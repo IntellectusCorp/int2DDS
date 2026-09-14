@@ -144,6 +144,26 @@ pub trait TypeSupport: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Serialize into a fixed-capacity buffer; a sample that does not fit is an
+    /// error. The default serializes into a `Vec` and copies.
+    fn serialize_into_slice(
+        &self,
+        data: &dyn Any,
+        buf: &mut [u8],
+        format: Option<&SerializationFormat>,
+    ) -> DdsResult<usize> {
+        let serialized = self.serialize(data, format)?;
+        if serialized.len() > buf.len() {
+            return Err(DdsError::Error(format!(
+                "sample of {} bytes does not fit a {} byte slot",
+                serialized.len(),
+                buf.len()
+            )));
+        }
+        buf[..serialized.len()].copy_from_slice(&serialized);
+        Ok(serialized.len())
+    }
+
     // Key handling
     fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData>;
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>>;
@@ -338,6 +358,31 @@ mod keyhash_tests {
     // ============================================================================
     // LC 6/7 EMHEADER Optimization Tests
     // ============================================================================
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct SliceSinkSample {
+        #[dds(key)]
+        pub id: u32,
+        pub payload: u64,
+    }
+
+    #[test]
+    fn serialize_into_slice_matches_serialize_and_rejects_a_short_buffer() {
+        use crate::dcps::topic::type_support::TypeSupport;
+
+        let value = SliceSinkSample { id: 7, payload: 0x1122_3344_5566_7788 };
+        let ts = SliceSinkSample::get_type_support();
+        let expected = ts.serialize(&value, None).unwrap();
+
+        let mut buf = vec![0u8; expected.len() + 8];
+        let n = ts.serialize_into_slice(&value, &mut buf, None).unwrap();
+        assert_eq!(n, expected.len());
+        assert_eq!(&buf[..n], expected.as_ref());
+
+        let mut short = vec![0u8; expected.len() - 1];
+        assert!(ts.serialize_into_slice(&value, &mut short, None).is_err());
+    }
 }
 
 #[cfg(test)]

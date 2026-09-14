@@ -24,14 +24,14 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock, RwLock, Weak,
     },
 };
 
 use arc_swap::ArcSwap;
 
-use log::debug;
+use log::{debug, info};
 
 use crate::{
     common::{
@@ -69,7 +69,7 @@ use crate::{
     rtps::{
         common::{
             entity_kind::EntityKind,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             sequence::SequenceNumber,
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
@@ -79,6 +79,10 @@ use crate::{
             writer::{StatefulWriter, Writer as RtpsWriter},
         },
         logic::wlp_logic::WlpLogic,
+        transport::shm::{
+            pool::SlotLease,
+            runtime::{FallbackReason, ShmRuntime},
+        },
     },
     topic::{
         topic::Topic,
@@ -87,17 +91,60 @@ use crate::{
     DdsType,
 };
 
+/// What backs a [`SerializedWriteLoan`]'s bytes: a pool slot whenever every
+/// write()-time fallback rule passes, the heap otherwise.
+enum LoanBacking {
+    Heap,
+    Slot { runtime: Arc<ShmRuntime>, lease: SlotLease },
+}
+
+/// A matched reader's SHM reachability, as the participant's registry answers
+/// it. A reader in this writer's own participant is `NotLocal`: a descriptor
+/// cannot cross to it (see `PeerMap::find_peer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShmReaderReachability {
+    NotLocal,
+    Local,
+}
+
+/// The write()-time checks answerable from the writer's own QoS and matched
+/// readers; `SampleTooLarge` and `PoolExhausted` are decided at `acquire`.
+fn shm_write_time_fallback(
+    durability: DurabilityQosPolicyKind,
+    matched_readers: &[Guid],
+    reachability: impl Fn(GuidPrefix) -> ShmReaderReachability,
+) -> Option<FallbackReason> {
+    // A TRANSIENT_LOCAL-or-stronger writer keeps changes indefinitely, so a
+    // slot it took would never come back.
+    if durability >= DurabilityQosPolicyKind::TransientLocal {
+        return Some(FallbackReason::DurabilityTooStrong);
+    }
+    // The loan is per change, not per destination: one reachable same-host
+    // reader is enough, and remote readers are served from that slot at send time.
+    if matched_readers.iter().any(|r| reachability(r.prefix()) == ShmReaderReachability::Local) {
+        return None;
+    }
+    Some(FallbackReason::NoLocalReader)
+}
+
 pub struct SerializedWriteLoan {
     change: CacheChange,
+    backing: LoanBacking,
 }
 
 impl SerializedWriteLoan {
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.change.data_mut().as_mut_ptr()
+        match &mut self.backing {
+            LoanBacking::Heap => self.change.data_mut().as_mut_ptr(),
+            LoanBacking::Slot { lease, .. } => lease.bytes_mut().as_mut_ptr(),
+        }
     }
 
     pub fn capacity(&mut self) -> usize {
-        self.change.data_mut().capacity()
+        match &mut self.backing {
+            LoanBacking::Heap => self.change.data_mut().capacity(),
+            LoanBacking::Slot { lease, .. } => lease.bytes_mut().len(),
+        }
     }
 }
 
@@ -171,6 +218,13 @@ pub struct DataWriter<Foo> {
     wlp_logic: Option<WlpLogic>,
     // First sequence number of this writer's open coherent set; None outside a set.
     current_coherent_start: Arc<Mutex<Option<SequenceNumber>>>,
+    /// Looked up once, when the RTPS entities are enabled.
+    shm_runtime: Arc<OnceLock<Option<Arc<ShmRuntime>>>>,
+    /// The typed write path cannot know a sample's size before serializing it,
+    /// so it asks for a slot of the previous sample's size. Zero on the first
+    /// write picks the smallest class; an overrun falls back to the heap and
+    /// records the real size for the next write.
+    last_serialized_len: Arc<AtomicUsize>,
 }
 
 impl<Foo> Debug for DataWriter<Foo> {
@@ -241,6 +295,8 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             datawriter_cache: self.datawriter_cache.clone(),
             wlp_logic: self.wlp_logic.clone(),
             current_coherent_start: self.current_coherent_start.clone(),
+            shm_runtime: self.shm_runtime.clone(),
+            last_serialized_len: self.last_serialized_len.clone(),
         }
     }
 }
@@ -329,6 +385,11 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
                 .map_err(|e| DdsError::Error(e.message))?,
             None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
         };
+
+        // Read under the guard already held here, never per write().
+        let _ = self
+            .shm_runtime
+            .set(dcps_bridge.as_ref().and_then(|bridge| bridge.transport().shm_runtime()));
 
         drop(dcps_bridge);
 
@@ -529,6 +590,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             ))),
             wlp_logic,
             current_coherent_start: Arc::new(Mutex::new(None)),
+            shm_runtime: Arc::new(OnceLock::new()),
+            last_serialized_len: Arc::new(AtomicUsize::new(0)),
         };
         let writer_arc = Arc::new(writer.clone());
         let weak_ref = Arc::downgrade(&writer_arc);
@@ -966,13 +1029,63 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             datawriter_cache.acquire_change()
         };
 
-        let data = change.data_mut();
-        data.clear();
-        if data.capacity() < capacity {
-            data.reserve(capacity - data.capacity());
+        let backing = match self.try_borrow_shm_slot(capacity) {
+            Some((runtime, lease)) => LoanBacking::Slot { runtime, lease },
+            None => {
+                let data = change.data_mut();
+                data.clear();
+                if data.capacity() < capacity {
+                    data.reserve(capacity - data.capacity());
+                }
+                LoanBacking::Heap
+            }
+        };
+
+        Ok(SerializedWriteLoan { change, backing })
+    }
+
+    /// The write()-time fallback rules; `None` sends the caller to the heap.
+    fn try_borrow_shm_slot(&self, len: usize) -> Option<(Arc<ShmRuntime>, SlotLease)> {
+        let rt = self.shm_runtime()?;
+        let fall_back = |reason: FallbackReason| -> Option<(Arc<ShmRuntime>, SlotLease)> {
+            if rt.fallbacks().note(reason) {
+                info!("[shm] write-time fallback for writer {:?}: {reason:?}", self.guid);
+            }
+            None
+        };
+
+        let durability = self.qos.load().durability.kind;
+        let matched_readers = self.get_rtps_writer().ok()?.matched_readers_guids();
+        let reachability = |prefix| {
+            if rt.peer_is_registered(&prefix) {
+                ShmReaderReachability::Local
+            } else {
+                ShmReaderReachability::NotLocal
+            }
+        };
+        if let Some(reason) = shm_write_time_fallback(durability, &matched_readers, reachability) {
+            return fall_back(reason);
         }
 
-        Ok(SerializedWriteLoan { change })
+        // One guard for both: `class_for` answers `SampleTooLarge`, `acquire`
+        // answers `PoolExhausted`.
+        let mut owner = rt.own().owner_mut();
+        if owner.pool().class_for(len).is_none() {
+            drop(owner);
+            return fall_back(FallbackReason::SampleTooLarge);
+        }
+        let lease = owner.acquire(len);
+        drop(owner);
+        match lease {
+            Some(lease) => Some((rt, lease)),
+            None => fall_back(FallbackReason::PoolExhausted),
+        }
+    }
+
+    /// Cached when the RTPS entities were enabled; `None` before that and for
+    /// every transport without a runtime.
+    fn shm_runtime(&self) -> Option<Arc<ShmRuntime>> {
+        self.shm_runtime.get().cloned().flatten()
     }
 
     pub fn commit_serialized_write(
@@ -983,7 +1096,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     ) -> DdsResult<()> {
         let _operation = self.lifecycle.begin_operation()?;
 
-        if actual_size > loan.change.data_mut().capacity() {
+        if actual_size > loan.capacity() {
             return Err(DdsError::BadParameter);
         }
 
@@ -991,14 +1104,33 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
-        // Expose the caller-written bytes to derive key+handle canonically from
-        // that sample. Any caller-supplied key is ignored. `reset` clears the
-        // buffer length (bytes stay in capacity), so re-expose them afterwards.
+        // Derive key+handle canonically from the caller-written bytes; any
+        // caller-supplied key is ignored. A slot-backed loan's bytes are in
+        // pool memory, and the slot goes onto the change only after `reset`.
         let _ = serialized_key;
-        unsafe {
-            loan.change.data_mut().set_len(actual_size);
-        }
-        let key_info = self.serialized_key_info(loan.change.data_mut())?;
+        let mut slot_payload = None;
+        let key_info = match std::mem::replace(&mut loan.backing, LoanBacking::Heap) {
+            LoanBacking::Heap => {
+                unsafe {
+                    loan.change.data_mut().set_len(actual_size);
+                }
+                self.serialized_key_info(loan.change.data_mut())?
+            }
+            LoanBacking::Slot { runtime, mut lease } => {
+                let key_info = match self.serialized_key_info(&lease.bytes_mut()[..actual_size]) {
+                    Ok(key_info) => key_info,
+                    Err(e) => {
+                        runtime.abort(lease);
+                        return Err(e);
+                    }
+                };
+                let Some(handle) = runtime.commit(lease, actual_size as u32) else {
+                    return Err(DdsError::Error("shm slot failed owner-side validation".into()));
+                };
+                slot_payload = Some(handle);
+                key_info
+            }
+        };
 
         let (instance_handle, _) =
             self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
@@ -1013,8 +1145,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             Some(timestamp.into()),
         );
         self.configure_coherent_set(&mut loan.change, seq_num)?;
-        unsafe {
-            loan.change.data_mut().set_len(actual_size);
+        match slot_payload {
+            // `reset` cleared the buffer length; the bytes stay in capacity.
+            None => unsafe {
+                loan.change.data_mut().set_len(actual_size);
+            },
+            Some(handle) => loan.change.set_shm_slot_payload(handle),
         }
         let max_message_size = crate::common::env::get_max_message_size();
         loan.change
@@ -1448,7 +1584,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         kind: ChangeKind,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
-        fill: impl FnOnce(&mut Vec<u8>) -> DdsResult<()>,
+        fill: impl FnOnce(&mut CacheChange) -> DdsResult<()>,
     ) -> DdsResult<SequenceNumber> {
         let rtps_writer = self.get_rtps_writer()?;
 
@@ -1465,7 +1601,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         // 3. Reset metadata + fill the reused buffer
         change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
         self.configure_coherent_set(&mut change, seq_num)?;
-        fill(change.data_mut())?;
+        fill(&mut change)?;
         let max_message_size = crate::common::env::get_max_message_size();
         change
             .apply_fragmentation(max_message_size, rtps_writer.data_max_size_serialized() as usize);
@@ -1494,7 +1630,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(seq_num)
     }
 
-    /// Pooled add_change for typed data: fills the buffer via TypeSupport serialization.
+    /// Pooled add_change for typed data: serializes into a pool slot when the
+    /// write()-time rules allow it, into the change's own buffer otherwise.
     fn add_change(
         &self,
         kind: ChangeKind,
@@ -1503,9 +1640,46 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
     ) -> DdsResult<SequenceNumber> {
-        self.add_change_pooled_with(kind, handle, source_timestamp, |buf| {
-            self.type_support.serialize_into(data, buf, Some(format))
+        self.add_change_pooled_with(kind, handle, source_timestamp, |change| {
+            if self.serialize_into_shm_slot(data, format, change)? {
+                return Ok(());
+            }
+            self.type_support.serialize_into(data, change.data_mut(), Some(format))?;
+            self.last_serialized_len.store(change.data_mut().len(), Ordering::Relaxed);
+            Ok(())
         })
+    }
+
+    /// `Ok(false)` when no slot backs the change: a fallback rule ruled the
+    /// sample out, or it overran the slot the size hint asked for. An overrun
+    /// is not counted as a fallback; the hint was simply too small.
+    fn serialize_into_shm_slot(
+        &self,
+        data: &dyn Any,
+        format: &SerializationFormat,
+        change: &mut CacheChange,
+    ) -> DdsResult<bool> {
+        let hint = self.last_serialized_len.load(Ordering::Relaxed);
+        let Some((runtime, mut lease)) = self.try_borrow_shm_slot(hint) else {
+            return Ok(false);
+        };
+
+        let written =
+            match self.type_support.serialize_into_slice(data, lease.bytes_mut(), Some(format)) {
+                Ok(written) => written,
+                Err(_) => {
+                    runtime.abort(lease);
+                    return Ok(false);
+                }
+            };
+        self.last_serialized_len.store(written, Ordering::Relaxed);
+        match runtime.commit(lease, written as u32) {
+            Some(handle) => {
+                change.set_shm_slot_payload(handle);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Pooled add_change for pre-serialized bytes: copies the bytes into the reused buffer.
@@ -1517,8 +1691,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
     ) -> DdsResult<SequenceNumber> {
-        self.add_change_pooled_with(kind, handle, source_timestamp, |buf| {
-            buf.extend_from_slice(bytes);
+        self.add_change_pooled_with(kind, handle, source_timestamp, |change| {
+            change.data_mut().extend_from_slice(bytes);
             Ok(())
         })
     }
@@ -3561,6 +3735,246 @@ mod tests {
         assert!(
             pool_len < depth as usize,
             "typed path should keep pool at working-set size, got {pool_len} (depth {depth})"
+        );
+    }
+
+    /// Keyed on purpose: only a keyed sample drives key derivation off the slot.
+    #[derive(DdsType)]
+    struct SlotLoanSample {
+        #[dds(key)]
+        id: u32,
+        value: u8,
+    }
+
+    /// A slot-backed loan built by hand: the committed change must stay backed
+    /// by the slot itself, not by a copy of its bytes.
+    #[test]
+    fn commit_serialized_write_keeps_a_slot_backed_loan_on_the_change() {
+        use crate::rtps::transport::shm::registry::unlink_registry;
+        use crate::rtps::transport::shm::segment::unlink_segment;
+
+        const DOMAIN: u32 = 254;
+        unlink_registry(DOMAIN);
+        let rt = ShmRuntime::start(DOMAIN, [41; 12]).expect("shm runtime");
+        let own_slot = rt.slot();
+
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<SlotLoanSample>(
+                "SlotCommitTopic",
+                "SlotLoanSample",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<SlotLoanSample>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let sample = SlotLoanSample { id: 7, value: 9 };
+        let bytes = sample.serialize().unwrap();
+        let size = bytes.len();
+        let free_before = free_slots_for(&rt, size);
+
+        let mut loan = writer.prepare_serialized_write(size).unwrap();
+        let lease = rt.own().owner_mut().acquire(size).unwrap();
+        loan.backing = LoanBacking::Slot { runtime: rt.clone(), lease };
+        let ptr = loan.as_mut_ptr();
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, size);
+        }
+
+        writer.commit_serialized_write(loan, size, None).unwrap();
+
+        let changes = writer.get_datawriter_cache().unwrap().lock().unwrap().get_changes();
+        assert_eq!(changes.len(), 1, "the committed loan must be the only change");
+        assert!(
+            changes[0].shm_slot_ref().is_some(),
+            "the change must stay backed by the slot, not by a copy of its bytes"
+        );
+        assert_eq!(changes[0].data_value(), &bytes[..]);
+
+        let handle = writer.lookup_instance(&sample).unwrap();
+        assert_ne!(
+            handle,
+            InstanceHandle::NIL,
+            "the key must be derived from the sample sitting in the slot"
+        );
+        assert_eq!(changes[0].instance_handle(), handle);
+
+        assert_eq!(
+            free_slots_for(&rt, size),
+            free_before - 1,
+            "the change holds the slot for as long as it lives"
+        );
+
+        drop(changes);
+        drop(writer);
+        drop(publisher);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+        assert_eq!(
+            free_slots_for(&rt, size),
+            free_before,
+            "dropping the change must give the slot back"
+        );
+
+        drop(rt);
+        unlink_registry(DOMAIN);
+        unlink_segment(DOMAIN, own_slot);
+    }
+
+    /// A writer on a participant whose transport brings an `ShmRuntime` up.
+    fn shm_writer<Foo: 'static + Clone + DdsType>(
+        topic_name: &str,
+        type_name: &str,
+    ) -> DataWriter<Foo> {
+        let mut participant_qos = DomainParticipantQos::default();
+        participant_qos.property.add_property(
+            crate::infrastructure::qos_policy::PROP_TRANSPORT,
+            "shm",
+            false,
+        );
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                participant_qos,
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<Foo>(
+                topic_name,
+                type_name,
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        publisher
+            .create_datawriter::<Foo>(&topic, DataWriterQos::default(), None, StatusMask::default())
+            .unwrap()
+    }
+
+    /// How many slots of the class serving `len` the pool will still hand out.
+    fn free_slots_for(rt: &ShmRuntime, len: usize) -> usize {
+        let mut leases = Vec::new();
+        while let Some(lease) = rt.own().owner_mut().acquire(len) {
+            leases.push(lease);
+        }
+        let count = leases.len();
+        let mut owner = rt.own().owner_mut();
+        for lease in leases {
+            owner.abort(lease);
+        }
+        count
+    }
+
+    /// Match a reader in another participant of this SHM registry, so the
+    /// `NoLocalReader` rule passes. The peer is claimed straight into the
+    /// registry with our pid, so the sweep never reclaims it.
+    fn match_a_local_reader<Foo: 'static + Clone>(writer: &DataWriter<Foo>, rt: &ShmRuntime) {
+        use crate::rtps::common::entity_id::EntityId;
+        use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
+        use crate::rtps::transport::shm::registry::now_tick;
+        use crate::subscription::qos::{DataReaderQos, SubscriberQos};
+
+        const PEER_PREFIX: [u8; 12] = [0xAB; 12];
+        assert_ne!(writer.guid().prefix(), PEER_PREFIX, "the peer must not be us");
+        rt.registry()
+            .claim(std::process::id(), PEER_PREFIX, now_tick())
+            .expect("a registry slot for the peer");
+
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful = rtps_writer
+            .as_any()
+            .downcast_ref::<StatefulWriter>()
+            .expect("a default-QoS writer is reliable");
+        stateful.matched_reader_add(ReaderProxy::new(
+            Guid::new(PEER_PREFIX, EntityId::UNKNOWN),
+            EntityId::UNKNOWN,
+            Vec::new(),
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::new(
+                &DataReaderQos::default(),
+                &SubscriberQos::default(),
+                &TopicQos::default(),
+            ),
+            SequenceNumber::new(0, 0),
+        ));
+    }
+
+    /// The typed `write()` path takes the same loan the raw-byte path does.
+    #[test]
+    fn a_typed_write_serializes_into_a_pool_slot_when_a_matched_reader_is_local() {
+        let writer = shm_writer::<SlotLoanSample>("ShmTypedSlotTopic", "SlotLoanSample");
+        let rt = writer.shm_runtime().expect("the shm transport must have a runtime");
+        match_a_local_reader(&writer, &rt);
+
+        let before = free_slots_for(&rt, 1);
+        writer.write(&SlotLoanSample { id: 1, value: 7 }, InstanceHandle::NIL).unwrap();
+        let after = free_slots_for(&rt, 1);
+
+        assert_eq!(after + 1, before, "the stored change must still hold its pool slot");
+        assert_eq!(
+            rt.fallbacks().count(FallbackReason::NoLocalReader),
+            0,
+            "a locally reachable reader must not count as NoLocalReader"
+        );
+    }
+
+    #[derive(DdsType)]
+    struct SlotBlobSample {
+        blob: Vec<u8>,
+    }
+
+    #[test]
+    fn a_sample_that_overruns_its_slot_gives_it_back_and_the_next_write_fits() {
+        let writer = shm_writer::<SlotBlobSample>("ShmOverflowTopic", "SlotBlobSample");
+        let rt = writer.shm_runtime().expect("the shm transport must have a runtime");
+        match_a_local_reader(&writer, &rt);
+
+        // Larger than the smallest default class, which the first write asks for.
+        let sample = SlotBlobSample { blob: vec![7u8; 100_000] };
+        let small_before = free_slots_for(&rt, 1);
+        let large_before = free_slots_for(&rt, 100_000);
+
+        writer.write(&sample, InstanceHandle::NIL).unwrap();
+        assert_eq!(free_slots_for(&rt, 1), small_before, "the overrun slot must go back, not leak");
+        assert_eq!(free_slots_for(&rt, 100_000), large_before, "and no larger slot was taken");
+
+        writer.write(&sample, InstanceHandle::NIL).unwrap();
+        assert_eq!(
+            free_slots_for(&rt, 100_000) + 1,
+            large_before,
+            "the recorded length must steer the second write to a class that fits"
         );
     }
 }

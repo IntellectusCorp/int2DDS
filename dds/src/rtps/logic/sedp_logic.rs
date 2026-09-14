@@ -1911,9 +1911,10 @@ impl SedpLogic {
             remote_guid,
             reader_entity_id,
             writer_entity_id,
-            None, // No heartbeat
-            true, // Use inline QoS (default)
-            None, // No content filter for SEDP messages
+            None,  // No heartbeat
+            true,  // Use inline QoS (default)
+            None,  // No content filter for SEDP messages
+            false, // SEDP is never an shm zero-copy destination
             &mut send_buffer,
         );
 
@@ -2138,9 +2139,10 @@ impl SedpLogic {
                 remote_guid,
                 remote_guid.entity_id(),
                 builtin_writer_guid.entity_id(),
-                None, // No heartbeat
-                true, // Use inline QoS (default)
-                None, // No content filter for termination messages
+                None,  // No heartbeat
+                true,  // Use inline QoS (default)
+                None,  // No content filter for termination messages
+                false, // SEDP is never an shm zero-copy destination
                 &mut send_buffer,
             );
 

@@ -10,10 +10,11 @@ use dashmap::DashMap;
 use log::{debug, info, warn};
 
 use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::transport::shm::pool::MAX_CLASSES;
+use crate::rtps::transport::shm::pool::{SlotLease, MAX_CLASSES};
 use crate::rtps::transport::shm::registry::{ParticipantSlot, Registry, HEARTBEAT_PERIOD};
 use crate::rtps::transport::shm::ring::RING_INLINE;
 use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment, PeerSegment};
+use crate::rtps::transport::shm::slot::ShmSlotHandle;
 
 /// 4 MiB + 12 MiB + 16 MiB = 32 MiB per participant.
 pub(crate) const DEFAULT_CLASSES: [(u32, u32); 3] = [(65536, 64), (1048576, 12), (8388608, 2)];
@@ -420,6 +421,22 @@ impl ShmRuntime {
 
     pub(crate) fn own_arc(&self) -> Arc<OwnedSegment> {
         Arc::clone(&self.own)
+    }
+
+    /// Publish a lease as a slot the writer holds. `None` only if the slot
+    /// fails validation, which a fresh commit never does; the slot is freed.
+    pub(crate) fn commit(&self, lease: SlotLease, len: u32) -> Option<ShmSlotHandle> {
+        // The guard must be gone before `own` re-locks the pool.
+        let slot_ref = self.own.owner_mut().commit(lease, len);
+        let handle = ShmSlotHandle::own(self.own_arc(), slot_ref);
+        if handle.is_none() {
+            self.own.owner_mut().release_own(slot_ref.class, slot_ref.index);
+        }
+        handle
+    }
+
+    pub(crate) fn abort(&self, lease: SlotLease) {
+        self.own.owner_mut().abort(lease);
     }
 
     pub(crate) fn peers(&self) -> &PeerMap {

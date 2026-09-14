@@ -12,12 +12,15 @@ use bytes::Bytes;
 use crate::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
-    rtps::common::{
-        guid::Guid,
-        // parameters::ParameterList,
-        sequence::SequenceNumber,
-        time::RtpsTime,
-        types::ChangeKind,
+    rtps::{
+        common::{
+            guid::Guid,
+            // parameters::ParameterList,
+            sequence::SequenceNumber,
+            time::RtpsTime,
+            types::ChangeKind,
+        },
+        transport::shm::slot::{ShmSlotHandle, SlotRef},
     },
 };
 
@@ -32,6 +35,7 @@ use crate::{
 pub(crate) enum DataPayload {
     Owned(Vec<u8>),
     Shared(Bytes),
+    ShmSlot(ShmSlotHandle),
 }
 
 impl Clone for DataPayload {
@@ -39,6 +43,9 @@ impl Clone for DataPayload {
         match self {
             DataPayload::Owned(v) => DataPayload::Owned(v.clone()),
             DataPayload::Shared(b) => DataPayload::Shared(b.clone()),
+            // A slot handle is move-only; the clone is an owned copy and no
+            // longer slot-backed.
+            DataPayload::ShmSlot(h) => DataPayload::Owned(h.as_slice().to_vec()),
         }
     }
 }
@@ -56,6 +63,7 @@ impl DataPayload {
         match self {
             DataPayload::Owned(v) => v,
             DataPayload::Shared(b) => b,
+            DataPayload::ShmSlot(h) => h.as_slice(),
         }
     }
 
@@ -63,6 +71,7 @@ impl DataPayload {
         match self {
             DataPayload::Owned(v) => v.is_empty(),
             DataPayload::Shared(b) => b.is_empty(),
+            DataPayload::ShmSlot(h) => h.as_slice().is_empty(),
         }
     }
 }
@@ -196,7 +205,7 @@ impl CacheChange {
         self.instance_handle = instance_handle;
         match &mut self.data_payload {
             DataPayload::Owned(v) => v.clear(),
-            DataPayload::Shared(_) => {
+            DataPayload::Shared(_) | DataPayload::ShmSlot(_) => {
                 self.data_payload = DataPayload::Owned(Vec::new());
             }
         }
@@ -270,6 +279,7 @@ impl CacheChange {
             DataPayload::Shared(b) => b.clone(),
             // Owned payload: copy into a fresh Bytes (writer-side path).
             DataPayload::Owned(v) => Bytes::copy_from_slice(v),
+            DataPayload::ShmSlot(h) => Bytes::copy_from_slice(h.as_slice()),
         }
     }
 
@@ -279,6 +289,8 @@ impl CacheChange {
         match &mut self.data_payload {
             DataPayload::Owned(v) => v,
             DataPayload::Shared(_) => unreachable!("data_mut called on shared payload"),
+            // `CacheChangePool::release` drops any non-`Owned` payload.
+            DataPayload::ShmSlot(_) => unreachable!("data_mut called on an shm slot payload"),
         }
     }
 
@@ -290,6 +302,25 @@ impl CacheChange {
     /// Set a shared payload for zero-copy multi-reader delivery.
     pub(crate) fn set_shared_payload(&mut self, data: Bytes) {
         self.data_payload = DataPayload::Shared(data);
+    }
+
+    pub(crate) fn set_shm_slot_payload(&mut self, handle: ShmSlotHandle) {
+        self.data_payload = DataPayload::ShmSlot(handle);
+    }
+
+    pub(crate) fn shm_slot_ref(&self) -> Option<SlotRef> {
+        match &self.data_payload {
+            DataPayload::ShmSlot(h) => Some(h.slot_ref()),
+            _ => None,
+        }
+    }
+
+    /// Give up a `Shared` or `ShmSlot` backing; dropping a slot handle returns
+    /// the slot to the pool.
+    pub(crate) fn drop_non_owned_payload(&mut self) {
+        if !matches!(self.data_payload, DataPayload::Owned(_)) {
+            self.data_payload = DataPayload::Owned(Vec::new());
+        }
     }
 
     pub(crate) fn source_timestamp(&self) -> Option<RtpsTime> {

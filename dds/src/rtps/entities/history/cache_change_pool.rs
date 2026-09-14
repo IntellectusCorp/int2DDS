@@ -48,7 +48,10 @@ impl CacheChangePool {
 
     /// Return a CacheChange to the pool for reuse.
     /// Drops the change when the pool is already at capacity.
-    pub(crate) fn release(&mut self, change: CacheChange) {
+    pub(crate) fn release(&mut self, mut change: CacheChange) {
+        // A pooled change must come back out with a writable buffer and must not
+        // hold a shared resource while idle.
+        change.drop_non_owned_payload();
         if self.idle_changes.len() < self.cap {
             self.idle_changes.push(change);
         }
@@ -89,5 +92,16 @@ mod tests {
         pool.release(CacheChange::empty());
         pool.release(CacheChange::empty());
         assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn a_released_change_comes_back_with_a_writable_buffer() {
+        let mut pool = CacheChangePool::new();
+        let mut change = pool.acquire();
+        change.set_shared_payload(bytes::Bytes::from_static(b"borrowed"));
+
+        pool.release(change);
+        let mut reused = pool.acquire();
+        reused.data_mut().push(1);
     }
 }

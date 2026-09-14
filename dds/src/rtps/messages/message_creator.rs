@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use log::{debug, info};
 use smallvec::SmallVec;
@@ -44,8 +45,12 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::common::instance_handle::InstanceHandle;
     use crate::rtps::common::entity_kind::EntityKind;
     use crate::rtps::messages::message_receiver::{MessageReceiver, TypedSubmessage};
+    use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
+    use crate::rtps::transport::shm::slot::ShmSlotHandle;
+    use crate::rtps::transport::shm::slot::{SlotRef, SLOT_REF_LEN};
 
     const LOCAL_PREFIX: GuidPrefix = [1; 12];
     const DST_PREFIX: GuidPrefix = [2; 12];
@@ -209,6 +214,104 @@ mod tests {
 
         unsafe { std::env::remove_var(key) };
     }
+
+    fn shm_backed_change(owned: &Arc<OwnedSegment>, body: &[u8]) -> CacheChange {
+        let mut lease = owned.owner_mut().acquire(body.len()).unwrap();
+        lease.bytes_mut()[..body.len()].copy_from_slice(body);
+        let r = owned.owner_mut().commit(lease, body.len() as u32);
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            Guid::new(LOCAL_PREFIX, EntityId::UNKNOWN),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(1),
+            Vec::new(),
+            None,
+        );
+        change.set_shm_slot_payload(ShmSlotHandle::own(Arc::clone(owned), r).unwrap());
+        change
+    }
+
+    fn data_payload_of(buffer: &[u8]) -> Vec<u8> {
+        let addr = "127.0.0.1:7400".parse().unwrap();
+        let mut receiver = MessageReceiver::new(DST_PREFIX, &addr);
+        receiver.init(&Bytes::copy_from_slice(buffer)).unwrap();
+        receiver
+            .parse_submessages()
+            .into_iter()
+            .find_map(|submessage| match submessage {
+                TypedSubmessage::Data(_, data) => Some(data.serialized_data().to_vec()),
+                _ => None,
+            })
+            .expect("one DATA submessage")
+    }
+
+    fn data_msg(change: &CacheChange, to_shm: bool) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        MessageCreator::create_data_msg(
+            change,
+            Guid::new(DST_PREFIX, EntityId::UNKNOWN),
+            EntityId::UNKNOWN,
+            EntityId::UNKNOWN,
+            None,
+            false,
+            None,
+            to_shm,
+            &mut buffer,
+        )
+        .unwrap();
+        buffer
+    }
+
+    #[test]
+    fn only_an_shm_destination_carries_the_descriptor_instead_of_the_payload() {
+        const DOMAIN: u32 = 253;
+        unlink_segment(DOMAIN, 0);
+        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap());
+        let change = shm_backed_change(&owned, b"payload-bytes");
+
+        let payload = data_payload_of(&data_msg(&change, true));
+        assert_eq!(payload.len(), 4 + SLOT_REF_LEN);
+        assert_eq!(&payload[..2], &0x8001u16.to_be_bytes());
+        assert_eq!(SlotRef::from_payload(&payload), Some(change.shm_slot_ref().unwrap()));
+
+        // The submessage body is padded to 4 bytes, so compare the prefix.
+        let payload = data_payload_of(&data_msg(&change, false));
+        assert_eq!(&payload[..b"payload-bytes".len()], b"payload-bytes");
+
+        drop(change);
+        drop(owned);
+        unlink_segment(DOMAIN, 0);
+    }
+
+    // Bound for shm a sample is a 24-byte descriptor, so nothing is left to fragment.
+    #[test]
+    fn a_sample_past_the_message_size_budget_still_fits_one_shm_datagram() {
+        let _guard = lock_env();
+        let max_message_size = crate::common::env::get_max_message_size();
+
+        const DOMAIN: u32 = 255;
+        unlink_segment(DOMAIN, 0);
+        let slot_size = (max_message_size as u32 + 1).next_power_of_two();
+        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, &[(slot_size, 1)], 4).unwrap());
+        let body = vec![0xABu8; max_message_size + 1];
+        let change = shm_backed_change(&owned, &body);
+        assert!(change.data_value().len() > max_message_size, "the sample must exceed the budget");
+
+        let buffer = data_msg(&change, true);
+        assert!(
+            buffer.len() < max_message_size,
+            "the descriptor datagram is {} bytes, past the {} budget",
+            buffer.len(),
+            max_message_size
+        );
+        let payload = data_payload_of(&buffer);
+        assert_eq!(payload.len(), 4 + SLOT_REF_LEN);
+        assert_eq!(SlotRef::from_payload(&payload), Some(change.shm_slot_ref().unwrap()));
+
+        drop(change);
+        drop(owned);
+        unlink_segment(DOMAIN, 0);
+    }
 }
 
 /// One reader's reply to one remote writer, worked out but not yet on the wire.
@@ -359,6 +462,9 @@ impl MessageCreator {
         }
     }
 
+    /// `to_shm`: the caller picked an SHM locator, so a slot-backed change travels as
+    /// its descriptor instead of its bytes.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_data_msg(
         cache_change: &CacheChange,
         remote_guid: Guid,
@@ -367,6 +473,7 @@ impl MessageCreator {
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         use_inline_qos: bool,
         content_filter_info: Option<ContentFilterInfo>,
+        to_shm: bool,
         send_buffer: &mut Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Creating RTPS message from cache change: {}", cache_change);
@@ -384,6 +491,7 @@ impl MessageCreator {
             writer_entity_id,
             use_inline_qos,
             content_filter_info,
+            to_shm,
         );
 
         rtps_message.add_submessage(data_submessage);
@@ -456,6 +564,7 @@ impl MessageCreator {
                 writer_entity_id,
                 use_inline_qos,
                 None,
+                false,
             );
             let data_len = SUBMESSAGE_HEADER_LEN + data.header.submessage_length() as usize;
 
@@ -485,6 +594,7 @@ impl MessageCreator {
         writer_entity_id: EntityId,
         use_inline_qos: bool,
         content_filter_info: Option<ContentFilterInfo>,
+        to_shm: bool,
     ) -> Submessage<'a> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
@@ -573,7 +683,12 @@ impl MessageCreator {
             }
         }
 
-        data.add_serialized_data(SubmessagePayload::Borrowed(cache_change.data_value()));
+        // The descriptor is built here, so it is `Owned`: 24 bytes against the copy it replaces.
+        let payload = match (to_shm, cache_change.shm_slot_ref()) {
+            (true, Some(r)) => SubmessagePayload::Owned(Bytes::copy_from_slice(&r.to_payload())),
+            _ => SubmessagePayload::Borrowed(cache_change.data_value()),
+        };
+        data.add_serialized_data(payload);
         Submessage {
             header: SubmessageHeader::new(
                 SubmessageId::DATA,

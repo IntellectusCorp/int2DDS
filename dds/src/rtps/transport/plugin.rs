@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
+use crate::rtps::transport::shm::runtime::ShmRuntime;
 use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -42,7 +43,7 @@ pub(crate) enum SendTarget<'a> {
     /// - UDP: sendto(locator address)
     /// - TCP: send a user-data-kind frame
     /// - Hybrid: route by locator kind (UDP or TCP)
-    /// - SHM: sendto via UDP
+    /// - SHM: sendto via UDP; an SHM locator is `send_to_peer`'s alone
     UserData(&'a Locator),
 }
 
@@ -76,6 +77,18 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// The caller expresses *what* to do (announce, discovery, user data).
     /// The implementation decides *how* (multicast, framed TCP, SHM write, etc.).
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()>;
+
+    /// Deliver user data to one peer over the zero-copy ring; `Unsupported`
+    /// when this transport has no such path. Takes the destination prefix
+    /// because a locator alone does not name the ring to push into.
+    fn send_to_peer(
+        &self,
+        _data: &[u8],
+        _locator: &Locator,
+        _dst_prefix: GuidPrefix,
+    ) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no zero-copy ring"))
+    }
 
     /// True iff this plugin can route to `locator`.
     ///
@@ -156,6 +169,15 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// of lingering until OS keepalive. Connectionless transports have nothing
     /// to close — default no-op; only the TCP plugin overrides this.
     fn disconnect_peer(&self, _locators: &[Locator]) {}
+
+    /// A remote participant is gone; releases per-peer resources keyed by GUID
+    /// prefix (`disconnect_peer` covers those keyed by locator).
+    fn peer_lost(&self, _prefix: GuidPrefix) {}
+
+    /// The zero-copy runtime, when this transport brought one up.
+    fn shm_runtime(&self) -> Option<std::sync::Arc<ShmRuntime>> {
+        None
+    }
 }
 
 /// Factory for creating transport plugin instances.
@@ -225,6 +247,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
+                    guid_prefix,
                     UdpConfig::from_property(property),
                 )?;
                 Ok(Box::new(plugin))

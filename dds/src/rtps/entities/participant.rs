@@ -163,7 +163,27 @@ impl Participant {
         metatraffic_unicast_locators: Vec<Locator>,
         default_unicast_locators: Vec<Locator>,
     ) -> Self {
-        let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
+        Self::with_guid_prefix(
+            Guid::generate_unique_guid_prefix(),
+            domain_id,
+            participant_id,
+            working_ips,
+            metatraffic_unicast_locators,
+            default_unicast_locators,
+        )
+    }
+
+    /// As `new`, but adopting a prefix the caller has already handed to
+    /// something constructed before this participant.
+    pub(crate) fn with_guid_prefix(
+        guid_prefix: GuidPrefix,
+        domain_id: DomainId,
+        participant_id: ParticipantId,
+        working_ips: Vec<String>,
+        metatraffic_unicast_locators: Vec<Locator>,
+        default_unicast_locators: Vec<Locator>,
+    ) -> Self {
+        let guid = Guid::new(guid_prefix, EntityId::PARTICIPANT);
 
         let mut local_participant_proxy_data = SPDPDiscoveredParticipantData::new(
             domain_id,
@@ -1150,6 +1170,10 @@ impl Participant {
         // resources are released promptly, rather than lingering until OS keepalive.
         if let (Some(transport), Some(locators)) = (self.transport.get(), peer_locators) {
             transport.disconnect_peer(&locators);
+        }
+
+        if let Some(transport) = self.transport.get() {
+            transport.peer_lost(remote_prefix);
         }
 
         info!("Successfully unmatched with remote participant: {}", terminated_participant_guid);

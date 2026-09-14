@@ -44,6 +44,10 @@ pub enum EncodingKind {
     DCdr2Le = 0x0009,     // DELIMITED_CDR Little Endian (APPENDABLE v2)
     PlCdr2Be = 0x000A,    // PL_CDR2 Big Endian (MUTABLE v2)
     PlCdr2Le = 0x000B,    // PL_CDR2 Little Endian (MUTABLE v2)
+
+    /// Vendor-specific: the payload is a `SlotRef`, not CDR. Only ever written
+    /// toward a same-host SHM locator.
+    ShmSlotRef = 0x8001,
 }
 
 /// Member header for mutable extensibility
@@ -683,3 +687,7 @@ impl XcdrDeserialize for WChar {
         Ok(WChar::from(c))
     }
 }
+
+const _: () = assert!(
+    EncodingKind::ShmSlotRef as u16 == crate::rtps::transport::shm::slot::SLOT_REF_ENCAPSULATION_ID
+);
