@@ -159,6 +159,7 @@ impl SubmessageCreator {
             writer_entity_id,
             gap_start,
             sequence_number_set,
+            None,
         );
 
         let gap_submessage = Submessage {
@@ -190,6 +191,7 @@ impl SubmessageCreator {
             writer_entity_id,
             gap_start,
             sequence_number_set,
+            None,
         );
 
         let gap_submessage = Submessage {
