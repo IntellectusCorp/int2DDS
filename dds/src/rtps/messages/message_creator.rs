@@ -32,7 +32,7 @@ use crate::rtps::{
         submessage_header::SubmessageHeader,
         submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag},
         submessage_id::SubmessageId,
-        submessages::{data::Data, data_frag::DataFrag},
+        submessages::{data::Data, data_frag::DataFrag, gap, heartbeat},
     },
 };
 use crate::serialize::pl_cdr::InlineQosParameters;
@@ -182,6 +182,7 @@ mod tests {
             reader_entity_id,
             writer_entity_id,
             &mut gap_list,
+            None,
         )
         .unwrap();
 
@@ -277,6 +278,7 @@ impl MessageCreator {
         last_sn: SequenceNumber,
         final_flag: bool,
         liveliness_flag: bool,
+        group_info: Option<heartbeat::GroupInfo>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(local_guid_prefix));
 
@@ -290,6 +292,7 @@ impl MessageCreator {
             last_sn,
             final_flag,
             liveliness_flag,
+            group_info,
         )?);
 
         match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
@@ -364,7 +367,14 @@ impl MessageCreator {
         remote_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
-        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(
+            u32,
+            SequenceNumber,
+            SequenceNumber,
+            bool,
+            bool,
+            Option<heartbeat::GroupInfo>,
+        )>,
         use_inline_qos: bool,
         content_filter_info: Option<ContentFilterInfo>,
         send_buffer: &mut Vec<u8>,
@@ -389,7 +399,7 @@ impl MessageCreator {
         rtps_message.add_submessage(data_submessage);
 
         // Add heartbeat submessage if heartbeat info is provided
-        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag)) =
+        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag, group_info)) =
             heartbeat_info
         {
             let heartbeat_submessage = SubmessageCreator::create_heartbeat_submessage(
@@ -400,6 +410,7 @@ impl MessageCreator {
                 last_sn,
                 final_flag,
                 liveliness_flag,
+                group_info,
             )?;
             rtps_message.add_submessage(heartbeat_submessage);
         }
@@ -598,7 +609,14 @@ impl MessageCreator {
         fragment_size: u16,
         sample_size: u32,
         fragment_data: &[u8],
-        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(
+            u32,
+            SequenceNumber,
+            SequenceNumber,
+            bool,
+            bool,
+            Option<heartbeat::GroupInfo>,
+        )>,
         timestamp: DateTime<Utc>,
         send_buffer: &mut Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -636,7 +654,7 @@ impl MessageCreator {
         rtps_message.add_submessage(data_frag_submessage);
 
         // Add heartbeat submessage if heartbeat info is provided
-        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag)) =
+        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag, group_info)) =
             heartbeat_info
         {
             let heartbeat_submessage = SubmessageCreator::create_heartbeat_submessage(
@@ -647,6 +665,7 @@ impl MessageCreator {
                 last_sn,
                 final_flag,
                 liveliness_flag,
+                group_info,
             )?;
             rtps_message.add_submessage(heartbeat_submessage);
         }
@@ -664,6 +683,7 @@ impl MessageCreator {
         writer_entity_id: EntityId,
         gap_start: SequenceNumber,
         gap_end: SequenceNumber,
+        group_info: Option<gap::GroupInfo>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(local_participant_guid.prefix()));
 
@@ -674,6 +694,7 @@ impl MessageCreator {
             writer_entity_id,
             gap_start,
             gap_end,
+            group_info,
         )?);
 
         let serialized_message = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?;
@@ -687,6 +708,7 @@ impl MessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
+        group_info: Option<gap::GroupInfo>,
     ) -> Result<Vec<Arc<Vec<u8>>>, Box<dyn std::error::Error>> {
         gap_list.sort();
         if gap_list.is_empty() {
@@ -721,6 +743,7 @@ impl MessageCreator {
                 reader_entity_id,
                 writer_entity_id,
                 gap_list,
+                group_info,
             )?;
             let submessage_len =
                 SUBMESSAGE_HEADER_LEN + submessage.header.submessage_length() as usize;

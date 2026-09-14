@@ -14,7 +14,8 @@ use crate::rtps::{
         submessage_id::SubmessageId,
         submessages::{
             ack_nack::AckNack,
-            heartbeat::Heartbeat,
+            gap,
+            heartbeat::{self, Heartbeat},
             info::{InfoDestination, InfoTimestamp},
             nack_frag::NackFrag,
         },
@@ -62,6 +63,7 @@ impl SubmessageCreator {
         last_sn: SequenceNumber,
         final_flag: bool,
         liveliness_flag: bool,
+        group_info: Option<heartbeat::GroupInfo>,
     ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::HEARTBEAT);
@@ -71,13 +73,16 @@ impl SubmessageCreator {
         if final_flag {
             data_header_flag.add_flag(SubmessageFlagType::FinalFlag, SubmessageId::HEARTBEAT);
         }
+        if group_info.is_some() {
+            data_header_flag.add_flag(SubmessageFlagType::GroupInfoFlag, SubmessageId::HEARTBEAT);
+        }
         let heartbeat_data = Heartbeat::new(
             reader_entity_id,
             writer_entity_id,
             first_sn,
             last_sn,
             heartbeat_count,
-            None,
+            group_info,
         );
 
         let heartbeat_submessage = Submessage {
@@ -141,6 +146,7 @@ impl SubmessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
+        group_info: Option<gap::GroupInfo>,
     ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         if gap_list.is_empty() {
             return Err(Box::new(std::io::Error::new(
@@ -151,15 +157,18 @@ impl SubmessageCreator {
 
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::GAP);
+        if group_info.is_some() {
+            data_header_flag.add_flag(SubmessageFlagType::GroupInfoFlag, SubmessageId::GAP);
+        }
 
         let (gap_start, sequence_number_set) = Self::calculate_gap_sns_from_vec(gap_list);
 
-        let gap_data = crate::rtps::messages::submessages::gap::Gap::new(
+        let gap_data = gap::Gap::new(
             reader_entity_id,
             writer_entity_id,
             gap_start,
             sequence_number_set,
-            None,
+            group_info,
         );
 
         let gap_submessage = Submessage {
@@ -178,20 +187,24 @@ impl SubmessageCreator {
         writer_entity_id: EntityId,
         gap_start: SequenceNumber,
         gap_end: SequenceNumber,
+        group_info: Option<gap::GroupInfo>,
     ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::GAP);
+        if group_info.is_some() {
+            data_header_flag.add_flag(SubmessageFlagType::GroupInfoFlag, SubmessageId::GAP);
+        }
 
         // RTPS 2.5 - 8.3.8.4.5
         // The set of sequence numbers identify in the range gapStart <= sequence_number <= gapList.base -1
         let sequence_number_set = SequenceNumberSet::new_empty_with_base(gap_end + 1);
 
-        let gap_data = crate::rtps::messages::submessages::gap::Gap::new(
+        let gap_data = gap::Gap::new(
             reader_entity_id,
             writer_entity_id,
             gap_start,
             sequence_number_set,
-            None,
+            group_info,
         );
 
         let gap_submessage = Submessage {
@@ -292,6 +305,7 @@ impl SubmessageCreator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::common::guid::GroupDigest;
 
     fn acknack_state(
         missing_changes: Vec<SequenceNumber>,
@@ -619,5 +633,95 @@ mod tests {
 
         assert_eq!(res[2].bitmap_base(), 513);
         assert_eq!(res[2].extract_numbers(), vec![513]);
+    }
+
+    const HEARTBEAT_GROUP_INFO_FLAG: u8 = 0x08;
+    const GAP_GROUP_INFO_FLAG: u8 = 0x02;
+
+    fn heartbeat_submessage_flags(group_info: Option<heartbeat::GroupInfo>) -> u8 {
+        SubmessageCreator::create_heartbeat_submessage(
+            1,
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            SequenceNumber::new(0, 1),
+            SequenceNumber::new(0, 1),
+            false,
+            false,
+            group_info,
+        )
+        .expect("the HEARTBEAT submessage must build")
+        .header
+        .flags()
+    }
+
+    fn dummy_heartbeat_group_info() -> heartbeat::GroupInfo {
+        heartbeat::GroupInfo {
+            current_gsn: SequenceNumber::new(0, 4),
+            first_gsn: SequenceNumber::new(0, 1),
+            last_gsn: SequenceNumber::new(0, 3),
+            writer_set: GroupDigest::new([0xaa, 0xbb, 0xcc, 0xdd]),
+            secure_writer_set: GroupDigest::new([0; 4]),
+        }
+    }
+
+    fn dummy_gap_group_info() -> gap::GroupInfo {
+        gap::GroupInfo {
+            gap_start_gsn: SequenceNumber::new(0, 1),
+            gap_end_gsn: SequenceNumber::new(0, 3),
+        }
+    }
+
+    #[test]
+    fn the_heartbeat_flags_group_info_only_when_it_carries_some() {
+        assert_eq!(heartbeat_submessage_flags(None) & HEARTBEAT_GROUP_INFO_FLAG, 0);
+        assert_eq!(
+            heartbeat_submessage_flags(Some(dummy_heartbeat_group_info()))
+                & HEARTBEAT_GROUP_INFO_FLAG,
+            HEARTBEAT_GROUP_INFO_FLAG
+        );
+    }
+
+    #[test]
+    fn the_consecutive_gap_flags_group_info_only_when_it_carries_some() {
+        let gap_flags = |group_info| {
+            SubmessageCreator::create_gap_submessage_consecutive(
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+                SequenceNumber::new(0, 1),
+                SequenceNumber::new(0, 3),
+                group_info,
+            )
+            .expect("the GAP submessage must build")
+            .header
+            .flags()
+        };
+
+        assert_eq!(gap_flags(None) & GAP_GROUP_INFO_FLAG, 0);
+        assert_eq!(
+            gap_flags(Some(dummy_gap_group_info())) & GAP_GROUP_INFO_FLAG,
+            GAP_GROUP_INFO_FLAG
+        );
+    }
+
+    #[test]
+    fn the_batched_gap_flags_group_info_only_when_it_carries_some() {
+        let gap_flags = |group_info| {
+            let mut gap_list = vec![SequenceNumber::new(0, 1), SequenceNumber::new(0, 3)];
+            SubmessageCreator::create_gap_submessage(
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+                &mut gap_list,
+                group_info,
+            )
+            .expect("the GAP submessage must build")
+            .header
+            .flags()
+        };
+
+        assert_eq!(gap_flags(None) & GAP_GROUP_INFO_FLAG, 0);
+        assert_eq!(
+            gap_flags(Some(dummy_gap_group_info())) & GAP_GROUP_INFO_FLAG,
+            GAP_GROUP_INFO_FLAG
+        );
     }
 }

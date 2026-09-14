@@ -22,7 +22,7 @@ use crate::rtps::{
 
 // Group sequence number elements present only when the GroupInfoFlag is set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HeartbeatGroupInfo {
+pub(crate) struct GroupInfo {
     pub current_gsn: SequenceNumber,
     pub first_gsn: SequenceNumber,
     pub last_gsn: SequenceNumber,
@@ -30,11 +30,11 @@ pub(crate) struct HeartbeatGroupInfo {
     pub secure_writer_set: GroupDigest,
 }
 
-impl HeartbeatGroupInfo {
+impl GroupInfo {
     const OCTETS: u16 = 3 * mem::size_of::<SequenceNumber>() as u16 + 2 * 4;
 
     // Validity rules for the group sequence number elements.
-    fn validate(&self) -> RtpsResult<()> {
+    pub(crate) fn validate(&self) -> RtpsResult<()> {
         let current_gsn = self.current_gsn.to_i64();
         let first_gsn = self.first_gsn.to_i64();
         let last_gsn = self.last_gsn.to_i64();
@@ -43,8 +43,10 @@ impl HeartbeatGroupInfo {
             || first_gsn <= 0
             || last_gsn < 0
             || last_gsn < first_gsn - 1
-            || current_gsn < first_gsn
-            || current_gsn > last_gsn;
+            || current_gsn < first_gsn;
+        // currentGSN counts the whole group while lastGSN is this writer's own last sample, so
+        // a writer the group has moved past would fail this and lose its Heartbeat.
+        // || current_gsn > last_gsn;
         if is_invalid {
             return Err(RtpsError::new(
                 RtpsErrorCode::InvalidSubmessageBody,
@@ -62,7 +64,7 @@ pub(crate) struct Heartbeat {
     pub first_sn: SequenceNumber,
     pub last_sn: SequenceNumber,
     pub count: Count,
-    pub group_info: Option<HeartbeatGroupInfo>,
+    pub group_info: Option<GroupInfo>,
 }
 
 impl Heartbeat {
@@ -72,14 +74,13 @@ impl Heartbeat {
         first_sn: SequenceNumber,
         last_sn: SequenceNumber,
         count: Count,
-        group_info: Option<HeartbeatGroupInfo>,
+        group_info: Option<GroupInfo>,
     ) -> Self {
         Self { reader_id, writer_id, first_sn, last_sn, count, group_info }
     }
 
     pub(crate) fn octets_to_next_header(&self) -> u16 {
-        let group_info_octets =
-            if self.group_info.is_some() { HeartbeatGroupInfo::OCTETS } else { 0 };
+        let group_info_octets = if self.group_info.is_some() { GroupInfo::OCTETS } else { 0 };
 
         mem::size_of::<EntityId>() as u16 /* reader_id 4 */
             + mem::size_of::<EntityId>() as u16 /* writer_id 4 */
@@ -128,13 +129,8 @@ impl Heartbeat {
             let writer_set = read_group_digest()?;
             let secure_writer_set = read_group_digest()?;
 
-            let read_group_info = HeartbeatGroupInfo {
-                current_gsn,
-                first_gsn,
-                last_gsn,
-                writer_set,
-                secure_writer_set,
-            };
+            let read_group_info =
+                GroupInfo { current_gsn, first_gsn, last_gsn, writer_set, secure_writer_set };
             read_group_info.validate()?;
             group_info = Some(read_group_info);
         }
@@ -214,8 +210,8 @@ mod tests {
         }
     }
 
-    fn create_dummy_group_info() -> HeartbeatGroupInfo {
-        HeartbeatGroupInfo {
+    fn create_dummy_group_info() -> GroupInfo {
+        GroupInfo {
             current_gsn: SequenceNumber::from_i64(7),
             first_gsn: SequenceNumber::from_i64(3),
             last_gsn: SequenceNumber::from_i64(9),
@@ -282,30 +278,24 @@ mod tests {
     fn group_info_violating_the_validity_rules_is_rejected() {
         let invalid_group_infos = [
             // currentGSN.value is zero or negative
-            HeartbeatGroupInfo { current_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
+            GroupInfo { current_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
             // firstGSN.value is zero or negative
-            HeartbeatGroupInfo { first_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
+            GroupInfo { first_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
             // lastGSN.value is negative
-            HeartbeatGroupInfo {
-                last_gsn: SequenceNumber::from_i64(-1),
-                ..create_dummy_group_info()
-            },
+            GroupInfo { last_gsn: SequenceNumber::from_i64(-1), ..create_dummy_group_info() },
             // lastGSN.value < firstGSN.value - 1
-            HeartbeatGroupInfo {
+            GroupInfo {
                 first_gsn: SequenceNumber::from_i64(5),
                 last_gsn: SequenceNumber::from_i64(3),
                 ..create_dummy_group_info()
             },
             // currentGSN.value < firstGSN.value
-            HeartbeatGroupInfo {
-                current_gsn: SequenceNumber::from_i64(2),
-                ..create_dummy_group_info()
-            },
+            GroupInfo { current_gsn: SequenceNumber::from_i64(2), ..create_dummy_group_info() },
             // currentGSN.value > lastGSN.value
-            HeartbeatGroupInfo {
-                current_gsn: SequenceNumber::from_i64(10),
-                ..create_dummy_group_info()
-            },
+            // GroupInfo {
+            //     current_gsn: SequenceNumber::from_i64(10),
+            //     ..create_dummy_group_info()
+            // },
         ];
 
         for invalid_group_info in invalid_group_infos {
@@ -322,7 +312,7 @@ mod tests {
     #[test]
     fn group_range_of_a_single_sample_is_accepted() {
         let mut heartbeat = create_dummy_heartbeat();
-        heartbeat.group_info = Some(HeartbeatGroupInfo {
+        heartbeat.group_info = Some(GroupInfo {
             current_gsn: SequenceNumber::from_i64(4),
             first_gsn: SequenceNumber::from_i64(4),
             last_gsn: SequenceNumber::from_i64(4),

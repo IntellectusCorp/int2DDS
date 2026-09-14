@@ -566,6 +566,7 @@ impl WlpLogic {
                 last_sn,
                 final_flag,
                 liveliness_flag,
+                None,
             ) {
                 Ok(buf) => buf,
                 Err(_) => continue,
@@ -1543,6 +1544,7 @@ impl UnicastMessageProcessor for WlpLogic {
             cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
             false,
             false,
+            None,
         ));
 
         debug!(
