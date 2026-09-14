@@ -1,20 +1,15 @@
-//! Shared Memory (SHM) Transport Module
+//! Shared-memory zero-copy data plane.
 //!
-//! This module implements shared memory transport for high-performance
-//! intra-host communication in DDS.
+//! A participant owns one segment: a pool of payload slots plus an MPSC ring
+//! that carries 24-byte slot descriptors. A writer serializes into a slot and
+//! sends the descriptor; the reader claims the slot and reads it in place.
+//! Discovery stays on UDP, and so does any sample no slot could take.
 //!
-//! ## Overview
-//!
-//! SHM transport provides zero-copy data transfer between DDS participants
-//! on the same host, significantly reducing latency and CPU overhead
-//! compared to network-based transports.
-//!
-//! ## Components
-//!
-//! - [`ShmSender`] - Sends user data via shared memory
-//! - [`ShmListener`] - Receives user data via shared memory
-//! - [`ring_buffer`] - Lock-free ring buffer for message passing
-//! - [`platform`] - Platform-specific shared memory implementations
+//! - [`runtime`] - the segment, registry slot and peer map a participant owns
+//! - [`pool_owner`] / [`pool_reader`] - the two ends of a payload slot
+//! - [`ring`] - the descriptor queue
+//! - [`recv`] - the loop that drains it
+//! - [`platform`] - shared-memory primitives per OS
 
 pub(crate) mod config;
 pub(crate) mod fallback;
@@ -30,11 +25,8 @@ pub(crate) mod recv;
 pub(crate) mod registry;
 pub(crate) mod registry_segment;
 pub(crate) mod ring;
-pub(crate) mod ring_buffer;
 pub(crate) mod runtime;
 pub(crate) mod segment;
-pub(crate) mod shm_listener;
-pub(crate) mod shm_sender;
 pub(crate) mod shm_transport_plugin;
 pub(crate) mod slot_handle;
 pub(crate) mod slot_ref;

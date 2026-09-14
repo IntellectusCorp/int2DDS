@@ -52,9 +52,6 @@ impl DiscoveryUnicastListeningTask {
     pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
         match source {
             MessageSource::Udp { mut listener } => self.listen_mio_poll(&mut listener),
-            MessageSource::Shm { .. } => {
-                unreachable!("Shm is only used by user-data unicast")
-            }
             MessageSource::Stream { .. } => {
                 unreachable!("Stream is handled by the stream unicast listening task")
             }

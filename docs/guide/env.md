@@ -15,7 +15,6 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
-| `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
 | `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
@@ -270,28 +269,6 @@ export INT2DDS_UDP_SOCKET_BUFFER=1048576
 
 cargo run --example hello_world_pub
 ```
-
-### INT2DDS_SHM_BUFFER_SIZE
-
-Sets the shared-memory transport's ring buffer size in bytes. Only applies when
-the SHM transport is in use. Default: 1048576 (1MB).
-
-#### Configuration
-
-```powershell
-# Windows PowerShell
-$env:INT2DDS_SHM_BUFFER_SIZE = "2097152"  # 2MB
-
-cargo run --example hello_world_pub
-```
-
-```bash
-# Linux/macOS
-export INT2DDS_SHM_BUFFER_SIZE=2097152
-
-cargo run --example hello_world_pub
-```
-
 
 ### INT2DDS_DATA_FRAG_SIZE
 

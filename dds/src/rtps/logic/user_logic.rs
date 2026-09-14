@@ -860,7 +860,7 @@ impl UserLogic {
             // One answer for both branches below: sample size must not change where a
             // fallback goes. Empty only when `to_shm` was tried and this destination
             // advertises no non-SHM locator.
-            let copy_to = self.copy_targets(&selected, locators.iter(), to_shm);
+            let copy_to = self.copy_targets(locators.iter());
             if copy_to.is_empty() {
                 warn!(
                     "[UserLogic] zero-copy ring refused sn={} and {:?} advertises no non-SHM \
@@ -1352,7 +1352,7 @@ impl UserLogic {
             // One answer for both branches below: sample size must not change where a
             // fallback goes. Empty only when `to_shm` was tried and this destination
             // advertises no non-SHM locator.
-            let copy_to = self.copy_targets(&selected, locators.iter(), to_shm);
+            let copy_to = self.copy_targets(locators.iter());
             if copy_to.is_empty() {
                 warn!(
                     "[Data] zero-copy ring refused sn={} and {:?} advertises no non-SHM \
@@ -1574,7 +1574,7 @@ impl UserLogic {
                         // One answer for both branches below: sample size must not change
                         // where a fallback goes. Empty only when `to_shm` was tried and
                         // this destination advertises no non-SHM locator.
-                        let copy_to = self.copy_targets(&selected, locators.iter(), to_shm);
+                        let copy_to = self.copy_targets(locators.iter());
 
                         if shm_delivered {
                             data_sent = true;
@@ -1842,7 +1842,7 @@ impl UserLogic {
                 // One answer for both branches below: sample size must not change where a
                 // fallback goes. Empty only when `to_shm` was tried and this reader has no
                 // non-SHM entry at all.
-                let copy_to = self.copy_targets(&selected, fallback.iter(), to_shm);
+                let copy_to = self.copy_targets(fallback.iter());
                 if copy_to.is_empty() {
                     warn!(
                         "[UserLogic] zero-copy ring refused sn={} and reader {:?} advertises \
@@ -2755,22 +2755,17 @@ impl UserLogic {
         self.locators_to_send_to(plain)
     }
 
-    /// Where a copy of the sample goes: the picked destination, or -- once `to_shm`
-    /// was tried and no ring took it -- the same destination's non-SHM locators.
-    fn copy_targets<'a, T>(
-        &self,
-        selected: &[&'a Locator],
-        locators: T,
-        to_shm: bool,
-    ) -> Vec<&'a Locator>
+    /// Where a copy of the sample goes: never an SHM locator. An SHM locator is
+    /// reachable only through `send_to_peer`, and only for a change that holds a
+    /// pool slot; a copy has no way to travel on one. That covers the ring that
+    /// refused, the change with no slot, and our own participant -- which never
+    /// takes a descriptor (see `destination_is_shm`) and must not be handed one
+    /// as a copy either. Empty when the destination advertises SHM only.
+    fn copy_targets<'a, T>(&self, locators: T) -> Vec<&'a Locator>
     where
         T: IntoIterator<Item = &'a Locator>,
     {
-        if to_shm {
-            self.non_shm_locators_to_send_to(locators)
-        } else {
-            selected.to_vec()
-        }
+        self.non_shm_locators_to_send_to(locators)
     }
 
     /// Hand an assembled descriptor to the destination participant's zero-copy ring.

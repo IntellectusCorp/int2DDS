@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::runtime::ShmRuntime;
-use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -44,7 +43,7 @@ pub(crate) enum SendTarget<'a> {
     /// - UDP: sendto(locator address)
     /// - TCP: send a user-data-kind frame
     /// - Hybrid: route by locator kind (UDP or TCP)
-    /// - SHM: route by locator kind (SHM or UDP)
+    /// - SHM: sendto(locator address); an SHM locator is `send_to_peer`'s alone
     UserData(&'a Locator),
 }
 
@@ -61,12 +60,6 @@ pub(crate) struct IncomingMessage {
 pub(crate) enum MessageSource {
     /// A single datagram listener owning the receive path.
     Udp { listener: UdpListener },
-
-    /// A shared-memory listener polled in the same loop as its datagram
-    /// fallback. SHM has no file descriptor and cannot register with mio, so
-    /// both are polled directly (zero-timeout poll plus a brief yield when
-    /// idle) instead of being merged over a channel.
-    Shm { listener: UdpListener, shm: ShmListener },
 
     /// A listener that owns accepted connections and reassembles framed
     /// streams from them.
@@ -187,8 +180,8 @@ pub(crate) trait TransportPlugin: Send + Sync {
     fn peer_lost(&self, _prefix: GuidPrefix) {}
 
     /// The zero-copy runtime, when this transport brought one up. `None` for
-    /// every transport that has none, and for SHM when `FallbackReason::NoSlotId`
-    /// or `NotifyUnsupported` kept it from starting.
+    /// every transport that has none, and for SHM when `ShmRuntime::start`
+    /// declined: disabled by env, no free registry slot, or no segment.
     fn shm_runtime(&self) -> Option<std::sync::Arc<ShmRuntime>> {
         None
     }

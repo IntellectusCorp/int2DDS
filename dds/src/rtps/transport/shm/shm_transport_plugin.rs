@@ -13,8 +13,6 @@ use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin}
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::shm::ring::{RingError, SPILL_NONE};
 use crate::rtps::transport::shm::runtime::ShmRuntime;
-use crate::rtps::transport::shm::shm_listener::ShmListener;
-use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::UdpConfig;
@@ -31,27 +29,18 @@ use crate::rtps::transport::UdpConfig;
 /// and silently drop all user data between the two hosts. Two hosts behind
 /// different NATs sharing a private IP still misjudge; closing that needs a
 /// host id, not an IP comparison.
-///
-/// Independent of the zero-copy runtime on purpose: the legacy SHM path works
-/// whether or not `ShmRuntime` started.
 fn shm_locator_is_local(locator: &Locator, ours: &[Ipv4Addr]) -> bool {
     locator.is_shm() && ours.contains(&locator.to_ip_v4_addr())
 }
 
-/// SHM transport plugin — UDP for discovery, SHM for user data.
+/// SHM transport plugin — UDP for discovery, zero-copy shared memory for user data.
 ///
 /// Discovery (both multicast and unicast) always uses UDP.
 /// User data routes by locator kind:
-///   - SHM locator → SHM sender (shared memory ring buffer)
-///   - UDP locator → UDP sender (fallback for non-SHM peers)
-///
-/// User data unicast is handed out as `MessageSource::Shm`,
-/// letting the listening task poll both UDP and SHM in the same loop
-/// (mirroring the develop-branch single-task receive pattern; no extra
-/// merge thread or inter-thread channel).
+///   - SHM locator → `send_to_peer`, which carries a slot descriptor
+///   - UDP locator → UDP sender, which carries the sample itself
 pub(crate) struct ShmTransportPlugin {
     udp_sender: UdpSender,
-    shm_sender: ShmSender,
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
@@ -71,10 +60,9 @@ pub(crate) struct ShmTransportPlugin {
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
 
-    // User-traffic listeners (UDP fallback + SHM ring buffer)
+    // User-traffic listeners
     user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
-    shm_listener: Mutex<Option<ShmListener>>,
 }
 
 impl ShmTransportPlugin {
@@ -88,7 +76,6 @@ impl ShmTransportPlugin {
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
         let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
-        let shm_sender = ShmSender::new(domain_id)?;
         // UDP-facing set: external override, else each parsed working_ip.
         let advertised_ip_addrs: Vec<Ipv4Addr> = match crate::common::env::get_external_address() {
             Some(ext_ip) => vec![ext_ip],
@@ -138,18 +125,15 @@ impl ShmTransportPlugin {
                 }
             }
         };
-        let shm_listener = ShmListener::new(domain_id).ok();
-
         info!(
-            "[ShmTransportPlugin] Created (domain={}, pid={}, shm_available={})",
+            "[ShmTransportPlugin] Created (domain={}, pid={}, zero_copy={})",
             domain_id,
             participant_id,
-            shm_sender.is_available()
+            runtime.is_some()
         );
 
         Ok(Self {
             udp_sender,
-            shm_sender,
             domain_id,
             participant_id,
             working_ips,
@@ -160,7 +144,6 @@ impl ShmTransportPlugin {
             discovery_unicast_listener: Mutex::new(discovery_uc),
             user_multicast_listener: Mutex::new(user_mc),
             user_unicast_listener: Mutex::new(user_uc),
-            shm_listener: Mutex::new(shm_listener),
         })
     }
 
@@ -217,11 +200,7 @@ impl TransportPlugin for ShmTransportPlugin {
                 Ok(())
             }
             SendTarget::UserData(locator) => {
-                if locator.is_shm() {
-                    let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-                    self.shm_sender.send(&dummy_addr, data)?;
-                    Ok(())
-                } else if locator.is_udp() {
+                if locator.is_udp() {
                     let ip = locator.to_ip_v4_addr();
                     let port = locator.port() as u16;
                     let addr = SocketAddr::new(IpAddr::V4(ip), port);
@@ -234,8 +213,7 @@ impl TransportPlugin for ShmTransportPlugin {
         }
     }
 
-    /// The zero-copy send path. The legacy SHM branch of `send` stays as it is:
-    /// SEDP and SPDP still travel on it.
+    /// The zero-copy send path.
     ///
     /// Reports why it failed through `ErrorKind` and counts nothing: one sample
     /// may be offered here once per SHM locator the destination advertises, so
@@ -272,10 +250,9 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn can_handle(&self, locator: &Locator) -> bool {
         if locator.is_shm() {
-            // Independent of the zero-copy runtime: the legacy SHM path works
-            // whether or not `ShmRuntime` started, so gating on it would turn
-            // `INT2DDS_SHM_ZERO_COPY=0` into "no SHM at all".
-            return shm_locator_is_local(locator, &self.host_ip_addrs);
+            // Only the zero-copy runtime carries shm; without it the locator
+            // names a segment nothing reads.
+            return self.runtime.is_some() && shm_locator_is_local(locator, &self.host_ip_addrs);
         }
         locator.is_udp()
     }
@@ -294,9 +271,13 @@ impl TransportPlugin for ShmTransportPlugin {
         // SHM locators carry our NIC addresses, not the external one: a
         // segment name means nothing off this machine, and every host behind
         // the same NAT advertises the same external address. Order is not
-        // load-bearing -- a peer picks by kind, not by position.
-        for ip in &self.host_ip_addrs {
-            locators.push(Locator::from_shm(ip, user_port));
+        // load-bearing -- a peer picks by kind, not by position. Advertised
+        // only with the runtime up: the locator promises a descriptor will be
+        // read.
+        if self.runtime.is_some() {
+            for ip in &self.host_ip_addrs {
+                locators.push(Locator::from_shm(ip, user_port));
+            }
         }
         for ip in self.advertised_ips() {
             locators.push(Locator::from_ip_v4_addr_and_port(&ip, user_port));
@@ -316,11 +297,7 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
-        let shm = self.shm_listener.lock().expect("lock poisoned").take();
-        Some(match shm {
-            Some(shm) => MessageSource::Shm { listener, shm },
-            None => MessageSource::Udp { listener },
-        })
+        Some(MessageSource::Udp { listener })
     }
 
     fn port(&self) -> u16 {
@@ -333,7 +310,6 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn close(&self) {
         self.udp_sender.force_close();
-        self.shm_sender.force_close();
 
         for guard_arc in [
             &self.discovery_multicast_listener,
@@ -347,12 +323,6 @@ impl TransportPlugin for ShmTransportPlugin {
                 }
             }
         }
-        if let Ok(mut guard) = self.shm_listener.lock() {
-            if let Some(mut listener) = guard.take() {
-                listener.close();
-            }
-        }
-
         debug!("[ShmTransportPlugin] Closed");
     }
 
@@ -379,6 +349,45 @@ mod tests {
     /// Unused elsewhere in `shm/`, and low enough that the UDP ports the
     /// plugin binds stay inside `u16`.
     const DOMAIN: u32 = 229;
+
+    /// `INT2DDS_SHM_ZERO_COPY` is process-wide, so only one test at a time may
+    /// move it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// With zero-copy off there is no runtime, and the legacy path is gone, so
+    /// there is no shm path at all: the plugin must then look like a UDP
+    /// transport to both sides.
+    #[test]
+    fn without_a_zero_copy_runtime_the_plugin_neither_advertises_nor_accepts_shm() {
+        const DISABLED_DOMAIN: u32 = 228;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unlink_registry(DISABLED_DOMAIN);
+        // Safety: the guard above serialises every test here that moves it.
+        unsafe { std::env::set_var("INT2DDS_SHM_ZERO_COPY", "0") };
+        let plugin = ShmTransportPlugin::new(
+            DISABLED_DOMAIN,
+            0,
+            "127.0.0.1".to_string(),
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [78; 12],
+            UdpConfig { multicast_ttl: 1 },
+        )
+        .unwrap();
+        unsafe { std::env::remove_var("INT2DDS_SHM_ZERO_COPY") };
+
+        assert!(
+            plugin.shm_runtime().is_none(),
+            "the runtime must be off, or this test asserts nothing"
+        );
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        assert!(!plugin.can_handle(&shm), "an shm locator has no path without the runtime");
+        assert!(
+            plugin.advertised_default_unicast_locators().iter().all(|l| !l.is_shm()),
+            "a peer must not be told to send shm to a participant that cannot read it"
+        );
+        unlink_registry(DISABLED_DOMAIN);
+    }
 
     #[test]
     fn send_to_peer_lands_in_the_peers_ring() {

@@ -838,9 +838,10 @@ const PERF_SIZES: [(usize, u64, u64, u64); 4] = [
 const PERF_POOL_CLASSES: &str = "65536:64,1048576:12,16777216:4";
 
 /// (`int2dds.transport` value, `INT2DDS_SHM_ZERO_COPY` value, label). Same code,
-/// same topic, same QoS on all three; only these two knobs move.
-const PERF_AXES: [(&str, &str, &str); 3] =
-    [("udp", "1", "UDP"), ("shm", "0", "legacy SHM"), ("shm", "1", "zero-copy SHM")];
+/// same topic, same QoS on both; only these two knobs move. With zero-copy off
+/// an shm participant advertises no shm locator, so that combination is the UDP
+/// axis and is not measured twice.
+const PERF_AXES: [(&str, &str, &str); 2] = [("udp", "1", "UDP"), ("shm", "1", "zero-copy SHM")];
 
 fn report_field(text: &str, key: &str) -> Option<String> {
     text.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix('=').map(|v| v.to_string()))
