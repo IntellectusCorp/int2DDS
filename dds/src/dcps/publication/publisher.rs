@@ -52,11 +52,18 @@ use crate::{
             EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         qos_kind::QosKind,
-        qos_policy::Qos,
+        qos_policy::{PresentationQosAccessScopeKind, Qos},
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    rtps::common::{entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber},
+    rtps::{
+        common::{
+            entity_kind::EntityKind,
+            guid::{GroupDigest, Guid},
+            sequence::SequenceNumber,
+        },
+        entities::history::cache_change::PresentationInfo,
+    },
     topic::{qos::TopicQos, topic::Topic},
 };
 
@@ -91,6 +98,8 @@ pub struct Publisher {
     // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
     coherent_depth: Arc<AtomicU32>,
     group_seq_state: Arc<Mutex<GroupSeqState>>,
+    // writerSet of WriterGroupInfo: digest of the attached writers, refreshed when they change.
+    writer_set: Arc<RwLock<GroupDigest>>,
 }
 
 // Group sequence numbers issued to attached writers, and the first one of the open coherent set.
@@ -201,6 +210,7 @@ impl Publisher {
             participant: Some(Arc::downgrade(participant)),
             coherent_depth: Arc::new(AtomicU32::new(0)),
             group_seq_state: Arc::new(Mutex::new(GroupSeqState::default())),
+            writer_set: Arc::new(RwLock::new(GroupDigest::from_entity_ids(&[]))),
         };
         let publisher_arc = Arc::new(publisher.clone());
         let weak_ref = Arc::downgrade(&publisher_arc);
@@ -381,6 +391,9 @@ impl Publisher {
                 .entry(topic_handle)
                 .or_insert_with(Vec::new)
                 .push(weak_writer.clone());
+        }
+        if self.is_group_access_scope()? {
+            self.refresh_writer_set()?;
         }
 
         Ok(datawriter)
@@ -587,6 +600,9 @@ impl Publisher {
                     writers_by_topic_handle.remove(&topic_handle);
                 }
             }
+        }
+        if self.is_group_access_scope()? {
+            self.refresh_writer_set()?;
         }
 
         // Close the writer to new API calls and drain in-flight ones before the rtps writer is
@@ -955,15 +971,52 @@ impl Publisher {
         }
     }
 
+    fn get_writer_set(&self) -> DdsResult<GroupDigest> {
+        Ok(*self.writer_set.read().map_err(|e| DdsError::Error(e.to_string()))?)
+    }
+
+    // Recompute the writerSet digest from the entity ids of every attached writer.
+    fn refresh_writer_set(&self) -> DdsResult<()> {
+        let mut writer_entity_ids = Vec::new();
+        for writer in self.get_datawriters_internal()? {
+            writer_entity_ids.push(writer.get_instance_handle()?.to_guid().entity_id());
+        }
+
+        *self.writer_set.write().map_err(|e| DdsError::Error(e.to_string()))? =
+            GroupDigest::from_entity_ids(&writer_entity_ids);
+        Ok(())
+    }
+
     // Ask every attached writer to close its open coherent set; returns the first error.
     fn end_writer_coherent_sets(&self) -> DdsResult<()> {
+        // Under GROUP scope every writer's End Coherent Set marker shares one group sequence
+        // number and the same group inline QoS; other scopes pass None.
+        let mut presentation_info = None;
+        if self.is_group_access_scope()? {
+            let group_seq_num = self.increment_group_seq_num()?;
+            let group_coherent_set = self.get_group_coherent_set_start()?.unwrap_or(group_seq_num);
+            let writer_set = self.get_writer_set()?;
+            log::debug!(
+                "group coherent set {} ends at gsn {} with writer set {}",
+                group_coherent_set.to_i64(),
+                group_seq_num.to_i64(),
+                writer_set
+            );
+            presentation_info = Some(PresentationInfo {
+                coherent_set: None,
+                group_seq_num: Some(group_seq_num),
+                group_coherent_set: Some(group_coherent_set),
+                writer_group_info: Some(writer_set),
+            });
+        }
+
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let mut result = Ok(());
         for weak_writers in writers_by_topic_name.values() {
             for weak_writer in weak_writers.iter() {
                 if let Some(writer) = weak_writer.upgrade() {
-                    let end_result = writer.end_coherent_set();
+                    let end_result = writer.end_coherent_set(presentation_info.as_ref());
                     if result.is_ok() {
                         result = end_result;
                     }
@@ -971,6 +1024,10 @@ impl Publisher {
             }
         }
         result
+    }
+
+    pub(crate) fn is_group_access_scope(&self) -> DdsResult<bool> {
+        Ok(self.get_qos_arc()?.presentation.access_scope == PresentationQosAccessScopeKind::Group)
     }
 
     // True while a coherent set is open (begin called without matching end).

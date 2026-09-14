@@ -566,6 +566,9 @@ impl MessageCreator {
             if let Some(sn) = inline.group_coherent_set {
                 param_list.set_group_coherent_set(sn);
             }
+            if let Some(writer_set) = inline.writer_group_info {
+                param_list.set_writer_group_info(writer_set.to_bytes().to_vec());
+            }
 
             if !param_list.parameters().is_empty() {
                 data_header_flag.add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA);

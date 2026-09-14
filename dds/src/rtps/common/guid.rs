@@ -125,9 +125,32 @@ impl GroupDigest {
         Self(bytes)
     }
 
-    pub fn from_entity_ids() -> Self {
-        todo!()
-        // DDSI-RTPS v2.5 9.3.2.5 GroupDigest_t (p.150)
+    // Leading 4 octets of the MD5 over the big-endian CDR EntityIdSet_t, ids sorted as
+    // little-endian i32. The empty set is all zeros, not a hash.
+    pub fn from_entity_ids(entity_ids: &[EntityId]) -> Self {
+        // The empty group is the zero value, not the hash of an empty sequence.
+        if entity_ids.is_empty() {
+            return Self([0; 4]);
+        }
+
+        // Sort ascending by the 4 octets reinterpreted as a little-endian int32.
+        let mut sorted_ids: Vec<[u8; 4]> = entity_ids.iter().map(EntityId::to_bytes).collect();
+        sorted_ids.sort_by_key(|bytes| i32::from_le_bytes(*bytes));
+
+        // CDR big-endian EntityIdSet_t: sequence length, then each EntityId_t as 4 octets.
+        let mut serialized_set = Vec::with_capacity(4 + 4 * sorted_ids.len());
+        serialized_set.extend_from_slice(&(sorted_ids.len() as u32).to_be_bytes());
+        for bytes in &sorted_ids {
+            serialized_set.extend_from_slice(bytes);
+        }
+
+        // MD5 over the serialized set, keeping the leading 4 octets.
+        let md5_digest = md5::compute(&serialized_set).0;
+        Self([md5_digest[0], md5_digest[1], md5_digest[2], md5_digest[3]])
+    }
+
+    pub fn to_bytes(&self) -> [u8; 4] {
+        self.0
     }
 }
 impl std::fmt::Display for GroupDigest {
@@ -144,6 +167,44 @@ mod tests {
     use crate::rtps::common::entity_kind::EntityKind;
 
     use super::*;
+
+    #[test]
+    fn group_digest_of_empty_set_is_zero() {
+        assert_eq!(GroupDigest::from_entity_ids(&[]).to_bytes(), [0; 4]);
+    }
+
+    #[test]
+    fn group_digest_matches_fixed_vectors() {
+        let first = EntityId::from_bytes([0x00, 0x00, 0x01, 0x02]);
+        let second = EntityId::from_bytes([0x00, 0x00, 0x02, 0x02]);
+
+        assert_eq!(GroupDigest::from_entity_ids(&[first]).to_bytes(), [0xfe, 0x84, 0xc0, 0x2b]);
+        assert_eq!(
+            GroupDigest::from_entity_ids(&[first, second]).to_bytes(),
+            [0x6f, 0x62, 0x13, 0x62]
+        );
+    }
+
+    #[test]
+    fn group_digest_ignores_input_order() {
+        let first = EntityId::from_bytes([0x00, 0x00, 0x01, 0x02]);
+        let second = EntityId::from_bytes([0x00, 0x00, 0x02, 0x02]);
+
+        let ascending = GroupDigest::from_entity_ids(&[first, second]);
+        assert_eq!(GroupDigest::from_entity_ids(&[second, first]), ascending);
+    }
+
+    #[test]
+    fn group_digest_sorts_ids_as_little_endian_i32() {
+        // As little-endian i32, [01 00 01 02] (0x02010001) sorts before [00 00 02 02] (0x02020000),
+        // the reverse of a big-endian or lexicographic comparison.
+        let lexicographically_first = EntityId::from_bytes([0x00, 0x00, 0x02, 0x02]);
+        let little_endian_first = EntityId::from_bytes([0x01, 0x00, 0x01, 0x02]);
+
+        let digest = GroupDigest::from_entity_ids(&[lexicographically_first, little_endian_first]);
+        assert_eq!(digest.to_bytes(), [0x8b, 0x40, 0x2c, 0x2e]);
+        assert_ne!(digest.to_bytes(), [0xfb, 0x55, 0x00, 0x43], "must not sort lexicographically");
+    }
 
     #[test]
     fn test_entity_kind_to_bytes() {
