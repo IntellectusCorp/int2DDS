@@ -1650,9 +1650,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         })
     }
 
-    /// `Ok(false)` when no slot backs the change: a fallback rule ruled the
-    /// sample out, or it overran the slot the size hint asked for. An overrun
-    /// is not counted as a fallback; the hint was simply too small.
+    /// `Ok(false)` when no slot backs the change and the sample is still to be
+    /// serialized: a fallback rule ruled it out. A sample that overruns the slot
+    /// the size hint asked for is serialized once more and copied into a slot
+    /// that fits; if none is left, the change keeps those bytes.
     fn serialize_into_shm_slot(
         &self,
         data: &dyn Any,
@@ -1664,12 +1665,21 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Ok(false);
         };
 
-        let written =
+        let (runtime, lease, written) =
             match self.type_support.serialize_into_slice(data, lease.bytes_mut(), Some(format)) {
-                Ok(written) => written,
+                Ok(written) => (runtime, lease, written),
                 Err(_) => {
                     runtime.abort(lease);
-                    return Ok(false);
+                    let bytes = self.type_support.serialize(data, Some(format))?;
+                    self.last_serialized_len.store(bytes.len(), Ordering::Relaxed);
+                    let Some((runtime, mut lease)) = self.try_borrow_shm_slot(bytes.len()) else {
+                        let buffer = change.data_mut();
+                        buffer.clear();
+                        buffer.extend_from_slice(&bytes);
+                        return Ok(true);
+                    };
+                    lease.bytes_mut()[..bytes.len()].copy_from_slice(&bytes);
+                    (runtime, lease, bytes.len())
                 }
             };
         self.last_serialized_len.store(written, Ordering::Relaxed);
@@ -3956,25 +3966,20 @@ mod tests {
     }
 
     #[test]
-    fn a_sample_that_overruns_its_slot_gives_it_back_and_the_next_write_fits() {
+    fn a_sample_that_overruns_its_hinted_slot_still_takes_a_slot_that_fits() {
         let writer = shm_writer::<SlotBlobSample>("ShmOverflowTopic", "SlotBlobSample");
         let rt = writer.shm_runtime().expect("the shm transport must have a runtime");
         match_a_local_reader(&writer, &rt);
 
-        // Larger than the smallest default class, which the first write asks for.
+        // The first write's hint is 0, so the slot it asks for is too small.
         let sample = SlotBlobSample { blob: vec![7u8; 100_000] };
-        let small_before = free_slots_for(&rt, 1);
         let large_before = free_slots_for(&rt, 100_000);
-
-        writer.write(&sample, InstanceHandle::NIL).unwrap();
-        assert_eq!(free_slots_for(&rt, 1), small_before, "the overrun slot must go back, not leak");
-        assert_eq!(free_slots_for(&rt, 100_000), large_before, "and no larger slot was taken");
 
         writer.write(&sample, InstanceHandle::NIL).unwrap();
         assert_eq!(
             free_slots_for(&rt, 100_000) + 1,
             large_before,
-            "the recorded length must steer the second write to a class that fits"
+            "the first write must hold a slot that fits, not fall back to its own buffer"
         );
     }
 }
