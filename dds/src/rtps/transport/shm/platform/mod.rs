@@ -70,6 +70,11 @@ impl SharedMemory {
     pub fn is_creator(&self) -> bool {
         self.inner.is_creator()
     }
+
+    /// Give up unlinking on drop. See the platform implementations.
+    pub fn disown_creation(&mut self) {
+        self.inner.disown_creation();
+    }
 }
 
 impl Drop for SharedMemory {
@@ -81,4 +86,54 @@ impl Drop for SharedMemory {
 /// Generate a shared memory segment name for a given domain
 pub fn shm_segment_name(domain_id: u32) -> String {
     format!("int2dds_shm_d{}", domain_id)
+}
+
+/// Whether a process with this pid currently exists.
+///
+/// "Permission denied" means the process exists but is not ours, and counts as
+/// alive: reporting it dead would let a sweep evict a live participant's slot.
+pub(crate) fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // Safety: signal 0 performs the existence and permission check only.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        use winapi::shared::minwindef::DWORD;
+        use winapi::shared::winerror::ERROR_ACCESS_DENIED;
+        use winapi::um::errhandlingapi::GetLastError;
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::{GetExitCodeProcess, OpenProcess};
+        use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+        // Stable Windows constant. It lives in winapi's `minwinbase`, a feature
+        // this crate does not enable.
+        const STILL_ACTIVE: DWORD = 259;
+
+        // Safety: FFI calls; the handle is closed on every path that opens one.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return GetLastError() == ERROR_ACCESS_DENIED;
+            }
+            // Opening the process is not enough: a terminated process keeps its
+            // kernel object while any handle to it exists, so `OpenProcess`
+            // still succeeds for one. Ask for the exit code instead.
+            let mut code: DWORD = 0;
+            let queried = GetExitCodeProcess(handle, &mut code) != 0;
+            CloseHandle(handle);
+            // A failed query means we cannot tell; report alive so a sweep never
+            // evicts a participant we were merely unable to inspect.
+            !queried || code == STILL_ACTIVE
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }

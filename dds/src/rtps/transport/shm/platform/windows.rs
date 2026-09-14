@@ -135,6 +135,11 @@ impl WindowsSharedMemory {
     pub fn is_creator(&self) -> bool {
         self.is_creator
     }
+
+    /// Give up unlinking on drop. See the platform implementations.
+    pub fn disown_creation(&mut self) {
+        self.is_creator = false;
+    }
 }
 
 impl Drop for WindowsSharedMemory {

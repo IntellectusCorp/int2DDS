@@ -121,6 +121,12 @@ impl UnixSharedMemory {
     pub fn is_creator(&self) -> bool {
         self.is_creator
     }
+
+    /// Give up unlinking on drop. The registry outlives any one participant;
+    /// only `unlink_registry` removes it.
+    pub fn disown_creation(&mut self) {
+        self.is_creator = false;
+    }
 }
 
 impl Drop for UnixSharedMemory {
