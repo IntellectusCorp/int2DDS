@@ -18,8 +18,13 @@ use crate::serialize::pl_cdr::InlineQosParameters;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
+
+/// Messages the SEDP decode queue holds before new ones are dropped, as the socket would.
+const SEDP_QUEUE_DEPTH: usize = 8192;
 
 pub(crate) struct DiscoveryUnicastListeningTask {
     guid_prefix: GuidPrefix,
@@ -28,6 +33,9 @@ pub(crate) struct DiscoveryUnicastListeningTask {
     spdp_logic: Arc<Option<SpdpLogic>>,
     sedp_logic: Arc<Option<SedpLogic>>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
+    /// SEDP/WLP messages are decoded on a worker so a discovery burst cannot back up the socket;
+    /// the counter holds the number queued.
+    sedp_tx: Option<(Sender<MessageReceiver>, Arc<AtomicUsize>)>,
 }
 
 impl DiscoveryUnicastListeningTask {
@@ -42,6 +50,7 @@ impl DiscoveryUnicastListeningTask {
             spdp_logic,
             sedp_logic,
             shutdown_waker: Arc::new(OnceLock::new()),
+            sedp_tx: None,
         }
     }
 
@@ -82,6 +91,36 @@ impl DiscoveryUnicastListeningTask {
             .upgrade()
             .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
 
+        let (tx, rx) = channel::<MessageReceiver>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        self.sedp_tx = Some((tx, Arc::clone(&queued)));
+        {
+            let sedp_logic = Arc::clone(&self.sedp_logic);
+            let worker_participant = self.participant.clone();
+            if let Err(e) =
+                std::thread::Builder::new().name("sedp-decode".to_string()).spawn(move || {
+                    while let Ok(message_receiver) = rx.recv() {
+                        queued.fetch_sub(1, Ordering::Relaxed);
+                        if let Some(logic) = sedp_logic.as_ref().as_ref() {
+                            let mut logic = logic.clone();
+                            if let Err(e) = logic.handle_rtps_message(message_receiver.clone()) {
+                                debug!("[DiscoveryUnicast] SEDP handling failed: {:?}", e);
+                            }
+                        }
+                        if let Some(participant) = worker_participant.upgrade() {
+                            if let Some(mut wlp_logic) = participant.wlp_logic() {
+                                let _ = wlp_logic.handle_rtps_message(message_receiver);
+                            }
+                        }
+                    }
+                    info!("[DiscoveryUnicast] SEDP worker stopped");
+                })
+            {
+                warn!("[DiscoveryUnicast] cannot spawn SEDP worker, staying inline: {}", e);
+                self.sedp_tx = None;
+            }
+        }
+
         loop {
             match poll.poll(&mut events, Some(Duration::from_millis(100))) {
                 Ok(()) => {}
@@ -121,6 +160,8 @@ impl DiscoveryUnicastListeningTask {
         bytes: Bytes,
         from_addr: SocketAddr,
     ) -> RtpsResult<()> {
+        // A queued message gets its own buffer instead of pinning the listener's receive chunk.
+        let bytes = if self.sedp_tx.is_some() { Bytes::copy_from_slice(&bytes) } else { bytes };
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
         let rtps_message = message_receiver.init(&bytes)?;
 
@@ -188,6 +229,16 @@ impl DiscoveryUnicastListeningTask {
                 RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized")
             })?
             .clone();
+
+        if let Some((tx, queued)) = self.sedp_tx.as_ref() {
+            if queued.fetch_add(1, Ordering::Relaxed) >= SEDP_QUEUE_DEPTH
+                || tx.send(message_receiver).is_err()
+            {
+                queued.fetch_sub(1, Ordering::Relaxed);
+                debug!("[DiscoveryUnicast] SEDP queue full, announcement dropped");
+            }
+            return Ok(());
+        }
 
         sedp_logic.handle_rtps_message(message_receiver.clone())?;
         if let Some(mut wlp_logic) = participant.wlp_logic() {
