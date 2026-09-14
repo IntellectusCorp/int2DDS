@@ -20,16 +20,16 @@ use crate::rtps::{
 
 // Group sequence number range present only when the GroupInfoFlag is set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GapGroupInfo {
+pub(crate) struct GroupInfo {
     pub gap_start_gsn: SequenceNumber,
     pub gap_end_gsn: SequenceNumber,
 }
 
-impl GapGroupInfo {
+impl GroupInfo {
     const OCTETS: u16 = 2 * mem::size_of::<SequenceNumber>() as u16;
 
     // Validity rules for the group sequence number range.
-    fn validate(&self) -> RtpsResult<()> {
+    pub(crate) fn validate(&self) -> RtpsResult<()> {
         let gap_start_gsn = self.gap_start_gsn.to_i64();
         let gap_end_gsn = self.gap_end_gsn.to_i64();
 
@@ -50,7 +50,7 @@ pub(crate) struct Gap {
     pub writer_id: EntityId,
     pub gap_start: SequenceNumber,
     pub gap_list: SequenceNumberSet,
-    pub group_info: Option<GapGroupInfo>,
+    pub group_info: Option<GroupInfo>,
 }
 
 impl Gap {
@@ -59,13 +59,13 @@ impl Gap {
         writer_id: EntityId,
         gap_start: SequenceNumber,
         gap_list: SequenceNumberSet,
-        group_info: Option<GapGroupInfo>,
+        group_info: Option<GroupInfo>,
     ) -> Self {
         Self { reader_id, writer_id, gap_start, gap_list, group_info }
     }
 
     pub(crate) fn octets_to_next_header(&self) -> u16 {
-        let group_info_octets = if self.group_info.is_some() { GapGroupInfo::OCTETS } else { 0 };
+        let group_info_octets = if self.group_info.is_some() { GroupInfo::OCTETS } else { 0 };
 
         mem::size_of::<EntityId>() as u16 /* reader_id 4 */
             + mem::size_of::<EntityId>() as u16 /* writer_id 4*/
@@ -116,7 +116,7 @@ impl Gap {
             let gap_start_gsn = read_sequence_number()?;
             let gap_end_gsn = read_sequence_number()?;
 
-            let read_group_info = GapGroupInfo { gap_start_gsn, gap_end_gsn };
+            let read_group_info = GroupInfo { gap_start_gsn, gap_end_gsn };
             read_group_info.validate()?;
             group_info = Some(read_group_info);
         }
@@ -167,8 +167,8 @@ mod tests {
         }
     }
 
-    fn create_dummy_group_info() -> GapGroupInfo {
-        GapGroupInfo {
+    fn create_dummy_group_info() -> GroupInfo {
+        GroupInfo {
             gap_start_gsn: SequenceNumber::from_i64(3),
             gap_end_gsn: SequenceNumber::from_i64(9),
         }
@@ -215,11 +215,11 @@ mod tests {
     fn group_info_violating_the_validity_rules_is_rejected() {
         let invalid_group_infos = [
             // gapStartGSN.value is zero or negative
-            GapGroupInfo { gap_start_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
+            GroupInfo { gap_start_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
             // gapEndGSN.value is zero or negative
-            GapGroupInfo { gap_end_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
+            GroupInfo { gap_end_gsn: SequenceNumber::ZERO, ..create_dummy_group_info() },
             // gapEndGSN.value < gapStartGSN.value - 1
-            GapGroupInfo {
+            GroupInfo {
                 gap_start_gsn: SequenceNumber::from_i64(5),
                 gap_end_gsn: SequenceNumber::from_i64(3),
             },
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn empty_group_range_is_accepted() {
         let mut gap = create_dummy_gap();
-        gap.group_info = Some(GapGroupInfo {
+        gap.group_info = Some(GroupInfo {
             gap_start_gsn: SequenceNumber::from_i64(4),
             gap_end_gsn: SequenceNumber::from_i64(3),
         });

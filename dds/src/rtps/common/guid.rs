@@ -121,6 +121,9 @@ struct EntityIdSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupDigest([u8; 4]);
 impl GroupDigest {
+    // The empty group, which is the zero value rather than a hash.
+    pub const EMPTY: Self = Self([0; 4]);
+
     pub fn new(bytes: [u8; 4]) -> Self {
         Self(bytes)
     }

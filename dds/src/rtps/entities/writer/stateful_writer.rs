@@ -5,8 +5,8 @@ use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock, RwLock, Weak,
     },
     thread,
 };
@@ -35,7 +35,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::{Guid, GuidPrefix},
+            guid::{GroupDigest, Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
@@ -50,6 +50,7 @@ use crate::{
                 writer_history::WriterHistoryCache,
             },
         },
+        messages::submessages::{gap, heartbeat},
         task::sending_handler::{MessageType, SendingHandler},
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
@@ -91,6 +92,9 @@ pub(crate) struct StatefulWriter {
     // Callback-producing accesses currently in flight against this writer. `remove_writer`
     // drains this to zero before returning.
     in_flight_callbacks: AtomicUsize,
+    // Shared with the publisher and set once for GROUP-scope writers.
+    last_group_seq_num: OnceLock<Arc<AtomicI64>>,
+    writer_set: OnceLock<Arc<RwLock<GroupDigest>>>,
 }
 
 impl StatefulWriter {
@@ -139,6 +143,8 @@ impl StatefulWriter {
             )),
             writer_reliability_extension,
             in_flight_callbacks: AtomicUsize::new(0),
+            last_group_seq_num: OnceLock::new(),
+            writer_set: OnceLock::new(),
         }
     }
 
@@ -156,6 +162,94 @@ impl StatefulWriter {
 
     pub(crate) fn heartbeat_timer_running(&self) -> bool {
         self.heartbeat_timer_running.load(Ordering::Acquire)
+    }
+
+    // Share the publisher's group sequence number counter; later calls are ignored.
+    // Only a GROUP access scope publisher calls this, so it also marks the writer as one.
+    pub(crate) fn set_last_group_seq_num(&self, last_group_seq_num: Arc<AtomicI64>) {
+        let _ = self.last_group_seq_num.set(last_group_seq_num);
+    }
+
+    // Share the publisher's writerSet digest; later calls are ignored.
+    pub(crate) fn set_writer_set(&self, writer_set: Arc<RwLock<GroupDigest>>) {
+        let _ = self.writer_set.set(writer_set);
+    }
+
+    // Heartbeat group info for the range first_sn..=last_sn; None when this writer has no
+    // shared group state or its group has issued nothing yet.
+    pub(crate) fn create_heartbeat_group_info(
+        &self,
+        history_cache: &WriterHistoryCache,
+        first_sn: SequenceNumber,
+        last_sn: SequenceNumber,
+    ) -> Option<heartbeat::GroupInfo> {
+        // Absent on every writer but a GROUP access scope one, which is what gates this.
+        let current_gsn =
+            SequenceNumber::from_i64(self.last_group_seq_num.get()?.load(Ordering::Acquire));
+        let writer_set = *self.writer_set.get()?.read().ok()?;
+        if current_gsn.to_i64() <= 0 {
+            return None;
+        }
+
+        // A reader has to be told that a writer holding nothing holds nothing, so an absent
+        // boundary reports the range firstSN and lastSN report: one that ends before it starts.
+        let stored_range =
+            history_cache.get_change(first_sn).zip(history_cache.get_change(last_sn));
+        let (first_gsn, last_gsn) = match stored_range {
+            Some((first_change, last_change)) => (
+                first_change.presentation_info().group_seq_num?,
+                last_change.presentation_info().group_seq_num?,
+            ),
+            None => (SequenceNumber::INIT, SequenceNumber::ZERO),
+        };
+
+        Some(heartbeat::GroupInfo {
+            current_gsn,
+            first_gsn,
+            last_gsn,
+            writer_set,
+            secure_writer_set: GroupDigest::EMPTY,
+        })
+    }
+
+    // Group sequence numbers a Gap over gap_start..=gap_end declares unavailable. The range
+    // stops before the next sample this writer still holds, which it is about to send.
+    // None when this writer has no shared group state or the range would be invalid.
+    pub(crate) fn create_gap_group_info(
+        &self,
+        history_cache: &WriterHistoryCache,
+        gap_start: SequenceNumber,
+        gap_end: SequenceNumber,
+    ) -> Option<gap::GroupInfo> {
+        // Absent on every writer but a GROUP access scope one, which is what gates this.
+        if self.last_group_seq_num.get().is_none() {
+            return None;
+        }
+
+        // The range must never reach a group sequence number this writer still has to send.
+        let gap_end_gsn = match history_cache.next_change_after(gap_end) {
+            // This one is still to be sent, so the range stops one short of it.
+            Some(change_after_gap) => {
+                change_after_gap.presentation_info().group_seq_num?.previous()
+            }
+            // Nothing is left to send, so the last number declared gone is the furthest proof.
+            None => {
+                let last_gapped_change = history_cache.get_change(gap_end)?;
+                last_gapped_change.presentation_info().group_seq_num?
+            }
+        };
+
+        // A removed sample took its group sequence number with it, so the range collapses onto
+        // its end. The reader's ordering rules read only gapEndGSN.
+        let gap_start_gsn = history_cache
+            .get_change(gap_start)
+            .and_then(|first_gapped_change| first_gapped_change.presentation_info().group_seq_num)
+            .unwrap_or(gap_end_gsn);
+
+        let group_info = gap::GroupInfo { gap_start_gsn, gap_end_gsn };
+        group_info.validate().ok()?;
+
+        Some(group_info)
     }
 
     pub(crate) fn disable_piggyback_heartbeat(&self) -> bool {
@@ -953,10 +1047,15 @@ mod tests {
         infrastructure::qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
         rtps::{
             common::{
-                entity_id::EntityId, entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber,
-                types::TopicKind,
+                entity_id::EntityId,
+                entity_kind::EntityKind,
+                guid::Guid,
+                sequence::SequenceNumber,
+                types::{ChangeKind, TopicKind},
             },
-            entities::writer::reader_proxy::ReaderProxy,
+            entities::{
+                history::cache_change::PresentationInfo, writer::reader_proxy::ReaderProxy,
+            },
         },
         subscription::qos::{DataReaderQos, SubscriberQos},
         topic::qos::TopicQos,
@@ -1090,5 +1189,132 @@ mod tests {
 
         // Should timeout (return false)
         assert!(!result);
+    }
+
+    fn create_group_scope_writer(last_group_seq_num: i64) -> StatefulWriter {
+        let entity_id = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        let writer = StatefulWriter::new(
+            Guid::new([0; 12], entity_id),
+            vec![],
+            vec![],
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::NoKey,
+            entity_id,
+            65000,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Weak::new(),
+        );
+        writer.set_last_group_seq_num(Arc::new(AtomicI64::new(last_group_seq_num)));
+        writer.set_writer_set(Arc::new(RwLock::new(GroupDigest::EMPTY)));
+
+        writer
+    }
+
+    // Store a change the way a write under GROUP access scope leaves it.
+    fn store_change_with_group_seq_num(writer: &StatefulWriter, seq_num: i64, group_seq_num: i64) {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            writer.guid(),
+            InstanceHandle::NIL,
+            SequenceNumber::from_i64(seq_num),
+            vec![1],
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            group_seq_num: Some(SequenceNumber::from_i64(group_seq_num)),
+            ..Default::default()
+        });
+
+        let writer_cache = writer.writer_cache();
+        let mut history_cache = writer_cache.lock().unwrap();
+        history_cache.add_change(Arc::new(change), writer).unwrap();
+    }
+
+    fn get_gap_group_info(
+        writer: &StatefulWriter,
+        gap_start: i64,
+        gap_end: i64,
+    ) -> Option<gap::GroupInfo> {
+        let writer_cache = writer.writer_cache();
+        let history_cache = writer_cache.lock().unwrap();
+        writer.create_gap_group_info(
+            &history_cache,
+            SequenceNumber::from_i64(gap_start),
+            SequenceNumber::from_i64(gap_end),
+        )
+    }
+
+    #[test]
+    fn gap_group_info_collapses_when_the_gapped_sample_is_gone() {
+        let writer = create_group_scope_writer(5);
+        store_change_with_group_seq_num(&writer, 2, 3);
+        store_change_with_group_seq_num(&writer, 3, 5);
+
+        // Seq 1 left no group sequence number behind, so the range is only its end.
+        assert_eq!(
+            get_gap_group_info(&writer, 1, 2),
+            Some(gap::GroupInfo {
+                gap_start_gsn: SequenceNumber::from_i64(4),
+                gap_end_gsn: SequenceNumber::from_i64(4),
+            })
+        );
+    }
+
+    fn get_heartbeat_group_info(
+        writer: &StatefulWriter,
+        first_sn: i64,
+        last_sn: i64,
+    ) -> Option<heartbeat::GroupInfo> {
+        let writer_cache = writer.writer_cache();
+        let history_cache = writer_cache.lock().unwrap();
+        writer.create_heartbeat_group_info(
+            &history_cache,
+            SequenceNumber::from_i64(first_sn),
+            SequenceNumber::from_i64(last_sn),
+        )
+    }
+
+    #[test]
+    fn heartbeat_group_info_spans_the_group_sequence_numbers_it_holds() {
+        let writer = create_group_scope_writer(5);
+        store_change_with_group_seq_num(&writer, 1, 1);
+        store_change_with_group_seq_num(&writer, 2, 3);
+
+        assert_eq!(
+            get_heartbeat_group_info(&writer, 1, 2),
+            Some(heartbeat::GroupInfo {
+                current_gsn: SequenceNumber::from_i64(5),
+                first_gsn: SequenceNumber::from_i64(1),
+                last_gsn: SequenceNumber::from_i64(3),
+                writer_set: GroupDigest::EMPTY,
+                secure_writer_set: GroupDigest::EMPTY,
+            })
+        );
+    }
+
+    #[test]
+    fn heartbeat_group_info_reports_an_empty_range_when_nothing_is_held() {
+        let writer = create_group_scope_writer(7);
+
+        // An empty history sends firstSN one past lastSN, and the group range says the same:
+        // the reader has no group sequence number to wait on from this writer.
+        assert_eq!(
+            get_heartbeat_group_info(&writer, 1, 0),
+            Some(heartbeat::GroupInfo {
+                current_gsn: SequenceNumber::from_i64(7),
+                first_gsn: SequenceNumber::INIT,
+                last_gsn: SequenceNumber::ZERO,
+                writer_set: GroupDigest::EMPTY,
+                secure_writer_set: GroupDigest::EMPTY,
+            })
+        );
+    }
+
+    #[test]
+    fn heartbeat_group_info_is_absent_before_the_group_issues_a_number() {
+        let writer = create_group_scope_writer(0);
+
+        assert_eq!(get_heartbeat_group_info(&writer, 1, 0), None);
     }
 }

@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
 };
@@ -98,11 +98,14 @@ pub struct Publisher {
     // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
     coherent_depth: Arc<AtomicU32>,
     group_seq_state: Arc<Mutex<GroupSeqState>>,
-    // writerSet of WriterGroupInfo: digest of the attached writers, refreshed when they change.
+    // Copy of the issued counter the attached writers read without taking the state lock.
+    last_group_seq_num: Arc<AtomicI64>,
+    // writerSet of WriterGroupInfo: digest of the attached writers; shared with the writers.
     writer_set: Arc<RwLock<GroupDigest>>,
 }
 
-// Group sequence numbers issued to attached writers, and the first one of the open coherent set.
+// Group sequence numbers issued to attached writers, and the first one of the open coherent
+// set. One lock so that opening a set cannot cross a write that takes the number it records.
 #[derive(Default)]
 struct GroupSeqState {
     last_group_seq_num: i64,
@@ -210,7 +213,8 @@ impl Publisher {
             participant: Some(Arc::downgrade(participant)),
             coherent_depth: Arc::new(AtomicU32::new(0)),
             group_seq_state: Arc::new(Mutex::new(GroupSeqState::default())),
-            writer_set: Arc::new(RwLock::new(GroupDigest::from_entity_ids(&[]))),
+            last_group_seq_num: Arc::new(AtomicI64::new(0)),
+            writer_set: Arc::new(RwLock::new(GroupDigest::EMPTY)),
         };
         let publisher_arc = Arc::new(publisher.clone());
         let weak_ref = Arc::downgrade(&publisher_arc);
@@ -1047,13 +1051,24 @@ impl Publisher {
     pub(crate) fn increment_group_seq_num(&self) -> DdsResult<SequenceNumber> {
         let mut state = self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         state.last_group_seq_num += 1;
+        self.last_group_seq_num.store(state.last_group_seq_num, Ordering::Release);
+
         Ok(SequenceNumber::from_i64(state.last_group_seq_num))
     }
 
     // Group sequence number of the open coherent set's first sample; None outside a set.
     pub(crate) fn get_group_coherent_set_start(&self) -> DdsResult<Option<SequenceNumber>> {
         let state = self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
         Ok(state.coherent_set_start)
+    }
+
+    pub(crate) fn get_last_group_seq_num_arc(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.last_group_seq_num)
+    }
+
+    pub(crate) fn get_writer_set_arc(&self) -> Arc<RwLock<GroupDigest>> {
+        Arc::clone(&self.writer_set)
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {

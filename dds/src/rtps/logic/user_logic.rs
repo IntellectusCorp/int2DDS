@@ -48,6 +48,7 @@ use crate::rtps::messages::submessages::gap::Gap;
 use crate::rtps::messages::submessages::heartbeat::Heartbeat;
 use crate::rtps::messages::submessages::heartbeat_frag::HeartbeatFrag;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
+use crate::rtps::messages::submessages::{gap, heartbeat};
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
@@ -805,12 +806,18 @@ impl UserLogic {
                     // firstSN is the oldest held change, not the one resent; the reader drops
                     // below it, including samples this same pass is still repairing.
                     let heartbeat_info = (piggyback && is_last).then(|| {
+                        let group_info =
+                            stateful_writer.writer_cache().lock().ok().and_then(|cache| {
+                                stateful_writer
+                                    .create_heartbeat_group_info(&cache, first_sn, last_sn)
+                            });
                         (
                             stateful_writer.heartbeat_count(),
                             first_sn,
                             last_sn,
                             false, // final_flag
                             false, // liveliness_flag = false for retransmission
+                            group_info,
                         )
                     });
 
@@ -869,12 +876,25 @@ impl UserLogic {
             .release(send_buffer);
 
         if !gap_list.is_empty() {
+            // One range serves every window the gap list is split into: a later window starts
+            // at a higher sequence number, so the bound taken from the lowest one holds there.
+            let group_info = gap_list.iter().min().and_then(|lowest_gapped_sn| {
+                let writer_cache = stateful_writer.writer_cache();
+                let history_cache = writer_cache.lock().ok()?;
+                stateful_writer.create_gap_group_info(
+                    &history_cache,
+                    *lowest_gapped_sn,
+                    *lowest_gapped_sn,
+                )
+            });
+
             let buffer_list = MessageCreator::create_multiple_gap_msgs(
                 writer.guid(),
                 remote_reader_guid,
                 group_id,
                 writer.endpoint_id(),
                 &mut gap_list,
+                group_info,
             )
             .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
@@ -995,8 +1015,20 @@ impl UserLogic {
             for (fragment_num, count, is_last) in plan {
                 // The heartbeat rides the last datagram of the window, so the reader always has
                 // a trigger for the next NACK_FRAG.
-                let heartbeat_info = (piggyback && is_last)
-                    .then(|| (stateful_writer.heartbeat_count(), first_sn, last_sn, false, false));
+                let heartbeat_info = (piggyback && is_last).then(|| {
+                    (
+                        stateful_writer.heartbeat_count(),
+                        first_sn,
+                        last_sn,
+                        false,
+                        false,
+                        stateful_writer.create_heartbeat_group_info(
+                            &history_cache_guard,
+                            first_sn,
+                            last_sn,
+                        ),
+                    )
+                });
 
                 if self.send_data_frag_to_reader_proxy(
                     &change,
@@ -1253,13 +1285,16 @@ impl UserLogic {
 
                     // The heartbeat rides the last datagram of the window, not only the last of
                     // the sample: without it the reader has no trigger to ask for the rest.
-                    let heartbeat_info = (is_piggyback_wanted && is_last).then_some((
-                        heartbeat_count,
-                        first,
-                        last,
-                        false,
-                        false,
-                    ));
+                    let heartbeat_info = (is_piggyback_wanted && is_last).then(|| {
+                        (
+                            heartbeat_count,
+                            first,
+                            last,
+                            false,
+                            false,
+                            writer.create_heartbeat_group_info(history_cache, first, last),
+                        )
+                    });
 
                     if MessageCreator::create_data_frag_msg(
                         &a_change,
@@ -1297,8 +1332,16 @@ impl UserLogic {
 
             let is_piggyback_wanted =
                 members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
-            let heartbeat_info =
-                is_piggyback_wanted.then_some((heartbeat_count, first, last, false, false));
+            let heartbeat_info = is_piggyback_wanted.then(|| {
+                (
+                    heartbeat_count,
+                    first,
+                    last,
+                    false,
+                    false,
+                    writer.create_heartbeat_group_info(history_cache, first, last),
+                )
+            });
 
             debug!(
                 "[Data] Batched DATA sn={} to {} readers behind one participant",
@@ -1361,6 +1404,7 @@ impl UserLogic {
                             writer.endpoint_id(),
                             start,
                             end,
+                            writer.create_gap_group_info(history_cache, start, end),
                         ) {
                             Ok(buffer) => {
                                 if let Err(e) =
@@ -1427,6 +1471,11 @@ impl UserLogic {
                                         last_sn,
                                         false,
                                         false,
+                                        writer.create_heartbeat_group_info(
+                                            history_cache,
+                                            first_sn,
+                                            last_sn,
+                                        ),
                                     ))
                                 } else {
                                     None
@@ -1464,7 +1513,18 @@ impl UserLogic {
                             }
                         } else {
                             let heartbeat_info = if reliable && piggyback {
-                                Some((writer.heartbeat_count(), first_sn, last_sn, false, false))
+                                Some((
+                                    writer.heartbeat_count(),
+                                    first_sn,
+                                    last_sn,
+                                    false,
+                                    false,
+                                    writer.create_heartbeat_group_info(
+                                        history_cache,
+                                        first_sn,
+                                        last_sn,
+                                    ),
+                                ))
                             } else {
                                 None
                             };
@@ -1727,7 +1787,14 @@ impl UserLogic {
         writer_id: EntityId,
         fragment_num: u32,
         fragments_in_submessage: u16,
-        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(
+            u32,
+            SequenceNumber,
+            SequenceNumber,
+            bool,
+            bool,
+            Option<heartbeat::GroupInfo>,
+        )>,
         timestamp: DateTime<Utc>,
         send_buffer: &mut Vec<u8>,
     ) -> bool {
@@ -1823,16 +1890,19 @@ impl UserLogic {
         // Send heartbeat once per participant
         for (target_participant_prefix, locators) in participant_locators.iter() {
             let highest_sn = history_cache.highest_sn();
+            let first_sn = history_cache.get_seq_num_min().unwrap_or(highest_sn + 1);
+            let last_sn = history_cache.get_seq_num_max().unwrap_or(highest_sn);
             let buffer = MessageCreator::create_heartbeat_message(
                 writer.guid().prefix(),
                 *target_participant_prefix,
                 writer.heartbeat_count(),
                 EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
                 writer.endpoint_id(),
-                history_cache.get_seq_num_min().unwrap_or(highest_sn + 1),
-                history_cache.get_seq_num_max().unwrap_or(highest_sn),
+                first_sn,
+                last_sn,
                 false,
                 false,
+                writer.create_heartbeat_group_info(&history_cache, first_sn, last_sn),
             );
 
             if let Ok(buf) = buffer {
@@ -1911,6 +1981,8 @@ impl UserLogic {
         }
 
         let highest_sn = history_cache.highest_sn();
+        let first_sn = history_cache.get_seq_num_min().unwrap_or(highest_sn + 1);
+        let last_sn = history_cache.get_seq_num_max().unwrap_or(highest_sn);
 
         let buffer = MessageCreator::create_heartbeat_message(
             writer.guid().prefix(),
@@ -1918,10 +1990,11 @@ impl UserLogic {
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
-            history_cache.get_seq_num_min().unwrap_or(highest_sn + 1),
-            history_cache.get_seq_num_max().unwrap_or(highest_sn),
+            first_sn,
+            last_sn,
             false,
             false,
+            writer.create_heartbeat_group_info(history_cache, first_sn, last_sn),
         );
 
         if let Ok(buf) = buffer {
@@ -1951,6 +2024,7 @@ impl UserLogic {
                     writer.endpoint_id(),
                     min_sn,
                     last_irrelevant,
+                    writer.create_gap_group_info(history_cache, min_sn, last_irrelevant),
                 )?;
             }
         }
@@ -1965,6 +2039,7 @@ impl UserLogic {
         writer_entity_id: EntityId,
         gap_start: SequenceNumber,
         gap_end: SequenceNumber,
+        group_info: Option<gap::GroupInfo>,
     ) -> RtpsResult<()> {
         let buffer = MessageCreator::create_gap_msg_consecutive(
             local_guid,
@@ -1973,6 +2048,7 @@ impl UserLogic {
             writer_entity_id,
             gap_start,
             gap_end,
+            group_info,
         )
         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
@@ -3850,7 +3926,7 @@ mod tests {
         for (fragment_num, count) in [(1u32, 2u16), (4, 1)] {
             for with_heartbeat in [false, true] {
                 let heartbeat = with_heartbeat.then(|| {
-                    (1u32, SequenceNumber::new(0, 1), SequenceNumber::new(0, 1), false, false)
+                    (1u32, SequenceNumber::new(0, 1), SequenceNumber::new(0, 1), false, false, None)
                 });
                 MessageCreator::create_data_frag_msg(
                     &change,
@@ -5708,6 +5784,7 @@ mod tests {
             SequenceNumber::from_i64(first),
             SequenceNumber::from_i64(last),
             count,
+            None,
         );
         let rtps_header = Header::new(writer_guid.prefix());
         let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);

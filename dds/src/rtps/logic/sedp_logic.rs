@@ -1816,6 +1816,7 @@ impl SedpLogic {
                 last_sn,
                 false,
                 false,
+                None,
             );
             match buffer {
                 Ok(buffer) => {
@@ -2134,6 +2135,7 @@ impl SedpLogic {
             reader_entity_id,
             writer_entity_id,
             &mut gap_list,
+            None,
         )
         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 

@@ -345,6 +345,14 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
                 Some(Arc::downgrade(&rtps_writer));
         }
 
+        // A GROUP-scope stateful writer reports its publisher's group state.
+        if publisher.is_group_access_scope()? {
+            if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+                stateful_writer.set_last_group_seq_num(publisher.get_last_group_seq_num_arc());
+                stateful_writer.set_writer_set(publisher.get_writer_set_arc());
+            }
+        }
+
         // A volatile, keep-all writer has no reason to keep samples acked by all readers,
         // so register a callback that removes them unless the user opted into strict mode
         let qos = self.get_qos_arc()?;
@@ -2591,6 +2599,7 @@ mod tests {
     use crate::domain::qos::DomainParticipantQos;
     use crate::infrastructure::qos_policy::HistoryQosPolicyKind;
     use crate::publication::qos::PublisherQos;
+    use crate::rtps::messages::submessages::{gap, heartbeat};
     use crate::topic::qos::TopicQos;
     use std::{sync::atomic::AtomicUsize, thread};
 
@@ -3789,6 +3798,167 @@ mod tests {
             get_presentation_info_of_change(&first_writer, 3).group_seq_num,
             Some(SequenceNumber::from_i64(4))
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    // Heartbeat group info the writer would send for its own sequence numbers first..=last.
+    fn get_heartbeat_group_info_of_writer(
+        writer: &DataWriter<TestData>,
+        first_sn: i64,
+        last_sn: i64,
+    ) -> Option<heartbeat::GroupInfo> {
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let writer_cache = stateful_writer.writer_cache();
+        let history_cache = writer_cache.lock().unwrap();
+        stateful_writer.create_heartbeat_group_info(
+            &history_cache,
+            SequenceNumber::from_i64(first_sn),
+            SequenceNumber::from_i64(last_sn),
+        )
+    }
+
+    // Gap group info the writer would send for its own sequence numbers gap_start..=gap_end.
+    fn get_gap_group_info_of_writer(
+        writer: &DataWriter<TestData>,
+        gap_start: i64,
+        gap_end: i64,
+    ) -> Option<gap::GroupInfo> {
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let writer_cache = stateful_writer.writer_cache();
+        let history_cache = writer_cache.lock().unwrap();
+        stateful_writer.create_gap_group_info(
+            &history_cache,
+            SequenceNumber::from_i64(gap_start),
+            SequenceNumber::from_i64(gap_end),
+        )
+    }
+
+    #[test]
+    fn group_scope_writers_report_group_info_from_their_publisher() {
+        use crate::infrastructure::qos_policy::PresentationQosAccessScopeKind;
+        use crate::rtps::common::guid::GroupDigest;
+
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "GroupInfoTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+        let mut writer_qos = DataWriterQos::default();
+        writer_qos.history.kind = HistoryQosPolicyKind::KeepAll;
+        let first_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos.clone(), None, StatusMask::default())
+            .unwrap();
+        let second_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        // first_writer holds seq 1, 2, 3 at GSN 1, 3, 5; second_writer took GSN 2 and 4.
+        first_writer.write(&TestData { id: 1 }, InstanceHandle::NIL).unwrap();
+        second_writer.write(&TestData { id: 2 }, InstanceHandle::NIL).unwrap();
+        first_writer.write(&TestData { id: 3 }, InstanceHandle::NIL).unwrap();
+        second_writer.write(&TestData { id: 4 }, InstanceHandle::NIL).unwrap();
+        first_writer.write(&TestData { id: 5 }, InstanceHandle::NIL).unwrap();
+
+        let expected_writer_set = GroupDigest::from_entity_ids(&[
+            first_writer.get_instance_handle().unwrap().to_guid().entity_id(),
+            second_writer.get_instance_handle().unwrap().to_guid().entity_id(),
+        ]);
+        let expected_group_info = |first_gsn: i64, last_gsn: i64| heartbeat::GroupInfo {
+            current_gsn: SequenceNumber::from_i64(5),
+            first_gsn: SequenceNumber::from_i64(first_gsn),
+            last_gsn: SequenceNumber::from_i64(last_gsn),
+            writer_set: expected_writer_set,
+            secure_writer_set: GroupDigest::EMPTY,
+        };
+
+        // Both writers report the publisher's current GSN and writerSet, each with its own range.
+        assert_eq!(
+            get_heartbeat_group_info_of_writer(&first_writer, 1, 2),
+            Some(expected_group_info(1, 3))
+        );
+        assert_eq!(
+            get_heartbeat_group_info_of_writer(&second_writer, 1, 2),
+            Some(expected_group_info(2, 4))
+        );
+        // What a writer sends has to survive the rules a receiver checks it against.
+        assert!(expected_group_info(1, 3).validate().is_ok());
+
+        // Gapping seq 1..=2 stops at GSN 4, one before the GSN 5 sample still to be sent.
+        assert_eq!(
+            get_gap_group_info_of_writer(&first_writer, 1, 2),
+            Some(gap::GroupInfo {
+                gap_start_gsn: SequenceNumber::from_i64(1),
+                gap_end_gsn: SequenceNumber::from_i64(4),
+            })
+        );
+
+        // Gapping the last sample it holds leaves nothing beyond, so the range ends on it.
+        assert_eq!(
+            get_gap_group_info_of_writer(&first_writer, 3, 3),
+            Some(gap::GroupInfo {
+                gap_start_gsn: SequenceNumber::from_i64(5),
+                gap_end_gsn: SequenceNumber::from_i64(5),
+            })
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn topic_scope_writer_reports_no_group_info() {
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "NoGroupInfoTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        writer.write(&TestData { id: 1 }, InstanceHandle::NIL).unwrap();
+
+        assert_eq!(get_heartbeat_group_info_of_writer(&writer, 1, 1), None);
+        assert_eq!(get_gap_group_info_of_writer(&writer, 1, 1), None);
 
         participant.delete_contained_entities().unwrap();
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
