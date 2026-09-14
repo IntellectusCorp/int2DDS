@@ -24,7 +24,7 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock, RwLock, Weak,
     },
 };
@@ -220,11 +220,9 @@ pub struct DataWriter<Foo> {
     current_coherent_start: Arc<Mutex<Option<SequenceNumber>>>,
     /// Looked up once, when the RTPS entities are enabled.
     shm_runtime: Arc<OnceLock<Option<Arc<ShmRuntime>>>>,
-    /// The typed write path cannot know a sample's size before serializing it,
-    /// so it asks for a slot of the previous sample's size. Zero on the first
-    /// write picks the smallest class; an overrun falls back to the heap and
-    /// records the real size for the next write.
-    last_serialized_len: Arc<AtomicUsize>,
+    /// The typed write path serializes here first, so it can take a slot of
+    /// the sample's exact size; the capacity is reused across writes.
+    shm_scratch: Arc<Mutex<Vec<u8>>>,
 }
 
 impl<Foo> Debug for DataWriter<Foo> {
@@ -296,7 +294,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             wlp_logic: self.wlp_logic.clone(),
             current_coherent_start: self.current_coherent_start.clone(),
             shm_runtime: self.shm_runtime.clone(),
-            last_serialized_len: self.last_serialized_len.clone(),
+            shm_scratch: self.shm_scratch.clone(),
         }
     }
 }
@@ -591,7 +589,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             wlp_logic,
             current_coherent_start: Arc::new(Mutex::new(None)),
             shm_runtime: Arc::new(OnceLock::new()),
-            last_serialized_len: Arc::new(AtomicUsize::new(0)),
+            shm_scratch: Arc::new(Mutex::new(Vec::new())),
         };
         let writer_arc = Arc::new(writer.clone());
         let weak_ref = Arc::downgrade(&writer_arc);
@@ -1046,14 +1044,15 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
     /// The write()-time fallback rules; `None` sends the caller to the heap.
     fn try_borrow_shm_slot(&self, len: usize) -> Option<(Arc<ShmRuntime>, SlotLease)> {
-        let rt = self.shm_runtime()?;
-        let fall_back = |reason: FallbackReason| -> Option<(Arc<ShmRuntime>, SlotLease)> {
-            if rt.fallbacks().note(reason) {
-                info!("[shm] write-time fallback for writer {:?}: {reason:?}", self.guid);
-            }
-            None
-        };
+        let rt = self.shm_write_runtime()?;
+        let lease = self.borrow_shm_slot(&rt, len)?;
+        Some((rt, lease))
+    }
 
+    /// The runtime, when the rules that do not depend on the sample's size
+    /// allow a slot.
+    fn shm_write_runtime(&self) -> Option<Arc<ShmRuntime>> {
+        let rt = self.shm_runtime()?;
         let durability = self.qos.load().durability.kind;
         let matched_readers = self.get_rtps_writer().ok()?.matched_readers_guids();
         let reachability = |prefix| {
@@ -1064,21 +1063,32 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         };
         if let Some(reason) = shm_write_time_fallback(durability, &matched_readers, reachability) {
-            return fall_back(reason);
+            self.note_shm_fallback(&rt, reason);
+            return None;
         }
+        Some(rt)
+    }
 
-        // One guard for both: `order_for` answers `SampleTooLarge`, `acquire`
-        // answers `PoolExhausted`.
+    /// One guard for both: `order_for` answers `SampleTooLarge`, `acquire`
+    /// answers `PoolExhausted`.
+    fn borrow_shm_slot(&self, rt: &ShmRuntime, len: usize) -> Option<SlotLease> {
         let mut owner = rt.own().owner_mut();
         if owner.pool().order_for(len).is_none() {
             drop(owner);
-            return fall_back(FallbackReason::SampleTooLarge);
+            self.note_shm_fallback(rt, FallbackReason::SampleTooLarge);
+            return None;
         }
         let lease = owner.acquire(len);
         drop(owner);
-        match lease {
-            Some(lease) => Some((rt, lease)),
-            None => fall_back(FallbackReason::PoolExhausted),
+        if lease.is_none() {
+            self.note_shm_fallback(rt, FallbackReason::PoolExhausted);
+        }
+        lease
+    }
+
+    fn note_shm_fallback(&self, rt: &ShmRuntime, reason: FallbackReason) {
+        if rt.fallbacks().note(reason) {
+            info!("[shm] write-time fallback for writer {:?}: {reason:?}", self.guid);
         }
     }
 
@@ -1644,52 +1654,35 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             if self.serialize_into_shm_slot(data, format, change)? {
                 return Ok(());
             }
-            self.type_support.serialize_into(data, change.data_mut(), Some(format))?;
-            self.last_serialized_len.store(change.data_mut().len(), Ordering::Relaxed);
-            Ok(())
+            self.type_support.serialize_into(data, change.data_mut(), Some(format))
         })
     }
 
-    /// `Ok(false)` when no slot backs the change and the sample is still to be
-    /// serialized: a fallback rule ruled it out. A sample that overruns the slot
-    /// the size hint asked for is serialized once more and copied into a slot
-    /// that fits; if none is left, the change keeps those bytes.
+    /// `Ok(false)` when a rule rules the slot out before serializing, leaving
+    /// the change to the caller. Otherwise the sample is serialized once into
+    /// the scratch buffer and copied into a slot of its exact size, or moved
+    /// into the change when no slot is left.
     fn serialize_into_shm_slot(
         &self,
         data: &dyn Any,
         format: &SerializationFormat,
         change: &mut CacheChange,
     ) -> DdsResult<bool> {
-        let hint = self.last_serialized_len.load(Ordering::Relaxed);
-        let Some((runtime, mut lease)) = self.try_borrow_shm_slot(hint) else {
+        let Some(runtime) = self.shm_write_runtime() else {
             return Ok(false);
         };
-
-        let (runtime, lease, written) =
-            match self.type_support.serialize_into_slice(data, lease.bytes_mut(), Some(format)) {
-                Ok(written) => (runtime, lease, written),
-                Err(_) => {
-                    runtime.abort(lease);
-                    let bytes = self.type_support.serialize(data, Some(format))?;
-                    self.last_serialized_len.store(bytes.len(), Ordering::Relaxed);
-                    let Some((runtime, mut lease)) = self.try_borrow_shm_slot(bytes.len()) else {
-                        let buffer = change.data_mut();
-                        buffer.clear();
-                        buffer.extend_from_slice(&bytes);
-                        return Ok(true);
-                    };
-                    lease.bytes_mut()[..bytes.len()].copy_from_slice(&bytes);
-                    (runtime, lease, bytes.len())
-                }
-            };
-        self.last_serialized_len.store(written, Ordering::Relaxed);
-        match runtime.commit(lease, written as u32) {
-            Some(handle) => {
+        let mut scratch = self.shm_scratch.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        self.type_support.serialize_into(data, &mut scratch, Some(format))?;
+        let len = scratch.len();
+        if let Some(mut lease) = self.borrow_shm_slot(&runtime, len) {
+            lease.bytes_mut()[..len].copy_from_slice(&scratch);
+            if let Some(handle) = runtime.commit(lease, len as u32) {
                 change.set_shm_slot_payload(handle);
-                Ok(true)
+                return Ok(true);
             }
-            None => Ok(false),
         }
+        std::mem::swap(change.data_mut(), &mut *scratch);
+        Ok(true)
     }
 
     /// Pooled add_change for pre-serialized bytes: copies the bytes into the reused buffer.
@@ -3966,12 +3959,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sample_that_overruns_its_hinted_slot_still_takes_a_slot_that_fits() {
+    fn a_large_first_write_takes_a_slot_that_fits() {
         let writer = shm_writer::<SlotBlobSample>("ShmOverflowTopic", "SlotBlobSample");
         let rt = writer.shm_runtime().expect("the shm transport must have a runtime");
         match_a_local_reader(&writer, &rt);
 
-        // The first write's hint is 0, so the slot it asks for is too small.
         let sample = SlotBlobSample { blob: vec![7u8; 100_000] };
         let large_before = free_slots_for(&rt, 100_000);
 

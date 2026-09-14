@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroU16;
+use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -35,7 +36,17 @@ use crate::{
 pub(crate) enum DataPayload {
     Owned(Vec<u8>),
     Shared(Bytes),
-    ShmSlot(ShmSlotHandle),
+    ShmSlot(Arc<ShmSlotHandle>),
+}
+
+/// Lends a slot's bytes to `Bytes` without copying; the slot stays held until
+/// the last `Bytes` sharing it is dropped.
+struct SlotBytes(Arc<ShmSlotHandle>);
+
+impl AsRef<[u8]> for SlotBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
 }
 
 impl Clone for DataPayload {
@@ -279,7 +290,7 @@ impl CacheChange {
             DataPayload::Shared(b) => b.clone(),
             // Owned payload: copy into a fresh Bytes (writer-side path).
             DataPayload::Owned(v) => Bytes::copy_from_slice(v),
-            DataPayload::ShmSlot(h) => Bytes::copy_from_slice(h.as_slice()),
+            DataPayload::ShmSlot(h) => Bytes::from_owner(SlotBytes(Arc::clone(h))),
         }
     }
 
@@ -305,7 +316,7 @@ impl CacheChange {
     }
 
     pub(crate) fn set_shm_slot_payload(&mut self, handle: ShmSlotHandle) {
-        self.data_payload = DataPayload::ShmSlot(handle);
+        self.data_payload = DataPayload::ShmSlot(Arc::new(handle));
     }
 
     pub(crate) fn shm_slot_ref(&self) -> Option<SlotRef> {
@@ -445,6 +456,34 @@ mod tests {
 
     // A payload over fragment_size but at or below max_message_size still goes as a
     // single DATA: the trigger is max_message_size, not fragment_size.
+    #[test]
+    fn a_slot_payload_lends_its_bytes_and_keeps_the_slot_held() {
+        use crate::rtps::transport::shm::pool::TEST_POOL_SIZE;
+        use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
+
+        const DOMAIN: u32 = 248;
+        unlink_segment(DOMAIN, 0);
+        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap());
+        // The whole pool, so a held slot shows as nothing left to acquire.
+        let mut lease = owned.owner_mut().acquire(TEST_POOL_SIZE as usize).unwrap();
+        lease.bytes_mut()[..3].copy_from_slice(b"abc");
+        let r = owned.owner_mut().commit(lease, 3);
+        let mut change = change_with_payload(0);
+        change.set_shm_slot_payload(ShmSlotHandle::own(Arc::clone(&owned), r).unwrap());
+
+        let bytes = change.data_bytes();
+        assert_eq!(bytes.as_ref(), b"abc");
+        assert_eq!(bytes.as_ptr(), change.data_payload.as_slice().as_ptr(), "no copy");
+
+        drop(change);
+        assert!(owned.owner_mut().acquire(8).is_none(), "the bytes must keep the slot held");
+        drop(bytes);
+        assert!(owned.owner_mut().acquire(8).is_some());
+
+        drop(owned);
+        unlink_segment(DOMAIN, 0);
+    }
+
     #[test]
     fn payload_within_max_is_not_fragmented() {
         let mut change = change_with_payload(10_000);
