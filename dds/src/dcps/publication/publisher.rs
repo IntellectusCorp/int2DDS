@@ -314,6 +314,10 @@ impl Publisher {
         listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataWriter<Foo>> {
+        // Under GROUP scope the writer set is fixed while a coherent set is open.
+        if self.is_group_access_scope()? && self.in_coherent_changes() {
+            return Err(DdsError::PreconditionNotMet);
+        }
         let _ = self.cleanup_dead_writers();
 
         let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
@@ -548,6 +552,10 @@ impl Publisher {
 
         self.remove_orphaned_writer(datawriter);
         if datawriter.get_publisher()?.get_instance_handle()? != self.get_instance_handle()? {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        // Under GROUP scope the writer set is fixed while a coherent set is open.
+        if self.is_group_access_scope()? && self.in_coherent_changes() {
             return Err(DdsError::PreconditionNotMet);
         }
         let handle = datawriter.get_instance_handle()?;
@@ -1553,6 +1561,117 @@ mod tests {
 
         assert_eq!(publisher.get_group_coherent_set_start().unwrap(), None);
         assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 4);
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn group_scope_publisher_refuses_writer_changes_while_a_coherent_set_is_open() {
+        use crate::{
+            infrastructure::qos_policy::PresentationQosAccessScopeKind,
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "GroupWriterSetTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        publisher_qos.presentation.coherent_access = true;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        publisher.begin_coherent_changes().unwrap();
+        let create_result = publisher.create_datawriter::<HelloWorld>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        );
+        assert!(matches!(create_result, Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(
+            publisher.delete_datawriter(writer.clone()),
+            Err(DdsError::PreconditionNotMet)
+        ));
+        publisher.end_coherent_changes().unwrap();
+
+        publisher.delete_datawriter(writer).unwrap();
+        publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn topic_scope_publisher_allows_writer_changes_while_a_coherent_set_is_open() {
+        use crate::{
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "TopicWriterSetTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        publisher.begin_coherent_changes().unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        publisher.delete_datawriter(writer).unwrap();
+        publisher.end_coherent_changes().unwrap();
 
         participant.delete_contained_entities().unwrap();
         domain_participant_factory.delete_participant(participant).unwrap();
