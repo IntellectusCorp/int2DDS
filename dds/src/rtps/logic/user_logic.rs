@@ -2823,6 +2823,18 @@ impl UnicastMessageProcessor for UserLogic {
             writer_proxy.set_last_heartbeat_count(heartbeat.count);
             writer_proxy.set_last_heartbeat_at(now);
 
+            if let Some(group_info) = heartbeat.group_info {
+                debug!(
+                    "[Heartbeat] group info from {}: currentGSN {}, firstGSN {}, lastGSN {}, writerSet {}",
+                    remote_writer_guid,
+                    group_info.current_gsn.to_i64(),
+                    group_info.first_gsn.to_i64(),
+                    group_info.last_gsn.to_i64(),
+                    group_info.writer_set
+                );
+                writer_proxy.record_heartbeat_group_info(group_info);
+            }
+
             let (bitmap_base, missing_changes) =
                 writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
 
@@ -3588,6 +3600,16 @@ impl UnicastMessageProcessor for UserLogic {
                     .iter_mut()
                     .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
                     .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+                if let Some(group_info) = gap.group_info {
+                    debug!(
+                        "[Gap] group info from {}: gapStartGSN {}, gapEndGSN {}",
+                        remote_writer_guid,
+                        group_info.gap_start_gsn.to_i64(),
+                        group_info.gap_end_gsn.to_i64()
+                    );
+                    writer_proxy.record_gap_group_info(group_info);
+                }
 
                 // Collect irrelevant changes from GAP message
                 let capacity =
