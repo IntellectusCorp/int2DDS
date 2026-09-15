@@ -175,8 +175,8 @@ impl StatefulWriter {
         let _ = self.writer_set.set(writer_set);
     }
 
-    // Heartbeat group info for the range first_sn..=last_sn; None when this writer has no
-    // shared group state or its group has issued nothing yet.
+    // Heartbeat group info for the range first_sn..=last_sn. None when this writer has no
+    // shared group state, its group has issued nothing yet, or the numbers would be invalid.
     pub(crate) fn create_heartbeat_group_info(
         &self,
         history_cache: &WriterHistoryCache,
@@ -203,13 +203,16 @@ impl StatefulWriter {
             None => (SequenceNumber::INIT, SequenceNumber::ZERO),
         };
 
-        Some(heartbeat::GroupInfo {
+        let group_info = heartbeat::GroupInfo {
             current_gsn,
             first_gsn,
             last_gsn,
             writer_set,
             secure_writer_set: GroupDigest::EMPTY,
-        })
+        };
+        group_info.validate().ok()?;
+
+        Some(group_info)
     }
 
     // Group sequence numbers a Gap over gap_start..=gap_end declares unavailable. The range
@@ -1316,5 +1319,36 @@ mod tests {
         let writer = create_group_scope_writer(0);
 
         assert_eq!(get_heartbeat_group_info(&writer, 1, 0), None);
+    }
+
+    // A receiver rejects the whole Heartbeat over a bad group block, taking firstSN, lastSN and
+    // count down with it, so the block is dropped here and a plain Heartbeat goes out instead.
+    #[test]
+    fn heartbeat_group_info_is_dropped_when_the_range_is_invalid() {
+        let writer = create_group_scope_writer(9);
+        store_change_with_group_seq_num(&writer, 1, 9);
+        store_change_with_group_seq_num(&writer, 2, 3);
+
+        assert_eq!(get_heartbeat_group_info(&writer, 1, 2), None);
+    }
+
+    #[test]
+    fn gap_group_info_is_dropped_when_the_range_is_invalid() {
+        let writer = create_group_scope_writer(9);
+        store_change_with_group_seq_num(&writer, 1, 9);
+        store_change_with_group_seq_num(&writer, 2, 2);
+        store_change_with_group_seq_num(&writer, 3, 4);
+
+        assert_eq!(get_gap_group_info(&writer, 1, 2), None);
+    }
+
+    // Neither boundary is held any more, so there is no group sequence number to anchor the
+    // range on and the writer can prove nothing about what it will not send.
+    #[test]
+    fn gap_group_info_is_absent_when_neither_boundary_is_still_held() {
+        let writer = create_group_scope_writer(5);
+        store_change_with_group_seq_num(&writer, 1, 1);
+
+        assert_eq!(get_gap_group_info(&writer, 2, 3), None);
     }
 }
