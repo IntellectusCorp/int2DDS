@@ -574,9 +574,14 @@ impl DcpsBridge {
         self.participant.terminate();
 
         // Stop thread monitoring
-        if let Some(thread_monitor) = &self.thread_monitor {
-            thread_monitor.stop_monitoring();
-            debug!("Thread monitoring stopped");
+        match &self.thread_monitor {
+            Some(thread_monitor) => {
+                thread_monitor.stop_monitoring();
+                debug!("Thread monitoring stopped");
+            }
+            None => {
+                ThreadMonitor::remove_threads_by_guid_prefix(&self.participant.guid().prefix());
+            }
         }
 
         let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
