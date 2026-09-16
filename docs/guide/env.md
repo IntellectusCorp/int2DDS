@@ -278,12 +278,14 @@ Sets the shared memory each participant sets aside for zero-copy payloads when
 `INT2DDS_TRANSPORT=shm`. Bytes, or a number with a `K`, `M` or `G` suffix; must
 be a power of two of at least 4K. Default: 32M.
 
-Samples are placed in blocks carved out of this pool, so the largest sample that
-can travel zero-copy is bounded by the pool size, and the number of samples
-readers may hold at once is bounded by it too. A sample that does not fit, or
-finds the pool exhausted, is sent over UDP instead and logged once. Windows
-commits this memory at participant creation, so deployments with many
-participants may want a smaller value.
+Samples take blocks carved out of this pool, each the serialized size rounded up
+to a power of two, so a 1 MiB payload plus a header takes 2 MiB. A block is held
+while the sample's change lives, on the writer and on every reader on this host,
+so the pool needs the block size times the writer's HISTORY depth plus each local
+reader's. A sample that does not fit, or finds the pool exhausted, goes over UDP
+instead; the first time either happens the writer logs a warning naming the size
+to set. Windows commits this memory at participant creation, so deployments with
+many participants may want a smaller value.
 
 #### Configuration
 

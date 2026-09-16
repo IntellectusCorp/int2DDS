@@ -31,7 +31,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 
-use log::{debug, info};
+use log::{debug, info, warn};
 
 use crate::{
     common::{
@@ -1073,15 +1073,49 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// answers `PoolExhausted`.
     fn borrow_shm_slot(&self, rt: &ShmRuntime, len: usize) -> Option<SlotLease> {
         let mut owner = rt.own().owner_mut();
-        if owner.pool().order_for(len).is_none() {
+        let Some(order) = owner.pool().order_for(len) else {
             drop(owner);
-            self.note_shm_fallback(rt, FallbackReason::SampleTooLarge);
+            if rt.fallbacks().note(FallbackReason::SampleTooLarge) {
+                warn!(
+                    concat!(
+                        "[shm] writer {:?} is on the copy path: a {} B sample exceeds the ",
+                        "pool. Set INT2DDS_SHM_POOL_SIZE to {} or more."
+                    ),
+                    self.guid,
+                    len,
+                    (len as u64).next_power_of_two()
+                );
+            }
             return None;
-        }
+        };
+        let block = owner.pool().block_size(order);
+        let blocks = owner.pool().block_count(order);
         let lease = owner.acquire(len);
         drop(owner);
-        if lease.is_none() {
-            self.note_shm_fallback(rt, FallbackReason::PoolExhausted);
+        if lease.is_none() && rt.fallbacks().note(FallbackReason::PoolExhausted) {
+            // Only this writer's own depth is knowable here; every local reader's
+            // HISTORY pins blocks in the same pool on top of it.
+            let target = match self.qos.load().history.kind.depth().filter(|&d| d > 0) {
+                Some(depth) => {
+                    let needed = block.saturating_mul(depth as u64);
+                    format!(
+                        "Its HISTORY alone needs {} B, so set INT2DDS_SHM_POOL_SIZE to {}.",
+                        needed,
+                        needed.next_power_of_two()
+                    )
+                }
+                None => {
+                    "It keeps all samples, so its demand has no bound to size against.".to_string()
+                }
+            };
+            warn!(
+                concat!(
+                    "[shm] writer {:?} is on the copy path: a {} B sample takes a {} B ",
+                    "block (the next power of two) and the pool holds {}. {} Each local ",
+                    "reader's HISTORY pins blocks in this pool on top."
+                ),
+                self.guid, len, block, blocks, target
+            );
         }
         lease
     }
