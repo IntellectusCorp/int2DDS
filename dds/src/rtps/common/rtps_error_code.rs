@@ -73,6 +73,7 @@ pub enum RtpsErrorCode {
     PartitionIncompatible = 501,
     InternalLogicError = 502,
     TopicKindIncompatible = 503,
+    GroupSequenceNumberNotSet = 504,
 
     // Error propagated from DDS layer
     DdsError = 600,
@@ -127,6 +128,7 @@ impl RtpsErrorCode {
             501 => Some(RtpsErrorCode::PartitionIncompatible),
             502 => Some(RtpsErrorCode::InternalLogicError),
             503 => Some(RtpsErrorCode::TopicKindIncompatible),
+            504 => Some(RtpsErrorCode::GroupSequenceNumberNotSet),
 
             // Resource shortage
             600 => Some(RtpsErrorCode::DdsError),
@@ -165,6 +167,7 @@ impl RtpsErrorCode {
             RtpsErrorCode::PartitionIncompatible => "Partition policies are incompatible",
             RtpsErrorCode::InternalLogicError => "Internal Logic Error",
             RtpsErrorCode::TopicKindIncompatible => "TopicKind mismatch between writer and reader",
+            RtpsErrorCode::GroupSequenceNumberNotSet => "Group sequence number not set",
             RtpsErrorCode::DataReaderCacheNotSet => "DataReader cache not set",
             RtpsErrorCode::WriterCacheNotSet => "Writer Cache not set",
             RtpsErrorCode::NotInitialized => "Not Initialized",
