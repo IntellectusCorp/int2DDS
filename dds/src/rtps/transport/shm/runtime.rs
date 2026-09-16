@@ -20,7 +20,7 @@ pub(crate) const DEFAULT_POOL_SIZE: u64 = 32 << 20;
 pub(crate) const DEFAULT_RING_ENTRIES: u32 = 1024;
 
 /// `INT2DDS_SHM_POOL_SIZE`: the shared memory this participant sets aside for
-/// payloads, in bytes or with a K/M/G suffix; a power of two of at least 64K.
+/// payloads, in bytes or with a K/M/G suffix; a power of two of at least 4K.
 /// A bad value is logged once and replaced by the default.
 fn pool_size_from_env() -> u64 {
     let Some(raw) = std::env::var("INT2DDS_SHM_POOL_SIZE").ok().filter(|s| !s.is_empty()) else {
@@ -47,19 +47,17 @@ fn parse_size(raw: &str) -> Option<u64> {
 }
 
 /// Why a sample took the copy path. `NoLocalReader` through
-/// `NotifyUnsupported` are decided at `write()`, `RingFull` and `PeerGone` at
-/// send time. `NoSlotId` never reaches a counter: it applies exactly when no
-/// runtime came up. `NotifyUnsupported` is never produced: a platform without
-/// a kernel wakeup polls and keeps using slots.
+/// `DurabilityTooStrong` are decided at `write()`, `RingFull` and `PeerGone` at
+/// send time. Two cases have no variant because no counter can hold them: a
+/// participant whose runtime never started is reported by `ShmRuntime::start`
+/// instead, and a platform without a kernel wakeup polls and keeps using slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FallbackReason {
     NoLocalReader,
     PeerNotRegistered,
-    NoSlotId,
     SampleTooLarge,
     PoolExhausted,
     DurabilityTooStrong,
-    NotifyUnsupported,
     RingFull,
     PeerGone,
 }
@@ -69,18 +67,16 @@ impl FallbackReason {
         match self {
             FallbackReason::NoLocalReader => 0,
             FallbackReason::PeerNotRegistered => 1,
-            FallbackReason::NoSlotId => 2,
-            FallbackReason::SampleTooLarge => 3,
-            FallbackReason::PoolExhausted => 4,
-            FallbackReason::DurabilityTooStrong => 5,
-            FallbackReason::NotifyUnsupported => 6,
-            FallbackReason::RingFull => 7,
-            FallbackReason::PeerGone => 8,
+            FallbackReason::SampleTooLarge => 2,
+            FallbackReason::PoolExhausted => 3,
+            FallbackReason::DurabilityTooStrong => 4,
+            FallbackReason::RingFull => 5,
+            FallbackReason::PeerGone => 6,
         }
     }
 }
 
-pub(crate) const FALLBACK_REASONS: usize = 9;
+pub(crate) const FALLBACK_REASONS: usize = 7;
 
 #[derive(Default)]
 pub(crate) struct FallbackCounters {

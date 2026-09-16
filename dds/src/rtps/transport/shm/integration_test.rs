@@ -238,14 +238,12 @@ const E2E_TOPIC: &str = "ShmZeroCopyE2eTopic";
 const E2E_TYPE: &str = "E2eSample";
 const E2E_BLOB_LEN: usize = 4096;
 
-const ALL_FALLBACK_REASONS: [FallbackReason; 9] = [
+const ALL_FALLBACK_REASONS: [FallbackReason; 7] = [
     FallbackReason::NoLocalReader,
     FallbackReason::PeerNotRegistered,
-    FallbackReason::NoSlotId,
     FallbackReason::SampleTooLarge,
     FallbackReason::PoolExhausted,
     FallbackReason::DurabilityTooStrong,
-    FallbackReason::NotifyUnsupported,
     FallbackReason::RingFull,
     FallbackReason::PeerGone,
 ];
