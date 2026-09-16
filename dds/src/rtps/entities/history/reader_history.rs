@@ -164,6 +164,18 @@ impl ReaderHistoryCache {
         a_change: CacheChange,
         apply_filter: bool,
     ) -> RtpsResult<Vec<Arc<CacheChange>>> {
+        let changes = self.prepare_changes_to_commit(a_change, apply_filter);
+
+        self.commit_changes_to_datareader_cache(changes)
+    }
+
+    // Decides what one arrival lets through right now: the sample itself, the members of a
+    // coherent set it closes, or nothing while its set is still open. Stores nothing.
+    pub(crate) fn prepare_changes_to_commit(
+        &mut self,
+        a_change: CacheChange,
+        apply_filter: bool,
+    ) -> Vec<(CacheChange, bool)> {
         let coherent_set = a_change.presentation_info().coherent_set;
         let writer_guid = a_change.writer_guid();
 
@@ -172,9 +184,7 @@ impl ReaderHistoryCache {
         // PID_COHERENT_SET=UNKNOWN and a payload-less Data carrying no coherent set id.
         if a_change.is_coherent_end_marker() {
             let members = self.close_and_take_coherent_set(writer_guid, a_change.sequence_number());
-            return self.commit_changes_to_datareader_cache(
-                members.into_iter().map(|c| (c, false)).collect(),
-            );
+            return members.into_iter().map(|c| (c, false)).collect();
         }
 
         // A coherent reader holds set members back until their set closes; any other
@@ -200,9 +210,7 @@ impl ReaderHistoryCache {
                     // Hold this member back until its own set closes.
                     self.buffer_coherent_member(writer_guid, set_id, a_change);
 
-                    return self.commit_changes_to_datareader_cache(
-                        members.into_iter().map(|c| (c, false)).collect(),
-                    );
+                    return members.into_iter().map(|c| (c, false)).collect();
                 }
                 None => {
                     // A non-coherent sample closes this writer's open set (if any); commit that
@@ -220,18 +228,18 @@ impl ReaderHistoryCache {
                     let mut batch: Vec<(CacheChange, bool)> =
                         members.into_iter().map(|c| (c, false)).collect();
                     batch.push((a_change, apply_filter));
-                    return self.commit_changes_to_datareader_cache(batch);
+                    return batch;
                 }
             }
         }
 
-        self.commit_changes_to_datareader_cache(vec![(a_change, apply_filter)])
+        vec![(a_change, apply_filter)]
     }
 
     // Insert a batch of changes into the DCPS and RTPS histories under a single DataReader
     // cache lock, so a concurrent take() never observes a partially-committed coherent set.
     // Each entry carries its own apply_filter; returns the changes actually stored.
-    fn commit_changes_to_datareader_cache(
+    pub(crate) fn commit_changes_to_datareader_cache(
         &mut self,
         changes: Vec<(CacheChange, bool)>,
     ) -> RtpsResult<Vec<Arc<CacheChange>>> {
@@ -439,6 +447,19 @@ mod tests {
     fn reader_cache() -> ReaderHistoryCache {
         let owner = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY);
         ReaderHistoryCache::new(owner, None)
+    }
+
+    // The judgement and the storing are separate steps, so a caller may hold the change back
+    // between them.
+    #[test]
+    fn prepare_hands_back_a_plain_sample_without_storing_it() {
+        let mut cache = reader_cache();
+
+        let prepared = cache.prepare_changes_to_commit(coherent_member(1), true);
+
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared[0].1);
+        assert!(cache.changes.is_empty());
     }
 
     #[test]
