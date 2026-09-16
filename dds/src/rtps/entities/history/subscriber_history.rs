@@ -3,19 +3,24 @@
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
 };
 
+use dashmap::DashMap;
 use log::debug;
 
-use crate::rtps::{
-    common::{
-        entity_id::EntityId,
-        guid::Guid,
-        rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
-        sequence::SequenceNumber,
+use crate::{
+    common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData,
+    rtps::{
+        common::{
+            entity_id::EntityId,
+            guid::{GroupDigest, Guid},
+            rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
+            sequence::SequenceNumber,
+        },
+        entities::history::cache_change::CacheChange,
+        messages::submessages::{gap, heartbeat},
     },
-    entities::history::cache_change::CacheChange,
-    messages::submessages::{gap, heartbeat},
 };
 
 // A sample held for one reader until its group sequence number is released.
@@ -46,6 +51,40 @@ impl WriterGsnInfo {
             highest_gap_end_gsn: None,
         }
     }
+
+    // The writer left the group position before the given one behind: it committed a sample at or
+    // after it, declared the range unavailable, or announced it never held that position.
+    fn has_passed_group_seq_num(&self, group_seq_num: SequenceNumber) -> bool {
+        let previous = group_seq_num.previous();
+
+        // Advanced past the GSN-1 by committing a Data sample with groupSequenceNumber >= GSN
+        let has_committed_beyond =
+            self.max_committed_gsn.is_some_and(|committed| committed >= group_seq_num);
+        // Or a Gap message with Gap.gapEndGSN.value >= GSN-1
+        let has_declared_unavailable =
+            self.highest_gap_end_gsn.is_some_and(|gap_end| gap_end >= previous);
+        // Or a Heartbeat with Heartbeat.currentGSN.value >= GSN and GSN-1 not in [firstGSN, lastGSN]
+        let has_never_held = self.heartbeat_group_info.is_some_and(|info| {
+            info.current_gsn >= group_seq_num
+                && (previous < info.first_gsn || previous > info.last_gsn)
+        });
+
+        has_committed_beyond || has_declared_unavailable || has_never_held
+    }
+
+    // The latest Heartbeat of this writer puts the group at or past the given position, and the
+    // writer set it carries is the one we discovered.
+    fn does_heartbeat_cover_group_seq_num(
+        &self,
+        group_seq_num: SequenceNumber,
+        discovered_writer_set: GroupDigest,
+    ) -> bool {
+        // A Heartbeat from one of the DataWriters with Heartbeat.currentGSN.value >= GSN and the
+        // Heartbeat.writerSet matching the set of discovered DataWriters
+        self.heartbeat_group_info.is_some_and(|info| {
+            info.current_gsn >= group_seq_num && info.writer_set == discovered_writer_set
+        })
+    }
 }
 
 // Group ordering state of one remote Publisher: its writers and the samples held for it.
@@ -66,18 +105,92 @@ impl PublisherProxy {
             writers: HashMap::new(),
         }
     }
+
+    fn lowest_pending_group_seq_num(&self) -> Option<SequenceNumber> {
+        self.pending.first_key_value().map(|(group_seq_num, _)| *group_seq_num)
+    }
+
+    // The position right after the last one released, or the very first one of the group.
+    fn is_next_in_group_order(&self, group_seq_num: SequenceNumber) -> bool {
+        // GSN-1 has already been committed. The first position has no predecessor, so it counts
+        // as if committed.
+        match self.last_committed_gsn {
+            Some(last_committed) => last_committed.next() == group_seq_num,
+            None => group_seq_num == SequenceNumber::INIT,
+        }
+    }
+
+    // Hands over the samples held under one group sequence number and records how far the group
+    // and each of their writers got.
+    fn release_group_seq_num(&mut self, group_seq_num: SequenceNumber) -> Vec<PendingSample> {
+        // Every copy under this position leaves together, one per reader.
+        let Some(samples) = self.pending.remove(&group_seq_num) else {
+            return Vec::new();
+        };
+
+        // The next position is judged against this one.
+        self.last_committed_gsn = Some(group_seq_num);
+
+        // Each writer now counts as advanced past this position, and a late copy of it from the
+        // same writer is let through without a judgement.
+        for sample in &samples {
+            if let Some(writer) = self.writers.get_mut(&sample.change.writer_guid()) {
+                writer.max_committed_gsn = Some(group_seq_num);
+            }
+        }
+
+        debug!(
+            "SHC released group sequence number {} with {} samples",
+            group_seq_num.to_i64(),
+            samples.len()
+        );
+
+        samples
+    }
+
+    // No alive writer of this Publisher will ever fill the position before the given one. One
+    // Heartbeat must cover that position, and every alive writer must have left it behind.
+    fn is_group_seq_num_absent_from_all_writers(
+        &self,
+        group_seq_num: SequenceNumber,
+        discovered_writer_set: GroupDigest,
+    ) -> bool {
+        // Only DataWriters that have not lost their liveliness are taken into consideration.
+        let mut alive_writers = self.writers.values().filter(|writer| writer.is_alive).peekable();
+
+        // With nobody alive there is no one to vouch that the position will stay empty.
+        if alive_writers.peek().is_none() {
+            return false;
+        }
+
+        // None of the remote DataWriters have GSN-1 when one Heartbeat covers the position and
+        // every DataWriter has left it behind.
+        let mut is_covered_by_a_heartbeat = false;
+        let mut has_every_writer_passed = true;
+
+        for writer in alive_writers {
+            is_covered_by_a_heartbeat |=
+                writer.does_heartbeat_cover_group_seq_num(group_seq_num, discovered_writer_set);
+            has_every_writer_passed &= writer.has_passed_group_seq_num(group_seq_num);
+        }
+
+        is_covered_by_a_heartbeat && has_every_writer_passed
+    }
 }
 
 // Holds the samples a GROUP access scope Subscriber may not hand over yet, ordered per remote
 // Publisher by group sequence number.
 #[derive(Debug)]
 pub(crate) struct SubscriberHistoryCache {
+    remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     publishers: HashMap<Guid, PublisherProxy>,
 }
 
 impl SubscriberHistoryCache {
-    pub(crate) fn new() -> Self {
-        Self { publishers: HashMap::new() }
+    pub(crate) fn new(
+        remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
+    ) -> Self {
+        Self { remote_publications, publishers: HashMap::new() }
     }
 
     // Takes one sample destined for a reader. A sample whose group position the writer already
@@ -120,6 +233,68 @@ impl SubscriberHistoryCache {
 
         proxy.pending.entry(group_seq_num).or_default().push(sample);
         Ok(())
+    }
+
+    // Takes out everything the gate now lets through, across every remote Publisher. The caller
+    // holds one lock over the event that changed the state and this call.
+    pub(crate) fn flush_pending_changes(&mut self) -> Vec<PendingSample> {
+        let mut released = Vec::new();
+
+        for publisher_guid in self.publishers.keys().copied().collect::<Vec<Guid>>() {
+            released.extend(self.flush_publisher_pending_changes(publisher_guid));
+        }
+
+        released
+    }
+
+    // Walks one Publisher's held positions from the lowest up and stops at the first one the gate
+    // keeps.
+    fn flush_publisher_pending_changes(&mut self, publisher_guid: Guid) -> Vec<PendingSample> {
+        // Late copies of positions already released go out first, without a judgement.
+        let mut released = match self.publishers.get_mut(&publisher_guid) {
+            Some(proxy) => std::mem::take(&mut proxy.ready),
+            None => return Vec::new(),
+        };
+
+        // Only a hole needs the discovered writer set, so it is computed at the first hole and
+        // reused for the rest of this walk.
+        let mut discovered_writer_set: Option<GroupDigest> = None;
+
+        loop {
+            let Some(proxy) = self.publishers.get(&publisher_guid) else {
+                break;
+            };
+
+            // The lowest held position blocks every position above it.
+            let Some(group_seq_num) = proxy.lowest_pending_group_seq_num() else {
+                break;
+            };
+
+            // Samples arriving in order pass here and never touch the discovered writer set.
+            if !proxy.is_next_in_group_order(group_seq_num) {
+                let writer_set = *discovered_writer_set
+                    .get_or_insert_with(|| self.discovered_writer_set(publisher_guid));
+
+                let Some(proxy) = self.publishers.get(&publisher_guid) else {
+                    break;
+                };
+
+                // Nobody has shown the hole will stay empty, so the position stays held until a
+                // later Heartbeat, Gap, liveliness or matching event changes that.
+                if !proxy.is_group_seq_num_absent_from_all_writers(group_seq_num, writer_set) {
+                    break;
+                }
+            }
+
+            let Some(proxy) = self.publishers.get_mut(&publisher_guid) else {
+                break;
+            };
+
+            // Releasing this position may make the next one pass on order alone.
+            released.extend(proxy.release_group_seq_num(group_seq_num));
+        }
+
+        released
     }
 
     // The announced range moves as the writer's history rolls, so the latest one replaces it.
@@ -285,6 +460,22 @@ impl SubscriberHistoryCache {
         proxy.ready.len() + proxy.pending.values().map(Vec::len).sum::<usize>()
     }
 
+    // The digest a writer of this Publisher announces covers every writer attached to it, so the
+    // comparison set is every discovered writer of that Publisher, not only the matched ones.
+    fn discovered_writer_set(&self, publisher_guid: Guid) -> GroupDigest {
+        let mut entity_ids = Vec::new();
+
+        for topic in self.remote_publications.iter() {
+            for (writer_guid, publication) in topic.value() {
+                if publication.group_guid() == Some(publisher_guid) {
+                    entity_ids.push(writer_guid.entity_id());
+                }
+            }
+        }
+
+        GroupDigest::from_entity_ids(&entity_ids)
+    }
+
     fn find_publisher_proxy_of_writer_mut(
         &mut self,
         writer_guid: Guid,
@@ -336,6 +527,10 @@ mod tests {
         Guid::new(PREFIX, EntityId::new([0, 1, 0], EntityKind::USER_DEFINED_WRITER_GROUP))
     }
 
+    fn other_publisher_guid() -> Guid {
+        Guid::new(PREFIX, EntityId::new([0, 3, 0], EntityKind::USER_DEFINED_WRITER_GROUP))
+    }
+
     fn writer_guid(key: u8) -> Guid {
         Guid::new(PREFIX, EntityId::new([0, 1, key], EntityKind::USER_DEFINED_WRITER_WITH_KEY))
     }
@@ -363,7 +558,7 @@ mod tests {
 
     // One matched writer of one Publisher, seen by one reader.
     fn cache_with_one_matched_writer() -> SubscriberHistoryCache {
-        let mut cache = SubscriberHistoryCache::new();
+        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()));
         cache
             .add_matched_writer(reader_id(1), writer_guid(1), publisher_guid())
             .expect("registered");
@@ -441,7 +636,7 @@ mod tests {
 
     #[test]
     fn refuses_a_writer_that_announced_no_publisher() {
-        let mut cache = SubscriberHistoryCache::new();
+        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()));
 
         let result = cache.add_matched_writer(reader_id(1), writer_guid(1), Guid::UNKNOWN);
 
@@ -559,5 +754,322 @@ mod tests {
 
         let writer = cache.find_writer_mut(writer_guid(1)).expect("writer registered");
         assert_eq!(writer.highest_gap_end_gsn, Some(SequenceNumber::from_i64(7)));
+    }
+
+    fn gap_group_info(gap_start_gsn: i64, gap_end_gsn: i64) -> gap::GroupInfo {
+        gap::GroupInfo {
+            gap_start_gsn: SequenceNumber::from_i64(gap_start_gsn),
+            gap_end_gsn: SequenceNumber::from_i64(gap_end_gsn),
+        }
+    }
+
+    fn set_last_committed_group_seq_num(cache: &mut SubscriberHistoryCache, last_committed: i64) {
+        cache
+            .publishers
+            .get_mut(&publisher_guid())
+            .expect("Publisher registered")
+            .last_committed_gsn = Some(SequenceNumber::from_i64(last_committed));
+    }
+
+    fn released_group_seq_nums(released: &[PendingSample]) -> Vec<i64> {
+        released
+            .iter()
+            .map(|sample| {
+                sample
+                    .change
+                    .presentation_info()
+                    .group_seq_num
+                    .unwrap_or(SequenceNumber::UNKNOWN)
+                    .to_i64()
+            })
+            .collect()
+    }
+
+    // Condition a with nothing committed yet: the group starts at 1, so 1 has no predecessor.
+    #[test]
+    fn releases_the_first_group_sequence_number() {
+        let mut cache = cache_with_one_matched_writer();
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(1)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![1]);
+        assert!(pending_group_sequence_numbers(&cache).is_empty());
+    }
+
+    #[test]
+    fn releases_a_run_of_group_sequence_numbers_in_order() {
+        let mut cache = cache_with_one_matched_writer();
+        for group_seq_num in 1..=3 {
+            cache
+                .add_change(
+                    reader_id(1),
+                    change(writer_guid(1), group_seq_num, Some(group_seq_num)),
+                    true,
+                )
+                .expect("accepted");
+        }
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![1, 2, 3]);
+    }
+
+    // Every reader's copy of one position leaves in the same flush.
+    #[test]
+    fn releases_the_copies_of_one_group_sequence_number_together() {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(2), writer_guid(1), publisher_guid())
+            .expect("registered");
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(1)), true).expect("accepted");
+        cache.add_change(reader_id(2), change(writer_guid(1), 1, Some(1)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![1, 1]);
+        assert_eq!(released[0].reader_id, reader_id(1));
+        assert_eq!(released[1].reader_id, reader_id(2));
+    }
+
+    // Condition a alone cannot cross a hole, and no writer has said anything about it yet.
+    #[test]
+    fn holds_a_group_sequence_number_behind_a_hole() {
+        let mut cache = cache_with_one_matched_writer();
+        set_last_committed_group_seq_num(&mut cache, 4);
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(6)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert!(released.is_empty());
+        assert_eq!(pending_group_sequence_numbers(&cache), vec![6]);
+    }
+
+    // Two alive writers, group sequence number 5 lost. Writer 1 announces it never held 5 and
+    // writer 2 declared it unavailable, so nothing will ever fill it.
+    fn cache_with_two_writers_that_left_five_behind() -> SubscriberHistoryCache {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(2), publisher_guid())
+            .expect("registered");
+        set_last_committed_group_seq_num(&mut cache, 4);
+
+        cache
+            .record_heartbeat_group_info(writer_guid(1), heartbeat_group_info(6, 6, 6))
+            .expect("writer registered");
+        cache
+            .record_gap_group_info(writer_guid(2), gap_group_info(5, 5))
+            .expect("writer registered");
+
+        cache
+    }
+
+    #[test]
+    fn releases_a_hole_every_alive_writer_left_behind() {
+        let mut cache = cache_with_two_writers_that_left_five_behind();
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(6)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![6]);
+    }
+
+    // The announced writer set covers writers we have not discovered, so the Heartbeat does not
+    // speak for the whole group.
+    #[test]
+    fn holds_when_the_announced_writer_set_does_not_match() {
+        let mut cache = cache_with_two_writers_that_left_five_behind();
+        let unknown_writer_set = GroupDigest::from_entity_ids(&[writer_guid(9).entity_id()]);
+        let mut group_info = heartbeat_group_info(6, 6, 6);
+        group_info.writer_set = unknown_writer_set;
+        cache.record_heartbeat_group_info(writer_guid(1), group_info).expect("writer registered");
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(6)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert!(released.is_empty());
+    }
+
+    // Both writers declared 5 gone, but without a Heartbeat nobody vouches that the group is at
+    // or past 6 with a fully discovered writer set.
+    #[test]
+    fn holds_when_no_heartbeat_covers_the_hole() {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(2), publisher_guid())
+            .expect("registered");
+        set_last_committed_group_seq_num(&mut cache, 4);
+        cache
+            .record_gap_group_info(writer_guid(1), gap_group_info(5, 5))
+            .expect("writer registered");
+        cache
+            .record_gap_group_info(writer_guid(2), gap_group_info(5, 5))
+            .expect("writer registered");
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(6)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert!(released.is_empty());
+    }
+
+    // The only covering Heartbeat came from a writer that lost liveliness, and a dead writer does
+    // not speak for the group.
+    #[test]
+    fn holds_when_only_a_dead_writer_covers_the_hole() {
+        let mut cache = cache_with_two_writers_that_left_five_behind();
+        cache.add_change(reader_id(1), change(writer_guid(2), 1, Some(6)), true).expect("accepted");
+
+        cache.set_writer_liveliness(writer_guid(1), false);
+
+        assert!(cache.flush_pending_changes().is_empty());
+    }
+
+    // Writer 1 covers 6 and never held 5. Writer 2 is alive but has said nothing, so 5 might still
+    // be on its way from writer 2 and 6 is held.
+    fn cache_with_a_silent_second_writer() -> SubscriberHistoryCache {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(2), publisher_guid())
+            .expect("registered");
+        set_last_committed_group_seq_num(&mut cache, 4);
+        cache
+            .record_heartbeat_group_info(writer_guid(1), heartbeat_group_info(6, 6, 6))
+            .expect("writer registered");
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(6)), true).expect("accepted");
+
+        cache
+    }
+
+    #[test]
+    fn holds_when_one_alive_writer_has_not_left_the_hole_behind() {
+        let mut cache = cache_with_a_silent_second_writer();
+
+        let released = cache.flush_pending_changes();
+
+        assert!(released.is_empty());
+        assert_eq!(pending_group_sequence_numbers(&cache), vec![6]);
+    }
+
+    // The held position is judged again on the next event, not only when it arrives.
+    #[test]
+    fn releases_a_hole_once_the_silent_writer_declares_it_gone() {
+        let mut cache = cache_with_a_silent_second_writer();
+        assert!(cache.flush_pending_changes().is_empty());
+
+        cache
+            .record_gap_group_info(writer_guid(2), gap_group_info(5, 5))
+            .expect("writer registered");
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![6]);
+    }
+
+    // An unmatched writer will send nothing more, so it stops being waited for.
+    #[test]
+    fn releases_a_hole_once_the_silent_writer_is_unmatched() {
+        let mut cache = cache_with_a_silent_second_writer();
+        assert!(cache.flush_pending_changes().is_empty());
+
+        cache.remove_matched_writer(writer_guid(2));
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![6]);
+    }
+
+    // A writer that lost liveliness is not waited for.
+    #[test]
+    fn releases_a_hole_when_the_silent_writer_lost_liveliness() {
+        let mut cache = cache_with_a_silent_second_writer();
+
+        cache.set_writer_liveliness(writer_guid(2), false);
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![6]);
+    }
+
+    // Once the writer is alive again its silence counts again.
+    #[test]
+    fn holds_again_when_the_silent_writer_regains_liveliness() {
+        let mut cache = cache_with_a_silent_second_writer();
+        cache.set_writer_liveliness(writer_guid(2), false);
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![6]);
+
+        cache.set_writer_liveliness(writer_guid(2), true);
+        cache
+            .record_heartbeat_group_info(writer_guid(1), heartbeat_group_info(8, 8, 8))
+            .expect("writer registered");
+        cache.add_change(reader_id(1), change(writer_guid(1), 2, Some(8)), true).expect("accepted");
+
+        assert!(cache.flush_pending_changes().is_empty());
+        assert_eq!(pending_group_sequence_numbers(&cache), vec![8]);
+
+        // The silent writer finally delivers 7, and 8 follows it in order.
+        cache.add_change(reader_id(1), change(writer_guid(2), 1, Some(7)), true).expect("accepted");
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![7, 8]);
+    }
+
+    // The release records how far each writer got, which is what a late copy of that position
+    // is measured against.
+    #[test]
+    fn releases_a_late_copy_without_judging_it() {
+        let mut cache = cache_with_one_matched_writer();
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(1)), true).expect("accepted");
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![1]);
+
+        cache.add_change(reader_id(2), change(writer_guid(1), 1, Some(1)), true).expect("accepted");
+        cache.add_change(reader_id(1), change(writer_guid(1), 2, Some(3)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![1]);
+        assert_eq!(pending_group_sequence_numbers(&cache), vec![3]);
+    }
+
+    // A hole in one Publisher does not hold back another Publisher's in-order samples.
+    #[test]
+    fn keeps_a_hole_in_one_publisher_from_blocking_another() {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(5), other_publisher_guid())
+            .expect("registered");
+        set_last_committed_group_seq_num(&mut cache, 4);
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(6)), true).expect("accepted");
+        cache.add_change(reader_id(1), change(writer_guid(5), 1, Some(1)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![1]);
+        assert_eq!(released[0].change.writer_guid(), writer_guid(5));
+        assert_eq!(pending_group_sequence_numbers(&cache), vec![6]);
+    }
+
+    // Writers of the Publisher are collected across topics. Writers of another Publisher and
+    // writers with no Publisher are left out even when they share a topic.
+    #[test]
+    fn collects_a_publisher_writers_across_topics_and_skips_the_rest() {
+        let remote_publications = Arc::new(DashMap::new());
+        let mut first_topic = HashMap::new();
+        first_topic.insert(writer_guid(1), publication_of(publisher_guid()));
+        first_topic.insert(writer_guid(3), publication_of(Guid::UNKNOWN));
+        first_topic.insert(writer_guid(4), publication_of(other_publisher_guid()));
+        let mut second_topic = HashMap::new();
+        second_topic.insert(writer_guid(2), publication_of(publisher_guid()));
+        remote_publications.insert("first".to_string(), first_topic);
+        remote_publications.insert("second".to_string(), second_topic);
+
+        let cache = SubscriberHistoryCache::new(remote_publications);
+
+        assert_eq!(
+            cache.discovered_writer_set(publisher_guid()),
+            GroupDigest::from_entity_ids(&[writer_guid(1).entity_id(), writer_guid(2).entity_id()])
+        );
+    }
+
+    fn publication_of(publisher_guid: Guid) -> PublicationBuiltinTopicData {
+        let mut publication = PublicationBuiltinTopicData::default();
+
+        if publisher_guid != Guid::UNKNOWN {
+            publication.set_group_guid(publisher_guid);
+        }
+
+        publication
     }
 }
