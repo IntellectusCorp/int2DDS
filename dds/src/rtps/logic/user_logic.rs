@@ -3763,6 +3763,7 @@ impl UnicastMessageProcessor for UserLogic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::common::sequence::SequenceNumberSet;
     use std::collections::BTreeSet;
 
     fn fpm(n: u32) -> NonZeroU32 {
@@ -5951,5 +5952,278 @@ mod tests {
             user_logic.send_credit.get(&remote_prefix).is_none(),
             "a builtin writer's send left a charge on the shared budget"
         );
+    }
+
+    const GROUP_TEST_TOPIC: &str = "group_gate_test_topic";
+
+    fn group_publisher_guid(prefix: GuidPrefix) -> Guid {
+        Guid::new(prefix, EntityId::new([0x0A, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_GROUP))
+    }
+
+    // One GROUP access scope reader matched to one writer of one remote Publisher, with the
+    // writer discovered so the announced writerSet can match, and its proxy primed so samples
+    // deliver on arrival instead of buffering.
+    fn group_reader_with_one_matched_writer(
+    ) -> (Arc<Participant>, UserLogic, Arc<StatefulReader>, Guid, GroupDigest) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
+        let user_logic = UserLogic::new(participant.clone(), transport);
+        participant.set_user_logic(Arc::new(Some(user_logic.clone())));
+
+        let writer_guid = Guid::new(
+            [0xD0; 12],
+            EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+        );
+        let publisher_guid = group_publisher_guid(writer_guid.prefix());
+
+        // What `discovered_writer_set` hashes, and therefore what a Heartbeat's writerSet has
+        // to equal for condition b to hold.
+        let mut publication = PublicationBuiltinTopicData::default();
+        publication.set_endpoint_guid(writer_guid);
+        publication.set_group_guid(publisher_guid);
+        participant
+            .remote_publications()
+            .entry(GROUP_TEST_TOPIC.to_string())
+            .or_default()
+            .insert(writer_guid, publication.clone());
+
+        let reader_entity_id =
+            EntityId::new([0xA0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let reader = Arc::new(StatefulReader::new(
+            Guid::new(participant.guid().prefix(), reader_entity_id),
+            TopicKind::NoKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            reader_entity_id,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant.guid(),
+        ));
+
+        let subscriber_history_cache =
+            Arc::new(Mutex::new(SubscriberHistoryCache::new(participant.remote_publications())));
+        subscriber_history_cache
+            .lock()
+            .expect("subscriber history cache lock")
+            .add_matched_writer(reader_entity_id, writer_guid, publisher_guid)
+            .expect("writer announced a Publisher");
+        reader.set_subscriber_history_cache(subscriber_history_cache);
+
+        reader.matched_writer_add(WriterProxy::new(
+            writer_guid,
+            publisher_guid.entity_id(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            publication,
+            reader.get_update_status_callback(),
+        ));
+        let proxies = reader.writer_proxies();
+        let mut guard = proxies.lock().expect("writer proxies lock");
+        if let Some(proxy) = guard.iter_mut().find(|p| p.remote_writer_guid() == writer_guid) {
+            proxy.set_expected_sn(SequenceNumber::new(0, 1));
+        }
+        drop(guard);
+        participant.add_reader(GROUP_TEST_TOPIC, reader.clone());
+
+        let discovered_writer_set = GroupDigest::from_entity_ids(&[writer_guid.entity_id()]);
+
+        (participant, user_logic, reader, writer_guid, discovered_writer_set)
+    }
+
+    fn feed_group_data(
+        user_logic: &mut UserLogic,
+        participant_prefix: GuidPrefix,
+        writer_guid: Guid,
+        sequence_number: i64,
+        group_seq_num: i64,
+    ) {
+        let mut data = Data::new(
+            EntityId::UNKNOWN,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(sequence_number),
+        );
+        let mut inline_qos = ParameterList::default();
+        inline_qos.set_group_seq_num(SequenceNumber::from_i64(group_seq_num));
+        data.set_inline_qos_list(inline_qos);
+        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(vec![0u8; 4])));
+
+        let rtps_header = Header::new(writer_guid.prefix());
+        let submessage_header = SubmessageHeader::new(SubmessageId::DATA, 0, 0);
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let mut message_receiver = MessageReceiver::new(participant_prefix, &from_addr);
+        let ts_header = SubmessageHeader::new(SubmessageId::INFO_TS, 0, 0);
+        message_receiver.from_timestamp(&ts_header, &InfoTimestamp::new(Utc::now()));
+
+        user_logic
+            .handle_data_message(&rtps_header, &submessage_header, &data, &message_receiver)
+            .expect("handle_data_message must not error");
+    }
+
+    fn feed_group_heartbeat(
+        user_logic: &mut UserLogic,
+        writer_guid: Guid,
+        first_sn: i64,
+        last_sn: i64,
+        count: u32,
+        group_info: Option<heartbeat::GroupInfo>,
+    ) {
+        let heartbeat = Heartbeat::new(
+            EntityId::UNKNOWN,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(first_sn),
+            SequenceNumber::from_i64(last_sn),
+            count,
+            group_info,
+        );
+        let rtps_header = Header::new(writer_guid.prefix());
+        let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
+
+        user_logic
+            .handle_heartbeat_message(&rtps_header, &submessage_header, &heartbeat)
+            .expect("handle_heartbeat_message must not error");
+    }
+
+    fn group_heartbeat_info(
+        current_gsn: i64,
+        first_gsn: i64,
+        last_gsn: i64,
+        writer_set: GroupDigest,
+    ) -> heartbeat::GroupInfo {
+        heartbeat::GroupInfo {
+            current_gsn: SequenceNumber::from_i64(current_gsn),
+            first_gsn: SequenceNumber::from_i64(first_gsn),
+            last_gsn: SequenceNumber::from_i64(last_gsn),
+            writer_set,
+            secure_writer_set: GroupDigest::EMPTY,
+        }
+    }
+
+    fn stored_group_seq_nums(reader: &StatefulReader) -> Vec<i64> {
+        reader
+            .available_changes()
+            .iter()
+            .filter_map(|change| change.presentation_info().group_seq_num)
+            .map(|group_seq_num| group_seq_num.to_i64())
+            .collect()
+    }
+
+    // Group sequence number 2 never arrives, so 3 may not be handed over on arrival.
+    fn group_reader_with_a_hole_at_two(
+    ) -> (Arc<Participant>, UserLogic, Arc<StatefulReader>, Guid, GroupDigest) {
+        let (participant, mut user_logic, reader, writer_guid, discovered_writer_set) =
+            group_reader_with_one_matched_writer();
+        let prefix = participant.guid().prefix();
+
+        feed_group_data(&mut user_logic, prefix, writer_guid, 1, 1);
+        feed_group_data(&mut user_logic, prefix, writer_guid, 2, 3);
+
+        (participant, user_logic, reader, writer_guid, discovered_writer_set)
+    }
+
+    #[test]
+    fn a_group_reader_holds_a_sample_behind_a_hole() {
+        let (_participant, _user_logic, reader, _writer_guid, _writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1]);
+    }
+
+    #[test]
+    fn a_heartbeat_covering_the_hole_releases_the_held_sample() {
+        let (_participant, mut user_logic, reader, writer_guid, writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        // The group reached 3 and this writer never held 2, so nothing will ever fill it.
+        feed_group_heartbeat(
+            &mut user_logic,
+            writer_guid,
+            1,
+            2,
+            1,
+            Some(group_heartbeat_info(3, 3, 3, writer_set)),
+        );
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1, 3]);
+    }
+
+    #[test]
+    fn a_heartbeat_with_a_different_writer_set_keeps_the_sample_held() {
+        let (_participant, mut user_logic, reader, writer_guid, _writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        // A writer set we did not discover: the Heartbeat does not speak for the whole group.
+        let unknown_writer_set = GroupDigest::from_entity_ids(&[EntityId::new(
+            [0x09, 0x00, 0x00],
+            EntityKind::USER_DEFINED_WRITER_NO_KEY,
+        )]);
+        feed_group_heartbeat(
+            &mut user_logic,
+            writer_guid,
+            1,
+            2,
+            1,
+            Some(group_heartbeat_info(3, 3, 3, unknown_writer_set)),
+        );
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1]);
+    }
+
+    #[test]
+    fn a_gap_declaring_the_hole_gone_releases_the_held_sample() {
+        let (participant, mut user_logic, reader, writer_guid, writer_set) =
+            group_reader_with_one_matched_writer();
+        let prefix = participant.guid().prefix();
+
+        // Group sequence number 2 left with the sample that carried writer sequence number 2,
+        // so 3 waits behind both holes.
+        feed_group_data(&mut user_logic, prefix, writer_guid, 1, 1);
+        feed_group_data(&mut user_logic, prefix, writer_guid, 3, 3);
+
+        // Writer sequence number 2 is irrelevant, and the group position it carried is 2.
+        let gap = Gap::new(
+            EntityId::UNKNOWN,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(2),
+            SequenceNumberSet::new_empty_with_base(SequenceNumber::from_i64(3)),
+            Some(gap::GroupInfo {
+                gap_start_gsn: SequenceNumber::from_i64(2),
+                gap_end_gsn: SequenceNumber::from_i64(2),
+            }),
+        );
+        let rtps_header = Header::new(writer_guid.prefix());
+        user_logic
+            .handle_gap_message(&rtps_header, &gap)
+            .expect("handle_gap_message must not error");
+
+        // The Gap alone states nothing about where the group is, so it takes a Heartbeat too.
+        // Its first and last span the hole, so the Gap is the only thing that crosses it.
+        feed_group_heartbeat(
+            &mut user_logic,
+            writer_guid,
+            1,
+            3,
+            1,
+            Some(group_heartbeat_info(3, 1, 3, writer_set)),
+        );
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1, 3]);
+    }
+
+    // A peer that offers GROUP access scope but sends no group info leaves the gate with no
+    // evidence to cross a hole. Whether to break the wait is decided separately.
+    #[test]
+    fn heartbeats_without_group_info_leave_the_hole_held() {
+        let (_participant, mut user_logic, reader, writer_guid, _writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        for count in 1..=3 {
+            feed_group_heartbeat(&mut user_logic, writer_guid, 1, 2, count, None);
+        }
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1]);
     }
 }
