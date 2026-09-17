@@ -28,6 +28,7 @@ pub struct ParsedBuiltinTopicData {
     pub endpoint_guid: Option<Guid>,
     pub participant_guid: Option<Guid>,
     pub group_guid: Option<Guid>,
+    pub group_entity_id: Option<crate::rtps::common::entity_id::EntityId>,
     pub key: Option<BuiltinTopicKey>,
     pub participant_key: Option<BuiltinTopicKey>,
 
@@ -99,6 +100,7 @@ impl ParsedBuiltinTopicData {
             endpoint_guid: Some(data.endpoint_guid()),
             participant_guid: None,
             group_guid: data.group_guid(),
+            group_entity_id: None,
             key: Some(data.key().clone()),
             participant_key: Some(data.participant_key().clone()),
             topic_name: Some(data.topic_name().to_string()),
@@ -141,6 +143,7 @@ impl ParsedBuiltinTopicData {
             endpoint_guid: Some(data.endpoint_guid()),
             participant_guid: None,
             group_guid: None,
+            group_entity_id: None,
             key: Some(data.key().clone()),
             participant_key: Some(data.participant_key().clone()),
             topic_name: Some(data.topic_name()),
@@ -231,6 +234,11 @@ impl ParsedBuiltinTopicData {
             ParameterId::PidGroupGuid => {
                 if let ParameterValue::GroupGuid(guid) = parameter.value {
                     self.group_guid = Some(guid);
+                }
+            }
+            ParameterId::PidGroupEntityId => {
+                if let ParameterValue::GroupEntityId(entity_id) = parameter.value {
+                    self.group_entity_id = Some(entity_id);
                 }
             }
             ParameterId::PidTopicName => {
