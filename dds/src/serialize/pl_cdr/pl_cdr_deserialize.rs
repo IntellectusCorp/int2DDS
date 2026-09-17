@@ -452,6 +452,19 @@ impl PlCdrParser {
                 let guid = self.parse_guid(data)?;
                 ParameterValue::GroupGuid(guid)
             }
+            ParameterId::PidGroupEntityId => {
+                if data.len() < 4 {
+                    return Err(format!(
+                        "Insufficient data for EntityId: need 4 bytes, got {}",
+                        data.len()
+                    ));
+                }
+                let entity_id_bytes = <[u8; 4]>::try_from(&data[0..4])
+                    .map_err(|_| "Invalid EntityId data".to_string())?;
+                ParameterValue::GroupEntityId(crate::rtps::common::entity_id::EntityId::from_bytes(
+                    entity_id_bytes,
+                ))
+            }
             ParameterId::PidParticipantLeaseDuration
             | ParameterId::PidDeadline
             | ParameterId::PidLatencyBudget

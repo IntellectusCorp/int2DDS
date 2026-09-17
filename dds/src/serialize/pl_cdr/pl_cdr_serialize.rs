@@ -196,6 +196,9 @@ impl PlCdrSerializer {
             ParameterValue::GroupGuid(guid) => {
                 buffer.extend_from_slice(&guid.to_bytes());
             }
+            ParameterValue::GroupEntityId(entity_id) => {
+                buffer.extend_from_slice(&entity_id.to_bytes());
+            }
             ParameterValue::BuiltinEndpointSet(bes) => {
                 self.write_u32(&mut buffer, *bes);
             }
