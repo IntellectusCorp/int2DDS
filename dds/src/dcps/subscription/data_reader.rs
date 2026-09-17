@@ -404,6 +404,9 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                 .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
                 .clone();
 
+            // Resolved before the bridge guard is taken, because it reaches the bridge itself.
+            let subscriber_history_cache = subscriber.subscriber_history_cache()?;
+
             // Use Weak to avoid lifetime issues in closure
             let mut dcps_bridge = participant.get_dcps_bridge()?;
             let rtps_reader = match dcps_bridge.as_mut() {
@@ -413,6 +416,8 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                         content_filter_property,
                         Some(change_callback),
                         Some(status_callback),
+                        subscriber.guid(),
+                        subscriber_history_cache,
                     )
                     .map_err(|e| DdsError::Error(e.message))?,
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
