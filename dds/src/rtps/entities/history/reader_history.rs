@@ -392,7 +392,7 @@ impl ReaderHistoryCache {
     }
 
     // True when the attached DCPS reader requests coherent access (INSTANCE or TOPIC scope).
-    fn is_coherent_access(&self) -> bool {
+    pub(crate) fn is_coherent_access(&self) -> bool {
         let Some(cache) = self.datareader_cache.as_ref().and_then(|weak| weak.upgrade()) else {
             return false;
         };

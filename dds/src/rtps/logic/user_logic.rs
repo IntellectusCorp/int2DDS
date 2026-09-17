@@ -2301,7 +2301,9 @@ impl UserLogic {
         changes: Vec<CacheChange>,
     ) -> RtpsResult<()> {
         for change in changes.into_iter() {
-            Self::deliver_change(reader, change);
+            if let Err(error) = self.deliver_change(reader, change) {
+                debug!("Delivering a change to reader {} failed: {}", reader.guid(), error);
+            }
         }
 
         Ok(())
@@ -2309,17 +2311,55 @@ impl UserLogic {
 
     // Add a change to the reader cache and notify every change it makes available:
     // none when held (TIME_BASED_FILTER) or buffered, several when a coherent set closes.
-    fn deliver_change(reader: &dyn Reader, change: CacheChange) {
+    fn deliver_change(&self, reader: &dyn Reader, change: CacheChange) -> RtpsResult<()> {
+        let subscriber_history_cache = reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .and_then(StatefulReader::subscriber_history_cache);
+
         let reader_cache = reader.reader_cache();
-        let mut res: Option<RtpsResult<Vec<Arc<CacheChange>>>> = None;
-        if let Ok(mut cache_guard) = reader_cache.lock() {
-            res = Some(cache_guard.add_change(change, true));
-        }
-        if let Some(Ok(changes)) = res {
-            for change in changes {
-                reader.on_change(change);
+        let mut cache_guard = reader_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        let subscriber_history_cache =
+            subscriber_history_cache.filter(|_| !cache_guard.is_coherent_access());
+
+        match subscriber_history_cache {
+            // Not GROUP access scope, or GROUP with coherent access. Stored right here.
+            None => {
+                let committed = cache_guard.add_change(change, true)?;
+                drop(cache_guard);
+
+                for change in committed {
+                    reader.on_change(change);
+                }
+            }
+            // GROUP access scope. Handed to the Subscriber HistoryCache, stored once the gate
+            // releases it.
+            Some(subscriber_history_cache) => {
+                let prepared = cache_guard.prepare_changes_to_commit(change, true);
+                drop(cache_guard);
+
+                // One lock over the hand-off and the gate, so no event slips in between them.
+                let reader_id = reader.guid().entity_id();
+                let mut subscriber_history_cache = subscriber_history_cache
+                    .lock()
+                    .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+                // A rejected sample is dropped on its own. The rest of the batch and the gate
+                // still run.
+                for (change, apply_filter) in prepared {
+                    subscriber_history_cache.add_change(reader_id, change, apply_filter)?
+                }
+                let released = subscriber_history_cache.flush_pending_changes();
+                drop(subscriber_history_cache);
+
+                self.get_upgraded_participant()?.commit_released_samples(released)?;
             }
         }
+
+        Ok(())
     }
 }
 

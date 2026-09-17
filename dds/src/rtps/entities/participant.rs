@@ -54,8 +54,9 @@ use crate::{
         entities::{
             entity::Entity,
             history::{
-                cache_change::CacheChange, history_cache::HistoryCache,
-                subscriber_history::SubscriberHistoryCache,
+                cache_change::CacheChange,
+                history_cache::HistoryCache,
+                subscriber_history::{PendingSample, SubscriberHistoryCache},
             },
             reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
@@ -278,6 +279,42 @@ impl Participant {
             .lock()
             .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
             .insert(subscriber_guid, subscriber_history_cache);
+
+        Ok(())
+    }
+
+    // Stores samples the Subscriber HistoryCache released, each reader's share under that
+    // reader's cache lock in one go, then notifies what became available.
+    pub(crate) fn commit_released_samples(&self, released: Vec<PendingSample>) -> RtpsResult<()> {
+        let mut changes_per_reader: HashMap<EntityId, Vec<(CacheChange, bool)>> = HashMap::new();
+        for sample in released {
+            changes_per_reader
+                .entry(sample.reader_id)
+                .or_default()
+                .push((sample.change, sample.apply_filter));
+        }
+
+        for (reader_id, changes) in changes_per_reader {
+            // A reader deleted while its share was held has nowhere to put it.
+            let Some(lease) = self.find_reader_callback_lease_from_entity_id(reader_id) else {
+                debug!(
+                    "Dropping {} released samples of deleted reader {}",
+                    changes.len(),
+                    reader_id
+                );
+                continue;
+            };
+
+            let available = lease
+                .reader_cache()
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+                .commit_changes_to_datareader_cache(changes)?;
+
+            for change in available {
+                lease.on_change(change);
+            }
+        }
 
         Ok(())
     }
