@@ -1334,6 +1334,10 @@ impl SedpLogic {
             );
         }
 
+        // The discovered writers of a Publisher are what an announced writerSet is compared
+        // against, and this one counts even for a Subscriber that never matches it.
+        participant.flush_subscriber_history_caches()?;
+
         Self::register_discovered_type(
             &participant,
             publication_builtin_topic_data.type_identifier(),
@@ -3572,5 +3576,145 @@ mod tests {
                 reader.guid()
             );
         }
+    }
+
+    const GROUP_READ_TOPIC: &str = "group_gate_read_topic";
+    const GROUP_SILENT_TOPIC: &str = "group_gate_silent_topic";
+
+    fn group_publication(
+        writer_guid: Guid,
+        publisher_guid: Guid,
+        topic_name: &str,
+    ) -> PublicationBuiltinTopicData {
+        let mut publication = PublicationBuiltinTopicData::default();
+        publication.set_endpoint_guid(writer_guid);
+        publication.set_group_guid(publisher_guid);
+        publication.set_topic_name(topic_name.to_string());
+
+        publication
+    }
+
+    // A writer of a remote Publisher sitting on a topic this Subscriber does not read never
+    // matches, yet it counts in the writerSet its sibling announces, so discovering it is what
+    // lets that Heartbeat speak for the whole group.
+    #[test]
+    fn discovering_the_last_writer_of_a_publisher_releases_what_its_writer_set_held() {
+        use crate::rtps::common::entity_kind::EntityKind;
+        use crate::rtps::common::guid::GroupDigest;
+        use crate::rtps::common::types::TopicKind;
+        use crate::rtps::entities::history::cache_change::PresentationInfo;
+        use crate::rtps::entities::history::subscriber_history::SubscriberHistoryCache;
+        use crate::rtps::messages::submessages::heartbeat;
+
+        let (sedp_logic, participant, _remote_writer_guid) = sedp_logic_with_matched_writer();
+
+        let remote_prefix: GuidPrefix = [0xD0; 12];
+        let publisher_guid = Guid::new(
+            remote_prefix,
+            EntityId::new([0x0A, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_GROUP),
+        );
+        let matched_writer_guid = Guid::new(
+            remote_prefix,
+            EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+        );
+        let undiscovered_writer_guid = Guid::new(
+            remote_prefix,
+            EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+        );
+
+        // Only the writer on the topic we read is known, so the discovered set holds one writer.
+        participant.remote_publications().entry(GROUP_READ_TOPIC.to_string()).or_default().insert(
+            matched_writer_guid,
+            group_publication(matched_writer_guid, publisher_guid, GROUP_READ_TOPIC),
+        );
+
+        let reader_entity_id =
+            EntityId::new([0xA0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let reader = Arc::new(StatefulReader::new(
+            Guid::new(participant.guid().prefix(), reader_entity_id),
+            TopicKind::NoKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            reader_entity_id,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant.guid(),
+        ));
+
+        let subscriber_history_cache =
+            Arc::new(Mutex::new(SubscriberHistoryCache::new(participant.remote_publications())));
+        let subscriber_guid = Guid::new(
+            participant.guid().prefix(),
+            EntityId::new([0xB0, 0x00, 0x00], EntityKind::USER_DEFINED_READER_GROUP),
+        );
+        participant
+            .register_subscriber_history_cache(
+                subscriber_guid,
+                Arc::downgrade(&subscriber_history_cache),
+            )
+            .expect("the cache registers");
+        reader.set_subscriber_history_cache(subscriber_history_cache.clone());
+        participant.add_reader(GROUP_READ_TOPIC, reader.clone());
+
+        // Group sequence number 3 sits behind a hole at 2, and the Heartbeat that covers the
+        // hole names both writers of the Publisher.
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            matched_writer_guid,
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(2),
+            vec![0u8; 4],
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            group_seq_num: Some(SequenceNumber::from_i64(3)),
+            ..PresentationInfo::default()
+        });
+
+        let announced_writer_set = GroupDigest::from_entity_ids(&[
+            matched_writer_guid.entity_id(),
+            undiscovered_writer_guid.entity_id(),
+        ]);
+
+        {
+            let mut cache = subscriber_history_cache.lock().expect("cache lock");
+            cache
+                .add_matched_writer(reader_entity_id, matched_writer_guid, publisher_guid)
+                .expect("the writer announced a Publisher");
+            cache.add_change(reader_entity_id, change, false).expect("the sample is ordered");
+            cache
+                .record_heartbeat_group_info(
+                    matched_writer_guid,
+                    heartbeat::GroupInfo {
+                        current_gsn: SequenceNumber::from_i64(3),
+                        first_gsn: SequenceNumber::from_i64(3),
+                        last_gsn: SequenceNumber::from_i64(3),
+                        writer_set: announced_writer_set,
+                        secure_writer_set: GroupDigest::EMPTY,
+                    },
+                )
+                .expect("the writer is registered");
+        }
+
+        assert!(
+            subscriber_history_cache.lock().expect("cache lock").flush_pending_changes().is_empty(),
+            "the announced writerSet names a writer we have not discovered, so the sample waits"
+        );
+
+        sedp_logic
+            .handle_publication_builtin_topic_data(
+                group_publication(undiscovered_writer_guid, publisher_guid, GROUP_SILENT_TOPIC),
+                None,
+            )
+            .expect("an announcement of a topic nobody reads still registers");
+
+        assert_eq!(
+            reader.available_changes().len(),
+            1,
+            "the discovered set now equals the announced writerSet, so the hole is proven empty"
+        );
     }
 }

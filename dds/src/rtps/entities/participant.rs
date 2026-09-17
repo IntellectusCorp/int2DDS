@@ -340,6 +340,21 @@ impl Participant {
         Ok(())
     }
 
+    // Runs the gate of every Subscriber HistoryCache again and commits whatever it releases.
+    pub(crate) fn flush_subscriber_history_caches(&self) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            let released = cache.flush_pending_changes();
+            drop(cache);
+
+            self.commit_released_samples(released)?;
+        }
+
+        Ok(())
+    }
+
     // Tells every Subscriber HistoryCache that a remote writer is gone and commits whatever the
     // gate releases on it.
     pub(crate) fn remove_matched_writer_from_subscriber_history_caches(
