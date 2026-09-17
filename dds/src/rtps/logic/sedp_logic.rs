@@ -1473,6 +1473,20 @@ impl SedpLogic {
             return Ok(());
         }
 
+        // A GROUP access scope reader also registers the writer under its Publisher for the
+        // group gate. A writer that announced no Publisher is refused, logged where it is made.
+        if let Some(subscriber_history_cache) = reader.subscriber_history_cache() {
+            let publisher_guid =
+                publication_builtin_topic_data.group_guid().unwrap_or(Guid::UNKNOWN);
+            if let Ok(mut cache) = subscriber_history_cache.lock() {
+                let _ = cache.add_matched_writer(
+                    reader.guid().entity_id(),
+                    endpoint_guid,
+                    publisher_guid,
+                );
+            }
+        }
+
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
