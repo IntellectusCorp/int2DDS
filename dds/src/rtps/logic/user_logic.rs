@@ -3150,7 +3150,15 @@ impl UnicastMessageProcessor for UserLogic {
         //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
         // Raised with the per-reader key: the same workload now needs one buffer per reader,
         // and evicting an in-progress one is the very loss this key change removes.
-        if self.fragment_buffers.len() > FRAGMENT_BUFFER_LIMIT {
+        // `len` read-locks every shard, so count only when this datagram opens a new buffer.
+        let opens_buffer = matched_readers.iter().any(|reader| {
+            !self.fragment_buffers.contains_key(&(
+                remote_writer_guid,
+                reader.guid().entity_id(),
+                data_frag.writer_sn,
+            ))
+        });
+        if opens_buffer && self.fragment_buffers.len() > FRAGMENT_BUFFER_LIMIT {
             debug!(
                 "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
                 self.fragment_buffers.len()
@@ -4881,14 +4889,14 @@ mod tests {
         fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8 - 1);
         assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
 
-        // One more datagram for reader B: the cap check evicts one buffer, reader A's.
+        // Reader B opens the next sample: the cap check evicts one buffer, reader A's.
         feed_fragment(
             &mut user_logic,
             prefix,
             writer_guid,
-            sn,
+            sn.next(),
             reader_b_id,
-            3,
+            1,
             1,
             vec![3, 3, 3, 3],
         );
@@ -4908,8 +4916,8 @@ mod tests {
         );
         assert_eq!(
             ledger_missing(&reader_b, writer_guid, sn),
-            vec![4],
-            "reader B's buffer still holds fragments 1..=3; retracting its record would make it \
+            vec![3, 4],
+            "reader B's buffer still holds fragments 1..=2; retracting its record would make it \
              re-request bytes it has, and the writer resend them into a buffer that already \
              counted them"
         );
