@@ -21,11 +21,13 @@ use std::{
     fmt::Debug,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock, Weak,
+        Arc, Mutex, OnceLock, RwLock, Weak,
     },
 };
 
 use arc_swap::ArcSwap;
+
+use crate::rtps::entities::history::subscriber_history::SubscriberHistoryCache;
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -102,6 +104,8 @@ pub struct Subscriber {
     orphaned_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     default_datareader_qos: Arc<Mutex<Option<DataReaderQos>>>,
     participant: Option<Weak<DomainParticipant>>,
+    // Present only under GROUP access scope. Shared with every reader of this Subscriber.
+    subscriber_history_cache: Arc<OnceLock<Arc<Mutex<SubscriberHistoryCache>>>>,
 }
 
 impl Debug for Subscriber {
@@ -204,6 +208,7 @@ impl Subscriber {
             orphaned_readers: Arc::new(Mutex::new(Vec::new())),
             default_datareader_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
+            subscriber_history_cache: Arc::new(OnceLock::new()),
         };
         let subscriber_arc = Arc::new(subscriber.clone());
         let weak_ref = Arc::downgrade(&subscriber_arc);
@@ -1099,10 +1104,36 @@ impl Subscriber {
             })
     }
 
+    pub(crate) fn guid(&self) -> Guid {
+        self.guid
+    }
+
     /// PRESENTATION coherent_access without cloning the whole subscriber to read one bool.
     /// Read twice per received sample by the reader history's coherent-access probes.
     pub(crate) fn presentation_coherent_access(&self) -> DdsResult<bool> {
         Ok(self.qos.load().presentation.coherent_access)
+    }
+
+    // None unless the access scope is GROUP. Created on first use, once the participant's
+    // discovery data is reachable, and shared by every reader created afterwards.
+    pub(crate) fn subscriber_history_cache(
+        &self,
+    ) -> DdsResult<Option<Arc<Mutex<SubscriberHistoryCache>>>> {
+        if self.qos.load().presentation.access_scope != PresentationQosAccessScopeKind::Group {
+            return Ok(None);
+        }
+
+        if let Some(cache) = self.subscriber_history_cache.get() {
+            return Ok(Some(Arc::clone(cache)));
+        }
+
+        let remote_publications =
+            self.get_participant()?.get_rtps_participant()?.remote_publications();
+        let cache = self
+            .subscriber_history_cache
+            .get_or_init(|| Arc::new(Mutex::new(SubscriberHistoryCache::new(remote_publications))));
+
+        Ok(Some(Arc::clone(cache)))
     }
 
     /// PRESENTATION ordered_access at topic scope, same reasoning. Read on every `read`/`take`.

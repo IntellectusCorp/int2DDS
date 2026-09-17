@@ -11,7 +11,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     net::SocketAddr,
-    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock, Weak},
 };
 
 use arc_swap::ArcSwap;
@@ -53,7 +53,10 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::{cache_change::CacheChange, history_cache::HistoryCache},
+            history::{
+                cache_change::CacheChange, history_cache::HistoryCache,
+                subscriber_history::SubscriberHistoryCache,
+            },
             reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterCallbackLease, WriterStore},
@@ -103,6 +106,10 @@ pub struct Participant {
 
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
+
+    // Subscriber HistoryCaches of the GROUP access scope Subscribers, keyed by Subscriber GUID.
+    // Weak so a deleted Subscriber drops out on the next walk.
+    subscriber_history_caches: Arc<Mutex<HashMap<Guid, Weak<Mutex<SubscriberHistoryCache>>>>>,
 
     // Dynamic-type registry populated from discovered TypeObjects.
     type_registry: SharedTypeRegistry,
@@ -200,6 +207,7 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
+            subscriber_history_caches: Arc::new(Mutex::new(HashMap::new())),
             type_registry: new_shared_registry(),
             working_ips,
             remote_same_host: Arc::new(DashMap::new()),
@@ -257,6 +265,21 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>> {
         self.remote_publications.clone()
+    }
+
+    // Registering the same Subscriber again replaces its entry, which every reader of that
+    // Subscriber does with the same cache.
+    pub(crate) fn register_subscriber_history_cache(
+        &self,
+        subscriber_guid: Guid,
+        subscriber_history_cache: Weak<Mutex<SubscriberHistoryCache>>,
+    ) -> RtpsResult<()> {
+        self.subscriber_history_caches
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+            .insert(subscriber_guid, subscriber_history_cache);
+
+        Ok(())
     }
 
     pub(crate) fn set_endpoint_discovery_cb(
