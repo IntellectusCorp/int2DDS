@@ -128,29 +128,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         );
 
         if is_exist {
-            // Replace an entry that is missing what this SPDP carries
-            // (metatraffic unicast locators, SEDP endpoints); otherwise a
-            // participant registered from incomplete data is never matched.
-            let incomplete = participant
-                .find_remote_participant_proxy_data(participant_guid.prefix())
-                .is_some_and(|existing| {
-                    let sedp = BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_ANNOUNCER;
-                    (existing.metatraffic_unicast_locator_list().is_empty()
-                        && !spdp_discovered_participant_data
-                            .metatraffic_unicast_locator_list()
-                            .is_empty())
-                        || (!existing.available_builtin_endpoints().contains(sedp)
-                            && spdp_discovered_participant_data
-                                .available_builtin_endpoints()
-                                .contains(sedp))
-                });
-            if !incomplete {
-                return Ok(());
-            }
-            log::debug!("Replacing incomplete DiscoveredParticipantData {}", participant_guid);
-            participant.unmatch_with_remote_participant(&participant_guid)?;
-            // unmatch forgets the same-host verdict; settle it again from this datagram
-            participant.remote_is_same_host(participant_guid.prefix(), Some(from_addr));
+            return Ok(());
         }
 
         // Setup builtin endpoints based on available endpoints
