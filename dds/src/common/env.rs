@@ -50,7 +50,7 @@ pub fn init_from_env() {
     // - INT2DDS_NACK_FRAG_MAX_RETRIES: Reader retries before yielding to the periodic heartbeat - Default: 10
     // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
     // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 250
-    // - INT2DDS_ENABLE_SEND_WINDOW: Bound a fragment burst by the peer's receive buffer. False sends every fragment of a change in one go (true, false) - Default: true
+    // - INT2DDS_ENABLE_SEND_WINDOW: Bound a fragment burst by the peer's receive buffer. Unset sends every fragment of a change in one go (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
     // - INT2DDS_TCP_PEER_SEARCH_SLOTS: Set how many participant slots a TCP peer named with the wildcard port stands for (1-125, one domain's port block) - Default: 16
@@ -589,10 +589,10 @@ pub fn set_send_credit_backstop_ms(ms: u32) {
     unsafe { std::env::set_var("INT2DDS_SEND_CREDIT_BACKSTOP_MS", ms.to_string()) };
 }
 
-// Read the send-window gate from `INT2DDS_ENABLE_SEND_WINDOW`. False puts every fragment of a
-// change on the wire in one go instead of bounding the burst by the peer's receive buffer.
+// Read the send-window gate from `INT2DDS_ENABLE_SEND_WINDOW`. Off, a writer puts every fragment
+// of a change on the wire in one go instead of bounding the burst by the peer's receive buffer.
 pub fn get_enable_send_window() -> bool {
-    get_bool_env("INT2DDS_ENABLE_SEND_WINDOW").unwrap_or(true)
+    get_bool_env("INT2DDS_ENABLE_SEND_WINDOW").unwrap_or(false)
 }
 
 // Set the send-window gate via `INT2DDS_ENABLE_SEND_WINDOW`.
@@ -772,16 +772,16 @@ mod tests {
     fn send_window_gate_env_round_trips_and_rejects_invalid() {
         const KEY: &str = "INT2DDS_ENABLE_SEND_WINDOW";
         unsafe { std::env::remove_var(KEY) };
-        assert!(get_enable_send_window(), "unset keeps sends bounded, as they have always been");
-
-        set_enable_send_window(false);
-        assert!(!get_enable_send_window());
+        assert!(!get_enable_send_window(), "unset sends every fragment in one go");
 
         set_enable_send_window(true);
         assert!(get_enable_send_window());
 
+        set_enable_send_window(false);
+        assert!(!get_enable_send_window());
+
         unsafe { std::env::set_var(KEY, "neither") };
-        assert!(get_enable_send_window(), "unparsable falls back to bounded");
+        assert!(!get_enable_send_window(), "unparsable falls back to unbounded");
 
         unsafe { std::env::remove_var(KEY) };
     }

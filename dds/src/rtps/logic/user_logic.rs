@@ -4062,6 +4062,9 @@ mod tests {
         locator_count: usize,
         advertised: Option<usize>,
     ) -> (Arc<Participant>, UserLogic, Arc<DatagramRecorder>, Arc<StatefulWriter>, GuidPrefix) {
+        // Every caller is about what the window does, and the window is off unless asked for.
+        crate::common::env::set_enable_send_window(true);
+
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let recorder = Arc::new(DatagramRecorder::default());
         let transport: Arc<dyn TransportPlugin> = recorder.clone();

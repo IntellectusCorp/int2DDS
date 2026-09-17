@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `INT2DDS_ENABLE_SEND_WINDOW` to turn the per-peer fragment send window on
+
+### Changed
+
+- The per-peer fragment send window is now opt-in. A fragmented sample goes out
+  in one burst unless `INT2DDS_ENABLE_SEND_WINDOW` is set
+
 ## [0.1.5] - 2026-09-10
 
 Entity deletion no longer races with in-flight operations, and the TCP transport
