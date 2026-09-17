@@ -323,8 +323,8 @@ impl<C: Context> Writable<C> for DataFrag<'_> {
 pub(crate) struct FragmentBuffer {
     pub sequence_number: SequenceNumber,
     pub total_size: u32,
-    // One contiguous buffer for the whole sample. Fragments are written at their
-    // offset, so reassembly costs one allocation instead of one per fragment.
+    // One contiguous buffer for the whole sample, left uninitialized: fragments are
+    // written into spare capacity and len is set only when the buffer is handed out.
     pub buf: BytesMut,
     // Which fragment slots have arrived, so retransmits do not over-count.
     pub filled: Vec<bool>,
@@ -351,11 +351,7 @@ impl FragmentBuffer {
         Self {
             sequence_number,
             total_size,
-            buf: {
-                let mut b = BytesMut::with_capacity(total_size as usize);
-                b.resize(total_size as usize, 0);
-                b
-            },
+            buf: BytesMut::with_capacity(total_size as usize),
             filled: vec![false; total_fragments as usize],
             received_count: 0,
             total_fragments,
@@ -390,7 +386,11 @@ impl FragmentBuffer {
 
         let idx = (fragment_num - 1) as usize;
         let off = idx * self.fragment_size as usize;
-        self.buf[off..off + data.len()].copy_from_slice(&data);
+        let dst = &mut self.buf.spare_capacity_mut()[off..off + data.len()];
+        // SAFETY: `dst` is exactly `data.len()` bytes of owned capacity, disjoint from `data`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst.as_mut_ptr().cast(), data.len())
+        };
         if !self.filled[idx] {
             self.filled[idx] = true;
             self.received_count += 1;
@@ -401,12 +401,30 @@ impl FragmentBuffer {
 
     // The assembled sample. Fragments were written in place, so this hands the
     // buffer over without another copy.
-    pub(crate) fn assemble(self) -> Vec<u8> {
+    pub(crate) fn assemble(mut self) -> Vec<u8> {
+        self.expose_payload();
         self.buf.to_vec()
     }
 
-    pub(crate) fn into_bytes(self) -> Bytes {
+    pub(crate) fn into_bytes(mut self) -> Bytes {
+        self.expose_payload();
         self.buf.freeze()
+    }
+
+    // Zero the slots that never arrived, then expose all `total_size` bytes.
+    // Callers normally hand out only complete buffers, so the loop rarely writes.
+    fn expose_payload(&mut self) {
+        let total = self.total_size as usize;
+        let frag = self.fragment_size as usize;
+        let spare = self.buf.spare_capacity_mut();
+        for (idx, _) in self.filled.iter().enumerate().filter(|(_, filled)| !**filled) {
+            let off = idx * frag;
+            for byte in &mut spare[off..(off + frag).min(total)] {
+                byte.write(0);
+            }
+        }
+        // SAFETY: every slot in 0..total was written by a fragment or zeroed above.
+        unsafe { self.buf.set_len(total) };
     }
 }
 
@@ -663,6 +681,15 @@ mod tests {
 
         // Fragments land at their offset, so arrival order does not matter.
         assert_eq!(&buffer.into_bytes()[..], &[10, 11, 20, 21, 30]);
+    }
+
+    #[test]
+    fn test_fragment_buffer_zeroes_missing_slots_on_handout() {
+        let mut buffer = three_fragment_buffer();
+        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+
+        // The buffer starts uninitialized, so a missing slot must still read as zero.
+        assert_eq!(&buffer.into_bytes()[..], &[0, 0, 20, 21, 0]);
     }
 
     #[test]
