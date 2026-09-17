@@ -319,6 +319,62 @@ impl Participant {
         Ok(())
     }
 
+    // Tells every Subscriber HistoryCache that a remote writer lost or regained liveliness and
+    // commits whatever the gate releases on it.
+    pub(crate) fn set_remote_writer_liveliness_in_subscriber_history_caches(
+        &self,
+        writer_guid: Guid,
+        is_alive: bool,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.set_writer_liveliness(writer_guid, is_alive);
+            let released = cache.flush_pending_changes();
+            drop(cache);
+
+            self.commit_released_samples(released)?;
+        }
+
+        Ok(())
+    }
+
+    // Tells every Subscriber HistoryCache that a remote writer is gone and commits whatever the
+    // gate releases on it.
+    pub(crate) fn remove_matched_writer_from_subscriber_history_caches(
+        &self,
+        writer_guid: Guid,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.remove_matched_writer(writer_guid);
+            let released = cache.flush_pending_changes();
+            drop(cache);
+
+            self.commit_released_samples(released)?;
+        }
+
+        Ok(())
+    }
+
+    // The registered caches whose Subscriber still exists. Entries of deleted Subscribers are
+    // dropped on the way.
+    fn get_upgraded_subscriber_history_caches(
+        &self,
+    ) -> RtpsResult<Vec<Arc<Mutex<SubscriberHistoryCache>>>> {
+        let mut registered = self
+            .subscriber_history_caches
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        registered.retain(|_, cache| cache.strong_count() > 0);
+
+        Ok(registered.values().filter_map(Weak::upgrade).collect())
+    }
+
     pub(crate) fn set_endpoint_discovery_cb(
         &self,
         f: Arc<dyn Fn(&EndpointDiscoveryEvent) + Send + Sync>,
@@ -872,6 +928,24 @@ impl Participant {
             }
         }
 
+        // After the drain no delivery can hand this reader's samples to the group gate anymore.
+        // Its held share is dropped, which may let the next position through for the other
+        // readers of the Subscriber.
+        let subscriber_history_cache = reader_arc
+            .as_ref()
+            .and_then(|reader| reader.as_any().downcast_ref::<StatefulReader>())
+            .and_then(StatefulReader::subscriber_history_cache);
+        if let Some(subscriber_history_cache) = subscriber_history_cache {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.remove_reader(entity_id);
+            let released = cache.flush_pending_changes();
+            drop(cache);
+
+            self.commit_released_samples(released)?;
+        }
+
         // The reader is gone, so any reassembly still addressed to it can never complete and
         // will not be reached by the normal completion path -- only by cap-driven eviction,
         // which may not run again for a long time.
@@ -999,6 +1073,8 @@ impl Participant {
                 stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
         }
+
+        self.remove_matched_writer_from_subscriber_history_caches(writer_guid)?;
 
         Ok(())
     }
