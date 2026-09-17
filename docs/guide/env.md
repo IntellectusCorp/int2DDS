@@ -24,6 +24,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NACK_FRAG_RETRY_MS`         | Reader NACK_FRAG retry interval (ms)       | 200                     |
 | `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
 | `INT2DDS_SEND_CREDIT_BACKSTOP_MS`    | Writer send-credit backstop (ms)           | 250                     |
+| `INT2DDS_ENABLE_SEND_WINDOW`         | Bound fragment sends by peer receive buffer | true                   |
 | `INT2DDS_NACK_RESPONSE_DELAY_MS`     | Writer delay before repair reply (ms)      | 0                       |
 | `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` | Writer piggyback HEARTBEAT off    | false                   |
 | `INT2DDS_SEDP_HEARTBEAT_MS`          | SEDP heartbeat period (ms)                 | heartbeat_period (2000) |
@@ -625,6 +626,49 @@ cargo run --example hello_world_sub
 export INT2DDS_NACK_FRAG_MAX_RETRIES=5
 
 cargo run --example hello_world_sub
+```
+
+### INT2DDS_ENABLE_SEND_WINDOW
+
+Whether a writer bounds a fragmented send by the receive buffer of the peer it
+is sending to. Writer-side, with no QoS field.
+
+Bounded is the default and what every deployment should run. A writer puts at
+most two thirds of that peer's receive buffer on the wire in one go -- the value
+the peer advertised in SPDP, else this participant's own socket value, else a
+128 KB floor -- and the fragments past it are dropped rather than queued. The
+reader learns the sample's fragment count from any DATA_FRAG it did receive, so
+the dropped tail already reads as missing to it, and the HEARTBEAT riding the
+window's last datagram is its trigger to ask. The transfer then completes one
+window per round.
+
+Set this to `false` and the whole plan goes out in one burst, exactly as it did
+before the window existed. Nothing is dropped at the writer, no window is
+resolved and no send credit is recorded. The peer's socket then has to absorb
+the entire sample at once, so anything it cannot hold is lost in the kernel and
+recovered by NACK_FRAG instead. Use it to measure a writer's own send rate
+without a per-peer budget in the way, not in production.
+
+Read once per send call, so it takes effect on the next sample written.
+
+- Default: `true`
+- Values other than `true`/`1` and `false`/`0` are logged at warn level and
+  ignored -- the default `true` is used.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_ENABLE_SEND_WINDOW = "false"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_ENABLE_SEND_WINDOW=false
+
+cargo run --example hello_world_pub
 ```
 
 ### INT2DDS_SEND_CREDIT_BACKSTOP_MS

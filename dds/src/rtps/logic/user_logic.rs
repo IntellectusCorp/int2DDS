@@ -359,6 +359,9 @@ fn carried_spend(spent: usize, since: Instant, now: Instant, backstop: Duration)
 /// participant owns. Without that, every send call opened a fresh full window, and the peer's
 /// socket -- which drains at the peer's pace, not ours -- saw the sum of them.
 struct SendWindows {
+    /// `INT2DDS_ENABLE_SEND_WINDOW`, read once per send. False resolves every window unbounded
+    /// and records no charge, so neither the peer's proxy list nor the shared budget is touched.
+    is_enabled: bool,
     /// This participant's own receive buffer, the fallback for a peer that does not advertise.
     own: Option<usize>,
     /// (window, bytes charged in this call) per destination, resolved on first use. The second
@@ -376,6 +379,7 @@ impl SendWindows {
         credit: Option<Arc<DashMap<GuidPrefix, SendCredit>>>,
     ) -> Self {
         Self {
+            is_enabled: crate::common::env::get_enable_send_window(),
             own: transport.advertised_receive_buffer_size(),
             state: HashMap::new(),
             credit,
@@ -395,6 +399,41 @@ impl SendWindows {
         } else {
             None
         }
+    }
+
+    /// The part of `plan` this send may put toward `dst`, charging what it keeps.
+    ///
+    /// Disabled, the plan comes back as it went in and nothing else here runs: no window is
+    /// resolved, `dst`'s proxy list is never locked and the shared budget is never written.
+    fn bound_plan_to_window(
+        &mut self,
+        participant: &Participant,
+        dst: GuidPrefix,
+        reliable: bool,
+        plan: Vec<(u32, u32, bool)>,
+        fragment_size: usize,
+        sample_size: usize,
+        locator_count: usize,
+        with_heartbeat: bool,
+    ) -> Vec<(u32, u32, bool)> {
+        if !self.is_enabled {
+            return plan;
+        }
+
+        let (remaining, untouched) = self.remaining(participant, dst, reliable);
+
+        let (bounded, charged) = bound_fragment_plan(
+            &plan,
+            fragment_size,
+            sample_size,
+            locator_count,
+            remaining,
+            untouched,
+            with_heartbeat,
+        );
+        self.charge(dst, charged, reliable);
+
+        bounded
     }
 
     /// Bytes still allowed toward `dst`, and whether nothing has gone out to it yet in this send.
@@ -723,17 +762,16 @@ impl UserLogic {
                 let plan = fragment_send_plan(&[(1, total_fragments)], frags_per_msg);
 
                 // Bound the resend by what this participant's receive buffer still allows.
-                let (remaining, untouched) = windows.remaining(&participant, dst_prefix, reliable);
-                let (plan, charged) = bound_fragment_plan(
-                    &plan,
+                let plan = windows.bound_plan_to_window(
+                    &participant,
+                    dst_prefix,
+                    reliable,
+                    plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
                     self.locators_to_send_to(locators.iter()).len(),
-                    remaining,
-                    untouched,
                     piggyback,
                 );
-                windows.charge(dst_prefix, charged, reliable);
 
                 for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
@@ -919,17 +957,16 @@ impl UserLogic {
 
             // A request larger than one window is served as far as the window reaches; the rest
             // is dropped, and the reader re-asks once this window's heartbeat arrives.
-            let (remaining, untouched) = windows.remaining(&participant, dst_prefix, reliable);
-            let (plan, charged) = bound_fragment_plan(
-                &plan,
+            let plan = windows.bound_plan_to_window(
+                &participant,
+                dst_prefix,
+                reliable,
+                plan,
                 change.fragment_size() as usize,
                 change.data_value().len(),
                 locator_count,
-                remaining,
-                untouched,
                 piggyback,
             );
-            windows.charge(dst_prefix, charged, reliable);
 
             for (fragment_num, count, is_last) in plan {
                 // The heartbeat rides the last datagram of the window, so the reader always has
@@ -1172,18 +1209,16 @@ impl UserLogic {
                 // Bound the burst by this participant's receive buffer; the fragments beyond
                 // the window are dropped, and the reader asks for them off the heartbeat below.
                 let is_reliable_batch = members.iter().any(|(_, plan)| plan.reliable);
-                let (remaining, untouched) =
-                    windows.remaining(&participant, dst_prefix, is_reliable_batch);
-                let (plan, charged) = bound_fragment_plan(
-                    &plan,
+                let plan = windows.bound_plan_to_window(
+                    &participant,
+                    dst_prefix,
+                    is_reliable_batch,
+                    plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
                     self.locators_to_send_to(locators.iter()).len(),
-                    remaining,
-                    untouched,
                     is_piggyback_wanted,
                 );
-                windows.charge(dst_prefix, charged, is_reliable_batch);
 
                 for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
@@ -1341,18 +1376,16 @@ impl UserLogic {
 
                             // Bound the burst by this participant's receive buffer; what is left
                             // over is dropped and re-requested off the window's heartbeat.
-                            let (remaining, untouched) =
-                                windows.remaining(&participant, reader_guid.prefix(), reliable);
-                            let (plan, charged) = bound_fragment_plan(
-                                &plan,
+                            let plan = windows.bound_plan_to_window(
+                                &participant,
+                                reader_guid.prefix(),
+                                reliable,
+                                plan,
                                 a_change.fragment_size() as usize,
                                 a_change.data_value().len(),
                                 self.locators_to_send_to(locators.iter()).len(),
-                                remaining,
-                                untouched,
                                 reliable && piggyback,
                             );
-                            windows.charge(reader_guid.prefix(), charged, reliable);
 
                             for (fragment_num, count, is_last) in plan {
                                 let Some(fragment_data) =
@@ -5729,6 +5762,38 @@ mod tests {
         assert!(
             user_logic.send_credit.get(&remote_prefix).is_none(),
             "a builtin writer's send left a charge on the shared budget"
+        );
+    }
+
+    /// `INT2DDS_ENABLE_SEND_WINDOW=false`. The field is set directly rather than through the env,
+    /// because other tests in this binary assert exact window sizes against the same process env.
+    #[test]
+    fn a_disabled_window_returns_the_plan_untouched_and_records_no_charge() {
+        let (participant, user_logic, _recorder, writer, remote_prefix) =
+            windowed_writer(1, 1, Some(300_000));
+
+        let mut windows = SendWindows::new(&NullTransport, user_logic.shared_send_credit(&writer));
+        windows.is_enabled = false;
+
+        // Far past what a 300_000-byte peer buffer would ever admit, and several runs so the
+        // heartbeat flag sits on the final chunk of the final run rather than on a lone entry.
+        let plan = fragment_send_plan(&[(1, 300), (700, 200), (1400, 61)], fpm(10));
+
+        let bounded = windows.bound_plan_to_window(
+            &participant,
+            remote_prefix,
+            true,
+            plan.clone(),
+            WINDOW_TEST_FRAG_SIZE,
+            1024 * 1024,
+            4,
+            true,
+        );
+
+        assert_eq!(bounded, plan, "a disabled window must hand the plan back as it came");
+        assert!(
+            user_logic.send_credit.get(&remote_prefix).is_none(),
+            "a disabled window left a charge on the shared budget"
         );
     }
 }
