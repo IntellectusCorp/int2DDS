@@ -39,7 +39,7 @@ pub fn init_from_env() {
     // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
     // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
     // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of 127.0.0.1 (true, false) - Default: false
-    // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
+    // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP receive and send socket buffer sizes (bytes) - Default: OS default, with 1048576 (1MiB) receive / 65536 (64KiB) send requested when the default is smaller
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
     // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
     // - INT2DDS_MAX_MESSAGE_SIZE: Set max UDP message size (1-65000), header-inclusive datagram budget bounding fragments packed per message - Default: 65000
@@ -240,6 +240,23 @@ pub fn set_disable_same_host_loopback(is_disabled: bool) {
 pub fn set_udp_socket_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", size);
     unsafe { std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", size.to_string()) };
+}
+
+/// Read the UDP socket buffer size from `INT2DDS_UDP_SOCKET_BUFFER`, applied to both directions.
+/// Returns `None` when unset, empty, or not a non-negative integer.
+pub fn get_udp_socket_buffer_size_override() -> Option<usize> {
+    let raw = std::env::var("INT2DDS_UDP_SOCKET_BUFFER").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<usize>() {
+        Ok(size) => Some(size),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_UDP_SOCKET_BUFFER value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
 }
 
 /// Set the shared memory buffer size via environment variable
