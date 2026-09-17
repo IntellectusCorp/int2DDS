@@ -18,7 +18,6 @@ use crate::{
     rtps::{
         common::{entity_id::EntityId, guid::Guid, locator::Locator, sequence::SequenceNumber},
         entities::history::cache_change::CacheChange,
-        messages::submessages::{gap, heartbeat},
     },
 };
 
@@ -36,9 +35,7 @@ pub(crate) struct WriterProxy {
     last_heartbeat_count: Option<u32>,
     last_heartbeat_at: Option<Instant>,
     last_heartbeat_frag_count: Option<u32>,
-    heartbeat_group_info: Option<heartbeat::GroupInfo>, // Group info the latest accepted Heartbeat announced.
-    highest_gap_end_gsn: Option<SequenceNumber>, // Furthest group sequence number any Gap has declared unavailable.
-    buffered_change: BTreeSet<CacheChange>,      // Changes that reader has not processed yet
+    buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
     status_callback:
@@ -77,8 +74,6 @@ impl WriterProxy {
             last_heartbeat_count: None,
             last_heartbeat_frag_count: None,
             last_heartbeat_at: None,
-            heartbeat_group_info: None,
-            highest_gap_end_gsn: None,
             buffered_change: BTreeSet::new(),
             publication_builtin_topic_data,
             status_callback,
@@ -140,29 +135,6 @@ impl WriterProxy {
 
     pub(crate) fn set_last_heartbeat_at(&mut self, at: Instant) {
         self.last_heartbeat_at = Some(at);
-    }
-
-    pub(crate) fn heartbeat_group_info(&self) -> Option<heartbeat::GroupInfo> {
-        self.heartbeat_group_info
-    }
-
-    // The announced range moves as the writer's history rolls, so the latest one replaces it.
-    pub(crate) fn record_heartbeat_group_info(&mut self, group_info: heartbeat::GroupInfo) {
-        self.heartbeat_group_info = Some(group_info);
-    }
-
-    pub(crate) fn highest_gap_end_gsn(&self) -> Option<SequenceNumber> {
-        self.highest_gap_end_gsn
-    }
-
-    // A later Gap can cover a shorter range, and what an earlier one declared gone stays gone.
-    pub(crate) fn record_gap_group_info(&mut self, group_info: gap::GroupInfo) {
-        let highest = match self.highest_gap_end_gsn {
-            Some(previous) => max(previous, group_info.gap_end_gsn),
-            None => group_info.gap_end_gsn,
-        };
-
-        self.highest_gap_end_gsn = Some(highest);
     }
 
     pub(crate) fn add_new_changes_from_writer(&mut self, change_from_writer: ChangeFromWriter) {
@@ -574,7 +546,6 @@ pub(crate) struct FragmentInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtps::common::guid::GroupDigest;
     use crate::rtps::messages::{
         message_creator::MessageCreator,
         message_receiver::{MessageReceiver, TypedSubmessage},
@@ -1003,49 +974,5 @@ mod tests {
 
         assert_eq!(proxy.get_ascending_missing_fn_list(sn), vec![1, 2, 3, 4]);
         assert!(!proxy.all_fragments_received(sn));
-    }
-
-    fn heartbeat_group_info(
-        current_gsn: i64,
-        first_gsn: i64,
-        last_gsn: i64,
-    ) -> heartbeat::GroupInfo {
-        heartbeat::GroupInfo {
-            current_gsn: SequenceNumber::from_i64(current_gsn),
-            first_gsn: SequenceNumber::from_i64(first_gsn),
-            last_gsn: SequenceNumber::from_i64(last_gsn),
-            writer_set: GroupDigest::EMPTY,
-            secure_writer_set: GroupDigest::EMPTY,
-        }
-    }
-
-    // firstGSN and lastGSN move forward as the writer's history rolls, so keeping the highest
-    // pair would claim the writer still holds samples it has already dropped.
-    #[test]
-    fn records_the_group_info_of_the_latest_heartbeat() {
-        let mut proxy = empty_writer_proxy();
-
-        proxy.record_heartbeat_group_info(heartbeat_group_info(5, 1, 5));
-        proxy.record_heartbeat_group_info(heartbeat_group_info(9, 4, 9));
-
-        assert_eq!(proxy.heartbeat_group_info(), Some(heartbeat_group_info(9, 4, 9)));
-    }
-
-    // A Gap declares its range gone for good, and a later Gap can cover a shorter one. Replacing
-    // the value would lose the proof that the group sequence numbers up to 7 will never arrive.
-    #[test]
-    fn keeps_the_furthest_gap_end_group_sequence_number() {
-        let mut proxy = empty_writer_proxy();
-
-        proxy.record_gap_group_info(gap::GroupInfo {
-            gap_start_gsn: SequenceNumber::from_i64(3),
-            gap_end_gsn: SequenceNumber::from_i64(7),
-        });
-        proxy.record_gap_group_info(gap::GroupInfo {
-            gap_start_gsn: SequenceNumber::from_i64(4),
-            gap_end_gsn: SequenceNumber::from_i64(4),
-        });
-
-        assert_eq!(proxy.highest_gap_end_gsn(), Some(SequenceNumber::from_i64(7)));
     }
 }

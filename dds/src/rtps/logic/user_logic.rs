@@ -25,6 +25,7 @@ use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo};
 use crate::rtps::entities::history::history_cache::HistoryCache;
+use crate::rtps::entities::history::subscriber_history::SubscriberHistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
     FragmentInfo, Reader, ReaderCallbackLease, StatefulReader, StatelessReader, WriterProxy,
@@ -2361,6 +2362,78 @@ impl UserLogic {
 
         Ok(())
     }
+
+    // The Subscriber HistoryCaches behind these readers, each once. Readers of one Subscriber
+    // share one cache, and a reader outside GROUP access scope has none.
+    fn get_subscriber_history_caches(
+        readers: &[ReaderCallbackLease],
+    ) -> Vec<Arc<Mutex<SubscriberHistoryCache>>> {
+        let mut caches: Vec<Arc<Mutex<SubscriberHistoryCache>>> = Vec::new();
+
+        for reader in readers {
+            let Some(cache) = reader
+                .as_any()
+                .downcast_ref::<StatefulReader>()
+                .and_then(StatefulReader::subscriber_history_cache)
+            else {
+                continue;
+            };
+
+            if !caches.iter().any(|known| Arc::ptr_eq(known, cache)) {
+                caches.push(Arc::clone(cache));
+            }
+        }
+
+        caches
+    }
+
+    // Records a writer's Heartbeat group info in each Subscriber HistoryCache and commits whatever
+    // the gate releases on it.
+    fn record_heartbeat_group_info_and_flush(
+        &self,
+        subscriber_history_caches: &[Arc<Mutex<SubscriberHistoryCache>>],
+        remote_writer_guid: Guid,
+        group_info: heartbeat::GroupInfo,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in subscriber_history_caches {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+            cache.record_heartbeat_group_info(remote_writer_guid, group_info)?;
+
+            let released = cache.flush_pending_changes();
+            drop(cache);
+
+            self.get_upgraded_participant()?.commit_released_samples(released)?;
+        }
+
+        Ok(())
+    }
+
+    // Records a writer's Gap group info in each Subscriber HistoryCache and commits whatever the
+    // gate releases on it.
+    fn record_gap_group_info_and_flush(
+        &self,
+        subscriber_history_caches: &[Arc<Mutex<SubscriberHistoryCache>>],
+        remote_writer_guid: Guid,
+        group_info: gap::GroupInfo,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in subscriber_history_caches {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+            cache.record_gap_group_info(remote_writer_guid, group_info)?;
+
+            let released = cache.flush_pending_changes();
+            drop(cache);
+
+            self.get_upgraded_participant()?.commit_released_samples(released)?;
+        }
+
+        Ok(())
+    }
 }
 
 // Utilities
@@ -2823,6 +2896,8 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
+        let subscriber_history_caches = Self::get_subscriber_history_caches(&matched_readers);
+
         for reader in matched_readers {
             let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
                 continue;
@@ -2862,18 +2937,6 @@ impl UnicastMessageProcessor for UserLogic {
 
             writer_proxy.set_last_heartbeat_count(heartbeat.count);
             writer_proxy.set_last_heartbeat_at(now);
-
-            if let Some(group_info) = heartbeat.group_info {
-                debug!(
-                    "[Heartbeat] group info from {}: currentGSN {}, firstGSN {}, lastGSN {}, writerSet {}",
-                    remote_writer_guid,
-                    group_info.current_gsn.to_i64(),
-                    group_info.first_gsn.to_i64(),
-                    group_info.last_gsn.to_i64(),
-                    group_info.writer_set
-                );
-                writer_proxy.record_heartbeat_group_info(group_info);
-            }
 
             let (bitmap_base, missing_changes) =
                 writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
@@ -2987,6 +3050,16 @@ impl UnicastMessageProcessor for UserLogic {
             }
             // Reported only once the flushed samples are safely in the reader's cache.
             acknack_result?;
+        }
+
+        // Nothing else in this Heartbeat depends on the group gate, and a failure here is
+        // already logged where it is made.
+        if let Some(group_info) = heartbeat.group_info {
+            let _ = self.record_heartbeat_group_info_and_flush(
+                &subscriber_history_caches,
+                remote_writer_guid,
+                group_info,
+            );
         }
 
         Ok(())
@@ -3621,6 +3694,8 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
+        let subscriber_history_caches = Self::get_subscriber_history_caches(&matched_readers);
+
         for reader in matched_readers {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
                 // Same rule as the DATA and HEARTBEAT paths: the batch is decided under the
@@ -3640,16 +3715,6 @@ impl UnicastMessageProcessor for UserLogic {
                     .iter_mut()
                     .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
                     .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
-
-                if let Some(group_info) = gap.group_info {
-                    debug!(
-                        "[Gap] group info from {}: gapStartGSN {}, gapEndGSN {}",
-                        remote_writer_guid,
-                        group_info.gap_start_gsn.to_i64(),
-                        group_info.gap_end_gsn.to_i64()
-                    );
-                    writer_proxy.record_gap_group_info(group_info);
-                }
 
                 // Collect irrelevant changes from GAP message
                 let capacity =
@@ -3679,6 +3744,16 @@ impl UnicastMessageProcessor for UserLogic {
                     self.add_change_to_reader_cache_and_notify(stateful_reader, pending_delivery)?;
                 }
             }
+        }
+
+        // Nothing else in this Gap depends on the group gate, and a failure here is already
+        // logged where it is made.
+        if let Some(group_info) = gap.group_info {
+            let _ = self.record_gap_group_info_and_flush(
+                &subscriber_history_caches,
+                remote_writer_guid,
+                group_info,
+            );
         }
 
         Ok(())
