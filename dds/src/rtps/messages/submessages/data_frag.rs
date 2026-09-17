@@ -123,13 +123,13 @@ impl<'a> DataFrag<'a> {
         payload_len + Self::alignment_padding(payload_len as usize)
     }
 
-    /// Return the payload as `Bytes` for zero-copy sub-slicing on the receive path.
+    /// Return the received payload, borrowed from the datagram it was parsed from.
     ///
     /// Returns `None` if the payload is `Borrowed` (only happens on the send
-    /// path, where the caller would not need shared ownership anyway).
-    pub(crate) fn serialized_bytes(&self) -> Option<Bytes> {
+    /// path, which never reassembles).
+    pub(crate) fn serialized_bytes(&self) -> Option<&[u8]> {
         match &self.serialized_data {
-            SubmessagePayload::Owned(b) => Some(b.clone()),
+            SubmessagePayload::Owned(b) => Some(b.as_ref()),
             SubmessagePayload::Borrowed(_) => None,
         }
     }
@@ -368,7 +368,7 @@ impl FragmentBuffer {
 
     // Write a fragment into its place in the sample buffer. Copying here detaches
     // the receive arena, whose chunk would otherwise stay resident until delivery.
-    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: Bytes) -> bool {
+    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: &[u8]) -> bool {
         if fragment_num == 0 || fragment_num > self.total_fragments {
             return false;
         }
@@ -664,9 +664,9 @@ mod tests {
     fn test_fragment_buffer_assembles_in_fragment_order() {
         let mut buffer = three_fragment_buffer();
         // Insert out of order with distinct bytes per fragment
-        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
-        assert!(buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])));
-        assert!(buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21])));
+        assert!(buffer.copy_fragment_data(3, &[30]));
+        assert!(buffer.copy_fragment_data(1, &[10, 11]));
+        assert!(buffer.copy_fragment_data(2, &[20, 21]));
 
         assert!(buffer.all_fragments_received());
         assert_eq!(buffer.assemble(), vec![10, 11, 20, 21, 30]);
@@ -675,9 +675,9 @@ mod tests {
     #[test]
     fn test_fragment_buffer_into_bytes_in_fragment_order() {
         let mut buffer = three_fragment_buffer();
-        buffer.copy_fragment_data(3, Bytes::from_static(&[30]));
-        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
-        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+        buffer.copy_fragment_data(3, &[30]);
+        buffer.copy_fragment_data(1, &[10, 11]);
+        buffer.copy_fragment_data(2, &[20, 21]);
 
         // Fragments land at their offset, so arrival order does not matter.
         assert_eq!(&buffer.into_bytes()[..], &[10, 11, 20, 21, 30]);
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn test_fragment_buffer_zeroes_missing_slots_on_handout() {
         let mut buffer = three_fragment_buffer();
-        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+        buffer.copy_fragment_data(2, &[20, 21]);
 
         // The buffer starts uninitialized, so a missing slot must still read as zero.
         assert_eq!(&buffer.into_bytes()[..], &[0, 0, 20, 21, 0]);
@@ -695,20 +695,20 @@ mod tests {
     #[test]
     fn test_fragment_buffer_incomplete_until_all_received() {
         let mut buffer = three_fragment_buffer();
-        assert!(buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])));
+        assert!(buffer.copy_fragment_data(1, &[10, 11]));
         assert!(!buffer.all_fragments_received());
-        assert!(buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21])));
+        assert!(buffer.copy_fragment_data(2, &[20, 21]));
         assert!(!buffer.all_fragments_received());
-        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
+        assert!(buffer.copy_fragment_data(3, &[30]));
         assert!(buffer.all_fragments_received());
     }
 
     #[test]
     fn test_fragment_buffer_duplicate_does_not_complete() {
         let mut buffer = three_fragment_buffer();
-        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
-        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])); // duplicate
-        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+        buffer.copy_fragment_data(1, &[10, 11]);
+        buffer.copy_fragment_data(1, &[10, 11]); // duplicate
+        buffer.copy_fragment_data(2, &[20, 21]);
         // Only 2 distinct fragments; fragment 3 still missing
         assert!(!buffer.all_fragments_received());
     }
@@ -718,25 +718,25 @@ mod tests {
         let mut buffer = three_fragment_buffer();
         // Fragment 1 must carry a full fragment_size (2). One byte would mark the
         // slot filled and leave buf[1] zeroed, which deserializes as real data.
-        assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[10])));
+        assert!(!buffer.copy_fragment_data(1, &[10]));
         assert_eq!(buffer.received_count, 0);
         // The sample's own last fragment is legitimately short (total_size 5).
-        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
+        assert!(buffer.copy_fragment_data(3, &[30]));
         assert_eq!(buffer.received_count, 1);
     }
 
     #[test]
     fn test_fragment_buffer_rejects_out_of_range() {
         let mut buffer = three_fragment_buffer();
-        assert!(!buffer.copy_fragment_data(0, Bytes::from_static(&[0])));
-        assert!(!buffer.copy_fragment_data(4, Bytes::from_static(&[0])));
+        assert!(!buffer.copy_fragment_data(0, &[0]));
+        assert!(!buffer.copy_fragment_data(4, &[0]));
     }
 
     #[test]
     fn test_fragment_buffer_rejects_oversized() {
         let mut buffer = three_fragment_buffer();
         // fragment 1 allows at most fragment_size (2) bytes
-        assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[1, 2, 3])));
+        assert!(!buffer.copy_fragment_data(1, &[1, 2, 3]));
     }
 
     /// Build the final fragment of a sample, which is the only one whose payload is not a

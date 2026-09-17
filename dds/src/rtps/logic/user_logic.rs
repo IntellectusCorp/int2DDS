@@ -2273,6 +2273,58 @@ impl UserLogic {
         Ok(())
     }
 
+    /// Evict old reassembly buffers once the map is over its cap, sparing this sample's keys.
+    /// Called only when a DATA_FRAG opens a new buffer: `len` read-locks every shard.
+    fn evict_fragment_buffers_if_full(
+        &self,
+        writer_guid: Guid,
+        matched_readers: &[ReaderCallbackLease],
+        sn: SequenceNumber,
+    ) {
+        if self.fragment_buffers.len() <= FRAGMENT_BUFFER_LIMIT {
+            return;
+        }
+        debug!(
+            "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
+            self.fragment_buffers.len()
+        );
+        // This datagram writes one key per matched reader; excluding all of them is what stops
+        // the arriving fragment from evicting its own buffer.
+        let arriving_keys: Vec<(Guid, EntityId, SequenceNumber)> = matched_readers
+            .iter()
+            .map(|reader| (writer_guid, reader.guid().entity_id(), sn))
+            .collect();
+        for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
+            self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
+        {
+            // The bytes are gone, so the ledger must stop claiming them. The key names the
+            // one reader that lost them; every other reader's buffer is still whole.
+            let Ok(readers) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
+            else {
+                continue;
+            };
+            for reader in readers {
+                let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+                    continue;
+                };
+                let writer_proxies = stateful_reader.writer_proxies();
+                let Ok(mut matched_writers) = writer_proxies.lock() else {
+                    continue;
+                };
+                if let Some(writer_proxy) = matched_writers
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
+                {
+                    // A complete ledger means the sample was already delivered and a late
+                    // repair merely recreated the buffer. Only a stranded one is retracted.
+                    if !writer_proxy.all_fragments_received(evicted_sn) {
+                        writer_proxy.forget_fragments(evicted_sn);
+                    }
+                }
+            }
+        }
+    }
+
     /// Evicts buffers over the cap and returns the keys removed, so the caller can retract the
     /// arrival record the evicted key's reader holds. `exclude` is forwarded unchanged to
     /// `select_eviction_victims`.
@@ -3146,60 +3198,7 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
-        // DashMap is thread-safe, so no explicit lock is needed
-        //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
-        // Raised with the per-reader key: the same workload now needs one buffer per reader,
-        // and evicting an in-progress one is the very loss this key change removes.
-        // `len` read-locks every shard, so count only when this datagram opens a new buffer.
-        let opens_buffer = matched_readers.iter().any(|reader| {
-            !self.fragment_buffers.contains_key(&(
-                remote_writer_guid,
-                reader.guid().entity_id(),
-                data_frag.writer_sn,
-            ))
-        });
-        if opens_buffer && self.fragment_buffers.len() > FRAGMENT_BUFFER_LIMIT {
-            debug!(
-                "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
-                self.fragment_buffers.len()
-            );
-            // This datagram is about to write one key per matched reader below; excluding all
-            // of them is what stops the arriving fragment from evicting its own buffer.
-            let arriving_keys: Vec<(Guid, EntityId, SequenceNumber)> = matched_readers
-                .iter()
-                .map(|reader| (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn))
-                .collect();
-            for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
-                self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
-            {
-                // The bytes are gone, so the ledger must stop claiming them. The key names the
-                // one reader that lost them; every other reader's buffer is still whole.
-                let Ok(readers) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
-                else {
-                    continue;
-                };
-                for reader in readers {
-                    let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
-                    else {
-                        continue;
-                    };
-                    let writer_proxies = stateful_reader.writer_proxies();
-                    let Ok(mut matched_writers) = writer_proxies.lock() else {
-                        continue;
-                    };
-                    if let Some(writer_proxy) = matched_writers
-                        .iter_mut()
-                        .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
-                    {
-                        // A complete ledger means the sample was already delivered and a late
-                        // repair merely recreated the buffer. Only a stranded one is retracted.
-                        if !writer_proxy.all_fragments_received(evicted_sn) {
-                            writer_proxy.forget_fragments(evicted_sn);
-                        }
-                    }
-                }
-            }
-        }
+        let payload = data_frag.serialized_bytes();
 
         // The key carries the reader, so the fragments go into each matched reader's own
         // buffer. Completion is then single-reader: a buffer belongs to exactly one.
@@ -3210,11 +3209,26 @@ impl UnicastMessageProcessor for UserLogic {
             // its payload holds, and the ledger drives NACK_FRAG.
             let mut accepted: Vec<u32> = Vec::new();
 
-            // Copy fragment data using DashMap entry API
-            {
-                let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
-                    FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
-                });
+            // One map lookup per reader, plus `remove` on completion. Only a DATA_FRAG that opens
+            // a buffer pays for the cap check, since `len` read-locks every shard.
+            let (total_fragments, complete) = {
+                let mut buffer = match self.fragment_buffers.get_mut(&key) {
+                    Some(buffer) => buffer,
+                    None => {
+                        self.evict_fragment_buffers_if_full(
+                            remote_writer_guid,
+                            &matched_readers,
+                            data_frag.writer_sn,
+                        );
+                        self.fragment_buffers.entry(key).or_insert_with(|| {
+                            FragmentBuffer::new(
+                                data_frag.writer_sn,
+                                total_size,
+                                data_frag.fragment_size,
+                            )
+                        })
+                    }
+                };
 
                 if buffer.source_timestamp.is_none() {
                     // timestamp does not be set in buffer.source_timestmap yet
@@ -3223,9 +3237,9 @@ impl UnicastMessageProcessor for UserLogic {
                     }
                 }
 
-                // Zero-copy: per-fragment slices are refcount bumps on the socket buffer, so
-                // fanning the write out across readers costs slot arrays, not payload copies.
-                if let Some(serialized_bytes) = data_frag.serialized_bytes() {
+                // Fragments are copied straight out of the datagram; a per-fragment `Bytes::slice`
+                // would only add a refcount round trip.
+                if let Some(serialized_bytes) = payload {
                     let frag_size = data_frag.fragment_size as usize;
                     let total_len = serialized_bytes.len();
                     for i in 0..data_frag.fragments_in_submessage {
@@ -3239,57 +3253,44 @@ impl UnicastMessageProcessor for UserLogic {
                         let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
                         if buffer.copy_fragment_data(
                             fragment_num,
-                            serialized_bytes.slice(frag_data_start..frag_data_end),
+                            &serialized_bytes[frag_data_start..frag_data_end],
                         ) {
                             accepted.push(fragment_num);
                         }
                     }
                 }
-            } // buffer RefMut is automatically dropped here
+                (buffer.total_fragments, buffer.all_fragments_received())
+            }; // buffer RefMut is dropped here, releasing its shard
 
             // Update this reader's ChangeFromWriter state from the buffer that just took them.
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                // Query buffer information from DashMap again
-                if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-                    let total_fragments = buffer_ref.total_fragments;
-                    drop(buffer_ref);
+                let writer_proxies = stateful_reader.writer_proxies();
+                let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        format!("Failed to acquire writer_proxies lock: {}", e),
+                    )
+                })?;
 
-                    let writer_proxies = stateful_reader.writer_proxies();
-                    let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to acquire writer_proxies lock: {}", e),
-                        )
-                    })?;
-
-                    if let Some(writer_proxy) = matched_writers
-                        .iter_mut()
-                        .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                    {
-                        // Update fragment information with what the buffer took
-                        writer_proxy.mark_frag_received(
-                            data_frag.writer_sn,
-                            total_fragments,
-                            accepted.iter().copied(),
-                        );
-                    }
+                if let Some(writer_proxy) = matched_writers
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                {
+                    // Update fragment information with what the buffer took
+                    writer_proxy.mark_frag_received(
+                        data_frag.writer_sn,
+                        total_fragments,
+                        accepted.iter().copied(),
+                    );
                 }
             }
 
-            // Check if all fragments have been received and process
-            let Some(buffer_ref) = self.fragment_buffers.get(&key) else {
-                continue;
-            };
-            if !buffer_ref.all_fragments_received() {
+            if !complete {
                 continue;
             }
-            let total_fragments = buffer_ref.total_fragments;
             // complete here; delivery FragmentInfo's set is unused when is_complete
             let received_fragments: std::collections::HashSet<u32> =
                 std::collections::HashSet::new();
-
-            // Drop buffer_ref to release DashMap lock
-            drop(buffer_ref);
 
             // Move payload from buffer without cloning
             let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
@@ -4568,10 +4569,7 @@ mod tests {
             let mut buffer =
                 FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
             for fragment in 1..=4u32 {
-                buffer.copy_fragment_data(
-                    fragment,
-                    bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
-                );
+                buffer.copy_fragment_data(fragment, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
             }
             assert!(buffer.all_fragments_received(), "filler buffers must not be eviction bait");
             user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
@@ -4854,6 +4852,82 @@ mod tests {
         );
     }
 
+    /// Over the cap, a burst addressed to both readers opens one buffer per reader and runs
+    /// the cap check before each. The second check must not evict the first reader's new buffer.
+    #[test]
+    fn a_fan_out_over_the_cap_keeps_every_buffer_it_opens() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
+
+        fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8 + 1);
+        assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            1,
+            vec![1, 1, 1, 1],
+        );
+
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)));
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_b_id, sn)));
+        assert_eq!(
+            user_logic.fragment_buffers.len(),
+            FRAGMENT_BUFFER_LIMIT + 1,
+            "each opened buffer must be paid for by evicting one filler"
+        );
+        assert_eq!(ledger_missing(&reader_a, writer_guid, sn), vec![2, 3, 4]);
+        assert_eq!(ledger_missing(&reader_b, writer_guid, sn), vec![2, 3, 4]);
+    }
+
+    /// Only a DATA_FRAG that opens a buffer runs the cap check, so one that continues an
+    /// existing buffer leaves an over-cap map as it is.
+    #[test]
+    fn continuing_a_buffer_over_the_cap_evicts_nothing() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            1,
+            1,
+            vec![1, 1, 1, 1],
+        );
+        fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8);
+        assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            2,
+            1,
+            vec![2, 2, 2, 2],
+        );
+
+        assert_eq!(
+            user_logic.fragment_buffers.len(),
+            FRAGMENT_BUFFER_LIMIT + 1,
+            "a continuing fragment must not evict"
+        );
+        assert_eq!(ledger_missing(&reader_a, writer_guid, sn), vec![3, 4]);
+    }
+
     #[test]
     fn evicting_one_readers_buffer_leaves_the_other_readers_ledger_alone() {
         let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
@@ -5081,10 +5155,7 @@ mod tests {
             let sn = SequenceNumber::new(0, 1);
             let mut buffer =
                 FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
-            buffer.copy_fragment_data(
-                1,
-                bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
-            );
+            buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
             user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
         }
 
@@ -5123,10 +5194,7 @@ mod tests {
                 let key = (writer_guid, reader_id, sn);
                 let mut buffer =
                     FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
-                buffer.copy_fragment_data(
-                    1,
-                    bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
-                );
+                buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
                 buffers.insert(key, buffer);
                 key
             })
