@@ -3,16 +3,6 @@ run-name: "Interop test ${{ github.head_ref }}"
 on:
   workflow_dispatch:
     inputs:
-      range_start:
-        description: "Start at this test case, e.g. Test_Domain_1 (blank = beginning)"
-        required: false
-        type: string
-        default: ""
-      range_end:
-        description: "Stop after this test case, e.g. Test_OrderedAccess_17 (blank = end)"
-        required: false
-        type: string
-        default: ""
       enable_int2dds_logging:
         description: "Enable int2DDS logging"
         required: false
@@ -46,6 +36,16 @@ on:
           - subscriber
           - both
         default: "both"
+      range_start:
+        description: "Start at this test case, e.g. Test_Domain_1 (blank = beginning)"
+        required: false
+        type: string
+        default: ""
+      range_end:
+        description: "Stop after this test case, e.g. Test_OrderedAccess_17 (blank = end)"
+        required: false
+        type: string
+        default: ""
   pull_request:
     branches: [develop, main]
     types: [opened, synchronize, reopened, ready_for_review]
