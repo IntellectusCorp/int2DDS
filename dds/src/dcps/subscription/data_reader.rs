@@ -1425,19 +1425,43 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // are sitting in the cache. `handle_liveliness_changed_status` uses this same order.
         self.set_read_communication_status(true)?;
 
-        // Listener
-        if let Some(listener) = self.get_listener()? {
-            listener.on_data_available(self);
-        }
         let subscriber = self.subscriber_arc()?;
-        if let Some(listener) = subscriber.get_listener()? {
-            listener.on_data_available(self);
-            listener.on_data_on_readers(&subscriber);
-        }
         let participant = subscriber.participant_arc()?;
-        if let Some(listener) = participant.get_listener()? {
-            listener.on_data_available(self);
-            listener.on_data_on_readers(&subscriber);
+
+        // on_data_on_readers is tried first and on_data_available runs only when none was
+        // called. Within each of the two, the most specific enabled listener wins.
+        if subscriber.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
+            if let Some(listener) = subscriber.get_listener()? {
+                listener.on_data_on_readers(&subscriber);
+                return Ok(());
+            }
+        }
+
+        if participant.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
+            if let Some(listener) = participant.get_listener()? {
+                listener.on_data_on_readers(&subscriber);
+                return Ok(());
+            }
+        }
+
+        if self.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = self.get_listener()? {
+                listener.on_data_available(self);
+                return Ok(());
+            }
+        }
+
+        if subscriber.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = subscriber.get_listener()? {
+                listener.on_data_available(self);
+                return Ok(());
+            }
+        }
+
+        if participant.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = participant.get_listener()? {
+                listener.on_data_available(self);
+            }
         }
 
         Ok(())
@@ -4117,9 +4141,8 @@ pub(crate) mod tests {
     /// `test_take_next_instance_surfaces_no_writers_after_writer_deleted`.
     ///
     /// The mask is what separates the two mechanisms: the listener takes data notifications, the
-    /// WaitSet takes everything else. Note that `handle_data_available_status` invokes the listener
-    /// without consulting the mask, so DATA_AVAILABLE is named here for intent rather than because
-    /// omitting it would silence the counter.
+    /// WaitSet takes everything else. DATA_AVAILABLE has to be named here, since
+    /// `handle_data_available_status` skips a listener whose mask leaves it out.
     const DATA_ONLY_LISTENER_MASK: StatusMask = StatusMask::DATA_AVAILABLE;
 
     struct SubListener {
