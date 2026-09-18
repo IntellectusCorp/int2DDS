@@ -17,7 +17,8 @@
 
 use std::{
     any::TypeId,
-    collections::HashMap,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
     fmt::Debug,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -1051,6 +1052,11 @@ impl Subscriber {
             return Ok(());
         }
 
+        // Inside on_data_on_readers the access block is neither needed nor tracked.
+        if is_inside_on_data_on_readers(self.guid) {
+            return Ok(());
+        }
+
         // Nested calls only deepen the current block. A new block starts at depth 0 -> 1.
         self.access_depth.fetch_add(1, Ordering::AcqRel);
 
@@ -1067,6 +1073,11 @@ impl Subscriber {
         */
         let _operation = self.lifecycle.begin_operation()?;
         if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
+            return Ok(());
+        }
+
+        // Inside on_data_on_readers the access block is neither needed nor tracked.
+        if is_inside_on_data_on_readers(self.guid) {
             return Ok(());
         }
 
@@ -1148,6 +1159,24 @@ impl Subscriber {
             .get_or_init(|| Arc::new(Mutex::new(SubscriberHistoryCache::new(remote_publications))));
 
         Ok(Some(Arc::clone(cache)))
+    }
+
+    // Under GROUP access scope the sample access operations need an open begin_access block.
+    // Inside this Subscriber's on_data_on_readers they are exempt.
+    pub(crate) fn check_group_access_block_open(&self) -> DdsResult<()> {
+        if self.qos.load().presentation.access_scope != PresentationQosAccessScopeKind::Group {
+            return Ok(());
+        }
+
+        if is_inside_on_data_on_readers(self.guid) {
+            return Ok(());
+        }
+
+        if self.access_depth.load(Ordering::Acquire) > 0 {
+            return Ok(());
+        }
+
+        Err(DdsError::PreconditionNotMet)
     }
 
     /// PRESENTATION ordered_access at topic scope, same reasoning. Read on every `read`/`take`.
@@ -1394,6 +1423,40 @@ impl Subscriber {
         self.self_ref = None;
         self.lifecycle.mark_deleted_and_await_operation_completion();
     }
+}
+
+thread_local! {
+    // Subscribers whose on_data_on_readers callback is running on this thread.
+    static SUBSCRIBERS_IN_ON_DATA_ON_READERS: RefCell<HashSet<Guid>> = RefCell::new(HashSet::new());
+}
+
+// Marks a Subscriber for as long as its on_data_on_readers callback runs on this thread.
+pub(crate) struct OnDataOnReadersGuard {
+    subscriber_guid: Guid,
+}
+
+impl OnDataOnReadersGuard {
+    pub(crate) fn new(subscriber_guid: Guid) -> Self {
+        let _ = SUBSCRIBERS_IN_ON_DATA_ON_READERS.try_with(|subscribers| {
+            subscribers.borrow_mut().insert(subscriber_guid);
+        });
+
+        Self { subscriber_guid }
+    }
+}
+
+impl Drop for OnDataOnReadersGuard {
+    fn drop(&mut self) {
+        let _ = SUBSCRIBERS_IN_ON_DATA_ON_READERS.try_with(|subscribers| {
+            subscribers.borrow_mut().remove(&self.subscriber_guid);
+        });
+    }
+}
+
+fn is_inside_on_data_on_readers(subscriber_guid: Guid) -> bool {
+    SUBSCRIBERS_IN_ON_DATA_ON_READERS
+        .try_with(|subscribers| subscribers.borrow().contains(&subscriber_guid))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -2083,6 +2146,59 @@ mod tests {
         subscriber.begin_access().unwrap();
         subscriber.end_access().unwrap();
         subscriber.end_access().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+    #[test]
+    fn test_take_needs_an_open_access_block_under_group_access_scope() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "HelloWorld",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let take_any = || {
+            reader.take(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
+
+        assert!(matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+
+        subscriber.begin_access().unwrap();
+        assert!(!matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+        subscriber.end_access().unwrap();
+
+        assert!(matches!(take_any(), Err(DdsError::PreconditionNotMet)));
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
