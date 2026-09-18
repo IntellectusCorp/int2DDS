@@ -2260,14 +2260,37 @@ mod tests {
                 &[InstanceStateKind::ANY_INSTANCE_STATE],
             )
         };
+        let read_any = || {
+            reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
+        // The serialized variants run through their own funnel and need the same check.
+        let take_any_serialized = || {
+            reader.take_serialized(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
 
         assert!(matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(read_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(take_any_serialized(), Err(DdsError::PreconditionNotMet)));
 
         subscriber.begin_access().unwrap();
         assert!(!matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(!matches!(read_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(!matches!(take_any_serialized(), Err(DdsError::PreconditionNotMet)));
         subscriber.end_access().unwrap();
 
         assert!(matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(read_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(take_any_serialized(), Err(DdsError::PreconditionNotMet)));
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();

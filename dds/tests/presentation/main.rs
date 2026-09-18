@@ -4,4 +4,5 @@
 mod common;
 
 mod coherent_access;
+mod group_access;
 mod ordered_access;
