@@ -641,9 +641,9 @@ fn parse_port_env(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_disable_preemptive, get_multicast_ttl_override, get_nack_frag_max_retries_override,
-        get_nack_frag_response_delay_ms_override, get_nack_frag_retry_ms_override,
-        get_enable_send_window, get_nack_response_delay_ms_override,
+        get_disable_preemptive, get_enable_send_window, get_multicast_ttl_override,
+        get_nack_frag_max_retries_override, get_nack_frag_response_delay_ms_override,
+        get_nack_frag_retry_ms_override, get_nack_response_delay_ms_override,
         get_send_credit_backstop_ms_override, set_disable_preemptive, set_enable_send_window,
         set_multicast_ttl, set_nack_frag_max_retries, set_nack_frag_response_delay_ms,
         set_nack_frag_retry_ms, set_nack_response_delay_ms, set_send_credit_backstop_ms,
