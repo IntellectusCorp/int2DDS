@@ -45,7 +45,7 @@ use super::{
     query_condition::QueryCondition,
     read_condition::ReadCondition,
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
-    subscriber::Subscriber,
+    subscriber::{OnDataOnReadersGuard, Subscriber},
 };
 use crate::{
     common::{
@@ -1432,6 +1432,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // called. Within each of the two, the most specific enabled listener wins.
         if subscriber.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
             if let Some(listener) = subscriber.get_listener()? {
+                let _marker = OnDataOnReadersGuard::new(subscriber.guid());
                 listener.on_data_on_readers(&subscriber);
                 return Ok(());
             }
@@ -1439,6 +1440,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
         if participant.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
             if let Some(listener) = participant.get_listener()? {
+                let _marker = OnDataOnReadersGuard::new(subscriber.guid());
                 listener.on_data_on_readers(&subscriber);
                 return Ok(());
             }
@@ -2843,6 +2845,10 @@ impl<Foo: DdsType> DataReader<Foo> {
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
+        if let Ok(subscriber) = self.subscriber_arc() {
+            subscriber.check_group_access_block_open()?;
+        }
+
         if max_samples == 0 {
             return Err(DdsError::BadParameter);
         }
@@ -3001,6 +3007,10 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
+
+        if let Ok(subscriber) = self.subscriber_arc() {
+            subscriber.check_group_access_block_open()?;
+        }
 
         if max_samples == 0 {
             log::warn!("BadParameter: max_samples={}", max_samples);
