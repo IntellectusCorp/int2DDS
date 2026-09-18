@@ -785,13 +785,12 @@ impl Subscriber {
         Ok(())
     }
 
-    // TODO
     pub fn get_datareaders(
         &self,
-        _sample_states: &[SampleStateKind],
-        _view_states: &[ViewStateKind],
-        _instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<Box<dyn DataReaderBase<Qos = DataReaderQos> + Send>>> {
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Arc<dyn DataReaderBase<Qos = DataReaderQos>>>> {
         /*
             This operation allows the application to access DataReader objects that contain samples with specified sample_states, view_states, and instance_states.
             If the PRESENTATION QoS policy of the Subscriber to which the DataReader belongs has access_scope set to 'GROUP', this operation must only be called within a begin_access / end_access block.
@@ -804,7 +803,58 @@ impl Subscriber {
             The pattern that the application should use when accessing data is described in detail in section 2.2.2.5.1 "Access to the data".
         */
         let _operation = self.lifecycle.begin_operation()?;
-        Err(DdsError::Unsupported)
+        self.check_group_access_block_open()?;
+
+        let readers = self.get_datareaders_internal()?;
+        let qos = self.qos.load();
+        let is_group_ordered = qos.presentation.access_scope
+            == PresentationQosAccessScopeKind::Group
+            && qos.presentation.ordered_access;
+
+        // GROUP ordered_access outside a listener returns a list, one entry per matching sample.
+        if is_group_ordered && !is_inside_on_data_on_readers(self.guid) {
+            let mut readers_by_group_seq_num = Vec::new();
+
+            for reader in readers.iter() {
+                for group_seq_num in reader.get_group_seq_nums_of_matching_samples(
+                    sample_states,
+                    view_states,
+                    instance_states,
+                )? {
+                    readers_by_group_seq_num.push((group_seq_num, Arc::clone(reader)));
+                }
+            }
+
+            // Stable, so samples that share a group sequence number keep their relative order.
+            readers_by_group_seq_num
+                .sort_by_key(|(group_seq_num, _)| (group_seq_num.is_none(), *group_seq_num));
+
+            return Ok(readers_by_group_seq_num
+                .into_iter()
+                .map(|(_, reader)| reader as Arc<dyn DataReaderBase<Qos = DataReaderQos>>)
+                .collect());
+        }
+
+        // Everything else, coherent_access alone and inside on_data_on_readers included,
+        // returns a set holding each reader at most once.
+        let mut readers_with_samples = Vec::new();
+
+        for reader in readers.iter() {
+            let has_matching_sample = !reader
+                .get_group_seq_nums_of_matching_samples(
+                    sample_states,
+                    view_states,
+                    instance_states,
+                )?
+                .is_empty();
+
+            if has_matching_sample {
+                readers_with_samples
+                    .push(Arc::clone(reader) as Arc<dyn DataReaderBase<Qos = DataReaderQos>>);
+            }
+        }
+
+        Ok(readers_with_samples)
     }
 
     pub fn get_data_readers(&self) -> DdsResult<Vec<Arc<dyn DataReaderBase<Qos = DataReaderQos>>>> {
@@ -2199,6 +2249,60 @@ mod tests {
         subscriber.end_access().unwrap();
 
         assert!(matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_get_datareaders_needs_an_open_access_block_under_group_access_scope() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "HelloWorld",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let get_datareaders = || {
+            subscriber.get_datareaders(
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
+
+        assert!(matches!(get_datareaders(), Err(DdsError::PreconditionNotMet)));
+
+        subscriber.begin_access().unwrap();
+        // No samples have arrived, so no reader is reported either way.
+        assert!(get_datareaders().unwrap().is_empty());
+        subscriber.end_access().unwrap();
+
+        assert!(matches!(get_datareaders(), Err(DdsError::PreconditionNotMet)));
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
