@@ -806,13 +806,9 @@ impl Subscriber {
         self.check_group_access_block_open()?;
 
         let readers = self.get_datareaders_internal()?;
-        let qos = self.qos.load();
-        let is_group_ordered = qos.presentation.access_scope
-            == PresentationQosAccessScopeKind::Group
-            && qos.presentation.ordered_access;
 
         // GROUP ordered_access outside a listener returns a list, one entry per matching sample.
-        if is_group_ordered && !is_inside_on_data_on_readers(self.guid) {
+        if self.is_group_order_enforced()? {
             let mut readers_by_group_seq_num = Vec::new();
 
             for reader in readers.iter() {
@@ -1227,6 +1223,20 @@ impl Subscriber {
         }
 
         Err(DdsError::PreconditionNotMet)
+    }
+
+    // PRESENTATION ordered_access at group scope.
+    pub(crate) fn presentation_group_ordered(&self) -> DdsResult<bool> {
+        let qos = self.qos.load();
+
+        Ok(qos.presentation.ordered_access
+            && qos.presentation.access_scope == PresentationQosAccessScopeKind::Group)
+    }
+
+    // Whether the caller has to access samples in group order. Inside on_data_on_readers the
+    // application is free to read in any order, so the group order is not enforced there.
+    pub(crate) fn is_group_order_enforced(&self) -> DdsResult<bool> {
+        Ok(self.presentation_group_ordered()? && !is_inside_on_data_on_readers(self.guid))
     }
 
     /// PRESENTATION ordered_access at topic scope, same reasoning. Read on every `read`/`take`.

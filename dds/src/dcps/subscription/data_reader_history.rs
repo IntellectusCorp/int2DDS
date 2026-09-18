@@ -719,6 +719,24 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             .unwrap_or_default()
     }
 
+    // GROUP ordered_access: flatten the per-instance buckets into one list sorted by group
+    // sequence number, the order the samples were published in. Samples without one go last.
+    pub(crate) fn get_changes_for_group_scoped_ordered_access(&self) -> Vec<Arc<CacheChange>> {
+        self.instance_map
+            .lock()
+            .map(|map| {
+                let mut changes: Vec<Arc<CacheChange>> = map.values().flatten().cloned().collect();
+
+                changes.sort_by_key(|change| {
+                    let group_seq_num = change.presentation_info().group_seq_num;
+                    (group_seq_num.is_none(), group_seq_num)
+                });
+
+                changes
+            })
+            .unwrap_or_default()
+    }
+
     // Must be called immediately after DataReaderHistoryCache creation.
     pub(crate) fn set_datareader(&mut self, data_reader: Weak<DataReader<Foo>>) {
         self.data_reader = data_reader;
