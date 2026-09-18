@@ -137,13 +137,22 @@ pub trait DataReaderBase: DomainEntity + Send + Any {
     fn get_topicdescription(&self) -> DdsResult<Arc<dyn TopicDescription>>;
     fn get_subscriber(&self) -> DdsResult<Subscriber>;
     fn delete_contained_entities(&self) -> DdsResult<()>;
+    // Entry point for downcasting a trait object back to its `DataReader<Foo>`.
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub(crate) trait DataReaderInternal: DataReaderBase {
     fn disable(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataReaderBase<Qos = DataReaderQos> + Send>;
-    fn as_any(&self) -> &dyn Any;
     fn notify_data_available(&self);
+    // Group sequence number of every cached sample that matches the three state masks.
+    // None for a sample that carries no group sequence number.
+    fn get_group_seq_nums_of_matching_samples(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Option<SequenceNumber>>>;
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn mark_deleted_and_await_operation_completion(&self);
@@ -3845,6 +3854,10 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
         }
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
@@ -3856,8 +3869,37 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         Box::new(self.clone())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn get_group_seq_nums_of_matching_samples(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Option<SequenceNumber>>> {
+        let changes = self.get_available_changes()?;
+        let instance_infos = self.get_instance_infos()?;
+
+        let mut group_seq_nums = Vec::new();
+
+        for change in changes.iter() {
+            let sample_state =
+                self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
+
+            let (view_state, instance_state) = match instance_infos.get(&change.instance_handle()) {
+                Some(info) => (info.view_state, info.instance_state),
+                None => (ViewStateKind::NEW_VIEW_STATE, InstanceStateKind::ALIVE_INSTANCE_STATE),
+            };
+
+            if !sample_states.matches(sample_state)
+                || !view_states.matches(view_state)
+                || !instance_states.matches(instance_state)
+            {
+                continue;
+            }
+
+            group_seq_nums.push(change.presentation_info().group_seq_num);
+        }
+
+        Ok(group_seq_nums)
     }
 
     fn notify_data_available(&self) {
