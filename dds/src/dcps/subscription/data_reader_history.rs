@@ -720,17 +720,14 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     }
 
     // GROUP ordered_access: flatten the per-instance buckets into one list sorted by group
-    // sequence number, the order the samples were published in. Samples without one go last.
+    // sequence number, the order the samples were published in.
     pub(crate) fn get_changes_for_group_scoped_ordered_access(&self) -> Vec<Arc<CacheChange>> {
         self.instance_map
             .lock()
             .map(|map| {
                 let mut changes: Vec<Arc<CacheChange>> = map.values().flatten().cloned().collect();
 
-                changes.sort_by_key(|change| {
-                    let group_seq_num = change.presentation_info().group_seq_num;
-                    (group_seq_num.is_none(), group_seq_num)
-                });
+                changes.sort_by_key(|change| change.presentation_info().group_seq_num);
 
                 changes
             })
@@ -1871,6 +1868,52 @@ mod tests {
             .map(|c| c.sequence_number().to_i64())
             .collect();
         assert_eq!(merged, vec![1, 2, 3, 4]);
+
+        drop(datareader_cache);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn group_ordered_reorders_instances_by_group_sequence_number() {
+        // Two instances A,B whose samples interleave in group order. get_changes() returns
+        // instance blocks, get_changes_for_group_scoped_ordered_access() sorts the buckets by
+        // group sequence number.
+        let mut reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        };
+        reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
+
+        let (participant, data_reader) = create_with_key_datareader(reader_qos);
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        let mut datareader_cache = datareader_cache.lock().unwrap();
+
+        let a = InstanceHandle::new([1; 16]);
+        let b = InstanceHandle::new([2; 16]);
+        for (seq, handle, group_seq_num) in [(1, a, 3), (2, b, 1), (3, a, 4), (4, b, 2)] {
+            let mut change =
+                create_change_with_key_src(seq, handle, RtpsTime::from_nanos(seq as u64 * 10));
+            change.set_presentation_info(PresentationInfo {
+                group_seq_num: Some(SequenceNumber::from_i64(group_seq_num)),
+                ..Default::default()
+            });
+
+            datareader_cache.add_change_with_cleanup(Arc::new(change), false).unwrap();
+        }
+
+        // INSTANCE scope: bucket A (seq 1,3) then bucket B (seq 2,4).
+        let blocks: Vec<i64> =
+            datareader_cache.get_changes().iter().map(|c| c.sequence_number().to_i64()).collect();
+        assert_eq!(blocks, vec![1, 3, 2, 4]);
+
+        // GROUP+ordered: group sequence number order across buckets.
+        let ordered: Vec<i64> = datareader_cache
+            .get_changes_for_group_scoped_ordered_access()
+            .iter()
+            .map(|c| c.sequence_number().to_i64())
+            .collect();
+        assert_eq!(ordered, vec![2, 4, 1, 3]);
 
         drop(datareader_cache);
         participant.delete_contained_entities().unwrap();
