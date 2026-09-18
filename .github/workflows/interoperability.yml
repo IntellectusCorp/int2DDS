@@ -51,7 +51,7 @@ jobs:
           repository: IntellectusCorp/int2DDS-shapes-demo
           token: ${{ secrets.ORG_PAT }}
           path: shapes-demo
-          ref: ${{ inputs.enable_int2dds_logging && 'log' || 'main' }}
+          ref: ${{ inputs.enable_int2dds_logging && 'log' || 'presentation' }}
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
