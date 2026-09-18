@@ -20,7 +20,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, OnceLock, RwLock, Weak,
     },
 };
@@ -106,6 +106,8 @@ pub struct Subscriber {
     participant: Option<Weak<DomainParticipant>>,
     // Present only under GROUP access scope. Shared with every reader of this Subscriber.
     subscriber_history_cache: Arc<OnceLock<Arc<Mutex<SubscriberHistoryCache>>>>,
+    // Nesting depth of begin/end_access. The access block is open while non-zero.
+    access_depth: Arc<AtomicU32>,
 }
 
 impl Debug for Subscriber {
@@ -209,6 +211,7 @@ impl Subscriber {
             default_datareader_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
             subscriber_history_cache: Arc::new(OnceLock::new()),
+            access_depth: Arc::new(AtomicU32::new(0)),
         };
         let subscriber_arc = Arc::new(subscriber.clone());
         let weak_ref = Arc::downgrade(&subscriber_arc);
@@ -1031,7 +1034,6 @@ impl Subscriber {
         Ok(())
     }
 
-    // TODO
     pub fn begin_access(&self) -> DdsResult<()> {
         /*
             This operation notifies the Service that the application is about to access data samples in one or more DataReader objects attached to the Subscriber.
@@ -1048,10 +1050,13 @@ impl Subscriber {
         if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
-        Err(DdsError::Unsupported)
+
+        // Nested calls only deepen the current block. A new block starts at depth 0 -> 1.
+        self.access_depth.fetch_add(1, Ordering::AcqRel);
+
+        Ok(())
     }
 
-    // TODO
     pub fn end_access(&self) -> DdsResult<()> {
         /*
             This operation indicates that the application has completed accessing data samples from DataReader objects managed by the Subscriber.
@@ -1064,7 +1069,16 @@ impl Subscriber {
         if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
-        Err(DdsError::Unsupported)
+
+        // fetch_update returns the pre-decrement depth. checked_sub refuses to go below zero.
+        match self
+            .access_depth
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| depth.checked_sub(1))
+        {
+            // Depth was 0: no matching begin_access.
+            Err(_) => Err(DdsError::PreconditionNotMet),
+            Ok(_) => Ok(()),
+        }
     }
 
     pub fn notify_datareaders(&self) -> DdsResult<()> {
@@ -2007,6 +2021,68 @@ mod tests {
         subscriber.delete_contained_entities().unwrap();
 
         assert!(subscriber.get_data_readers().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    fn group_access_subscriber_qos() -> SubscriberQos {
+        SubscriberQos {
+            presentation: crate::infrastructure::qos_policy::PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ordered_access: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_begin_access_nests_and_unmatched_end_access_fails() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+
+        subscriber.begin_access().unwrap();
+        subscriber.begin_access().unwrap();
+        subscriber.end_access().unwrap();
+        subscriber.end_access().unwrap();
+
+        assert_eq!(subscriber.end_access(), Err(DdsError::PreconditionNotMet));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_unmatched_end_access_is_no_op_outside_group_access_scope() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        subscriber.begin_access().unwrap();
+        subscriber.end_access().unwrap();
+        subscriber.end_access().unwrap();
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
