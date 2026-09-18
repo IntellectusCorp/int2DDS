@@ -822,8 +822,7 @@ impl Subscriber {
             }
 
             // Stable, so samples that share a group sequence number keep their relative order.
-            readers_by_group_seq_num
-                .sort_by_key(|(group_seq_num, _)| (group_seq_num.is_none(), *group_seq_num));
+            readers_by_group_seq_num.sort_by_key(|(group_seq_num, _)| *group_seq_num);
 
             return Ok(readers_by_group_seq_num
                 .into_iter()
@@ -1525,7 +1524,16 @@ mod tests {
 
     use super::*;
     use crate::{
+        core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+        infrastructure::{
+            qos_policy::{
+                HistoryQosPolicy, HistoryQosPolicyKind, PresentationQosPolicy,
+                ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+            },
+            wait_set::WaitSet,
+        },
+        publication::qos::{DataWriterQos, PublisherQos},
         subscription::{
             qos::{DataReaderQos, SubscriberQos},
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
@@ -2210,6 +2218,7 @@ mod tests {
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
     }
+
     #[test]
     fn test_take_needs_an_open_access_block_under_group_access_scope() {
         let factory = DomainParticipantFactory::get_instance();
@@ -2313,6 +2322,289 @@ mod tests {
         subscriber.end_access().unwrap();
 
         assert!(matches!(get_datareaders(), Err(DdsError::PreconditionNotMet)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    fn group_access_unordered_subscriber_qos() -> SubscriberQos {
+        SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ordered_access: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn group_access_publisher_qos() -> PublisherQos {
+        PublisherQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ordered_access: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn reliable_keep_all_writer_qos() -> DataWriterQos {
+        DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn reliable_keep_all_reader_qos() -> DataReaderQos {
+        DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn wait_for_match(writer_condition: StatusCondition<DataWriterQos>) {
+        let wait_set = WaitSet::new();
+        writer_condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(writer_condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("timed out waiting for the reader");
+        wait_set.detach_condition(writer_condition).unwrap();
+    }
+
+    #[test]
+    fn test_group_ordered_access_lists_a_reader_once_per_sample_and_takes_one() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "GroupOrderedList",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(group_access_publisher_qos(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        wait_for_match(writer.get_statuscondition().unwrap().clone());
+
+        for index in 0..2 {
+            writer
+                .write(&HelloWorld { index, message: "sample".to_string() }, InstanceHandle::NIL)
+                .unwrap();
+        }
+
+        subscriber.begin_access().unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let entries = loop {
+            let entries = subscriber
+                .get_datareaders(
+                    &[SampleStateKind::ANY_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                )
+                .unwrap();
+
+            if entries.len() == 2 {
+                break entries;
+            }
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for both samples, the list held {} entries",
+                entries.len()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+
+        // One reader holding two samples is named twice.
+        assert_eq!(entries.len(), 2);
+
+        // max_samples is 10, but group ordered access hands out one sample.
+        let first = reader
+            .take(
+                10,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].data().unwrap().index, 0);
+
+        let second = reader
+            .take(
+                10,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].data().unwrap().index, 1);
+
+        let remaining = subscriber
+            .get_datareaders(
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert!(remaining.is_empty());
+
+        subscriber.end_access().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_group_access_without_ordered_access_names_each_reader_once() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "GroupUnorderedSet",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(group_access_publisher_qos(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(group_access_unordered_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        wait_for_match(writer.get_statuscondition().unwrap().clone());
+
+        for index in 0..2 {
+            writer
+                .write(&HelloWorld { index, message: "sample".to_string() }, InstanceHandle::NIL)
+                .unwrap();
+        }
+
+        subscriber.begin_access().unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        // Wait for both samples to arrive
+        loop {
+            let delivered = reader
+                .read(
+                    10,
+                    &[SampleStateKind::ANY_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                )
+                .map(|samples| samples.len())
+                .unwrap_or(0);
+
+            if delivered == 2 {
+                break;
+            }
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for both samples, the reader held {}",
+                delivered
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Two samples in one reader, but without ordered_access the reader is named once.
+        let entries = subscriber
+            .get_datareaders(
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+
+        // Without ordered_access the single sample limit does not apply.
+        let taken = reader
+            .take(
+                10,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+
+        subscriber.end_access().unwrap();
+
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken[0].data().unwrap().index, 0);
+        assert_eq!(taken[1].data().unwrap().index, 1);
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();

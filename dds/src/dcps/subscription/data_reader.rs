@@ -4052,6 +4052,7 @@ pub(crate) mod tests {
     use crate::subscription::subscriber_listener::SubscriberListener;
     use crate::test_utils::unique_domain_id;
     use crate::topic::qos::TopicQos;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{sync_channel, SyncSender};
     use std::sync::Arc;
 
@@ -7310,5 +7311,164 @@ pub(crate) mod tests {
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
+    }
+
+    struct CountingSubscriberListener {
+        on_data_on_readers_count: Arc<AtomicUsize>,
+        does_notify_datareaders: bool,
+    }
+
+    impl SubscriberListener for CountingSubscriberListener {
+        fn on_data_on_readers(&self, subscriber: &Subscriber) {
+            self.on_data_on_readers_count.fetch_add(1, Ordering::AcqRel);
+
+            if self.does_notify_datareaders {
+                subscriber.notify_datareaders().unwrap();
+            }
+        }
+    }
+
+    struct CountingReaderListener {
+        on_data_available_count: Arc<AtomicUsize>,
+    }
+
+    impl DataReaderListener for CountingReaderListener {
+        type Foo = HelloWorld;
+
+        fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+            self.on_data_available_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    // Writes one sample to a Subscriber and a DataReader that both count their data callbacks.
+    fn count_data_callbacks_of_one_sample(
+        topic_name: &str,
+        does_notify_datareaders: bool,
+    ) -> (usize, usize) {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                topic_name,
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_keep_all_writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos,
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let on_data_on_readers_count = Arc::new(AtomicUsize::new(0));
+        let on_data_available_count = Arc::new(AtomicUsize::new(0));
+
+        let subscriber = participant
+            .create_subscriber(
+                SubscriberQos::default(),
+                Some(Arc::new(CountingSubscriberListener {
+                    on_data_on_readers_count: Arc::clone(&on_data_on_readers_count),
+                    does_notify_datareaders,
+                })),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_keep_all_reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos,
+                Some(Arc::new(CountingReaderListener {
+                    on_data_available_count: Arc::clone(&on_data_available_count),
+                })),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("timed out waiting for the reader");
+        wait_set.detach_condition(condition).unwrap();
+
+        writer
+            .write(&HelloWorld { index: 0, message: "sample".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+
+        // The listener that wins the dispatch is the one to wait for. Every other seat of the
+        // same dispatch is already settled once it has run.
+        let awaited = if does_notify_datareaders {
+            &on_data_available_count
+        } else {
+            &on_data_on_readers_count
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        while awaited.load(Ordering::Acquire) == 0 {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for the callback");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let counts = (
+            on_data_on_readers_count.load(Ordering::Acquire),
+            on_data_available_count.load(Ordering::Acquire),
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        counts
+    }
+
+    #[test]
+    fn test_on_data_on_readers_leaves_on_data_available_uncalled() {
+        let (on_data_on_readers, on_data_available) =
+            count_data_callbacks_of_one_sample("OnDataOnReadersWins", false);
+
+        assert_eq!(on_data_on_readers, 1);
+        assert_eq!(on_data_available, 0);
+    }
+
+    #[test]
+    fn test_notify_datareaders_reaches_the_reader_listener_from_on_data_on_readers() {
+        let (on_data_on_readers, on_data_available) =
+            count_data_callbacks_of_one_sample("NotifyDatareaders", true);
+
+        assert_eq!(on_data_on_readers, 1);
+        assert_eq!(on_data_available, 1);
     }
 }
