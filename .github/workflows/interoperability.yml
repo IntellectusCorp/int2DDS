@@ -3,6 +3,16 @@ run-name: "Interop test ${{ github.head_ref }}"
 on:
   workflow_dispatch:
     inputs:
+      range_start:
+        description: "Start at this test case, e.g. Test_Domain_1 (blank = beginning)"
+        required: false
+        type: string
+        default: ""
+      range_end:
+        description: "Stop after this test case, e.g. Test_OrderedAccess_17 (blank = end)"
+        required: false
+        type: string
+        default: ""
       enable_int2dds_logging:
         description: "Enable int2DDS logging"
         required: false
@@ -161,6 +171,8 @@ jobs:
           role: ${{ matrix.role }}
           dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
           enable-int2dds-logging: ${{ inputs.enable_int2dds_logging }}
+          range-start: ${{ inputs.range_start }}
+          range-end: ${{ inputs.range_end }}
 
   merge_files:
     needs: test_all_dds
