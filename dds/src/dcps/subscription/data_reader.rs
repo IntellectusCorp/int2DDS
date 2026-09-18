@@ -1651,16 +1651,28 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
-        let topic_ordered = self.subscriber_topic_ordered();
+        let (group_ordered, topic_ordered) = match self.subscriber_arc() {
+            Ok(subscriber) => (
+                subscriber.presentation_group_ordered().unwrap_or(false),
+                subscriber.presentation_topic_ordered().unwrap_or(false),
+            ),
+            Err(_) => (false, false),
+        };
+
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
         let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
         // Enforce Lifespan QoS at read time so expired samples are never returned,
         // even if the periodic cleanup timer hasn't fired yet.
         guard.purge_expired_on_read()?;
-        // TOPIC ordered_access presents samples in topic-wide DESTINATION_ORDER across instances;
-        // otherwise return the per-instance storage order.
-        if topic_ordered {
+
+        // GROUP ordered_access presents samples in group sequence number order, TOPIC
+        // ordered_access in topic-wide DESTINATION_ORDER across instances. Otherwise return the
+        // per-instance storage order.
+        if group_ordered {
+            Ok(guard.get_changes_for_group_scoped_ordered_access())
+        } else if topic_ordered {
             Ok(guard.get_changes_for_topic_scoped_ordered_access())
         } else {
             Ok(guard.get_changes())
@@ -1679,10 +1691,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         self.subscriber.as_ref().and_then(|weak_ref| weak_ref.upgrade()).ok_or_else(|| {
             DdsError::Error("Subscriber reference is invalid or expired".to_string())
         })
-    }
-
-    fn subscriber_topic_ordered(&self) -> bool {
-        self.subscriber_arc().and_then(|s| s.presentation_topic_ordered()).unwrap_or(false)
     }
 
     pub(crate) fn is_subscriber_coherent(&self) -> bool {
@@ -2854,8 +2862,11 @@ impl<Foo: DdsType> DataReader<Foo> {
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
+        let mut is_limited_to_one_sample = false;
+
         if let Ok(subscriber) = self.subscriber_arc() {
             subscriber.check_group_access_block_open()?;
+            is_limited_to_one_sample = subscriber.is_group_order_enforced()?;
         }
 
         if max_samples == 0 {
@@ -2873,7 +2884,16 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.set_read_communication_status(false)?;
         let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
-        let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
+
+        // Group ordered access hands out one sample per call, so that the application can move to
+        // the next reader of the returned list.
+        let mut remaining = if is_limited_to_one_sample {
+            1
+        } else if max_samples == -1 {
+            i32::MAX
+        } else {
+            max_samples
+        };
 
         let changes = self.get_available_changes()?;
 
@@ -3017,8 +3037,11 @@ impl<Foo: DdsType> DataReader<Foo> {
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
+        let mut is_limited_to_one_sample = false;
+
         if let Ok(subscriber) = self.subscriber_arc() {
             subscriber.check_group_access_block_open()?;
+            is_limited_to_one_sample = subscriber.is_group_order_enforced()?;
         }
 
         if max_samples == 0 {
@@ -3046,8 +3069,16 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.set_read_communication_status(false)?;
         let mut result_samples: Vec<DataSample<Foo>> = Vec::new();
-        // TODO: The size of the collection may be additionally limited by the PRESENTATION QoS policy (2.2.3.6).
-        let mut remaining_samples = if max_samples == -1 { i32::MAX } else { max_samples };
+
+        // Group ordered access hands out one sample per call, so that the application can move to
+        // the next reader of the returned list.
+        let mut remaining_samples = if is_limited_to_one_sample {
+            1
+        } else if max_samples == -1 {
+            i32::MAX
+        } else {
+            max_samples
+        };
 
         // let rtps_reader = self.get_rtps_reader()?;
         // let mut changes = rtps_reader.available_changes();
