@@ -59,7 +59,14 @@ pub(crate) fn send_buffer_request() -> BufferRequest {
 pub(crate) fn configure_recv_buffer(socket: &Socket) -> Option<usize> {
     let current = socket.recv_buffer_size().unwrap_or(0);
     if let Some(size) = recv_buffer_request().size_to_request(current) {
-        let _ = socket.set_recv_buffer_size(size);
+        if let Err(e) = socket.set_recv_buffer_size(size) {
+            log::warn!(
+                "Failed to set UDP receive buffer to {} bytes: {}. Keeping {}.",
+                size,
+                e,
+                current
+            );
+        }
     }
     socket.recv_buffer_size().ok()
 }
@@ -69,7 +76,14 @@ pub(crate) fn configure_recv_buffer(socket: &Socket) -> Option<usize> {
 pub(crate) fn configure_send_buffer(socket: &Socket) -> Option<usize> {
     let current = socket.send_buffer_size().unwrap_or(0);
     if let Some(size) = send_buffer_request().size_to_request(current) {
-        let _ = socket.set_send_buffer_size(size);
+        if let Err(e) = socket.set_send_buffer_size(size) {
+            log::warn!(
+                "Failed to set UDP send buffer to {} bytes: {}. Keeping {}.",
+                size,
+                e,
+                current
+            );
+        }
     }
     socket.send_buffer_size().ok()
 }
