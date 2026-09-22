@@ -14,7 +14,9 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NETWORK_IP`                 | Network IP address                         | auto                    |
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
-| `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
+| `INT2DDS_UDP_SOCKET_BUFFER`          | UDP receive and send buffer size (bytes)   | OS default, see below   |
+| `INT2DDS_UDP_RECV_BUFFER`            | UDP receive buffer size (bytes)            | `INT2DDS_UDP_SOCKET_BUFFER` |
+| `INT2DDS_UDP_SEND_BUFFER`            | UDP send buffer size (bytes)               | `INT2DDS_UDP_SOCKET_BUFFER` |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
 | `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
@@ -254,7 +256,20 @@ cargo run --example hello_world_pub
 
 ### INT2DDS_UDP_SOCKET_BUFFER
 
-Sets the UDP socket buffer size in bytes. Default uses OS default value.
+Sets both the UDP receive (`SO_RCVBUF`) and send (`SO_SNDBUF`) buffer sizes in bytes.
+
+When unset, the OS default is kept unless it is below a floor, in which case the floor is requested:
+
+| Direction | Default                                                           |
+|-----------|-------------------------------------------------------------------|
+| Receive   | OS default (`net.core.rmem_default`); 1 MiB requested if smaller  |
+| Send      | OS default (`net.core.wmem_default`); 64 KiB requested if smaller |
+
+The floor is a request like any other, so `net.core.rmem_max` / `net.core.wmem_max` still cap it.
+
+A configured size is always requested. Linux caps a requested size at `net.core.rmem_max` /
+`net.core.wmem_max` and then doubles it, so the size it reports is twice the capped request.
+A socket left at the OS default reports the default as is.
 
 #### Configuration
 
@@ -268,6 +283,33 @@ cargo run --example hello_world_pub
 ```bash
 # Linux/macOS
 export INT2DDS_UDP_SOCKET_BUFFER=1048576
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_UDP_RECV_BUFFER, INT2DDS_UDP_SEND_BUFFER
+
+Set one direction only: `INT2DDS_UDP_RECV_BUFFER` the receive (`SO_RCVBUF`) size,
+`INT2DDS_UDP_SEND_BUFFER` the send (`SO_SNDBUF`) size, in bytes.
+
+Either one overrides `INT2DDS_UDP_SOCKET_BUFFER` for its own direction. A direction left unset
+falls back to `INT2DDS_UDP_SOCKET_BUFFER`, and without that to the floor policy described above.
+A size set here is always requested, subject to the same OS cap.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_UDP_RECV_BUFFER = "8388608"  # 8MB receive
+$env:INT2DDS_UDP_SEND_BUFFER = "262144"   # 256KB send
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_UDP_RECV_BUFFER=8388608
+export INT2DDS_UDP_SEND_BUFFER=262144
 
 cargo run --example hello_world_pub
 ```
