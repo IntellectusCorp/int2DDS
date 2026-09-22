@@ -6,11 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.intellectus.int2dds.exceptions.DdsAlreadyDeletedException;
 import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.types.ConformanceRecord;
-import java.util.ArrayList;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -22,13 +19,6 @@ import org.junit.jupiter.api.Test;
 class FindTopicTest {
 
     private static final long DATA_TIMEOUT_NANOS = 5_000_000_000L;
-
-    /**
-     * Deliberately reachable for the rest of this JVM: see the note at the
-     * end of {@link #findTopicLocatesExistingTopicUsableForRoundTrip} for why
-     * one entity from that test must never become unreachable.
-     */
-    private static final List<Object> LEAKED_ON_PURPOSE = new ArrayList<Object>();
 
     /**
      * Strongest test: {@code found} must refer to the very same logical
@@ -91,26 +81,13 @@ class FindTopicTest {
 
         // created names the very same native topic found just deleted: this
         // dds core keys a participant's topics by name/handle, not a
-        // per-lookup refcount, so -- despite the DDS spec's own commentary in
-        // domain_participant.rs's find_topic suggesting find/create
-        // acquisitions should be independently deletable, one corresponding
-        // delete_topic each -- created's own close now genuinely fails
-        // against real native state (RET_ALREADY_DELETED), not a bug here or
-        // in findTopic. Demonstrated directly rather than masked.
-        assertThrows(DdsAlreadyDeletedException.class, created::close);
-
-        // A failed close leaves created's Java-side handle OPEN (see
-        // NativeHandle's own doc), and that failure is permanent -- no later
-        // retry of this same delete can ever succeed. If created became
-        // unreachable from here, NativeCleaner's background reaper would
-        // pick it up, retry the same doomed delete forever, and permanently
-        // inflate the process-wide deferred-entry count every other test
-        // observes (NativeCleanerTest asserts that count returns to its own
-        // baseline). Keeping a strong reference for the rest of this JVM
-        // (created transitively keeps p, its parent, reachable too) avoids
-        // that reaper attempt ever happening, at the cost of intentionally
-        // never releasing this one native topic handle.
-        LEAKED_ON_PURPOSE.add(created);
+        // per-lookup refcount. int2dds_delete_topic releases a handle whose
+        // topic is already gone instead of refusing it forever, so created
+        // and then the participant itself still close cleanly.
+        created.close();
+        assertTrue(created.isClosed());
+        p.close();
+        assertTrue(p.isClosed(), "a participant that used findTopic must still be closable");
     }
 
     /** A short timeout against a name nothing ever registers must fail, not hang or silently succeed. */

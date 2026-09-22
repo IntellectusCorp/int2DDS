@@ -136,7 +136,7 @@ public final class Subscriber extends NativeEntity {
         NativeKeepAlive.keepAlive(topic);
         NativeKeepAlive.keepAlive(support);
         ReturnCodes.check(rc);
-        return DynamicDataReader.fromHandle(out[0]);
+        return DynamicDataReader.fromHandle(out[0], this);
     }
 
     /**
@@ -169,15 +169,16 @@ public final class Subscriber extends NativeEntity {
             NativeKeepAlive.keepAlive(topic);
             NativeKeepAlive.keepAlive(support);
             ReturnCodes.check(rc);
-            return DynamicDataReader.fromHandle(out[0]);
+            return DynamicDataReader.fromHandle(out[0], this);
         } finally {
             FfiAccess.destroyDataReaderQos(qosHandle);
         }
     }
 
     /**
-     * Applies {@code qos} to this subscriber at runtime. Builds a native
-     * {@link SubscriberQos} handle, applies {@code qos}'s policies onto it,
+     * Applies {@code qos} to this subscriber at runtime. Reads this
+     * subscriber's current QoS into a native handle, applies {@code qos}'s
+     * non-null policies onto it (a null policy keeps its current value),
      * and destroys it again once the native {@code set_qos} call returns —
      * success or failure, thrown or not, the same build-apply-destroy shape
      * {@link #create} uses for the create path. The core rejects a change to
@@ -189,11 +190,9 @@ public final class Subscriber extends NativeEntity {
      */
     public void setQos(SubscriberQos qos) {
         Objects.requireNonNull(qos, "qos");
-        long qosHandle = FfiAccess.createSubscriberQos();
-        if (qosHandle == 0L) {
-            throw new DdsErrorException(
-                    "failed to allocate a native SubscriberQos handle for setQos");
-        }
+        long[] qosOut = new long[1];
+        ReturnCodes.check(FfiAccess.getSubscriberQos(handle(), qosOut));
+        long qosHandle = qosOut[0];
         try {
             QosMarshal.applySubscriberQos(qosHandle, qos);
             int rc = FfiAccess.subscriberSetQos(handle(), qosHandle);

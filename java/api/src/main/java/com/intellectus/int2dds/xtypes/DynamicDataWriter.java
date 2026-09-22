@@ -18,7 +18,13 @@ public final class DynamicDataWriter implements AutoCloseable {
 
     private final NativeHandle handle;
 
-    private DynamicDataWriter(long rawHandle) {
+    // Keeps the creating entity reachable while this writer is: a
+    // ConfiguredParticipant's deleter tears its whole tree down unconditionally.
+    @SuppressWarnings("unused")
+    private final Object owner;
+
+    private DynamicDataWriter(long rawHandle, Object owner) {
+        this.owner = owner;
         this.handle = NativeCleaner.register(this, rawHandle, DynamicDataWriter::deleteVoid);
     }
 
@@ -30,7 +36,12 @@ public final class DynamicDataWriter implements AutoCloseable {
      * FfiAccess#createDataWriterDynamic}.
      */
     public static DynamicDataWriter fromHandle(long rawHandle) {
-        return new DynamicDataWriter(rawHandle);
+        return new DynamicDataWriter(rawHandle, null);
+    }
+
+    /** {@link #fromHandle(long)}, additionally keeping {@code owner} reachable for this writer's lifetime. */
+    public static DynamicDataWriter fromHandle(long rawHandle, Object owner) {
+        return new DynamicDataWriter(rawHandle, owner);
     }
 
     private static int deleteVoid(long h) {

@@ -7,4 +7,8 @@ public class DdsUnsupportedException extends DdsException {
     public DdsUnsupportedException() {
         super("DDS operation not supported.", RET_UNSUPPORTED);
     }
+
+    public DdsUnsupportedException(String message) {
+        super(message, RET_UNSUPPORTED);
+    }
 }

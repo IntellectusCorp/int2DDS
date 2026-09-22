@@ -19,7 +19,13 @@ public final class DynamicDataReader implements AutoCloseable {
 
     private final NativeHandle handle;
 
-    private DynamicDataReader(long rawHandle) {
+    // Keeps the creating entity reachable while this reader is: a
+    // ConfiguredParticipant's deleter tears its whole tree down unconditionally.
+    @SuppressWarnings("unused")
+    private final Object owner;
+
+    private DynamicDataReader(long rawHandle, Object owner) {
+        this.owner = owner;
         this.handle = NativeCleaner.register(this, rawHandle, DynamicDataReader::deleteVoid);
     }
 
@@ -31,7 +37,12 @@ public final class DynamicDataReader implements AutoCloseable {
      * FfiAccess#createDataReaderDynamic}.
      */
     public static DynamicDataReader fromHandle(long rawHandle) {
-        return new DynamicDataReader(rawHandle);
+        return new DynamicDataReader(rawHandle, null);
+    }
+
+    /** {@link #fromHandle(long)}, additionally keeping {@code owner} reachable for this reader's lifetime. */
+    public static DynamicDataReader fromHandle(long rawHandle, Object owner) {
+        return new DynamicDataReader(rawHandle, owner);
     }
 
     private static int deleteVoid(long h) {

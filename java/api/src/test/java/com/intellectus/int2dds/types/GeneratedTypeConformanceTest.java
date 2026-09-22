@@ -9,14 +9,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.intellectus.int2dds.cdr.CdrReader;
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
-import com.intellectus.int2dds.core.TopicFieldDescriptor;
 import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
-import com.intellectus.int2dds.xtypes.FieldType;
+import com.intellectus.int2dds.xtypes.TypeInfo;
+import com.intellectus.int2dds.xtypes.TypeObject;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
-import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,20 +35,16 @@ import org.junit.jupiter.api.Test;
  * <p>No golden hex appears here on purpose. A hex snapshot of our own writer's
  * output would enshrine whatever that writer does, bug included.
  *
- * <p>The type object is built mostly from {@link CdrGolden#ddsFields()}, so
- * the generator's own declared {@link FieldType} codes -- not a hand-copied
- * list -- are what the core is asked to decode with. Only the trailing fields
- * that the keyed-topic path cannot describe (octet, char, float, double and the
- * two wstrings) are added explicitly.
+ * <p>The type object is built from the generated {@link CdrGolden#typeInfo()}
+ * itself -- exactly what {@code createTopic} advertises, not a hand-copied
+ * list -- so that is what the core is asked to decode with.
  */
 class GeneratedTypeConformanceTest {
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
-    // INT2DDS_MEMBER_KEY, from ffi/src/type_info.rs.
-    private static final int MEMBER_KEY = 1;
-
-    private long typeInfo;
+    private TypeInfo typeInfo;
+    private TypeObject typeObjectOwner;
     private long typeObject;
 
     private static byte[] utf8(String s) {
@@ -58,49 +53,22 @@ class GeneratedTypeConformanceTest {
 
     @BeforeEach
     void buildTypeObject() {
-        typeInfo = FfiAccess.typeInfoCreate(utf8("CdrGolden"), Extensibility.APPENDABLE.value());
-        assertNotEquals(0L, typeInfo, "type info handle");
-
-        for (TopicFieldDescriptor d : CdrGolden.ddsFields()) {
-            assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8(d.name()), d.fieldType(),
-                    d.isKey() ? MEMBER_KEY : 0), d.name());
-        }
-        // Declaration order must match serializeCdr; these sit after the last
-        // @key field, so ddsFields() does not describe them.
-        assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8("byte_val"), FieldType.BYTE, 0));
-        assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8("char_val"), FieldType.CHAR8, 0));
-        assertEquals(0,
-                FfiAccess.typeInfoAddField(typeInfo, utf8("f32_val"), FieldType.FLOAT32, 0));
-        assertEquals(0,
-                FfiAccess.typeInfoAddField(typeInfo, utf8("f64_val"), FieldType.FLOAT64, 0));
-        // The two collections carry no assertion of their own: nothing reads a
-        // sequence element back through this path. They are here so the core has
-        // to walk past them to reach the two scalar wstrings after them, which
-        // is what makes those assertions cover the per-element framing too.
-        assertEquals(0, FfiAccess.typeInfoAddSequenceField(
-                typeInfo, utf8("wstr_seq"), FieldType.WSTRING, 0, 0));
-        assertEquals(0, FfiAccess.typeInfoAddArrayField(
-                typeInfo, utf8("wstr_arr"), FieldType.WSTRING, 2, 0));
-        // wstring needs the dedicated adder rather than a FieldType code; 0
-        // means unbounded.
-        assertEquals(0,
-                FfiAccess.typeInfoAddWstringField(typeInfo, utf8("unbounded_wstr"), 0, 0));
-        assertEquals(0,
-                FfiAccess.typeInfoAddWstringField(typeInfo, utf8("bounded_wstr"), 32, 0));
-
-        typeObject = FfiAccess.typeInfoToTypeObject(typeInfo);
+        typeInfo = new CdrGolden().typeInfo();
+        typeObjectOwner = typeInfo.toTypeObject();
+        typeObject = typeObjectOwner.handle();
         assertNotEquals(0L, typeObject, "type object handle");
     }
 
     @AfterEach
     void releaseTypeInfo() {
-        if (typeObject != 0L) {
-            FfiAccess.typeObjectDestroy(typeObject);
-            typeObject = 0L;
+        typeObject = 0L;
+        if (typeObjectOwner != null) {
+            typeObjectOwner.close();
+            typeObjectOwner = null;
         }
-        if (typeInfo != 0L) {
-            FfiAccess.typeInfoDestroy(typeInfo);
-            typeInfo = 0L;
+        if (typeInfo != null) {
+            typeInfo.close();
+            typeInfo = null;
         }
     }
 
@@ -373,15 +341,13 @@ class GeneratedTypeConformanceTest {
     }
 
     @Test
-    void ddsFieldsDescribesThePrefixThroughTheLastKeyField() {
-        // The core's flat parser walks these in declaration order, so the
-        // prefix must be unbroken and the last entry must be the last @key.
-        List<TopicFieldDescriptor> fields = CdrGolden.ddsFields();
-        assertEquals(12, fields.size());
-        assertEquals("id", fields.get(0).name());
-        assertTrue(fields.get(0).isKey(), "id is a key");
-        assertEquals("bounded_str", fields.get(11).name());
-        assertTrue(fields.get(11).isKey(), "bounded_str is a key");
+    void typeInfoDescribesEveryMemberNotJustThePrefixThroughTheLastKey() {
+        // A description that stopped at the last @key (bounded_str, index 11)
+        // would be advertised as a smaller type that full-type peers reject.
+        assertTrue(typeInfo.hasKey(), "CdrGolden is keyed");
+        assertEquals(20, typeObjectOwner.memberCount());
+        assertEquals("id", typeObjectOwner.memberName(0));
+        assertEquals("bounded_wstr", typeObjectOwner.memberName(19));
     }
 
     private static void assertFieldsEqual(CdrGolden a, CdrGolden b, String what) {

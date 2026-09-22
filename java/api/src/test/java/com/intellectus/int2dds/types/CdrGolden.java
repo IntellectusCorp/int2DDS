@@ -6,11 +6,9 @@ package com.intellectus.int2dds.types;
 import com.intellectus.int2dds.cdr.CdrReader;
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
-import com.intellectus.int2dds.core.TopicFieldDescriptor;
 import com.intellectus.int2dds.types.IDdsType;
 import com.intellectus.int2dds.xtypes.FieldType;
-import java.util.Arrays;
-import java.util.List;
+import com.intellectus.int2dds.xtypes.TypeInfo;
 
 public final class CdrGolden implements IDdsType {
 
@@ -122,26 +120,34 @@ public final class CdrGolden implements IDdsType {
         reader.readDheaderEnd(d);
     }
 
-    /**
-     * Field descriptors for {@link com.intellectus.int2dds.core.DomainParticipant
-     * #createTopic(String, com.intellectus.int2dds.types.IDdsType, List)}.
-     * Covers every field up to and including the last {@code @key} one:
-     * the core's flat parser walks them in order and a gap misaligns
-     * everything after it.
-     */
-    public static List<TopicFieldDescriptor> ddsFields() {
-        return Arrays.asList(
-                new TopicFieldDescriptor("id", FieldType.INT32, true),
-                new TopicFieldDescriptor("bool_val", FieldType.BOOL, false),
-                new TopicFieldDescriptor("i8_val", FieldType.INT8, false),
-                new TopicFieldDescriptor("u8_val", FieldType.UINT8, false),
-                new TopicFieldDescriptor("i16_val", FieldType.INT16, false),
-                new TopicFieldDescriptor("u16_val", FieldType.UINT16, false),
-                new TopicFieldDescriptor("i32_val", FieldType.INT32, false),
-                new TopicFieldDescriptor("u32_val", FieldType.UINT32, false),
-                new TopicFieldDescriptor("i64_val", FieldType.INT64, false),
-                new TopicFieldDescriptor("u64_val", FieldType.UINT64, false),
-                new TopicFieldDescriptor("unbounded_str", FieldType.STRING, false),
-                new TopicFieldDescriptor("bounded_str", FieldType.STRING, true));
+    @Override
+    public TypeInfo typeInfo() {
+        TypeInfo ti = new TypeInfo("CdrGolden", Extensibility.APPENDABLE);
+        try {
+            ti.addField("id", FieldType.INT32, 1);
+            ti.addField("bool_val", FieldType.BOOL, 0);
+            ti.addField("i8_val", FieldType.INT8, 0);
+            ti.addField("u8_val", FieldType.UINT8, 0);
+            ti.addField("i16_val", FieldType.INT16, 0);
+            ti.addField("u16_val", FieldType.UINT16, 0);
+            ti.addField("i32_val", FieldType.INT32, 0);
+            ti.addField("u32_val", FieldType.UINT32, 0);
+            ti.addField("i64_val", FieldType.INT64, 0);
+            ti.addField("u64_val", FieldType.UINT64, 0);
+            ti.addStringField("unbounded_str", 0, 0);
+            ti.addStringField("bounded_str", 64, 1);
+            ti.addField("byte_val", FieldType.BYTE, 0);
+            ti.addField("char_val", FieldType.CHAR8, 0);
+            ti.addField("f32_val", FieldType.FLOAT32, 0);
+            ti.addField("f64_val", FieldType.FLOAT64, 0);
+            ti.addSequenceField("wstr_seq", FieldType.WSTRING, 0, 0);
+            ti.addArrayField("wstr_arr", FieldType.WSTRING, 2, 0);
+            ti.addWstringField("unbounded_wstr", 0, 0);
+            ti.addWstringField("bounded_wstr", 32, 0);
+            return ti;
+        } catch (RuntimeException e) {
+            ti.close();
+            throw e;
+        }
     }
 }

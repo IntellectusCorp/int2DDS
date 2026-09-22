@@ -585,25 +585,181 @@ fn emit_read(
     Ok(())
 }
 
-// ---- topic field descriptors ------------------------------------------------
+// ---- type description -------------------------------------------------------
 
-/// The `FieldType` constant a member maps to, or None when this native path
-/// cannot represent it. Mirrors DomainParticipant.nativeFieldTypeCode, which
-/// rejects floats, BYTE, the char kinds, wide strings, and every aggregate.
+/// The `FieldType` constant for a scalar or string type, or None for a named
+/// or collection type. Same table as the C# backend's `field_constant`.
 fn field_type_const(t: &ResolvedType) -> Option<&'static str> {
     Some(match t {
         ResolvedType::Bool => "BOOL",
+        ResolvedType::U8 => "BYTE",
+        ResolvedType::Char => "CHAR8",
         ResolvedType::I8 => "INT8",
-        ResolvedType::UInt8 => "UINT8",
         ResolvedType::I16 => "INT16",
-        ResolvedType::U16 => "UINT16",
         ResolvedType::I32 => "INT32",
-        ResolvedType::U32 => "UINT32",
         ResolvedType::I64 => "INT64",
+        ResolvedType::UInt8 => "UINT8",
+        ResolvedType::U16 => "UINT16",
+        ResolvedType::U32 => "UINT32",
         ResolvedType::U64 => "UINT64",
+        ResolvedType::F32 => "FLOAT32",
+        ResolvedType::F64 => "FLOAT64",
         ResolvedType::String { .. } => "STRING",
+        ResolvedType::WChar => "CHAR16",
+        ResolvedType::WString { .. } => "WSTRING",
         _ => return None,
     })
+}
+
+/// `TypeInfo.MEMBER_*` bits; the FFI adds must-understand for a key itself.
+fn member_flags(m: &ResolvedMember) -> i32 {
+    let mut f = 0;
+    if m.is_key {
+        f |= 1;
+    }
+    if m.is_optional {
+        f |= 2;
+    }
+    if m.must_understand {
+        f |= 4;
+    }
+    if m.is_external {
+        f |= 8;
+    }
+    f
+}
+
+/// Whether `typeInfo()` can describe the struct byte-correctly. Same rule as
+/// the C# backend: an `@external` nested struct cannot be, nor can a struct
+/// whose nested structs cannot, recursively.
+fn struct_describable(model: &IdlModel, name: &str, visited: &mut Vec<String>) -> bool {
+    let leaf = name.rsplit("::").next().unwrap_or(name);
+    let declared = || model.structs.iter().chain(model.imported.structs.iter());
+    let Some(s) = declared()
+        .find(|s| s.qualified_name == name)
+        .or_else(|| declared().find(|s| s.name == leaf))
+    else {
+        return false;
+    };
+    if visited.contains(&s.qualified_name) {
+        return false;
+    }
+    visited.push(s.qualified_name.clone());
+    let ok = s.members.iter().all(|m| member_describable(model, m, visited));
+    visited.pop();
+    ok
+}
+
+fn member_describable(model: &IdlModel, m: &ResolvedMember, visited: &mut Vec<String>) -> bool {
+    let named = |t: &ResolvedType, visited: &mut Vec<String>| match t {
+        ResolvedType::Struct(n) => struct_describable(model, n, visited),
+        ResolvedType::Enum(_) => true,
+        other => field_type_const(other).is_some(),
+    };
+    match &m.resolved_type {
+        ResolvedType::Struct(_) if m.is_external => false,
+        ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+            named(element, visited)
+        }
+        other => named(other, visited),
+    }
+}
+
+/// The expression that builds a named type's own `TypeInfo`: a generated enum
+/// exposes it statically, a generated struct through `IDdsType.typeInfo()`.
+fn nested_type_info_expr(t: &ResolvedType) -> Option<String> {
+    match t {
+        ResolvedType::Struct(n) => Some(format!("new {}().typeInfo()", java_type_name(n))),
+        ResolvedType::Enum(n) => Some(format!("{}.typeInfo()", java_type_name(n))),
+        _ => None,
+    }
+}
+
+/// The `typeInfo()` statements describing one member. `uses_field_type` is set
+/// when a `FieldType` constant is referenced, so the import is only emitted then.
+fn emit_type_info_member(out: &mut String, m: &ResolvedMember, uses_field_type: &mut bool) {
+    let ind = "            ";
+    let flags = member_flags(m);
+    let nested = |out: &mut String, expr: String, call: String| {
+        out.push_str(&format!(
+            "{ind}try (TypeInfo n = {expr}) {{\n{ind}    ti.{call};\n{ind}}}\n",
+            ind = ind,
+            expr = expr,
+            call = call
+        ));
+    };
+    match &m.resolved_type {
+        ResolvedType::String { bound } => out.push_str(&format!(
+            "{}ti.addStringField(\"{}\", {}, {});\n",
+            ind,
+            m.name,
+            bound.unwrap_or(0),
+            flags
+        )),
+        ResolvedType::WString { bound } => out.push_str(&format!(
+            "{}ti.addWstringField(\"{}\", {}, {});\n",
+            ind,
+            m.name,
+            bound.unwrap_or(0),
+            flags
+        )),
+        ResolvedType::Sequence { element, bound } => match nested_type_info_expr(element) {
+            Some(expr) => nested(
+                out,
+                expr,
+                format!(
+                    "addSequenceOfNestedField(\"{}\", n, {}, {})",
+                    m.name,
+                    bound.unwrap_or(0),
+                    flags
+                ),
+            ),
+            None => {
+                *uses_field_type = true;
+                out.push_str(&format!(
+                    "{}ti.addSequenceField(\"{}\", FieldType.{}, {}, {});\n",
+                    ind,
+                    m.name,
+                    field_type_const(element).unwrap_or("BYTE"),
+                    bound.unwrap_or(0),
+                    flags
+                ));
+            }
+        },
+        ResolvedType::Array { element, size } => match nested_type_info_expr(element) {
+            Some(expr) => nested(
+                out,
+                expr,
+                format!("addArrayOfNestedField(\"{}\", n, {}, {})", m.name, size, flags),
+            ),
+            None => {
+                *uses_field_type = true;
+                out.push_str(&format!(
+                    "{}ti.addArrayField(\"{}\", FieldType.{}, {}, {});\n",
+                    ind,
+                    m.name,
+                    field_type_const(element).unwrap_or("BYTE"),
+                    size,
+                    flags
+                ));
+            }
+        },
+        other => match nested_type_info_expr(other) {
+            Some(expr) => {
+                nested(out, expr, format!("addNestedField(\"{}\", n, {})", m.name, flags))
+            }
+            None => {
+                *uses_field_type = true;
+                out.push_str(&format!(
+                    "{}ti.addField(\"{}\", FieldType.{}, {});\n",
+                    ind,
+                    m.name,
+                    field_type_const(other).unwrap_or("BYTE"),
+                    flags
+                ));
+            }
+        },
+    }
 }
 
 // ---- file emission ---------------------------------------------------------
@@ -626,25 +782,26 @@ fn emit_struct(
     let package = package_for(opts, &s.qualified_name);
     let appendable = s.extensibility == ExtensibilityKind::Appendable;
 
-    // The prefix runs from field 0 through the last @key field: the core's
-    // flat parser walks descriptors in declaration order, so a gap before a
-    // needed field misaligns everything after it.
-    let last_key = s.members.iter().rposition(|m| m.is_key);
-    let mut descriptors: Vec<String> = Vec::new();
-    if let Some(last) = last_key {
-        for m in &s.members[..=last] {
-            let Some(kind) = field_type_const(&m.resolved_type) else {
-                return Err(format!(
-                    "Java backend cannot describe '{}.{}' to the keyed-topic path, \
-                     and it sits at or before the last @key field; \
-                     the core's flat parser needs an unbroken prefix",
-                    s.name, m.name
-                ));
-            };
-            descriptors.push(format!(
-                "                new TopicFieldDescriptor(\"{}\", FieldType.{}, {})",
-                m.name, kind, m.is_key
+    // typeInfo() describes every member, so the topic advertises the same
+    // TypeObject the Rust derive and the C#/Python bindings do. A partial
+    // description would be advertised as a smaller type that full-type peers
+    // reject, and a keyed type with none would be created as a key-less topic.
+    let describable = struct_describable(model, &s.qualified_name, &mut Vec::new());
+    if !describable {
+        if let Some(k) = s.members.iter().find(|m| m.is_key) {
+            return Err(format!(
+                "Java backend cannot describe every member of keyed struct '{}' (key '{}'): \
+                 an @external nested struct has no TypeObject form here, and without a \
+                 full description the topic would be created key-less",
+                s.name, k.name
             ));
+        }
+    }
+    let mut type_info_body = String::new();
+    let mut uses_field_type = false;
+    if describable {
+        for m in &s.members {
+            emit_type_info_member(&mut type_info_body, m, &mut uses_field_type);
         }
     }
 
@@ -662,11 +819,11 @@ fn emit_struct(
         "import com.intellectus.int2dds.cdr.Extensibility;".to_string(),
         "import com.intellectus.int2dds.types.IDdsType;".to_string(),
     ];
-    if !descriptors.is_empty() {
-        imports.push("import com.intellectus.int2dds.core.TopicFieldDescriptor;".to_string());
+    if describable {
+        imports.push("import com.intellectus.int2dds.xtypes.TypeInfo;".to_string());
+    }
+    if uses_field_type {
         imports.push("import com.intellectus.int2dds.xtypes.FieldType;".to_string());
-        imports.push("import java.util.Arrays;".to_string());
-        imports.push("import java.util.List;".to_string());
     }
     imports.sort();
     for imp in &imports {
@@ -752,18 +909,21 @@ fn emit_struct(
     }
     out.push_str("    }\n");
 
-    if !descriptors.is_empty() {
+    if describable {
         out.push_str(&format!(
-            "\n    /**\n\
-             \x20    * Field descriptors for {{@link com.intellectus.int2dds.core.DomainParticipant\n\
-             \x20    * #createTopic(String, com.intellectus.int2dds.types.IDdsType, List)}}.\n\
-             \x20    * Covers every field up to and including the last {{@code @key}} one:\n\
-             \x20    * the core's flat parser walks them in order and a gap misaligns\n\
-             \x20    * everything after it.\n\
-             \x20    */\n\
-             \x20   public static List<TopicFieldDescriptor> ddsFields() {{\n\
-             \x20       return Arrays.asList(\n{});\n    }}\n",
-            descriptors.join(",\n")
+            "\n    @Override\n\
+             \x20   public TypeInfo typeInfo() {{\n\
+             \x20       TypeInfo ti = new TypeInfo(\"{name}\", Extensibility.{ext});\n\
+             \x20       try {{\n{body}\
+             \x20           return ti;\n\
+             \x20       }} catch (RuntimeException e) {{\n\
+             \x20           ti.close();\n\
+             \x20           throw e;\n\
+             \x20       }}\n\
+             \x20   }}\n",
+            name = s.qualified_name,
+            ext = extensibility_const(s.extensibility),
+            body = type_info_body
         ));
     }
 
@@ -784,6 +944,7 @@ fn emit_enum(e: &ResolvedEnum, idl_filename: &str, opts: &JavaOptions) -> Genera
     if let Some(p) = &package {
         out.push_str(&format!("package {};\n\n", p));
     }
+    out.push_str("import com.intellectus.int2dds.xtypes.TypeInfo;\n\n");
     out.push_str(&format!("public enum {} {{\n\n", class));
 
     for (i, v) in e.variants.iter().enumerate() {
@@ -803,8 +964,33 @@ fn emit_enum(e: &ResolvedEnum, idl_filename: &str, opts: &JavaOptions) -> Genera
          \x20           if (v.value == value) {{\n                return v;\n            }}\n\
          \x20       }}\n\
          \x20       throw new IllegalArgumentException(\"unknown {class} value: \" + value);\n\
-         \x20   }}\n}}\n",
+         \x20   }}\n",
         class = class
+    ));
+
+    // Literal names are PascalCase, the Rust derive's variant names, so the
+    // TypeObject equals the one the Rust, C# and Python backends advertise.
+    let mut literals = String::new();
+    for v in &e.variants {
+        literals.push_str(&format!(
+            "            ti.addEnumLiteral(\"{}\", {}, false);\n",
+            naming::to_pascal_case(&v.name),
+            v.value
+        ));
+    }
+    out.push_str(&format!(
+        "\n    /** This enum's type description, for a struct's {{@code typeInfo()}}. The caller closes it. */\n\
+         \x20   public static TypeInfo typeInfo() {{\n\
+         \x20       TypeInfo ti = TypeInfo.createEnum(\"{name}\", 32);\n\
+         \x20       try {{\n{literals}\
+         \x20           return ti;\n\
+         \x20       }} catch (RuntimeException e) {{\n\
+         \x20           ti.close();\n\
+         \x20           throw e;\n\
+         \x20       }}\n\
+         \x20   }}\n}}\n",
+        name = e.qualified_name,
+        literals = literals
     ));
 
     GeneratedFile { relative_path: relative_path(&package, &class), source: out }
@@ -1404,7 +1590,9 @@ mod tests {
     }
 
     #[test]
-    fn keyed_struct_emits_the_descriptor_prefix() {
+    fn keyed_struct_describes_the_members_after_its_last_key_too() {
+        // A description that stopped at the last key would be advertised as a
+        // smaller type, which a peer holding the full type refuses to match.
         let files = gen(
             r#"@extensibility(APPENDABLE) struct S {
                  @key long id;
@@ -1413,56 +1601,79 @@ mod tests {
             &JavaOptions::default(),
         );
         let src = &files[0].source;
+        assert!(src.contains("import com.intellectus.int2dds.xtypes.TypeInfo;"), "{}", src);
+        assert!(src.contains("import com.intellectus.int2dds.xtypes.FieldType;"), "{}", src);
+        assert!(src.contains("public TypeInfo typeInfo() {"), "{}", src);
+        assert!(src.contains("new TypeInfo(\"S\", Extensibility.APPENDABLE);"), "{}", src);
+        assert!(src.contains("ti.addField(\"id\", FieldType.INT32, 1);"), "{}", src);
         assert!(
-            src.contains("import com.intellectus.int2dds.core.TopicFieldDescriptor;"),
+            src.contains("ti.addSequenceField(\"payload\", FieldType.INT32, 0, 0);"),
             "{}",
             src
         );
-        assert!(src.contains("import com.intellectus.int2dds.xtypes.FieldType;"), "{}", src);
-        assert!(src.contains("public static List<TopicFieldDescriptor> ddsFields()"), "{}", src);
-        assert!(src.contains("new TopicFieldDescriptor(\"id\", FieldType.INT32, true)"), "{}", src);
-        // The prefix ends at the last key, so the sequence after it cannot ride along.
-        assert!(!src.contains("\"payload\""), "{}", src);
+        assert!(!src.contains("ddsFields"), "{}", src);
     }
 
     #[test]
-    fn unkeyed_struct_emits_no_descriptors() {
+    fn unkeyed_struct_is_described_too() {
         let files = gen(
-            r#"struct HelloWorld { unsigned long index; string message; };"#,
+            r#"struct HelloWorld { unsigned long index; string<64> message; };"#,
             &JavaOptions::default(),
         );
         let src = &files[0].source;
-        assert!(!src.contains("ddsFields"), "{}", src);
-        assert!(!src.contains("TopicFieldDescriptor"), "{}", src);
+        assert!(src.contains("ti.addField(\"index\", FieldType.UINT32, 0);"), "{}", src);
+        assert!(src.contains("ti.addStringField(\"message\", 64, 0);"), "{}", src);
     }
 
     #[test]
-    fn descriptor_prefix_spans_every_field_up_to_the_last_key() {
+    fn type_info_lists_members_in_declaration_order() {
         let files = gen(
             r#"@extensibility(FINAL) struct S {
-                 long a; @key string b; @key long c;
+                 float a; @key wstring b; @key long c;
                };"#,
             &JavaOptions::default(),
         );
         let src = &files[0].source;
-        assert!(src.contains("new TopicFieldDescriptor(\"a\", FieldType.INT32, false)"), "{}", src);
-        assert!(src.contains("new TopicFieldDescriptor(\"b\", FieldType.STRING, true)"), "{}", src);
-        assert!(src.contains("new TopicFieldDescriptor(\"c\", FieldType.INT32, true)"), "{}", src);
+        let a = src.find("ti.addField(\"a\", FieldType.FLOAT32, 0);").expect(src);
+        let b = src.find("ti.addWstringField(\"b\", 0, 1);").expect(src);
+        let c = src.find("ti.addField(\"c\", FieldType.INT32, 1);").expect(src);
+        assert!(a < b && b < c, "{}", src);
     }
 
     #[test]
-    fn an_undescribable_field_before_a_key_fails_generation() {
-        // This native path cannot describe float or wstring. Dropping the key
-        // silently would leave no way to see why keying stopped working.
-        for src in [
-            r#"@extensibility(FINAL) struct S { float bad; @key long id; };"#,
-            r#"@extensibility(FINAL) struct S { wstring bad; @key long id; };"#,
-        ] {
-            let defs = parse_idl(src).unwrap();
-            let model = resolve(defs).unwrap();
-            let err = generate(&model, "S.idl", &JavaOptions::default()).unwrap_err();
-            assert!(err.contains("S.bad"), "{}", err);
-            assert!(err.contains("key"), "{}", err);
-        }
+    fn named_members_borrow_the_named_types_own_description() {
+        let files = gen(
+            r#"enum Color { RED, GREEN };
+               @extensibility(FINAL) struct Point { long x; };
+               @extensibility(FINAL) struct S {
+                 @key Color c; Point p; sequence<Point> path; Point grid[3];
+               };"#,
+            &JavaOptions::default(),
+        );
+        let color = &files.iter().find(|f| f.relative_path == "Color.java").unwrap().source;
+        assert!(color.contains("public static TypeInfo typeInfo() {"), "{}", color);
+        assert!(color.contains("TypeInfo.createEnum(\"Color\", 32);"), "{}", color);
+        // PascalCase, the Rust derive's variant name, not the Java constant.
+        assert!(color.contains("ti.addEnumLiteral(\"Red\", 0, false);"), "{}", color);
+
+        let src = &files.iter().find(|f| f.relative_path == "S.java").unwrap().source;
+        assert!(src.contains("try (TypeInfo n = Color.typeInfo()) {"), "{}", src);
+        assert!(src.contains("ti.addNestedField(\"c\", n, 1);"), "{}", src);
+        assert!(src.contains("try (TypeInfo n = new Point().typeInfo()) {"), "{}", src);
+        assert!(src.contains("ti.addSequenceOfNestedField(\"path\", n, 0, 0);"), "{}", src);
+        assert!(src.contains("ti.addArrayOfNestedField(\"grid\", n, 3, 0);"), "{}", src);
+    }
+
+    #[test]
+    fn a_keyed_struct_that_cannot_be_described_fails_generation() {
+        // Without a full description the topic would be created key-less, and
+        // nothing at runtime would say why keying stopped working.
+        let src = r#"@extensibility(FINAL) struct Inner { long v; };
+                     @extensibility(FINAL) struct S { @key long id; @external Inner bad; };"#;
+        let defs = parse_idl(src).unwrap();
+        let model = resolve(defs).unwrap();
+        let err = generate(&model, "S.idl", &JavaOptions::default()).unwrap_err();
+        assert!(err.contains("'S'"), "{}", err);
+        assert!(err.contains("key"), "{}", err);
     }
 }

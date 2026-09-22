@@ -168,14 +168,15 @@ worth knowing:
 - **Sequences and arrays both become Java arrays**, not `List<T>`, so no element is
   boxed on the serialization path.
 
-A struct with at least one `@key` member also gets a static `ddsFields()`:
+Every generated struct also overrides `typeInfo()`, a full description of its members
+(kinds, bounds, `@key` flags, nested types). `createTopic` uses it to advertise the
+same TypeObject the Rust, C# and Python bindings advertise for that IDL, which is what
+lets a keyed Java topic match a keyed peer in another language and lets the core
+resolve instance keys. A hand-written `IDdsType` that leaves `typeInfo()` at its
+default (`null`) gets a key-less topic matched by type name alone.
 
-```java
-Topic<Sensor> topic = participant.createTopic("sensors", new Sensor(), Sensor.ddsFields());
-```
-
-That three-argument overload is the only Java path that resolves instance keys, and it
-is also what makes a field usable in a content-filter expression.
+Because the C ABI has no profile variant of that path, `createTopic(name, prototype,
+profilePath)` refuses a keyed type; pass a `TopicQos` instead.
 
 The backend refuses several IDL constructs rather than emitting Java that will not
 compile — or that compiles and encodes the wrong bytes. See

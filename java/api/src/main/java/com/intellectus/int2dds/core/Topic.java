@@ -3,6 +3,7 @@ package com.intellectus.int2dds.core;
 import com.intellectus.int2dds.cdr.Extensibility;
 import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
+import com.intellectus.int2dds.exceptions.DdsUnsupportedException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
@@ -12,6 +13,7 @@ import com.intellectus.int2dds.qos.TopicQos;
 import com.intellectus.int2dds.status.InconsistentTopicStatus;
 import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
+import com.intellectus.int2dds.xtypes.TypeInfo;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
@@ -198,8 +200,9 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
     }
 
     /**
-     * Applies {@code qos} to this topic at runtime. Builds a native {@link
-     * TopicQos} handle, applies {@code qos}'s policies onto it, and destroys
+     * Applies {@code qos} to this topic at runtime. Reads this topic's
+     * current QoS into a native handle, applies {@code qos}'s non-null
+     * policies onto it (a null policy keeps its current value), and destroys
      * it again once the native {@code set_qos} call returns — success or
      * failure, thrown or not, the same build-apply-destroy shape {@link
      * #create} uses for the create path. The core rejects a change to an
@@ -216,11 +219,9 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
      */
     public void setQos(TopicQos qos) {
         Objects.requireNonNull(qos, "qos");
-        long qosHandle = FfiAccess.createTopicQos();
-        if (qosHandle == 0L) {
-            throw new DdsErrorException(
-                    "failed to allocate a native TopicQos handle for setQos");
-        }
+        long[] qosOut = new long[1];
+        ReturnCodes.check(FfiAccess.getTopicQos(handle(), qosOut));
+        long qosHandle = qosOut[0];
         try {
             QosMarshal.applyTopicQos(qosHandle, qos);
             int rc = FfiAccess.topicSetQos(handle(), qosHandle);
@@ -292,10 +293,8 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
     private static long create(
             DomainParticipant participant, String name, IDdsType prototype, TopicQos qos) {
         byte[] nameBytes = utf8(name);
-        byte[] typeNameBytes = utf8(prototype.typeName());
-        int extensibility = prototype.extensibility().value();
         if (qos == null) {
-            return createNative(participant, nameBytes, typeNameBytes, extensibility, 0L);
+            return createNative(participant, nameBytes, prototype, 0L);
         }
         long qosHandle = FfiAccess.createTopicQos();
         if (qosHandle == 0L) {
@@ -311,17 +310,29 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         }
         try {
             QosMarshal.applyTopicQos(qosHandle, qos);
-            return createNative(participant, nameBytes, typeNameBytes, extensibility, qosHandle);
+            return createNative(participant, nameBytes, prototype, qosHandle);
         } finally {
             FfiAccess.destroyTopicQos(qosHandle);
         }
     }
 
     private static long createNative(DomainParticipant participant, byte[] nameBytes,
-            byte[] typeNameBytes, int extensibility, long qos) {
+            IDdsType prototype, long qos) {
         long[] handleOut = new long[1];
-        int rc = FfiAccess.createTopic(
-                participant.handle(), nameBytes, typeNameBytes, extensibility, qos, handleOut);
+        int rc;
+        TypeInfo typeInfo = prototype.typeInfo();
+        if (typeInfo != null) {
+            // The type name, extensibility, keys and the advertised TypeObject
+            // all come from the description, as in the C# and Python bindings.
+            try {
+                rc = typeInfo.createTopic(participant.handle(), nameBytes, qos, handleOut);
+            } finally {
+                typeInfo.close();
+            }
+        } else {
+            rc = FfiAccess.createTopic(participant.handle(), nameBytes,
+                    utf8(prototype.typeName()), prototype.extensibility().value(), qos, handleOut);
+        }
         // participant.handle() above returns a bare long, disconnected from
         // `participant` the moment it is read: nothing else in this method
         // still references `participant`, so without this the reaper could
@@ -341,6 +352,18 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
      */
     private static long createWithProfile(
             DomainParticipant participant, String name, IDdsType prototype, String profilePath) {
+        // The C ABI has no profile variant of create_topic_with_type_info, and a
+        // keyed type created without one would be a key-less topic that never
+        // matches its keyed peers -- so refuse it, as the C# binding does.
+        TypeInfo typeInfo = prototype.typeInfo();
+        if (typeInfo != null) {
+            boolean keyed = typeInfo.hasKey();
+            typeInfo.close();
+            if (keyed) {
+                throw new DdsUnsupportedException("keyed topic '" + name
+                        + "' cannot be created from a QoS profile; create it with a TopicQos instead");
+            }
+        }
         byte[] nameBytes = utf8(name);
         byte[] typeNameBytes = utf8(prototype.typeName());
         int extensibility = prototype.extensibility().value();

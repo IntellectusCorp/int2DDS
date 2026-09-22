@@ -112,7 +112,10 @@ public final class DomainParticipant extends NativeEntity {
      * extensibility that {@link Topic#typeName()} / {@link
      * Topic#extensibility()} report afterward — an instance rather than
      * {@code Class<T>}, since {@code Class.newInstance()} is both deprecated
-     * and unnecessary here.
+     * and unnecessary here. When {@link IDdsType#typeInfo()} returns a
+     * description (every generated type does), the topic advertises that
+     * TypeObject and resolves instance keys from it; otherwise it is key-less
+     * and matched by type name alone.
      */
     public <T extends IDdsType> Topic<T> createTopic(String name, T prototype) {
         // Cast disambiguates from the (String, T, String) profile-create constructor.
@@ -129,6 +132,10 @@ public final class DomainParticipant extends NativeEntity {
      * QoS from the named profile at {@code profilePath} (a {@code
      * "LibraryName::ProfileName"} path). The profile must already be loaded
      * via {@link DomainParticipantFactory#loadProfiles}.
+     *
+     * @throws com.intellectus.int2dds.exceptions.DdsUnsupportedException if
+     *     {@code prototype} is keyed: this path cannot advertise its
+     *     TypeObject, so use {@link #createTopic(String, IDdsType, TopicQos)}
      */
     public <T extends IDdsType> Topic<T> createTopic(String name, T prototype, String profilePath) {
         return new Topic<T>(this, name, prototype, Objects.requireNonNull(profilePath, "profilePath"));
@@ -136,7 +143,7 @@ public final class DomainParticipant extends NativeEntity {
 
     /**
      * Finds an existing topic named {@code name} (created elsewhere in this
-     * participant, or discovered), waiting up to {@code timeoutMs}
+     * participant; remote topics are not looked up), waiting up to {@code timeoutMs}
      * milliseconds (negative = wait indefinitely). {@code prototype} supplies
      * the DDS type name the native lookup matches against, and the
      * compile-time type {@code T} for the returned {@link Topic}. Throws if
@@ -146,10 +153,10 @@ public final class DomainParticipant extends NativeEntity {
      * acquisitions, so the returned handle is not an independent second owner
      * of the underlying topic (despite the DDS spec's multi-acquire
      * semantics). If you also hold the {@link #createTopic}-returned handle for
-     * the same topic in this participant, close only one of them: closing
-     * either removes the native topic, and closing the other afterward throws
-     * {@code DdsAlreadyDeletedException}. Intended for finding a topic you do
-     * not otherwise hold — one created by another component, or discovered.
+     * the same topic in this participant, closing either removes the native
+     * topic for both; closing the other afterward is then a harmless no-op.
+     * Intended for finding a topic you do not otherwise hold — one created by
+     * another component.
      */
     public <T extends IDdsType> Topic<T> findTopic(String name, T prototype, int timeoutMs) {
         Objects.requireNonNull(name, "name");
@@ -184,9 +191,10 @@ public final class DomainParticipant extends NativeEntity {
      * declaring {@code fields} as the type's CDR field descriptors: fields
      * with {@link TopicFieldDescriptor#isKey()} true become instance keys,
      * and the core can evaluate a {@link #createContentFilteredTopic content
-     * filter expression} against any declared field. Unlike {@link
-     * #createTopic(String, IDdsType)}, which registers no field metadata at
-     * all, the topic this returns supports both.
+     * filter expression} against any declared field. For a type whose
+     * {@link IDdsType#typeInfo()} is null, {@link #createTopic(String,
+     * IDdsType)} registers no field metadata at all; this overload is how
+     * such a hand-written type gets keys and filtering.
      *
      * <p>{@code fields} must include every field up to and including the
      * last one a later content filter or the instance key needs -- the
@@ -347,7 +355,9 @@ public final class DomainParticipant extends NativeEntity {
      * <p>Only endpoints whose instance state matches {@code instanceStateMask}
      * (a bitwise-OR of {@link com.intellectus.int2dds.conditions.InstanceState}
      * constants -- e.g. {@code InstanceState.ANY} for all, {@code
-     * InstanceState.NOT_ALIVE_DISPOSED} for disposed-only) are returned.
+     * InstanceState.NOT_ALIVE_DISPOSED} for disposed-only) are returned. A
+     * departed endpoint arrives as a key-only entry: {@code hasData()} is
+     * false and only {@code endpointGuid()}/{@code instanceState()} are set.
      *
      * <p>Materializes each entry into an immutable {@link
      * PublicationBuiltinTopicData} before releasing the native snapshot: the
@@ -377,11 +387,21 @@ public final class DomainParticipant extends NativeEntity {
             ReturnCodes.check(FfiAccess.pubDataSeqLength(seq, lenOut));
             int n = (int) lenOut[0];
             for (int i = 0; i < n; i++) {
+                int[] state = new int[1];
+                ReturnCodes.check(FfiAccess.pubDataSeqGetInstanceState(seq, i, state));
                 long[] dataOut = new long[1];
-                ReturnCodes.check(FfiAccess.pubDataSeqGet(seq, i, dataOut));
+                int getRc = FfiAccess.pubDataSeqGet(seq, i, dataOut);
+                if (getRc == DdsException.RET_PRECONDITION_NOT_MET) {
+                    // Key-only entry (a dispose): the handle is its only identity.
+                    byte[] guid = new byte[16];
+                    ReturnCodes.check(FfiAccess.pubDataSeqGetInstanceHandle(seq, i, guid));
+                    out.add(PublicationBuiltinTopicData.keyOnly(guid, state[0]));
+                    continue;
+                }
+                ReturnCodes.check(getRc);
                 long data = dataOut[0];
                 try {
-                    out.add(PublicationBuiltinTopicData.materialize(data));
+                    out.add(PublicationBuiltinTopicData.materialize(data, state[0]));
                 } finally {
                     FfiAccess.pubDataDestroy(data);
                 }
@@ -424,7 +444,9 @@ public final class DomainParticipant extends NativeEntity {
      * <p>Only endpoints whose instance state matches {@code instanceStateMask}
      * (a bitwise-OR of {@link com.intellectus.int2dds.conditions.InstanceState}
      * constants -- e.g. {@code InstanceState.ANY} for all, {@code
-     * InstanceState.NOT_ALIVE_DISPOSED} for disposed-only) are returned.
+     * InstanceState.NOT_ALIVE_DISPOSED} for disposed-only) are returned. A
+     * departed endpoint arrives as a key-only entry: {@code hasData()} is
+     * false and only {@code endpointGuid()}/{@code instanceState()} are set.
      *
      * <p>Materializes each entry into an immutable {@link
      * SubscriptionBuiltinTopicData} before releasing the native snapshot: the
@@ -454,11 +476,21 @@ public final class DomainParticipant extends NativeEntity {
             ReturnCodes.check(FfiAccess.subDataSeqLength(seq, lenOut));
             int n = (int) lenOut[0];
             for (int i = 0; i < n; i++) {
+                int[] state = new int[1];
+                ReturnCodes.check(FfiAccess.subDataSeqGetInstanceState(seq, i, state));
                 long[] dataOut = new long[1];
-                ReturnCodes.check(FfiAccess.subDataSeqGet(seq, i, dataOut));
+                int getRc = FfiAccess.subDataSeqGet(seq, i, dataOut);
+                if (getRc == DdsException.RET_PRECONDITION_NOT_MET) {
+                    // Key-only entry (a dispose): the handle is its only identity.
+                    byte[] guid = new byte[16];
+                    ReturnCodes.check(FfiAccess.subDataSeqGetInstanceHandle(seq, i, guid));
+                    out.add(SubscriptionBuiltinTopicData.keyOnly(guid, state[0]));
+                    continue;
+                }
+                ReturnCodes.check(getRc);
                 long data = dataOut[0];
                 try {
-                    out.add(SubscriptionBuiltinTopicData.materialize(data));
+                    out.add(SubscriptionBuiltinTopicData.materialize(data, state[0]));
                 } finally {
                     FfiAccess.subDataDestroy(data);
                 }
@@ -586,8 +618,9 @@ public final class DomainParticipant extends NativeEntity {
     }
 
     /**
-     * Applies {@code qos} to this participant at runtime. Builds a native
-     * {@link ParticipantQos} handle, applies {@code qos}'s policies onto it,
+     * Applies {@code qos} to this participant at runtime. Reads this
+     * participant's current QoS into a native handle, applies {@code qos}'s
+     * non-null policies onto it (a null policy keeps its current value),
      * and destroys it again once the native {@code set_qos} call returns —
      * success or failure, thrown or not, the same build-apply-destroy shape
      * {@link #createWithQos} uses for the create path. {@code ParticipantQos}
@@ -601,11 +634,9 @@ public final class DomainParticipant extends NativeEntity {
      */
     public void setQos(ParticipantQos qos) {
         Objects.requireNonNull(qos, "qos");
-        long qosHandle = FfiAccess.createParticipantQos();
-        if (qosHandle == 0L) {
-            throw new DdsErrorException(
-                    "failed to allocate a native ParticipantQos handle for setQos");
-        }
+        long[] qosOut = new long[1];
+        ReturnCodes.check(FfiAccess.getParticipantQos(handle(), qosOut));
+        long qosHandle = qosOut[0];
         try {
             QosMarshal.applyParticipantQos(qosHandle, qos);
             int rc = FfiAccess.participantSetQos(handle(), qosHandle);

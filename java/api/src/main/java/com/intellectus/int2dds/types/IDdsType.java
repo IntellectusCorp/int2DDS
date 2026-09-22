@@ -3,6 +3,7 @@ package com.intellectus.int2dds.types;
 import com.intellectus.int2dds.cdr.CdrReader;
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
+import com.intellectus.int2dds.xtypes.TypeInfo;
 
 /**
  * A type that can cross the DDS wire.
@@ -40,6 +41,19 @@ public interface IDdsType {
      * struct-level DHEADER, a FINAL one does not.
      */
     Extensibility extensibility();
+
+    /**
+     * A fresh description of every member of this type -- kinds, bounds and
+     * {@code @key} flags -- or {@code null} when the type carries none. With
+     * one, {@code createTopic} advertises the full TypeObject over discovery
+     * and the core resolves instance keys, which is what lets a keyed type
+     * match a keyed peer written in another language. Without one the topic is
+     * key-less and matched by type name alone. The caller closes the result.
+     * The IDL backend generates this.
+     */
+    default TypeInfo typeInfo() {
+        return null;
+    }
 }
 
 // The C# binding keeps these three facts in a DdsTypeAttribute

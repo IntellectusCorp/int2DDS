@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.discovery;
 
+import com.intellectus.int2dds.conditions.InstanceState;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import java.nio.charset.StandardCharsets;
@@ -38,11 +39,14 @@ public final class SubscriptionBuiltinTopicData {
     private final int livelinessLeaseSeconds;
     private final int livelinessLeaseNanos;
     private final byte[] userData;
+    private final int instanceState;
+    private final boolean hasData;
 
     private SubscriptionBuiltinTopicData(byte[] key, byte[] endpointGuid, byte[] participantKey,
             String topicName, String typeName, int reliabilityKind, int durabilityKind,
             int livelinessKind, int deadlineSeconds, int deadlineNanos,
-            int livelinessLeaseSeconds, int livelinessLeaseNanos, byte[] userData) {
+            int livelinessLeaseSeconds, int livelinessLeaseNanos, byte[] userData,
+            int instanceState, boolean hasData) {
         this.key = key;
         this.endpointGuid = endpointGuid;
         this.participantKey = participantKey;
@@ -56,6 +60,22 @@ public final class SubscriptionBuiltinTopicData {
         this.livelinessLeaseSeconds = livelinessLeaseSeconds;
         this.livelinessLeaseNanos = livelinessLeaseNanos;
         this.userData = userData;
+        this.instanceState = instanceState;
+        this.hasData = hasData;
+    }
+
+    /**
+     * False for a departed endpoint: a dispose travels as a key with no
+     * payload, so only {@link #endpointGuid()} and {@link #instanceState()}
+     * are meaningful and every other field is empty or zero.
+     */
+    public boolean hasData() {
+        return hasData;
+    }
+
+    /** One of the {@link com.intellectus.int2dds.conditions.InstanceState} bits. */
+    public int instanceState() {
+        return instanceState;
     }
 
     /** The 12-byte instance key (defensively copied). */
@@ -121,6 +141,17 @@ public final class SubscriptionBuiltinTopicData {
      * destroying it afterward -- this never does.
      */
     public static SubscriptionBuiltinTopicData materialize(long data) {
+        return materialize(data, InstanceState.ALIVE);
+    }
+
+    /** A key-only snapshot entry; {@code endpointGuid} is the entry's 16-byte instance handle. */
+    public static SubscriptionBuiltinTopicData keyOnly(byte[] endpointGuid, int instanceState) {
+        return new SubscriptionBuiltinTopicData(new byte[12], endpointGuid.clone(), new byte[12],
+                "", "", 0, 0, 0, 0, 0, 0, 0, new byte[0], instanceState, false);
+    }
+
+    /** {@link #materialize(long)} for a snapshot entry whose instance state is known. */
+    public static SubscriptionBuiltinTopicData materialize(long data, int instanceState) {
         byte[] key = new byte[12];
         ReturnCodes.check(FfiAccess.subDataGetKey(data, key));
 
@@ -184,7 +215,7 @@ public final class SubscriptionBuiltinTopicData {
         return new SubscriptionBuiltinTopicData(key, endpointGuid, participantKey, topicName,
                 typeName, reliabilityKind[0], durabilityKind[0], livelinessKind[0],
                 deadlineSeconds[0], deadlineNanos[0], leaseSeconds[0], leaseNanos[0],
-                userDataBytes[0]);
+                userDataBytes[0], instanceState, true);
     }
 
     @Override

@@ -34,10 +34,11 @@ public final class Ffi {
             () -> new UnsatisfiedLinkError("int2DDS C ABI symbol not found: " + name)), d);
     }
 
-    /** Native address of a direct ByteBuffer, or 0 if not direct. */
+    /** Native base address of a direct ByteBuffer, or 0 if not direct. */
     static long directBufferAddress(java.nio.ByteBuffer buf) {
         if (buf == null || !buf.isDirect()) return 0L;
-        return MemorySegment.ofBuffer(buf).address();
+        // ofBuffer starts at the buffer's position; JNI's GetDirectBufferAddress does not.
+        return MemorySegment.ofBuffer(buf).address() - buf.position();
     }
 
     private static final MethodHandle MH_int2dds_clear_last_error = dc("int2dds_clear_last_error", FunctionDescriptor.ofVoid());

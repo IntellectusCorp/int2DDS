@@ -19,7 +19,14 @@ public final class TypeInfo implements AutoCloseable {
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
+    /** Member flag bits for the {@code flags} argument of the {@code add*Field} methods. */
+    public static final int MEMBER_KEY = 1;
+    public static final int MEMBER_OPTIONAL = 1 << 1;
+    public static final int MEMBER_MUST_UNDERSTAND = 1 << 2;
+    public static final int MEMBER_EXTERNAL = 1 << 3;
+
     private final NativeHandle handle;
+    private boolean hasKey;
 
     public TypeInfo(String name, Extensibility extensibility) {
         this(name.getBytes(UTF8), extensibility);
@@ -75,6 +82,28 @@ public final class TypeInfo implements AutoCloseable {
         return handle.value();
     }
 
+    /** True once a field carrying {@link #MEMBER_KEY} has been appended. */
+    public boolean hasKey() {
+        return hasKey;
+    }
+
+    /**
+     * Creates a native topic advertising this type; the bridge {@link
+     * com.intellectus.int2dds.core.Topic} creates itself through. This builder
+     * is borrowed. {@code qos} may be {@code 0L}. Returns the C ABI status code
+     * and, on success, the topic handle in {@code handleOut[0]}.
+     */
+    public int createTopic(long participant, byte[] topicName, long qos, long[] handleOut) {
+        int rc = FfiAccess.createTopicWithTypeInfo(participant, topicName, handle(), qos, handleOut);
+        NativeKeepAlive.keepAlive(this);
+        return rc;
+    }
+
+    private void fieldAdded(int rc, int flags) {
+        ReturnCodes.check(rc);
+        hasKey |= (flags & MEMBER_KEY) != 0;
+    }
+
     /** Appends one field. {@code name} crosses as UTF-8, never modified UTF-8. */
     public void addField(String name, int fieldType, int flags) {
         int rc = FfiAccess.typeInfoAddField(handle(), name.getBytes(UTF8), fieldType, flags);
@@ -83,7 +112,7 @@ public final class TypeInfo implements AutoCloseable {
         // Same hazard FfiAccess's own bridges guard against -- see
         // NativeKeepAlive's doc for the full argument.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /** Appends a sequence field ({@code bound == 0} means unbounded). */
@@ -92,7 +121,7 @@ public final class TypeInfo implements AutoCloseable {
                 handle(), name.getBytes(UTF8), elementType, bound, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /**
@@ -105,7 +134,7 @@ public final class TypeInfo implements AutoCloseable {
         // the native call dereferences both handles.
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(nested);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /** Appends a bounded string field ({@code bound == 0} means unbounded). */
@@ -113,7 +142,7 @@ public final class TypeInfo implements AutoCloseable {
         int rc = FfiAccess.typeInfoAddStringField(handle(), name.getBytes(UTF8), bound, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /** Appends a wide-string (wstring) field ({@code bound == 0} means unbounded). */
@@ -121,7 +150,7 @@ public final class TypeInfo implements AutoCloseable {
         int rc = FfiAccess.typeInfoAddWstringField(handle(), name.getBytes(UTF8), bound, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /** Appends a fixed-size array field of a primitive {@link FieldType}. */
@@ -130,7 +159,7 @@ public final class TypeInfo implements AutoCloseable {
                 handle(), name.getBytes(UTF8), elementType, arraySize, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /**
@@ -145,7 +174,7 @@ public final class TypeInfo implements AutoCloseable {
         // the native call dereferences both handles.
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(element);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /**
@@ -160,7 +189,7 @@ public final class TypeInfo implements AutoCloseable {
         // the native call dereferences both handles.
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(element);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /** Appends a literal to an enum builder. No-op if this builder is not an enum. */
@@ -192,7 +221,7 @@ public final class TypeInfo implements AutoCloseable {
                 handle(), fieldName.getBytes(UTF8), typeName.getBytes(UTF8), flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /**
@@ -207,7 +236,7 @@ public final class TypeInfo implements AutoCloseable {
                 handle(), fieldName.getBytes(UTF8), elementTypeName.getBytes(UTF8), bound, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /**
@@ -220,7 +249,7 @@ public final class TypeInfo implements AutoCloseable {
                 handle(), fieldName.getBytes(UTF8), elementTypeName.getBytes(UTF8), arraySize, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
-        ReturnCodes.check(rc);
+        fieldAdded(rc, flags);
     }
 
     /** Bakes the fields appended so far into an immutable {@link TypeObject}. */

@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Java code generation in `int2dds-idl` (`-j`/`--java <DIR>`, `--java-package <PKG>`).
   Unlike the other language flags it takes a directory, because Java requires one
   public top-level class per file. Generated classes implement the Java binding's
-  `IDdsType`; a keyed struct also gets a static `ddsFields()` for the keyed
-  `createTopic` overload. Batch `--output-dir` now emits Java alongside the other
-  targets.
+  `IDdsType`, including a `typeInfo()` that describes every member so `createTopic`
+  advertises the same TypeObject the other bindings do. Batch `--output-dir` now
+  emits Java alongside the other targets.
 - `scripts/check-idl-java.sh`, which generates every `idl/input/*.idl` file and
   compiles the result with `javac -Xlint:all`, then verifies the committed
   `CdrGolden.java` still matches the generator. Wired into the `java` CI status.

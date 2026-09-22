@@ -20,7 +20,15 @@ public class ReadCondition extends Condition {
      * arbitrary handle.
      */
     public ReadCondition(long rawHandle) {
-        super(rawHandle, FfiAccess::readConditionDelete);
+        super(rawHandle, ReadCondition::deleteAlways);
+    }
+
+    // Unlike the int2dds_delete_* entity deleters, int2dds_readcondition_delete
+    // frees the handle on every path, even when it returns an error. A non-zero
+    // code must not reach NativeCleaner, which would retry and free it twice.
+    private static int deleteAlways(long h) {
+        FfiAccess.readConditionDelete(h);
+        return 0;
     }
 
     @Override

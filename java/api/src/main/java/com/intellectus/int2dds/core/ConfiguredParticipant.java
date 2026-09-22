@@ -81,7 +81,7 @@ public final class ConfiguredParticipant implements AutoCloseable {
         // this reachable across it -- see NativeKeepAlive's own doc.
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
-        DynamicDataWriter created = DynamicDataWriter.fromHandle(out[0]);
+        DynamicDataWriter created = DynamicDataWriter.fromHandle(out[0], this);
         writers.put(name, created);
         return created;
     }
@@ -106,7 +106,7 @@ public final class ConfiguredParticipant implements AutoCloseable {
         // Same fence as getDataWriter.
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
-        DynamicDataReader created = DynamicDataReader.fromHandle(out[0]);
+        DynamicDataReader created = DynamicDataReader.fromHandle(out[0], this);
         readers.put(name, created);
         return created;
     }

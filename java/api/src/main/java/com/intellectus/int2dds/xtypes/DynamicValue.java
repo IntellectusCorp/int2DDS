@@ -40,7 +40,10 @@ public final class DynamicValue implements AutoCloseable {
      * like one of the static factories below returns.
      */
     DynamicValue(long rawHandle) {
-        this.handle = NativeCleaner.register(this, rawHandle, this::deleteUnlessConsumed);
+        // The deleter captures only the flag, never `this`: NativeCleaner holds
+        // deleters from a static set, so capturing the owner would pin it forever.
+        final AtomicBoolean moved = consumed;
+        this.handle = NativeCleaner.register(this, rawHandle, h -> deleteUnlessConsumed(moved, h));
     }
 
     /**
@@ -50,7 +53,7 @@ public final class DynamicValue implements AutoCloseable {
      * it into a collection or a DynamicData field, so there is nothing left
      * here to destroy.
      */
-    private int deleteUnlessConsumed(long h) {
+    private static int deleteUnlessConsumed(AtomicBoolean consumed, long h) {
         if (!consumed.get()) {
             FfiAccess.dynamicValueDestroy(h);
         }
@@ -269,6 +272,9 @@ public final class DynamicValue implements AutoCloseable {
         }
         if (value.consumed.get()) {
             throw new IllegalStateException("value has already been consumed");
+        }
+        if (discriminator == value) {
+            throw new IllegalArgumentException("discriminator and value must be distinct values");
         }
         long d = discriminator.handle();
         long v = value.handle();
@@ -580,6 +586,9 @@ public final class DynamicValue implements AutoCloseable {
         if (element.consumed.get()) {
             throw new IllegalStateException("element has already been consumed");
         }
+        if (element == this) {
+            throw new IllegalArgumentException("a value cannot be pushed into itself");
+        }
         long c = handle();
         long e = element.handle();
         int rc = FfiAccess.dynamicValuePush(c, e);
@@ -611,6 +620,9 @@ public final class DynamicValue implements AutoCloseable {
         }
         if (value.consumed.get()) {
             throw new IllegalStateException("value has already been consumed");
+        }
+        if (key == value || key == this || value == this) {
+            throw new IllegalArgumentException("map, key and value must be distinct values");
         }
         long m = handle();
         long k = key.handle();
@@ -656,15 +668,12 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Releases this value's handle, unless it has already been consumed
-     * (moved into a collection or a DynamicData field), in which case this
-     * is a no-op -- there is nothing left here to free.
+     * Releases this value's handle. For a consumed value (moved into a
+     * collection or a DynamicData field) the deleter frees nothing, but the
+     * handle is still closed so NativeCleaner drops its registration.
      */
     @Override
     public void close() {
-        if (consumed.get()) {
-            return;
-        }
         ReturnCodes.check(handle.close());
     }
 }

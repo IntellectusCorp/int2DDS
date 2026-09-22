@@ -22,7 +22,7 @@ use syn::{FnArg, Item, Pat, ReturnType, Visibility};
 /// symbol table of the built cdylib. Intentionally exact: an FFI change must
 /// force a deliberate update here, and this is the ONLY count that needs one —
 /// every other guard derives from the parsed surface.
-pub const EXPECTED_FFI_FUNCTIONS: usize = 455;
+pub const EXPECTED_FFI_FUNCTIONS: usize = 456;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
@@ -329,7 +329,7 @@ mod tests {
         let fns = parse_ffi_dir(ffi_dir()).expect("parse must succeed");
         // Ground truth is the dynamic symbol table of the built cdylib:
         //   nm -D --defined-only target/release/libint2dds_ffi.so | grep -c ' T int2dds_'
-        // reports 455 after adding int2dds_clear_last_error.
+        // reports 456, including int2dds_participant_set_endpoint_discovery_callback.
         // This assertion is intentionally exact so an FFI change forces a
         // deliberate update here.
         assert_eq!(fns.len(), EXPECTED_FFI_FUNCTIONS, "exported FFI function count changed");

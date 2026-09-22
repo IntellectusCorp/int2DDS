@@ -3,9 +3,12 @@ package com.intellectus.int2dds.core;
 import com.intellectus.int2dds.cdr.CdrReader;
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
+import com.intellectus.int2dds.conditions.InstanceState;
 import com.intellectus.int2dds.conditions.QueryCondition;
 import com.intellectus.int2dds.conditions.ReadCondition;
+import com.intellectus.int2dds.conditions.SampleState;
 import com.intellectus.int2dds.conditions.StatusCondition;
+import com.intellectus.int2dds.conditions.ViewState;
 import com.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.exceptions.DdsException;
@@ -432,8 +435,9 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     }
 
     /**
-     * Applies {@code qos} to this reader at runtime. Builds a native {@link
-     * DataReaderQos} handle, applies {@code qos}'s policies onto it, and
+     * Applies {@code qos} to this reader at runtime. Reads this reader's
+     * current QoS into a native handle, applies {@code qos}'s non-null
+     * policies onto it (a null policy keeps its current value), and
      * destroys it again once the native {@code set_qos} call returns —
      * success or failure, thrown or not, the same build-apply-destroy shape
      * {@link #create} uses for the create path. The core rejects a change to
@@ -450,11 +454,9 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      */
     public void setQos(DataReaderQos qos) {
         Objects.requireNonNull(qos, "qos");
-        long qosHandle = FfiAccess.createDataReaderQos();
-        if (qosHandle == 0L) {
-            throw new DdsErrorException(
-                    "failed to allocate a native DataReaderQos handle for setQos");
-        }
+        long[] qosOut = new long[1];
+        ReturnCodes.check(FfiAccess.getReaderQos(handle(), qosOut));
+        long qosHandle = qosOut[0];
         try {
             QosMarshal.applyReaderQos(qosHandle, qos);
             int rc = FfiAccess.datareaderSetQos(handle(), qosHandle);
@@ -653,14 +655,31 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return out;
     }
 
-    /** Takes (removes) the next sample, or null if the cache is empty. */
+    /**
+     * Takes (removes) the next sample in any state, or null if the cache is
+     * empty -- so it also drains samples a prior {@link #read()} marked READ.
+     */
     public Sample<T> take() {
-        return next(true);
+        return next(true, SampleState.ANY, ViewState.ANY, InstanceState.ANY);
     }
 
-    /** Reads (without removing) the next sample, or null if the cache is empty. */
+    /**
+     * Reads (without removing) the next not-yet-read sample and marks it
+     * READ, or null if there is none. Use {@link #read(int, int, int)} to see
+     * an already-READ sample again.
+     */
     public Sample<T> read() {
-        return next(false);
+        return next(false, SampleState.NOT_READ, ViewState.ANY, InstanceState.ANY);
+    }
+
+    /** State-filtered {@link #take()}; same mask semantics as {@link #takeSerialized(int, int, int)}. */
+    public Sample<T> take(int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return next(true, sampleStateMask, viewStateMask, instanceStateMask);
+    }
+
+    /** State-filtered {@link #read()}; same mask semantics as {@link #readSerialized(int, int, int)}. */
+    public Sample<T> read(int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return next(false, sampleStateMask, viewStateMask, instanceStateMask);
     }
 
     /**
@@ -1046,16 +1065,17 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         }
     }
 
-    private Sample<T> next(boolean take) {
+    private Sample<T> next(
+            boolean take, int sampleStateMask, int viewStateMask, int instanceStateMask) {
         long h = handle();
         // The core removes the sample only when it fits, so on BUFFER_TOO_SMALL
         // we can grow to the required size and retry without losing data.
         while (true) {
             int rc = take
-                    ? FfiAccess.datareaderTakeSerializedWInfo(h, addr(payload), payload.capacity(),
-                            addr(sizeSlot), addr(infoSlot))
-                    : FfiAccess.datareaderReadSerializedWInfo(h, addr(payload), payload.capacity(),
-                            addr(sizeSlot), addr(infoSlot));
+                    ? FfiAccess.datareaderTakeSerializedWStates(h, addr(payload), payload.capacity(),
+                            addr(sizeSlot), addr(infoSlot), sampleStateMask, viewStateMask, instanceStateMask)
+                    : FfiAccess.datareaderReadSerializedWStates(h, addr(payload), payload.capacity(),
+                            addr(sizeSlot), addr(infoSlot), sampleStateMask, viewStateMask, instanceStateMask);
             // handle() and the three buffer addresses were consumed by the
             // native call above; keep them all reachable across it.
             NativeKeepAlive.keepAlive(this);

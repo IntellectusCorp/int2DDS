@@ -71,7 +71,7 @@ fn main() -> Result<(), String> {
 
     let generated = fns.iter().filter(|f| int2dds_java::gen::typemap::is_generatable(f)).count();
     println!(
-        "parsed {total} FFI functions; generated {generated}; hand-written {}",
+        "parsed {total} FFI functions; generated {generated}; not generated {}",
         total - generated
     );
     println!("  {}", rust_path.display());

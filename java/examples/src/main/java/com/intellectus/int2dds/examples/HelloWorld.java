@@ -7,6 +7,8 @@ import com.intellectus.int2dds.cdr.CdrReader;
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
 import com.intellectus.int2dds.types.IDdsType;
+import com.intellectus.int2dds.xtypes.FieldType;
+import com.intellectus.int2dds.xtypes.TypeInfo;
 
 public final class HelloWorld implements IDdsType {
 
@@ -37,5 +39,18 @@ public final class HelloWorld implements IDdsType {
         this.index = reader.readU32();
         this.message = reader.readString();
         reader.readDheaderEnd(d);
+    }
+
+    @Override
+    public TypeInfo typeInfo() {
+        TypeInfo ti = new TypeInfo("HelloWorld", Extensibility.APPENDABLE);
+        try {
+            ti.addField("index", FieldType.UINT32, 0);
+            ti.addStringField("message", 0, 0);
+            return ti;
+        } catch (RuntimeException e) {
+            ti.close();
+            throw e;
+        }
     }
 }

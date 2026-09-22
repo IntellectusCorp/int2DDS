@@ -790,6 +790,24 @@ public final class FfiAccess {
     }
 
     /**
+     * Creates a topic from a native {@code TypeInfo} builder: the type name,
+     * extensibility, keys and the advertised TypeObject all come from {@code
+     * typeInfo}, which is borrowed. {@code qos} may be {@code 0L}. Same
+     * status-code/{@code handleOut} shape as {@link #createTopic}.
+     */
+    public static int createTopicWithTypeInfo(long participant, byte[] topicName, long typeInfo,
+            long qos, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_topic_with_type_info(participant, topicName, typeInfo, qos,
+                directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
      * Creates a ContentFilteredTopic on {@code relatedTopic}: samples not
      * matching {@code filterExpr} (a SQL-92-like WHERE clause, {@code %0}
      * {@code %1}... referencing {@code params} positionally) are not
@@ -1119,6 +1137,50 @@ public final class FfiAccess {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datareader_get_qos(reader, directBufferAddress(slot));
         // See createDataWriter's identical fence just above.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Same shape as {@link #getWriterQos}, for a topic. */
+    public static int getTopicQos(long topic, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_topic_get_qos(topic, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Same shape as {@link #getWriterQos}, for a publisher. */
+    public static int getPublisherQos(long publisher, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publisher_get_qos(publisher, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Same shape as {@link #getWriterQos}, for a subscriber. */
+    public static int getSubscriberQos(long subscriber, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscriber_get_qos(subscriber, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Same shape as {@link #getWriterQos}, for a participant. */
+    public static int getParticipantQos(long participant, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_get_qos(participant, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
@@ -3713,6 +3775,23 @@ public final class FfiAccess {
         return rc;
     }
 
+    /** Instance state ({@code InstanceState} bits) of the publication snapshot entry at {@code index}. */
+    public static int pubDataSeqGetInstanceState(long seq, long index, int[] stateOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_seq_get_instance_state(
+                seq, index, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            stateOut[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /** Instance handle (the endpoint GUID) of the entry at {@code index}; present even for a key-only entry. */
+    public static int pubDataSeqGetInstanceHandle(long seq, long index, byte[] handleOut) {
+        return Ffi.int2dds_publication_builtin_topic_data_seq_get_instance_handle(seq, index, handleOut);
+    }
+
     /** Releases a publication snapshot sequence returned by {@link #takeDiscoveredPublicationsSnapshot}. */
     public static void pubDataSeqDelete(long seq) {
         Ffi.int2dds_publication_builtin_topic_data_seq_delete(seq);
@@ -3915,6 +3994,23 @@ public final class FfiAccess {
             dataOut[0] = slot.getLong(0);
         }
         return rc;
+    }
+
+    /** Instance state ({@code InstanceState} bits) of the subscription snapshot entry at {@code index}. */
+    public static int subDataSeqGetInstanceState(long seq, long index, int[] stateOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_seq_get_instance_state(
+                seq, index, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            stateOut[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /** Instance handle (the endpoint GUID) of the entry at {@code index}; present even for a key-only entry. */
+    public static int subDataSeqGetInstanceHandle(long seq, long index, byte[] handleOut) {
+        return Ffi.int2dds_subscription_builtin_topic_data_seq_get_instance_handle(seq, index, handleOut);
     }
 
     /** Releases a subscription snapshot sequence returned by {@link #takeDiscoveredSubscriptionsSnapshot}. */

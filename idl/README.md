@@ -232,9 +232,11 @@ signed type of the **same width** (`unsigned long` → `int`), wrapping rather t
 widening. Sequences and arrays both map to Java arrays rather than `List<T>`, so
 no element is boxed.
 
-A struct with at least one `@key` member also gets a static `ddsFields()` returning
-the `List<TopicFieldDescriptor>` that the keyed `createTopic` overload needs — that
-overload is the only Java path that resolves instance keys.
+Every struct also overrides `typeInfo()`, describing all of its members (kinds,
+bounds, `@key` flags, nested structs and enums) so `createTopic` advertises the same
+TypeObject the other backends do; a generated enum exposes its own description as a
+static `typeInfo()`. A keyed struct that cannot be fully described is refused rather
+than emitted as a key-less type.
 
 See [java/README.md](../java/README.md) for the binding-side workflow.
 
@@ -252,10 +254,9 @@ declaration. It refuses:
 | `@extensibility(MUTABLE)` structs | same — EMHEADER framing is not emitted yet |
 | struct inheritance | no Java mapping implemented yet |
 | `enum` with no variants | an empty Java `enum` body is not valid Java |
-| `wstring` | the Java CDR layer and the Rust core disagree on whether the uint32 length counts the NUL terminator; refused until that is settled in one place. `wchar` is fine |
 | nested collections (`sequence<sequence<T>>`, `long m[3][4]`) | Java array creation needs the sized dimension first, and no test exercises a nested encoding against real CDR bytes |
 | cross-package type references | see the reference contract above |
-| a key-descriptor field the native path cannot represent | the keyed-topic path is scalar-only; a `float`, `octet`, `char`, `wstring`, or aggregate at or before the last `@key` field fails rather than silently dropping the key |
+| a keyed struct with an `@external` nested struct member | that member has no TypeObject form here, and without a full description the topic would be created key-less |
 
 Everything else in the [Supported IDL](#supported-idl) table generates.
 

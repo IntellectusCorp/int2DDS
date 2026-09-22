@@ -603,8 +603,9 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     }
 
     /**
-     * Applies {@code qos} to this writer at runtime. Builds a native {@link
-     * DataWriterQos} handle, applies {@code qos}'s policies onto it, and
+     * Applies {@code qos} to this writer at runtime. Reads this writer's
+     * current QoS into a native handle, applies {@code qos}'s non-null
+     * policies onto it (a null policy keeps its current value), and
      * destroys it again once the native {@code set_qos} call returns —
      * success or failure, thrown or not, the same build-apply-destroy shape
      * {@link #create} uses for the create path. The core rejects a change to
@@ -622,11 +623,9 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      */
     public void setQos(DataWriterQos qos) {
         Objects.requireNonNull(qos, "qos");
-        long qosHandle = FfiAccess.createDataWriterQos();
-        if (qosHandle == 0L) {
-            throw new DdsErrorException(
-                    "failed to allocate a native DataWriterQos handle for setQos");
-        }
+        long[] qosOut = new long[1];
+        ReturnCodes.check(FfiAccess.getWriterQos(handle(), qosOut));
+        long qosHandle = qosOut[0];
         try {
             QosMarshal.applyWriterQos(qosHandle, qos);
             int rc = FfiAccess.datawriterSetQos(handle(), qosHandle);

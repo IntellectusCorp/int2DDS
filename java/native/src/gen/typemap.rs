@@ -342,14 +342,20 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_real_function_is_not_generatable() {
+    fn only_the_callback_functions_are_not_generatable() {
         let fns = parse_ffi_dir(Path::new("../../ffi/src")).unwrap();
-        let skipped: Vec<&str> =
+        let mut skipped: Vec<&str> =
             fns.iter().filter(|f| !is_generatable(f)).map(|f| f.name.as_str()).collect();
+        skipped.sort_unstable();
+        // The first is hand-written in `handwritten.rs`; the second has no Java
+        // binding yet.
         assert_eq!(
             skipped,
-            vec!["int2dds_participant_qos_get_properties_with_prefix"],
-            "the set of hand-written functions changed"
+            vec![
+                "int2dds_participant_qos_get_properties_with_prefix",
+                "int2dds_participant_set_endpoint_discovery_callback",
+            ],
+            "the set of non-generated functions changed"
         );
         // Totality check: generatable_count must equal everything minus the
         // named skip set above, with no independent magic number.
@@ -358,10 +364,10 @@ mod tests {
 
     #[test]
     fn every_type_in_the_real_ffi_surface_is_accounted_for() {
-        // Totality check: the only type in the whole parsed FFI surface that
-        // map_type refuses is the C callback. If a future FFI change introduces
-        // another unmapped type this names it, rather than silently shrinking
-        // the generated binding.
+        // Totality check: the only types in the whole parsed FFI surface that
+        // map_type refuses are the two C callbacks. If a future FFI change
+        // introduces another unmapped type this names it, rather than silently
+        // shrinking the generated binding.
         let fns = parse_ffi_dir(Path::new("../../ffi/src")).unwrap();
         let mut unmapped: Vec<String> = fns
             .iter()
@@ -373,7 +379,8 @@ mod tests {
             .collect();
         unmapped.sort();
         unmapped.dedup();
-        assert_eq!(unmapped.len(), 1, "unmapped types: {unmapped:?}");
-        assert!(unmapped[0].starts_with("Option<"), "{unmapped:?}");
+        assert_eq!(unmapped.len(), 2, "unmapped types: {unmapped:?}");
+        assert_eq!(unmapped[0], "Int2DdsEndpointDiscoveryCallback", "{unmapped:?}");
+        assert!(unmapped[1].starts_with("Option<"), "{unmapped:?}");
     }
 }
