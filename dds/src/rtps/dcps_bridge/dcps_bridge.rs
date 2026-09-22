@@ -921,6 +921,7 @@ mod tests {
             // Both peers must take the default-policy branch below,
             // not an explicit override left set by another test/session.
             std::env::remove_var("INT2DDS_UDP_SOCKET_BUFFER");
+            std::env::remove_var("INT2DDS_UDP_RECV_BUFFER");
         }
 
         // Independent oracle, computed with socket2 directly (not via

@@ -15,6 +15,8 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP receive and send buffer size (bytes)   | OS default, see below   |
+| `INT2DDS_UDP_RECV_BUFFER`            | UDP receive buffer size (bytes)            | `INT2DDS_UDP_SOCKET_BUFFER` |
+| `INT2DDS_UDP_SEND_BUFFER`            | UDP send buffer size (bytes)               | `INT2DDS_UDP_SOCKET_BUFFER` |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
 | `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
@@ -280,6 +282,33 @@ cargo run --example hello_world_pub
 ```bash
 # Linux/macOS
 export INT2DDS_UDP_SOCKET_BUFFER=1048576
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_UDP_RECV_BUFFER, INT2DDS_UDP_SEND_BUFFER
+
+Set one direction only: `INT2DDS_UDP_RECV_BUFFER` the receive (`SO_RCVBUF`) size,
+`INT2DDS_UDP_SEND_BUFFER` the send (`SO_SNDBUF`) size, in bytes.
+
+Either one overrides `INT2DDS_UDP_SOCKET_BUFFER` for its own direction. A direction left unset
+falls back to `INT2DDS_UDP_SOCKET_BUFFER`, and without that to the floor policy described above.
+A size set here is always requested, subject to the same OS cap.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_UDP_RECV_BUFFER = "8388608"  # 8MB receive
+$env:INT2DDS_UDP_SEND_BUFFER = "262144"   # 256KB send
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_UDP_RECV_BUFFER=8388608
+export INT2DDS_UDP_SEND_BUFFER=262144
 
 cargo run --example hello_world_pub
 ```
