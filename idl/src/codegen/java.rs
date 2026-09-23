@@ -630,8 +630,10 @@ fn member_flags(m: &ResolvedMember) -> i32 {
 }
 
 /// Whether `typeInfo()` can describe the struct byte-correctly. Same rule as
-/// the C# backend: an `@external` nested struct cannot be, nor can a struct
-/// whose nested structs cannot, recursively.
+/// the C# backend: every nested struct must itself be describable, recursively,
+/// and a struct that reaches itself through a nested member cannot be. An
+/// `@external` nested struct is described like any other, carrying the EXTERNAL
+/// member flag exactly as the Rust derive does for `Box<T>`.
 fn struct_describable(model: &IdlModel, name: &str, visited: &mut Vec<String>) -> bool {
     let leaf = name.rsplit("::").next().unwrap_or(name);
     let declared = || model.structs.iter().chain(model.imported.structs.iter());
@@ -657,7 +659,6 @@ fn member_describable(model: &IdlModel, m: &ResolvedMember, visited: &mut Vec<St
         other => field_type_const(other).is_some(),
     };
     match &m.resolved_type {
-        ResolvedType::Struct(_) if m.is_external => false,
         ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
             named(element, visited)
         }
@@ -791,8 +792,8 @@ fn emit_struct(
         if let Some(k) = s.members.iter().find(|m| m.is_key) {
             return Err(format!(
                 "Java backend cannot describe every member of keyed struct '{}' (key '{}'): \
-                 an @external nested struct has no TypeObject form here, and without a \
-                 full description the topic would be created key-less",
+                 a nested struct that is cyclic or not declared here has no TypeObject form, \
+                 and without a full description the topic would be created key-less",
                 s.name, k.name
             ));
         }
@@ -1665,15 +1666,24 @@ mod tests {
     }
 
     #[test]
+    fn an_external_nested_struct_is_described_with_the_external_flag() {
+        let files = gen(
+            r#"@extensibility(FINAL) struct Inner { long v; };
+               @extensibility(FINAL) struct S { @key long id; @external Inner ext; };"#,
+            &JavaOptions::default(),
+        );
+        let src = &files.iter().find(|f| f.relative_path == "S.java").unwrap().source;
+        assert!(src.contains("try (TypeInfo n = new Inner().typeInfo()) {"), "{}", src);
+        assert!(src.contains("ti.addNestedField(\"ext\", n, 8);"), "{}", src);
+    }
+
+    #[test]
     fn a_keyed_struct_that_cannot_be_described_fails_generation() {
-        // Without a full description the topic would be created key-less, and
-        // nothing at runtime would say why keying stopped working.
-        let src = r#"@extensibility(FINAL) struct Inner { long v; };
-                     @extensibility(FINAL) struct S { @key long id; @external Inner bad; };"#;
+        let src = r#"@extensibility(FINAL) struct Node { @key long id; @external Node next; };"#;
         let defs = parse_idl(src).unwrap();
         let model = resolve(defs).unwrap();
-        let err = generate(&model, "S.idl", &JavaOptions::default()).unwrap_err();
-        assert!(err.contains("'S'"), "{}", err);
+        let err = generate(&model, "Node.idl", &JavaOptions::default()).unwrap_err();
+        assert!(err.contains("'Node'"), "{}", err);
         assert!(err.contains("key"), "{}", err);
     }
 }

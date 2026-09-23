@@ -621,18 +621,16 @@ impl<'a> PyGen<'a> {
     }
 
     /// A member is advertisable byte-correctly when its type is a primitive/string, an enum or
-    /// bitmask, a (non-@external) nested struct that is itself recursively advertisable, or a
-    /// sequence/array whose element is one of those (single-level). Maps, unions, and nested
-    /// collections are excluded (they fall back to the name-based keyed path).
+    /// bitmask, a nested struct that is itself recursively advertisable, or a sequence/array
+    /// whose element is one of those (single-level). An `@external` nested struct is advertised
+    /// like any other nested struct, carrying the EXTERNAL member flag exactly as the Rust
+    /// derive does for `Box<T>`. Maps, unions, nested collections, and cyclic nested-struct
+    /// references are excluded.
     fn member_advertisable(
         &self,
         m: &ResolvedMember,
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
-        // @external only guards direct struct members (Box) against type cycles.
-        if m.is_external && matches!(m.resolved_type, ResolvedType::Struct(_)) {
-            return false;
-        }
         self.type_advertisable(&m.resolved_type, visited)
     }
 
@@ -1613,6 +1611,27 @@ mod tests {
         // Widget has a map member -> not advertisable -> advertisement metadata is omitted
         // so it falls back to name-based matching.
         assert!(!code.contains("_dds_type_info_fields"), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_external_nested_struct() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Inner {
+                long v;
+            };
+            @final
+            struct Outer {
+                @key long id;
+                @external Inner ext;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Outer.idl", &PythonOptions::new());
+        assert!(code.contains(r#"("nested", "ext", Inner, 0, 8),"#), "{}", code);
     }
 
     #[test]

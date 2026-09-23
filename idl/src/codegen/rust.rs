@@ -277,33 +277,8 @@ impl<'a> RustGen<'a> {
     }
 
     fn default_discriminant(&self, u: &ResolvedUnion, repr: &str) -> String {
-        let used: std::collections::HashSet<i64> = u
-            .cases
-            .iter()
-            .flat_map(|c| &c.labels)
-            .filter_map(|l| match l {
-                ResolvedUnionLabel::Int(v) => Some(*v),
-                ResolvedUnionLabel::Bool(b) => Some(*b as i64),
-                ResolvedUnionLabel::Ident(_) => None,
-            })
-            .collect();
-
-        // Signed discriminators default to -1, or, when -1 is already a declared label,
-        // the negative value closest to zero that no label uses (spec §7.14.2).
-        // Unsigned discriminators use the value closest to zero that no label uses.
-        if matches!(repr, "i8" | "i16" | "i32" | "i64") {
-            let mut candidate = -1i64;
-            while used.contains(&candidate) {
-                candidate -= 1;
-            }
-            candidate.to_string()
-        } else {
-            let mut candidate = 0i64;
-            while used.contains(&candidate) {
-                candidate += 1;
-            }
-            candidate.to_string()
-        }
+        let signed = matches!(repr, "i8" | "i16" | "i32" | "i64");
+        super::union_default_discriminant(u, signed).to_string()
     }
 
     fn discriminant_repr(&self, ty: &ResolvedType) -> &'static str {

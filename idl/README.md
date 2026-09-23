@@ -256,7 +256,7 @@ declaration. It refuses:
 | `enum` with no variants | an empty Java `enum` body is not valid Java |
 | nested collections (`sequence<sequence<T>>`, `long m[3][4]`) | Java array creation needs the sized dimension first, and no test exercises a nested encoding against real CDR bytes |
 | cross-package type references | see the reference contract above |
-| a keyed struct with an `@external` nested struct member | that member has no TypeObject form here, and without a full description the topic would be created key-less |
+| a keyed struct whose nested-struct members form a cycle (e.g. an `@external` self-reference) | the cyclic member has no TypeObject form here, and without a full description the topic would be created key-less |
 
 Everything else in the [Supported IDL](#supported-idl) table generates.
 
