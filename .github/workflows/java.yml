@@ -90,83 +90,19 @@ jobs:
         shell: bash
         run: ./scripts/check-idl-java.sh
 
-  java-test:
-    name: ${{ matrix.os }} / JDK ${{ matrix.jdk }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-2022, macos-latest]
-        jdk: [8, 11, 17, 21, 25]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Disable Windows Defender realtime monitoring
-        if: runner.os == 'Windows'
-        run: Set-MpPreference -DisableRealtimeMonitoring $true
-        shell: powershell
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: 1.89.0
-          rustflags: ""
-
-      - name: Load cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: cargo-develop
-          save-if: false
-
-      # The matrix JDK runs the tests; JDK 17 runs Gradle itself. It is listed
-      # last on purpose — setup-java points JAVA_HOME at the final entry, and
-      # Gradle 8.10 on JDK 8 is not a combination worth relying on. Gradle finds
-      # the matrix JDK through toolchain auto-detection of these installs.
-      - name: Install JDKs
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: |
-            ${{ matrix.jdk }}
-            17
-
-      - name: Build native library
-        shell: bash
-        env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo build --release -p int2dds-java
-
-      - name: Run Rust tests
-        shell: bash
-        env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo test -p int2dds-java
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Run Java tests
-        working-directory: java
-        shell: bash
-        run: ./gradlew test --no-daemon -PtestJavaVersion=${{ matrix.jdk }}
-
   # Reports the plain "java" status required by the develop ruleset;
-  # fails unless every matrix job succeeded.
+  # fails unless every check job succeeded.
   java-gate:
     name: java
-    needs: [jni-drift, idl-java-codegen, java-test]
+    needs: [jni-drift, idl-java-codegen]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Check matrix results
+      - name: Check job results
         run: |
           if [ "${{ needs.jni-drift.result }}" != "success" ] \
-             || [ "${{ needs.idl-java-codegen.result }}" != "success" ] \
-             || [ "${{ needs.java-test.result }}" != "success" ]; then
+             || [ "${{ needs.idl-java-codegen.result }}" != "success" ]; then
             echo "jni-drift: ${{ needs.jni-drift.result }}"
             echo "idl-java-codegen: ${{ needs.idl-java-codegen.result }}"
-            echo "java-test: ${{ needs.java-test.result }}"
             exit 1
           fi

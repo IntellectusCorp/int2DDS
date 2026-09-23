@@ -7,7 +7,8 @@ core's C ABI, and the `api` module wraps it in a DDS-shaped Java API.
 
 - **JDK 17** to run Gradle itself (the wrapper is included — no separate Gradle install).
 - The published classes target **Java 8** (`options.release.set(8)`), with
-  multi-release source sets for 9 and 22. Tests run on 8, 11, 17, 21 and 25.
+  multi-release source sets for 9 and 22. The test suite runs on 8, 11, 17, 21 or 25
+  via `./gradlew test -PtestJavaVersion=<N>`.
 - A Rust toolchain to build the native library.
 
 ## Building
