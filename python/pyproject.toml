@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "int2dds"
-version = "0.1.6"
+version = "0.1.7"
 description = "Python bindings for int2DDS - a high-performance DDS implementation"
 readme = "README.md"
 license = {text = "Apache-2.0"}

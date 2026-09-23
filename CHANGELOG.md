@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-23
+
+The UDP socket buffers follow the OS default and can be sized per direction.
+
+### Added
+
+- `INT2DDS_UDP_RECV_BUFFER` and `INT2DDS_UDP_SEND_BUFFER` to size each UDP
+  socket buffer direction on its own
+
+### Changed
+
+- The UDP socket buffers keep the OS default, raised to at least 1 MiB receive
+  and 64 KiB send. `INT2DDS_UDP_SOCKET_BUFFER` still sets both directions
+
+### Fixed
+
+- A UDP socket buffer size the OS refuses is logged instead of the error being
+  discarded
+
 ## [0.1.6] - 2026-09-22
 
 Discovery on the multicast path accepts only SPDP, and the per-peer fragment
@@ -381,7 +400,8 @@ repository were migrated together.
 - Unused C code-generation output in `idl` and unused declarations in the
   `hello_world` FFI example header.
 
-[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.6...HEAD
+[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.3...v0.1.4
