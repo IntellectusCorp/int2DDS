@@ -18,7 +18,8 @@ use std::os::raw::c_char;
 use std::sync::Arc;
 
 use int2dds::{
-    infrastructure::status::StatusMask, serialize::cdr::ExtensibilityKind, topic::TypeSupport,
+    core::error::DdsError, infrastructure::status::StatusMask, serialize::cdr::ExtensibilityKind,
+    topic::TypeSupport,
 };
 
 use crate::data::Int2DdsData;
@@ -369,8 +370,12 @@ pub unsafe extern "C" fn int2dds_delete_topic(topic: *mut Int2DdsTopic) -> Int2D
 
     let topic_obj = (*topic_box.inner).clone();
 
+    // Already deleted through another handle to the same topic (one from
+    // `int2dds_participant_find_topic`): a retry can never succeed, so release
+    // this handle rather than restoring it.
     let participant = match topic_obj.get_participant() {
         Ok(p) => p,
+        Err(DdsError::AlreadyDeleted) => return INT2DDS_RET_OK,
         Err(e) => {
             let _ = Box::into_raw(topic_box);
             return dds_error_to_code(&e);
@@ -380,7 +385,7 @@ pub unsafe extern "C" fn int2dds_delete_topic(topic: *mut Int2DdsTopic) -> Int2D
     // On failure the topic is not deleted; restore the caller's handle
     // (into_raw) instead of leaving it freed. The Box drops (frees) only on success.
     match participant.delete_topic(topic_obj) {
-        Ok(()) => INT2DDS_RET_OK,
+        Ok(()) | Err(DdsError::AlreadyDeleted) => INT2DDS_RET_OK,
         Err(e) => {
             let _ = Box::into_raw(topic_box);
             dds_error_to_code(&e)

@@ -1,0 +1,25 @@
+[package]
+name = "int2dds-java"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "JNI bindings for int2DDS"
+
+[lib]
+name = "int2dds_java"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "gen-jni"
+path = "src/bin/gen-jni.rs"
+
+[dependencies]
+int2dds-ffi = { path = "../../ffi" }
+jni = "0.21"
+syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
+quote = "1.0"
+proc-macro2 = "1.0"

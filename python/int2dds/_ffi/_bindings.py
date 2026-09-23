@@ -1297,6 +1297,14 @@ ffi.cdef("""
     Int2DdsRet int2dds_type_info_add_array_of_nested_field(Int2DdsTypeInfo *type_info, const char *field_name, const Int2DdsTypeInfo *element_type_info, uint32_t array_size, int32_t flags);
     Int2DdsRet int2dds_type_info_create_enum(const char *type_name, uint16_t bit_bound, Int2DdsTypeInfo **out);
     Int2DdsRet int2dds_type_info_add_enum_literal(Int2DdsTypeInfo *type_info, const char *literal_name, int32_t value, int32_t is_default);
+    Int2DdsRet int2dds_type_info_create_bitmask(const char *type_name, uint16_t bit_bound, Int2DdsTypeInfo **out);
+    Int2DdsRet int2dds_type_info_add_bitmask_flag(Int2DdsTypeInfo *type_info, const char *flag_name, uint16_t position);
+    Int2DdsRet int2dds_type_info_create_bitset(const char *type_name, Int2DdsTypeInfo **out);
+    Int2DdsRet int2dds_type_info_add_bitfield(Int2DdsTypeInfo *type_info, const char *field_name, uint8_t bitcount, int32_t holder_type);
+    Int2DdsRet int2dds_type_info_create_union(const char *type_name, int32_t extensibility, int32_t discriminator_type, Int2DdsTypeInfo **out);
+    Int2DdsRet int2dds_type_info_add_union_label(Int2DdsTypeInfo *type_info, const char *member_name, int32_t label);
+    Int2DdsRet int2dds_type_info_add_map_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t key_type, uint32_t key_bound, int32_t value_type, uint32_t value_bound, uint32_t bound, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_map_of_nested_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t key_type, uint32_t key_bound, const Int2DdsTypeInfo *value_type_info, uint32_t bound, int32_t flags);
     Int2DdsRet int2dds_type_info_add_sequence_of_named_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *element_hash_name, uint32_t bound, int32_t flags);
     Int2DdsRet int2dds_type_info_add_array_of_named_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *element_hash_name, uint32_t array_size, int32_t flags);
     void int2dds_type_info_destroy(Int2DdsTypeInfo *type_info);

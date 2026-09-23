@@ -117,13 +117,19 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_support(
         Ok(s) => s,
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
+    // Report an unknown name the same way `..._get_type_object` does, rather
+    // than as a generic error, so both lookups surface not-found identically.
+    if (*registry).inner.get_type_object(name_str).is_none() {
+        return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND;
+    }
     let support = ffi_try!((*registry).inner.get(name_str));
     *out = Box::into_raw(Box::new(Int2DdsDynamicTypeSupport { inner: Arc::new(support) }));
     INT2DDS_RET_OK
 }
 
-/// Look up a loaded type by name and return its top-level TypeObject for
-/// introspection. Destroy the result with `int2dds_type_object_destroy`.
+/// Look up a loaded type by name and return its TypeObject, carrying its full
+/// nested-dependency closure so struct/array/sequence members decode correctly.
+/// Destroy the result with `int2dds_type_object_destroy`.
 ///
 /// # Safety
 /// - `registry` must be a valid XML type registry
@@ -142,11 +148,12 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_object(
         Ok(s) => s,
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
-    let complete = match (*registry).inner.get_type_object(name_str) {
-        Some(c) => c.clone(),
+    let (complete, deps) = match (*registry).inner.get_type_object_with_deps(name_str) {
+        Some(v) => v,
         None => return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
     };
-    let handle = Int2DdsTypeObject::from_type_object(TypeObject::Complete(complete));
+    let handle =
+        Int2DdsTypeObject::from_type_object_with_deps(TypeObject::Complete(complete), deps);
     *out = Box::into_raw(Box::new(handle));
     INT2DDS_RET_OK
 }

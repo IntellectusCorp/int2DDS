@@ -564,8 +564,6 @@ pub unsafe extern "C" fn int2dds_delete_datawriter(writer: *mut Int2DdsDataWrite
     let writer_arc = Arc::from_raw(writer as *const Int2DdsDataWriter);
     let writer_obj = writer_arc.inner.clone();
 
-    let _ = writer_obj.set_listener(None, StatusMask::default());
-
     let publisher = match writer_obj.get_publisher() {
         Ok(p) => p,
         Err(e) => {
@@ -575,7 +573,8 @@ pub unsafe extern "C" fn int2dds_delete_datawriter(writer: *mut Int2DdsDataWrite
     };
 
     // On failure the writer is not deleted; hand the caller's strong reference
-    // back (into_raw) so the handle stays valid instead of being freed.
+    // back (into_raw) so the handle (and its listener) stay intact. On success
+    // the writer is destroyed, so its listener slot goes with it.
     match publisher.delete_datawriter(writer_obj) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => {

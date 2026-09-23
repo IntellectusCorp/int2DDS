@@ -1,0 +1,26 @@
+// Conformance type: the scalars and strings the core can decode.
+// ddsFields() must describe every field up to the last @key, so describable
+// kinds come first and octet/char/float/double/wstring after.
+@extensibility(APPENDABLE)
+struct CdrGolden {
+    @key long id;
+    boolean bool_val;
+    int8 i8_val;
+    uint8 u8_val;
+    int16 i16_val;
+    uint16 u16_val;
+    int32 i32_val;
+    uint32 u32_val;
+    int64 i64_val;
+    uint64 u64_val;
+    string unbounded_str;
+    @key string<64> bounded_str;
+    octet byte_val;
+    char char_val;
+    float f32_val;
+    double f64_val;
+    sequence<wstring> wstr_seq;
+    wstring wstr_arr[2];
+    wstring unbounded_wstr;
+    wstring<32> bounded_wstr;
+};

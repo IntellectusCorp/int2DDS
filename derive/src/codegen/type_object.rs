@@ -117,6 +117,26 @@ fn type_to_identifier(
     if let syn::Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             let wrapper = segment.ident.to_string();
+            if matches!(wrapper.as_str(), "HashMap" | "BTreeMap") {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    let mut params = args.args.iter().filter_map(|a| match a {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    });
+                    if let (Some(key_ty), Some(value_ty)) = (params.next(), params.next()) {
+                        let key_id = type_to_identifier(
+                            key_ty, crate_path, as_char, as_uint8, None, minimal,
+                        );
+                        let value_id = type_to_identifier(
+                            value_ty, crate_path, as_char, as_uint8, None, minimal,
+                        );
+                        let map_bound = bound.unwrap_or(0) as u32;
+                        return quote! {
+                            #crate_path::xtypes::plain_map_identifier(#key_id, #value_id, #map_bound)
+                        };
+                    }
+                }
+            }
             if matches!(wrapper.as_str(), "Vec" | "Option" | "Box") {
                 if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                     if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {

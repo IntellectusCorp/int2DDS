@@ -54,5 +54,6 @@
       "foreground": "#dcd2aa"
     }
   ],
+  "cmake.sourceDirectory": "D:/sourceCode/int2DDS/ffi/examples",
   //logFileHighlighter
 }

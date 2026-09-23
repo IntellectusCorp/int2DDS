@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Java code generation in `int2dds-idl` (`-j`/`--java <DIR>`, `--java-package <PKG>`).
+  Unlike the other language flags it takes a directory, because Java requires one
+  public top-level class per file. Generated classes implement the Java binding's
+  `IDdsType`, including a `typeInfo()` that describes every member so `createTopic`
+  advertises the same TypeObject the other bindings do. Batch `--output-dir` now
+  emits Java alongside the other targets.
+- `scripts/check-idl-java.sh`, which generates every `idl/input/*.idl` file and
+  compiles the result with `javac -Xlint:all`, then verifies the committed
+  `CdrGolden.java` still matches the generator. Wired into the `java` CI status.
+- `GeneratedTypeConformanceTest`, which hands bytes produced by a generated Java
+  type to the core's own deserializer rather than round-tripping against our own
+  reader.
+- `java/README.md`, documenting the binding's build, examples, and IDL workflow.
+- `gen-jni --count`, printing the size of the exported C ABI surface.
+
+### Changed
+
+- `java/examples`' `HelloWorld` type is now generated from `idl/input/HelloWorld.idl`
+  instead of hand-written. Verified byte-identical on the wire under both XCDR1 and
+  XCDR2 before the swap.
+
+### Fixed
+
+- The JNI generator's count guards no longer hardcode the FFI surface size in five
+  places and the CI symbol check in a sixth. Four of them now derive from the parsed
+  surface, so adding a C ABI function requires updating exactly one constant.
+
 ## [0.1.7] - 2026-09-23
 
 The UDP socket buffers follow the OS default and can be sized per direction.

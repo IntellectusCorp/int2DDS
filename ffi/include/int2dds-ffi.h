@@ -209,6 +209,11 @@
 #define INT2DDS_MEMBER_EXTERNAL (1 << 3)
 
 /**
+ * Marks the `default:` case member of a union builder (`IS_DEFAULT`); ignored on structs.
+ */
+#define INT2DDS_MEMBER_DEFAULT (1 << 4)
+
+/**
  * C-compatible QoS policy ID enum
  */
 typedef enum Int2DdsQosPolicyId {
@@ -1920,6 +1925,11 @@ Int2DdsRet int2dds_create_datareader_dynamic(const struct Int2DdsSubscriber *sub
 /**
  * Destroy a dynamic DataWriter handle. Safe to call with null.
  *
+ * Mirrors `int2dds_delete_datawriter`: unregisters the writer from its
+ * parent publisher so the publisher/participant can be deleted afterward.
+ * Best-effort, since a void destructor cannot report a failure code; the
+ * FFI wrapper is freed either way.
+ *
  * # Safety
  * - `w` must be a valid dynamic datawriter, or null (null is a no-op)
  * - `w` must not be used after this call
@@ -1928,6 +1938,11 @@ void int2dds_dynamic_writer_destroy(struct Int2DdsDynamicDataWriter *w);
 
 /**
  * Destroy a dynamic DataReader handle. Safe to call with null.
+ *
+ * Mirrors `int2dds_delete_datareader`: unregisters the reader from its
+ * parent subscriber so the subscriber/participant can be deleted afterward.
+ * Best-effort, since a void destructor cannot report a failure code; the
+ * FFI wrapper is freed either way.
  *
  * # Safety
  * - `r` must be a valid dynamic datareader, or null (null is a no-op)
@@ -2402,6 +2417,16 @@ Int2DdsRet int2dds_env_set_qos_profile(const char *path);
  *   (e.g. `"HelloWorldDataFrag::Reliable"`).
  */
 Int2DdsRet int2dds_env_set_default_qos_profile(const char *profile);
+
+/**
+ * Clear the calling thread's last-error message from the C ABI. Lets a host
+ * binding reset the thread-local before an operation whose error state it
+ * wants to read in isolation.
+ *
+ * # Safety
+ * Callable from any thread under the C ABI; touches only that thread's slot.
+ */
+void int2dds_clear_last_error(void);
 
 /**
  * Copy the calling thread's last error message (UTF-8, NUL-terminated) into `buf`.
@@ -4046,6 +4071,17 @@ Int2DdsRet int2dds_datareader_get_statuscondition(const struct Int2DdsDataReader
                                                   struct Int2DdsStatusCondition **condition_out);
 
 /**
+ * Get the StatusCondition from a dynamic DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid handle from `int2dds_create_datareader_dynamic`
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_dynamic_reader_get_statuscondition(const struct Int2DdsDynamicDataReader *reader,
+                                                      struct Int2DdsStatusCondition **condition_out);
+
+/**
  * Get the StatusCondition from a DataWriter
  *
  * # Safety
@@ -5086,6 +5122,43 @@ Int2DdsRet int2dds_type_info_add_bitmask_flag(struct Int2DdsTypeInfo *type_info,
                                               uint16_t position);
 
 /**
+ * Create a bitset type info builder. Populate it with `int2dds_type_info_add_bitfield`
+ * in declaration order, then pass it to `int2dds_type_info_add_nested_field` on the
+ * parent so a bitset-typed member resolves like the derive's `#[dds_type(bitset)]`.
+ */
+Int2DdsRet int2dds_type_info_create_bitset(const char *type_name, struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a `bitfield<bitcount>` to a bitset builder. `holder_type` is the
+ * `INT2DDS_FIELD_*` integer kind that holds the field (`BYTE` up to 8 bits, then
+ * `UINT16`/`UINT32`/`UINT64`); the bit position follows the previous bitfield.
+ */
+Int2DdsRet int2dds_type_info_add_bitfield(struct Int2DdsTypeInfo *type_info,
+                                          const char *field_name,
+                                          uint8_t bitcount,
+                                          int32_t holder_type);
+
+/**
+ * Create a union type info builder. `discriminator_type` is the `INT2DDS_FIELD_*`
+ * scalar kind of the switch (string kinds are rejected). Add each case member with the
+ * same `int2dds_type_info_add_*_field` calls a struct uses, giving the `default:`
+ * member `INT2DDS_MEMBER_DEFAULT`, then attach its labels with
+ * `int2dds_type_info_add_union_label`.
+ */
+Int2DdsRet int2dds_type_info_create_union(const char *type_name,
+                                          int32_t extensibility,
+                                          int32_t discriminator_type,
+                                          struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a case label to the union member named `member_name`, which must already
+ * have been added. Boolean labels are `1`/`0`; enum labels are their literal value.
+ */
+Int2DdsRet int2dds_type_info_add_union_label(struct Int2DdsTypeInfo *type_info,
+                                             const char *member_name,
+                                             int32_t label);
+
+/**
  * Add a primitive-typed field to the type info builder.
  *
  * # Safety
@@ -5242,6 +5315,33 @@ Int2DdsRet int2dds_type_info_add_array_of_named_field(struct Int2DdsTypeInfo *ty
                                                       const char *element_hash_name,
                                                       uint32_t array_size,
                                                       int32_t flags);
+
+/**
+ * Add a `map<K, V>` field whose key and value are scalar `INT2DDS_FIELD_*` kinds.
+ * `key_bound`/`value_bound` apply to the string kinds (`0` = unbounded) and are ignored
+ * otherwise; `bound` is the map's own bound (`0` = unbounded).
+ */
+Int2DdsRet int2dds_type_info_add_map_field(struct Int2DdsTypeInfo *type_info,
+                                           const char *field_name,
+                                           int32_t key_type,
+                                           uint32_t key_bound,
+                                           int32_t value_type,
+                                           uint32_t value_bound,
+                                           uint32_t bound,
+                                           int32_t flags);
+
+/**
+ * Add a `map<K, Nested>` field whose key is a scalar `INT2DDS_FIELD_*` kind and whose
+ * value is a nested struct/enum/bitmask/union builder, referenced by content-hash so
+ * the runtime can resolve the entries. `value_type_info` is borrowed, not consumed.
+ */
+Int2DdsRet int2dds_type_info_add_map_of_nested_field(struct Int2DdsTypeInfo *type_info,
+                                                     const char *field_name,
+                                                     int32_t key_type,
+                                                     uint32_t key_bound,
+                                                     const struct Int2DdsTypeInfo *value_type_info,
+                                                     uint32_t bound,
+                                                     int32_t flags);
 
 /**
  * # Safety
@@ -5485,8 +5585,9 @@ Int2DdsRet int2dds_xml_type_registry_get_type_support(const struct Int2DdsXmlTyp
                                                       struct Int2DdsDynamicTypeSupport **out);
 
 /**
- * Look up a loaded type by name and return its top-level TypeObject for
- * introspection. Destroy the result with `int2dds_type_object_destroy`.
+ * Look up a loaded type by name and return its TypeObject, carrying its full
+ * nested-dependency closure so struct/array/sequence members decode correctly.
+ * Destroy the result with `int2dds_type_object_destroy`.
  *
  * # Safety
  * - `registry` must be a valid XML type registry

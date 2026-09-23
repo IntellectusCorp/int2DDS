@@ -29,6 +29,60 @@ struct NestedColl {
     grid: Vec<Vec<Inner>>,
 }
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate", extensibility = "Appendable")]
+struct Mapped {
+    counts: std::collections::HashMap<String, i32>,
+    entries: std::collections::HashMap<i32, Inner>,
+    #[dds(bound = 4)]
+    small: std::collections::BTreeMap<String, f64>,
+}
+
+#[test]
+fn map_members_carry_plain_map_ids_and_nested_closure() {
+    let complete = Mapped::complete_type_object();
+    let members = complete_members(&complete);
+    match &members[0].common.member_type_id {
+        TypeIdentifier::PlainMapSmall {
+            header, bound, key_identifier, element_identifier, ..
+        } => {
+            assert_eq!(header.equiv_kind, EquivalenceKind::Both);
+            assert_eq!(*bound, 0);
+            assert_eq!(**key_identifier, TypeIdentifier::String8);
+            assert_eq!(**element_identifier, TypeIdentifier::Int32);
+        }
+        other => panic!("counts must be PlainMapSmall, got {:?}", other),
+    }
+    match &members[1].common.member_type_id {
+        TypeIdentifier::PlainMapSmall { header, key_identifier, element_identifier, .. } => {
+            assert_eq!(header.equiv_kind, EquivalenceKind::Complete);
+            assert_eq!(**key_identifier, TypeIdentifier::Int32);
+            assert_eq!(**element_identifier, Inner::type_identifier());
+        }
+        other => panic!("entries must be PlainMapSmall, got {:?}", other),
+    }
+    match &members[2].common.member_type_id {
+        TypeIdentifier::PlainMapSmall { bound, .. } => assert_eq!(*bound, 4),
+        other => panic!("small must keep its bound, got {:?}", other),
+    }
+
+    let minimal = Mapped::minimal_type_object();
+    match &minimal_members(&minimal)[1].common.member_type_id {
+        TypeIdentifier::PlainMapSmall { header, element_identifier, .. } => {
+            assert_eq!(header.equiv_kind, EquivalenceKind::Minimal);
+            assert_eq!(**element_identifier, Inner::minimal_type_identifier());
+        }
+        other => panic!("entries (minimal) must be PlainMapSmall, got {:?}", other),
+    }
+
+    let mut closure: Vec<(TypeIdentifier, TypeObject)> = Vec::new();
+    Mapped::collect_nested_type_objects(&mut closure);
+    assert!(
+        closure.iter().any(|(id, _)| *id == Inner::type_identifier()),
+        "map value type must be part of the nested closure"
+    );
+}
+
 fn complete_members(o: &CompleteTypeObject) -> &Vec<CompleteStructMember> {
     match o {
         CompleteTypeObject::Struct(s) => &s.member_seq,

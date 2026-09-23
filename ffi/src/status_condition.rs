@@ -15,6 +15,7 @@
 use int2dds::infrastructure::status::StatusMask;
 
 use super::{error::*, types::*};
+use crate::dynamic::Int2DdsDynamicDataReader;
 
 // Status mask constants matching int2dds Rust library (status.rs StatusKind)
 pub const INT2DDS_STATUS_INCONSISTENT_TOPIC: u32 = 1 << 0;
@@ -54,6 +55,34 @@ pub unsafe extern "C" fn int2dds_datareader_get_statuscondition(
     };
 
     // Clone before .into() to preserve concrete type for set/get_enabled_statuses
+    let kind = StatusConditionKind::Reader(status_condition.clone());
+    let condition_handle =
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });
+    *condition_out = Box::into_raw(condition_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Get the StatusCondition from a dynamic DataReader.
+///
+/// # Safety
+/// - `reader` must be a valid handle from `int2dds_create_datareader_dynamic`
+/// - `condition_out` must be a valid pointer to a null pointer
+/// - The returned condition must be freed with `int2dds_statuscondition_delete`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_reader_get_statuscondition(
+    reader: *const Int2DdsDynamicDataReader,
+    condition_out: *mut *mut Int2DdsStatusCondition,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(condition_out);
+
+    let reader_ref = &*reader;
+    let status_condition = match reader_ref.inner.get_statuscondition() {
+        Ok(cond) => cond,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
     let kind = StatusConditionKind::Reader(status_condition.clone());
     let condition_handle =
         Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });

@@ -1,0 +1,108 @@
+name: Java
+run-name: "Java ${{ github.head_ref }}"
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+jobs:
+  jni-drift:
+    name: Generated JNI layer is current
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          # gen-jni runs rustfmt on its output so `cargo fmt` stays a no-op on
+          # the committed file. Without the component the generator fails.
+          components: rustfmt
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      - name: Check for generator drift
+        shell: bash
+        run: ./scripts/check-jni-drift.sh
+
+      - name: Verify the C ABI stays re-exported from the JNI library
+        shell: bash
+        run: |
+          # Spike S2: the Panama backend planned for a later branch reuses this
+          # same .so, which only works while the dependency rlib's #[no_mangle]
+          # symbols reach the dynamic symbol table. They do so because the
+          # forwarders reference them — a linker dead-code pass would drop them
+          # again if that ever stopped being true.
+          cargo build --release -p int2dds-java
+          expected=$(cargo run --quiet -p int2dds-java --bin gen-jni -- --count)
+          count=$(nm -D --defined-only target/release/libint2dds_java.so \
+                  | grep -c ' T int2dds_')
+          echo "int2dds_ symbols exported: $count (expected $expected)"
+          if [ "$count" -ne "$expected" ]; then
+            echo "ERROR: expected $expected re-exported C ABI symbols, found $count" >&2
+            exit 1
+          fi
+
+  idl-java-codegen:
+    name: Generated Java compiles and is current
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      # JDK 17 runs both Gradle and the javac the script invokes.
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Phase 1 compiles the backend's output for the whole idl/input corpus;
+      # phase 2 fails when the committed CdrGolden.java is stale. The script
+      # builds java/api/build/classes itself when the runner has none.
+      - name: Check the IDL Java backend
+        shell: bash
+        run: ./scripts/check-idl-java.sh
+
+  # Reports the plain "java" status required by the develop ruleset;
+  # fails unless every check job succeeded.
+  java-gate:
+    name: java
+    needs: [jni-drift, idl-java-codegen]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        run: |
+          if [ "${{ needs.jni-drift.result }}" != "success" ] \
+             || [ "${{ needs.idl-java-codegen.result }}" != "success" ]; then
+            echo "jni-drift: ${{ needs.jni-drift.result }}"
+            echo "idl-java-codegen: ${{ needs.idl-java-codegen.result }}"
+            exit 1
+          fi
