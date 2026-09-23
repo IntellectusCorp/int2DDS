@@ -266,7 +266,7 @@ impl<'a> RustGen<'a> {
             let variant_name =
                 naming::escape_keyword(&naming::to_pascal_case(&dc.name), naming::TargetLang::Rust);
             let type_str = self.type_to_rust(&dc.resolved_type);
-            let disc_val = self.default_discriminant(u, repr);
+            let disc_val = super::union_default_label(u);
 
             self.line("#[dds(default)]");
             self.line(&format!("{}({}) = {},", variant_name, type_str, disc_val));
@@ -274,11 +274,6 @@ impl<'a> RustGen<'a> {
 
         self.indent -= 1;
         self.line("}");
-    }
-
-    fn default_discriminant(&self, u: &ResolvedUnion, repr: &str) -> String {
-        let signed = matches!(repr, "i8" | "i16" | "i32" | "i64");
-        super::union_default_discriminant(u, signed).to_string()
     }
 
     fn discriminant_repr(&self, ty: &ResolvedType) -> &'static str {

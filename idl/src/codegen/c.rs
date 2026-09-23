@@ -494,70 +494,6 @@ impl<'a> CGen<'a> {
         }
     }
 
-    /// The numeric value a case label advertises in the TypeObject: booleans as `1`/`0`,
-    /// identifiers resolved through the enum literals and integer constants in scope.
-    /// `None` when an identifier cannot be resolved.
-    fn union_label_value(&self, label: &ResolvedUnionLabel) -> Option<i64> {
-        match label {
-            ResolvedUnionLabel::Int(v) => Some(*v),
-            ResolvedUnionLabel::Bool(v) => Some(i64::from(*v)),
-            ResolvedUnionLabel::Ident(name) => {
-                let simple = name.rsplit("::").next().unwrap_or(name);
-                let literal = self
-                    .model
-                    .enums
-                    .iter()
-                    .chain(self.model.imported.enums.iter())
-                    .flat_map(|e| e.variants.iter())
-                    .find(|v| v.name == simple)
-                    .map(|v| i64::from(v.value));
-                literal.or_else(|| {
-                    self.model.constants.iter().find(|c| c.name == simple).and_then(|c| {
-                        match c.value {
-                            ConstValue::Int(v) => Some(v),
-                            ConstValue::Bool(b) => Some(i64::from(b)),
-                            _ => None,
-                        }
-                    })
-                })
-            }
-        }
-    }
-
-    /// The `INT2DDS_FIELD_*` kind advertised for a union discriminator. Byte-width
-    /// discriminators (boolean/char/octet/uint8) advertise `BYTE`, matching the
-    /// `#[repr(u8)]` the Rust generator emits for them; enums switch on their `i32`.
-    fn discriminator_field_constant(ty: &ResolvedType) -> &'static str {
-        match ty {
-            ResolvedType::Bool | ResolvedType::Char | ResolvedType::U8 | ResolvedType::UInt8 => {
-                "INT2DDS_FIELD_BYTE"
-            }
-            ResolvedType::I8 => "INT2DDS_FIELD_INT8",
-            ResolvedType::I16 => "INT2DDS_FIELD_INT16",
-            ResolvedType::U16 => "INT2DDS_FIELD_UINT16",
-            ResolvedType::U32 => "INT2DDS_FIELD_UINT32",
-            ResolvedType::I64 => "INT2DDS_FIELD_INT64",
-            ResolvedType::U64 => "INT2DDS_FIELD_UINT64",
-            _ => "INT2DDS_FIELD_INT32",
-        }
-    }
-
-    /// A union case member as the `ResolvedMember` the type_info field emitter consumes:
-    /// PascalCase name like the generated Rust variant, no member annotations.
-    fn union_case_member(cm: &ResolvedUnionCaseMember) -> ResolvedMember {
-        ResolvedMember {
-            name: naming::to_pascal_case(&cm.name),
-            resolved_type: cm.resolved_type.clone(),
-            is_key: false,
-            member_id: None,
-            is_optional: false,
-            must_understand: false,
-            is_external: false,
-            default_value: None,
-            hashid: None,
-        }
-    }
-
     /// Emit `{Union}_type_info()`: a union builder with the discriminator kind, every
     /// case member (added like a struct member, then given all of its labels) and the
     /// `default:` member flagged `INT2DDS_MEMBER_DEFAULT` under the implicit default
@@ -566,17 +502,18 @@ impl<'a> CGen<'a> {
     fn emit_union_type_info_fn(&mut self, u: &ResolvedUnion) {
         self.raw(&format!("static inline Int2DdsTypeInfo* {}_type_info(void) {{\n", u.name));
         self.raw("    Int2DdsTypeInfo *ti;\n");
+        let disc = super::discriminator_kind(&u.discriminant_type);
         self.raw(&format!(
             "    int2dds_type_info_create_union(\"{}\", {}, {}, &ti);\n",
             u.qualified_name,
-            extensibility_code(u.extensibility),
-            Self::discriminator_field_constant(&u.discriminant_type)
+            super::extensibility_code(u.extensibility),
+            Self::resolved_type_to_field_constant(&disc).unwrap_or("INT2DDS_FIELD_INT32")
         ));
         for case in &u.cases {
-            let m = Self::union_case_member(&case.member);
+            let m = super::union_case_member(&case.member);
             self.emit_type_info_field_with_flags(&m, "0", &u.name);
             for label in &case.labels {
-                if let Some(value) = self.union_label_value(label) {
+                if let Some(value) = super::union_label_value(self.model, label) {
                     self.raw(&format!(
                         "    int2dds_type_info_add_union_label(ti, \"{}\", {});\n",
                         m.name, value
@@ -585,20 +522,12 @@ impl<'a> CGen<'a> {
             }
         }
         if let Some(dc) = &u.default_case {
-            let m = Self::union_case_member(dc);
+            let m = super::union_case_member(dc);
             self.emit_type_info_field_with_flags(&m, "INT2DDS_MEMBER_DEFAULT", &u.name);
-            let signed = matches!(
-                u.discriminant_type,
-                ResolvedType::I8
-                    | ResolvedType::I16
-                    | ResolvedType::I32
-                    | ResolvedType::I64
-                    | ResolvedType::Enum(_)
-            );
             self.raw(&format!(
                 "    int2dds_type_info_add_union_label(ti, \"{}\", {});\n",
                 m.name,
-                super::union_default_discriminant(u, signed)
+                super::union_default_label(u)
             ));
         }
         self.raw("    return ti;\n}\n");
@@ -1822,15 +1751,6 @@ impl<'a> CGen<'a> {
         Some(name.rsplit("::").next().unwrap_or(name))
     }
 
-    /// The string bound carried by a scalar map key/value (`0` when unbounded or not a
-    /// string), as the `int2dds_type_info_add_map*` builders expect.
-    fn scalar_string_bound(ty: &ResolvedType) -> u32 {
-        match ty {
-            ResolvedType::String { bound } | ResolvedType::WString { bound } => bound.unwrap_or(0),
-            _ => 0,
-        }
-    }
-
     /// All members including inherited ones (ancestors first), matching the C#/Python
     /// `collect_all_members` so the type_info metadata (and thus KeyHash) covers base
     /// `@key` members.
@@ -1950,7 +1870,7 @@ impl<'a> CGen<'a> {
                             "int2dds_type_info_add_map_of_nested_field(ti, \"{}\", {}, {}, {}, {}, {});",
                             name,
                             key_const,
-                            Self::scalar_string_bound(key),
+                            super::scalar_string_bound(key),
                             var,
                             bound.unwrap_or(0),
                             flags
@@ -2010,9 +1930,9 @@ impl<'a> CGen<'a> {
                     "    int2dds_type_info_add_map_field(ti, \"{}\", {}, {}, {}, {}, {}, {});\n",
                     name,
                     key_const,
-                    Self::scalar_string_bound(key),
+                    super::scalar_string_bound(key),
                     value_const,
-                    Self::scalar_string_bound(value),
+                    super::scalar_string_bound(value),
                     bound.unwrap_or(0),
                     flags
                 ));
@@ -2112,7 +2032,7 @@ impl<'a> CGen<'a> {
         self.raw(&format!(
             "    int2dds_type_info_create(\"{}\", {}, &ti);\n",
             s.qualified_name,
-            extensibility_code(s.extensibility)
+            super::extensibility_code(s.extensibility)
         ));
 
         let members = self.collect_all_members(s);
@@ -2317,24 +2237,10 @@ fn bitfield_c_type(bit_width: u32) -> &'static str {
     }
 }
 
-/// Map bitfield width to the `INT2DDS_FIELD_*` holder kind the derive advertises for the
-/// generated Rust field type (`u8` -> BYTE, then UINT16/UINT32/UINT64).
+/// The `INT2DDS_FIELD_*` holder kind the derive advertises for a `bitfield<bit_width>`.
 fn bitfield_holder_constant(bit_width: u32) -> &'static str {
-    match bit_width {
-        0..=8 => "INT2DDS_FIELD_BYTE",
-        9..=16 => "INT2DDS_FIELD_UINT16",
-        17..=32 => "INT2DDS_FIELD_UINT32",
-        _ => "INT2DDS_FIELD_UINT64",
-    }
-}
-
-/// The integer code `int2dds_type_info_create*` takes for an extensibility kind.
-fn extensibility_code(kind: ExtensibilityKind) -> i32 {
-    match kind {
-        ExtensibilityKind::Final => 0,
-        ExtensibilityKind::Appendable => 1,
-        ExtensibilityKind::Mutable => 2,
-    }
+    CGen::resolved_type_to_field_constant(&super::bitfield_holder_kind(bit_width))
+        .unwrap_or("INT2DDS_FIELD_UINT64")
 }
 
 #[cfg(test)]
