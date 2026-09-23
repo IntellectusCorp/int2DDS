@@ -9,7 +9,7 @@ on:
       dry_run_tag:
         description: "Tag to use for the dry run (no release is created)"
         required: true
-        default: "v0.1.1"
+        default: "v0.1.7"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -67,24 +67,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { triple: x86_64-unknown-linux-gnu,        dist: linux-x86_64, runner: ubuntu-latest }
-          - { triple: aarch64-unknown-linux-gnu,       dist: linux-aarch64, runner: ubuntu-24.04-arm }
-          - { triple: armv7-unknown-linux-gnueabihf,   dist: linux-armhf,  runner: ubuntu-latest }
+          # manylinux_2_28 is AlmaLinux 8 (glibc 2.28) — the RHEL 8 ABI itself.
+          # One artifact per arch then covers RHEL 8/9/10 and Ubuntu 20.04+.
+          - { triple: x86_64-unknown-linux-gnu,      dist: linux-x86_64,  runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64",  pkg: dnf, max_glibc: "2.28" }
+          - { triple: aarch64-unknown-linux-gnu,     dist: linux-aarch64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64", pkg: dnf, max_glibc: "2.28" }
+          # armhf keeps the ubuntu 22.04 cross path: manylinux publishes no
+          # armv7 image, and every lower-glibc armhf builder is unmaintained
+          # (debian 10 archived, debian 11 LTS ends 2026-08-31, ubuntu 20.04 EOL).
+          - { triple: armv7-unknown-linux-gnueabihf, dist: linux-armhf,   runner: ubuntu-latest,    image: "ubuntu:22.04", pkg: apt, max_glibc: "2.35" }
     runs-on: ${{ matrix.runner }}
-    container: ubuntu:22.04
+    container: ${{ matrix.image }}
     steps:
-      - name: Install build prerequisites
+      # The manylinux images already ship gcc (via gcc-toolset, ahead of
+      # /usr/bin on PATH), make, cmake, perl, git, curl, file, pkg-config and
+      # binutils — no dnf install is needed. Installing plain `gcc` here would
+      # add an older /usr/bin/gcc and muddy the toolchain, so there is no dnf
+      # prerequisites step for the manylinux entries.
+
+      - name: Install build prerequisites (Ubuntu)
+        if: matrix.pkg == 'apt'
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             curl ca-certificates build-essential git pkg-config cmake perl file binutils
-          if [ "${{ matrix.triple }}" = "armv7-unknown-linux-gnueabihf" ]; then
-            # libc6-dev-armhf-cross is only a *recommended* dep of the cross gcc,
-            # so --no-install-recommends leaves the armhf libc headers out and
-            # C deps such as ring fail to compile. Name it explicitly.
-            apt-get install -y --no-install-recommends \
-              gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
-          fi
+          # libc6-dev-armhf-cross is only a *recommended* dep of the cross gcc,
+          # so --no-install-recommends leaves the armhf libc headers out and
+          # C deps such as ring fail to compile. Name it explicitly.
+          apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
 
       - uses: actions/checkout@v4
 
@@ -110,13 +120,94 @@ jobs:
         run: git diff --exit-code ffi/include/int2dds-ffi.h
 
       - name: Stage archive
-        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu
+        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu "${{ matrix.max_glibc }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.dist }}
           path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
           if-no-files-found: error
+
+      # Built here, not in verify-glibc-floor, so the loader inherits this
+      # image's glibc 2.28 floor and runs in every target container without a
+      # compiler or python — ubi8 and the ubuntu base images ship neither.
+      - name: Build the glibc floor smoke-test loader
+        if: matrix.triple == 'x86_64-unknown-linux-gnu'
+        run: gcc -O2 -o glibc-floor-check .github/scripts/ci/glibc-floor-check.c -ldl
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.triple == 'x86_64-unknown-linux-gnu'
+        with:
+          name: glibc-floor-check
+          path: glibc-floor-check
+          if-no-files-found: error
+
+  # Proves the "build low, run high" claim instead of trusting it: the glibc
+  # 2.28 artifact is loaded on every OS the RMW layer targets. dlopen(RTLD_NOW)
+  # forces full relocation, so a missing symbol version fails here rather than
+  # at a customer's first call.
+  verify-glibc-floor:
+    needs: [prepare, native-linux-gnu]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "redhat/ubi8",  glibc: "2.28" }   # floor boundary itself
+          - { image: "ubuntu:20.04", glibc: "2.31" }   # ROS 2 Foxy / ROS 1 Noetic
+          - { image: "redhat/ubi9",  glibc: "2.34" }   # ROS 2 Jazzy tier 3
+          - { image: "ubuntu:22.04", glibc: "2.35" }   # ROS 2 Humble
+          - { image: "ubuntu:24.04", glibc: "2.39" }   # ROS 2 Jazzy / Kilted / Rolling
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: art
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: glibc-floor-check
+          path: checker
+
+      - name: Unpack the archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p unpacked
+          tar -xzf "art/int2dds-$VERSION-linux-x86_64.tar.gz" -C unpacked
+          chmod +x checker/glibc-floor-check
+
+      - name: Load the library on ${{ matrix.image }}
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Pull first, as its own command. A `docker run` that also has to pull
+          # emits progress on the same stream as the command output, and piping
+          # that into `head -1` lets head close the pipe while docker is still
+          # writing — docker then dies on EPIPE ("write /dev/stdout: broken
+          # pipe") and pipefail turns it into a step failure. That is a race, so
+          # it strikes whichever rows happen to lose it. Pulling separately also
+          # tells a registry problem apart from a real load failure.
+          docker pull -q "${{ matrix.image }}"
+
+          # Confirm the container really is the glibc version this row claims,
+          # so a silently retagged base image cannot turn the test into a no-op.
+          # Capture the output whole, then parse the variable, so nothing is
+          # ever piped out of docker.
+          ldd_out="$(docker run --rm "${{ matrix.image }}" ldd --version)"
+          actual="$(printf '%s\n' "$ldd_out" | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
+          echo "${{ matrix.image }} reports glibc $actual (expected ${{ matrix.glibc }})"
+          if [ "$actual" != "${{ matrix.glibc }}" ]; then
+            echo "ERROR: ${{ matrix.image }} is glibc $actual, not ${{ matrix.glibc }} — update the matrix" >&2
+            exit 1
+          fi
+          # Pass the archive-relative path, never an absolute system path: RHEL
+          # uses /lib64 while Ubuntu uses /lib/x86_64-linux-gnu.
+          docker run --rm -v "$PWD":/w -w /w "${{ matrix.image }}" \
+            ./checker/glibc-floor-check \
+            "/w/unpacked/int2dds-$VERSION-linux-x86_64/lib/libint2dds_ffi.so.$VERSION"
 
   native-linux-musl:
     needs: prepare
@@ -180,6 +271,34 @@ jobs:
         with:
           name: native-${{ matrix.dist }}
           path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
+          if-no-files-found: error
+
+  # The tarball published to IntellectusCorp/int2dds_ffi_vendor, which the ROS 2
+  # vendor package in IntellectusCorp/rmw_int2dds downloads. It is deliberately
+  # NOT one of the 24 int2DDS release assets -- collect-assets.sh skips it -- so
+  # publishing to the vendor repo stays a human step rather than something this
+  # workflow does with a cross-repo token.
+  #
+  # Repackaging here instead of rebuilding means the bytes shipped to ROS users
+  # are the same ones verify-glibc-floor loaded on all five target OSes.
+  ffi-vendor:
+    needs: [prepare, native-linux-gnu, native-linux-musl]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: native-linux-*
+
+      - name: Assemble the FFI vendor tarball
+        run: ./.github/scripts/ci/stage-ffi-vendor.sh "${{ needs.prepare.outputs.version }}" artifacts dist/vendor
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffi-vendor
+          path: dist/vendor/int2dds-ffi-*-linux.tar.gz
           if-no-files-found: error
 
   native-windows:
@@ -499,7 +618,7 @@ jobs:
           set -euo pipefail
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet \
-            dist/wheels/int2dds-*-py3-none-manylinux_2_35_x86_64.whl
+            dist/wheels/int2dds-*-py3-none-manylinux_2_28_x86_64.whl
           env -u INT2DDS_FFI_PATH /tmp/venv/bin/python -c "import int2dds; print('bundled native loaded')"
 
       - uses: actions/upload-artifact@v4
@@ -564,7 +683,7 @@ jobs:
           python -m pytest python/tests/test_libpath.py -q
 
   release:
-    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, verify-examples]
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, verify-examples, verify-glibc-floor]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -51,10 +51,12 @@ impl DiscoveryUnicastListeningTask {
 
     pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
         match source {
-            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
-            MessageSource::Channel { rx } => self.listen_channel(&rx),
-            MessageSource::MioPollWithShm { .. } => {
-                unreachable!("MioPollWithShm is only used by user-data unicast")
+            MessageSource::Udp { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Shm { .. } => {
+                unreachable!("Shm is only used by user-data unicast")
+            }
+            MessageSource::Stream { .. } => {
+                unreachable!("Stream is handled by the stream unicast listening task")
             }
         }
     }
@@ -63,7 +65,7 @@ impl DiscoveryUnicastListeningTask {
         &mut self,
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
     ) -> std::io::Result<()> {
-        info!("start discovery unicast listening (MioPoll)");
+        info!("start discovery unicast listening (Udp)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -114,41 +116,11 @@ impl DiscoveryUnicastListeningTask {
         }
     }
 
-    fn listen_channel(
+    pub(crate) fn process_rtps_message(
         &mut self,
-        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
-    ) -> std::io::Result<()> {
-        info!("start discovery unicast listening (Channel)");
-
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
-
-        loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(msg) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, discovery unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                    let _ = self.process_rtps_message(Bytes::from(msg.data), msg.source);
-                }
-                Err(flume::RecvTimeoutError::Timeout) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, discovery unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                }
-                Err(flume::RecvTimeoutError::Disconnected) => {
-                    info!("[DiscoveryUnicast] Channel disconnected, stopping listener");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) -> RtpsResult<()> {
+        bytes: Bytes,
+        from_addr: SocketAddr,
+    ) -> RtpsResult<()> {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
         let rtps_message = message_receiver.init(&bytes)?;
 
@@ -159,6 +131,13 @@ impl DiscoveryUnicastListeningTask {
                 Guid::guid_prefix_to_string(&self.guid_prefix)
             );
             return Ok(());
+        }
+
+        // Settle where the peer runs from its first datagram, whichever
+        // announcement that one carries: a SEDP can arrive before any SPDP, and
+        // what is derived from it is never revisited.
+        if let Some(participant) = self.participant.upgrade() {
+            participant.remote_is_same_host(rtps_message.header.guid_prefix(), Some(from_addr));
         }
 
         // Check if this is an SPDP message (TCP mode sends SPDP via unicast)
@@ -189,7 +168,7 @@ impl DiscoveryUnicastListeningTask {
                         error!("Failed to handle participant termination message: {:?}", e);
                     }
                 } else if let Err(e) =
-                    spdp_logic.handle_discovered_participant_data(participant_proxy_data)
+                    spdp_logic.handle_discovered_participant_data(participant_proxy_data, from_addr)
                 {
                     error!("[DiscoveryUnicast] Failed to handle SPDP data: {:?}", e);
                 }

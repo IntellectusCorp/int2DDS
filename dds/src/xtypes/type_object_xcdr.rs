@@ -91,7 +91,7 @@ impl W {
     }
 
     fn align(&mut self, a: usize) {
-        while self.buf.len() % a != 0 {
+        while !self.buf.len().is_multiple_of(a) {
             self.buf.push(0);
         }
     }

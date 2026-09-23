@@ -18,8 +18,12 @@ rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
 # Artifacts arrive as <artifact_root>/<artifact-name>/<file>.
+# int2dds-ffi-*.tar.gz is the vendor tarball built by the ffi-vendor job. It
+# goes to a different repository's releases, not this one's, so it must not land
+# here -- it would be a 25th file and trip the count check below.
 find "$artifact_root" -type f \
   \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.nupkg' -o -name '*.snupkg' -o -name '*.whl' \) \
+  -not -name 'int2dds-ffi-*' \
   -exec cp {} "$out_dir/" \;
 
 expected=24
@@ -59,7 +63,7 @@ for f in "Int2Dds.$base_version.nupkg" \
 done
 
 for tag in win_amd64 win_arm64 \
-           manylinux_2_35_x86_64 manylinux_2_35_aarch64 \
+           manylinux_2_28_x86_64 manylinux_2_28_aarch64 \
            macosx_11_0_arm64 macosx_10_12_x86_64 \
            any; do
   if [[ ! -f "$out_dir/int2dds-$base_version-py3-none-$tag.whl" ]]; then

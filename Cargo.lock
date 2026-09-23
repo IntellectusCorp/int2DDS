@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "arc-swap",
  "bitflags 2.13.1",
@@ -1058,7 +1058,6 @@ dependencies = [
  "if-addrs",
  "int2dds-derive",
  "libc",
- "libloading",
  "local-ip-address",
  "log",
  "md5",
@@ -1091,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-derive"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "md5",
  "proc-macro2",
@@ -1101,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-ffi"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "cbindgen",
@@ -1116,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-idl"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "dialoguer",
  "int2dds",
@@ -1127,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-java"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "int2dds-ffi",
  "jni",
@@ -1138,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-rpc"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "int2dds",
  "int2dds-derive",
@@ -1263,16 +1262,6 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
-
-[[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
 
 [[package]]
 name = "linux-raw-sys"

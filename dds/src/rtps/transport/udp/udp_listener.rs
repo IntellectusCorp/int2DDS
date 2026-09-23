@@ -6,13 +6,13 @@ use core::net::{Ipv4Addr, SocketAddr};
 use log::{debug, error};
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
-use std::env;
 use std::net::UdpSocket as StdUdpSocket;
 
 use crate::rtps::common::locator::{Locator, MULTICAST_IP};
 use crate::rtps::transport::udp::recv_arena::{
     RecvArena, DEFAULT_RECV_ARENA_CHUNK_BYTES, MAX_UDP_PACKET_BYTES,
 };
+use crate::rtps::transport::udp::socket_buffer::configure_recv_buffer;
 
 // One arena per listener; reused across every incoming datagram on this socket.
 fn new_recv_arena() -> RecvArena {
@@ -24,8 +24,8 @@ pub(crate) struct UdpListener {
     port: u16,
     socket: Option<mio::net::UdpSocket>,
     recv_arena: RecvArena,
-    // What the kernel actually granted (getsockopt, post-set) - not what was
-    // requested. Linux clamps to net.core.rmem_max and then doubles the result.
+    // What the kernel actually granted (getsockopt, post-set) - not what was requested.
+    // Linux doubles a set size after capping it; an untouched socket reports rmem_default.
     recv_buffer_size: Option<usize>,
 }
 
@@ -36,27 +36,14 @@ impl Drop for UdpListener {
 }
 
 impl UdpListener {
-    // INT2DDS_UDP_SOCKET_BUFFER check
-    fn get_socket_buffer_size() -> Option<usize> {
-        env::var("INT2DDS_UDP_SOCKET_BUFFER").ok().and_then(|val| val.parse().ok())
-    }
-
     pub(crate) fn new(port: u16) -> std::io::Result<Self> {
         let recv_buffer_size;
         let socket = {
             let saddr: SocketAddr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
 
             let socket2 = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-            if let Some(size) = Self::get_socket_buffer_size() {
-                let _ = socket2.set_recv_buffer_size(size);
-            } else if let Ok(current) = socket2.recv_buffer_size() {
-                let new_size = current.saturating_mul(2);
-                let _ = socket2.set_recv_buffer_size(new_size);
-            }
-
-            // Re-read via getsockopt rather than trust what was requested: the OS
-            // may silently cap it (see set_recv_buffer_size above).
-            recv_buffer_size = socket2.recv_buffer_size().ok();
+            // Granted size, read back: the OS may silently cap the request.
+            recv_buffer_size = configure_recv_buffer(&socket2);
 
             let sock_addr = SockAddr::from(saddr);
             socket2.bind(&sock_addr)?;
@@ -75,9 +62,8 @@ impl UdpListener {
         self.port
     }
 
-    /// What `getsockopt(SO_RCVBUF)` reported right after this listener bound -
-    /// the value actually granted, already doubled by Linux. `None` if the
-    /// read-back failed.
+    /// What `getsockopt(SO_RCVBUF)` reported after the buffer was configured -
+    /// the value actually granted. `None` if the read-back failed.
     pub(crate) fn recv_buffer_size(&self) -> Option<usize> {
         self.recv_buffer_size
     }
@@ -86,13 +72,7 @@ impl UdpListener {
         let interface_address_list = NetworkInterface::show()
             .expect("Could not scan interfaces")
             .into_iter()
-            .flat_map(|i| {
-                i.addr.into_iter().filter(|a| match a {
-                    #[rustfmt::skip]
-                    Addr::V4(_) => true,
-                    _ => false,
-                })
-            });
+            .flat_map(|i| i.addr.into_iter().filter(|a| matches!(a, Addr::V4(_))));
 
         interface_address_list.clone().map(|a| Locator::from_ip_and_port(&a, port as u32)).collect()
     }
@@ -104,13 +84,7 @@ impl UdpListener {
         #[cfg(unix)]
         socket.set_reuse_port(true)?;
 
-        if let Some(size) = Self::get_socket_buffer_size() {
-            let _ = socket.set_recv_buffer_size(size);
-        } else if let Ok(current) = socket.recv_buffer_size() {
-            let new_size = current.saturating_mul(2);
-            let _ = socket.set_recv_buffer_size(new_size);
-        }
-        let recv_buffer_size = socket.recv_buffer_size().ok();
+        let recv_buffer_size = configure_recv_buffer(&socket);
 
         // Join multicast group on each working interface individually,
         // so multicast works regardless of OS default route availability.
@@ -262,7 +236,7 @@ mod tests {
 
     // Pins the fix this task is about: recv_buffer_size() must be what
     // getsockopt reads back after set_recv_buffer_size, not the pre-set value -
-    // Linux always doubles a granted SO_RCVBUF, so requested != granted.
+    // Linux doubles a granted SO_RCVBUF, so requested != granted.
     #[test]
     fn recv_buffer_size_reports_the_post_set_kernel_grant() {
         let listener = UdpListener::new(0).expect("bind ephemeral port");
@@ -270,18 +244,15 @@ mod tests {
 
         // Independent oracle: the same set-then-read-back sequence hand-rolled on a throwaway
         // socket rather than through UdpListener::new, so a broken capture cannot also break
-        // this. It has to branch on the env exactly as the listener does, or a run that sets
-        // INT2DDS_UDP_SOCKET_BUFFER compares two different requests. Where the kernel clamps
-        // both to the same ceiling that mismatch hides; where it grants what is asked, it does
-        // not.
+        // this. It has to follow the same request as the listener, or a run that sets an
+        // explicit size compares two different requests. Where the kernel clamps both to the
+        // same ceiling that mismatch hides; where it grants what is asked, it does not.
         let probe = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        if let Some(size) = std::env::var("INT2DDS_UDP_SOCKET_BUFFER")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
+        let current = probe.recv_buffer_size().unwrap();
+        if let Some(size) = crate::rtps::transport::udp::socket_buffer::recv_buffer_request()
+            .size_to_request(current)
         {
             let _ = probe.set_recv_buffer_size(size);
-        } else if let Ok(current) = probe.recv_buffer_size() {
-            let _ = probe.set_recv_buffer_size(current.saturating_mul(2));
         }
         let expected = probe.recv_buffer_size().unwrap();
 

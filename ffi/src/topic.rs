@@ -555,7 +555,7 @@ pub unsafe extern "C" fn int2dds_create_contentfilteredtopic(
 
     let cft = ffi_try!(participant_ref.inner.create_contentfilteredtopic::<Int2DdsData>(
         topic_name_str,
-        &*related_topic_ref.inner,
+        &related_topic_ref.inner,
         filter_expression_str,
         params,
     ));
@@ -645,6 +645,11 @@ pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_expression_parameters(
     }
 }
 
+/// # Safety
+/// - `cft` must be a valid content filtered topic
+/// - `filter_expression` must be a valid null-terminated C string
+/// - `expression_parameters` must be a valid array of `expression_parameters_count`
+///   null-terminated C strings, or null if the count is 0
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_filter_expression(
     cft: *mut Int2DdsContentFilteredTopic,
@@ -685,6 +690,8 @@ pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_filter_expression(
     }
 }
 
+/// # Safety
+/// - `cft` must be a valid content filtered topic
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_enabled(
     cft: *mut Int2DdsContentFilteredTopic,

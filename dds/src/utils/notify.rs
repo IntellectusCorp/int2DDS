@@ -21,7 +21,7 @@ thread_local! {
     // True while this thread is running a user listener callback. Deleting an entity from inside
     // its own callback would block on an in-flight count only this thread can release, so the
     // delete path reads this and refuses rather than deadlocking.
-    static IN_LISTENER: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static IN_LISTENER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 // Whether the current thread is executing a user listener callback.

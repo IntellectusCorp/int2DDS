@@ -305,7 +305,7 @@ impl SedpLogic {
             if let Ok(registry) = participant.type_registry().read() {
                 let want_minimal = type_ids
                     .first()
-                    .map_or(false, |id| matches!(id, TypeIdentifier::MinimalTypeId(_)));
+                    .is_some_and(|id| matches!(id, TypeIdentifier::MinimalTypeId(_)));
                 let roots: Vec<_> =
                     type_ids
                         .iter()

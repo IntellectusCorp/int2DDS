@@ -10,6 +10,7 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
+    net::SocketAddr,
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
 
@@ -44,7 +45,7 @@ use crate::{
             entity_id::EntityId,
             entity_kind::EntityKind,
             guid::{Guid, GuidPrefix},
-            locator::Locator,
+            locator::{is_same_host, Locator},
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::RtpsTime,
@@ -55,7 +56,7 @@ use crate::{
             history::{cache_change::CacheChange, history_cache::HistoryCache},
             reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
-            writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
+            writer::{StatefulWriter, StatelessWriter, Writer, WriterCallbackLease, WriterStore},
         },
         logic::{
             sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
@@ -108,6 +109,7 @@ pub struct Participant {
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
+    remote_same_host: Arc<DashMap<GuidPrefix, bool>>,
     terminated: Arc<AtomicBool>,
     wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
@@ -200,6 +202,7 @@ impl Participant {
             remote_subscriptions: Arc::new(DashMap::new()),
             type_registry: new_shared_registry(),
             working_ips,
+            remote_same_host: Arc::new(DashMap::new()),
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
             wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
@@ -301,6 +304,23 @@ impl Participant {
             if let Some(sedp_logic) = sedp_logic.as_ref().as_ref() {
                 let _ = sedp_logic.request_get_types(remote_prefix, vec![type_id]);
             }
+        }
+    }
+
+    /// Whether the peer behind `remote_prefix` runs on this host. A source
+    /// address decides and keeps the verdict, `None` only reads one, so the
+    /// answer does not depend on which announcement arrived first.
+    pub(crate) fn remote_is_same_host(
+        &self,
+        remote_prefix: GuidPrefix,
+        from_addr: Option<SocketAddr>,
+    ) -> bool {
+        match from_addr {
+            Some(from_addr) => *self
+                .remote_same_host
+                .entry(remote_prefix)
+                .or_insert_with(|| is_same_host(from_addr)),
+            None => self.remote_same_host.get(&remote_prefix).is_some_and(|held| *held),
         }
     }
 
@@ -491,6 +511,15 @@ impl Participant {
         self.rtps_writer_store.get(entity_id)
     }
 
+    // Callback-producing lookup: the returned lease keeps the writer's in-flight count raised
+    // until dropped, so deletion drains it instead of racing the callback.
+    pub(crate) fn find_writer_callback_lease_from_entity_id(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<WriterCallbackLease> {
+        self.rtps_writer_store.get_writer_callback_lease(entity_id)
+    }
+
     pub(crate) fn find_readers_from_topic_name(
         &self,
         topic_name: &str,
@@ -581,7 +610,7 @@ impl Participant {
         // Send Data[w(UD)]
         let writer_arc = self.rtps_writer_store.get(entity_id);
 
-        if let Some(writer) = writer_arc {
+        if let Some(writer) = writer_arc.as_ref() {
             if writer.guid().entity_id().entity_kind().is_user_defined() {
                 if let Some(wlp_logic) = self.wlp_logic.get() {
                     let _ = wlp_logic.deregister_asserting_writer(writer.guid());
@@ -669,6 +698,22 @@ impl Participant {
         // No duplicate can result: the writer is gone, so no reliable retransmit can occur.
         self.rtps_writer_store.remove(&topic_name, entity_id);
 
+        // Drain in-flight discovery/liveliness callbacks so none runs against this writer after the
+        // delete returns. Store removal above stops new callbacks from starting; this waits out the
+        // ones already past the shard lock. A reentrant delete from inside a callback is refused
+        // earlier, but guard the wait too: blocking on our own count would deadlock.
+        if let Some(writer) = writer_arc.as_ref() {
+            if !crate::utils::notify::in_listener_callback() {
+                while writer.in_flight_callbacks() > 0 {
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+                debug!(
+                    "[delete] writer {:?} in-flight callbacks drained, all callbacks finished",
+                    entity_id
+                );
+            }
+        }
+
         // Unmatch with intra participant readers
         self.cleanup_resources_for_remote_writer(
             Guid::new(self.guid().prefix(), entity_id),
@@ -755,19 +800,15 @@ impl Participant {
         // out the ones already past the shard lock. A reentrant delete from inside a callback is
         // refused earlier, but guard the wait too: blocking on our own count would deadlock.
         if let Some(reader) = reader_arc.as_ref() {
+            reader.mark_deleted();
             if !crate::utils::notify::in_listener_callback() {
-                let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 while reader.in_flight_callbacks() > 0 {
-                    if std::time::Instant::now() >= drain_deadline {
-                        log::warn!(
-                            "remove_reader: {} callback(s) still in flight for {} after drain timeout",
-                            reader.in_flight_callbacks(),
-                            entity_id
-                        );
-                        break;
-                    }
                     std::thread::sleep(std::time::Duration::from_micros(50));
                 }
+                debug!(
+                    "[delete] reader {:?} in-flight callbacks drained, all callbacks finished",
+                    entity_id
+                );
             }
         }
 
@@ -884,10 +925,16 @@ impl Participant {
 
     /// Iterate through all Readers in the Participant to find Readers matched with the Writer, then remove Writer Proxy
     fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) -> RtpsResult<()> {
-        for reader in self.rtps_reader_store.iter_all() {
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+        // The lease keeps this reader's in-flight count raised across the SUBSCRIPTION_MATCHED(-1)
+        // update below, and drops at the end of the iteration so only that reader is held.
+        for entity_id in self.rtps_reader_store.all_entity_ids() {
+            let Some(lease) = self.rtps_reader_store.get_reader_callback_lease(entity_id) else {
+                continue;
+            };
+
+            if let Some(stateful_reader) = lease.as_any().downcast_ref::<StatefulReader>() {
                 stateful_reader.remove_matched_writer_and_update_status(writer_guid)?;
-            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
+            } else if let Some(stateless_reader) = lease.as_any().downcast_ref::<StatelessReader>()
             {
                 stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
@@ -898,10 +945,16 @@ impl Participant {
 
     /// Iterate through all Writers in the Participant to find Writers matched with the Reader, then remove Reader Locator or Reader Proxy
     fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) -> RtpsResult<()> {
-        for writer in self.rtps_writer_store.iter_all() {
-            if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+        // The lease keeps this writer's in-flight count raised across the PUBLICATION_MATCHED(-1)
+        // update below, and drops at the end of the iteration so only that writer is held.
+        for entity_id in self.rtps_writer_store.all_entity_ids() {
+            let Some(lease) = self.rtps_writer_store.get_writer_callback_lease(entity_id) else {
+                continue;
+            };
+
+            if let Some(stateful_writer) = lease.as_any().downcast_ref::<StatefulWriter>() {
                 stateful_writer.remove_matched_reader_and_update_status(reader_guid)?;
-            } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
+            } else if let Some(stateless_writer) = lease.as_any().downcast_ref::<StatelessWriter>()
             {
                 stateless_writer.remove_matched_reader_and_update_status(reader_guid)?;
             }
@@ -1081,6 +1134,8 @@ impl Participant {
                 });
             }
         }
+
+        self.remote_same_host.remove(&remote_prefix);
 
         // The peer is gone, so it will never answer to release what is charged against it, and
         // the entry would sit there until the backstop -- or for good, since a peer that

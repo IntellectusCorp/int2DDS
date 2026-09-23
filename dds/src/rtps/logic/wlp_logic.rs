@@ -663,7 +663,7 @@ impl WlpLogic {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
                         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
                             let _ =
-                                self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator));
+                                self.transport.send(buffer, &SendTarget::SEDPDiscovery(locator));
                             debug!(
                                 "[{}] WLP Logic: {} message sent to {}",
                                 message_type, message_type, locator
@@ -1128,12 +1128,14 @@ impl WlpLogic {
             writer_info.set_not_alive();
             debug!("[WLP] Writer {} set to NOT_ALIVE (participant kept for recovery)", guid);
 
-            if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
+            if let Some(writer_lease) =
+                participant.find_writer_callback_lease_from_entity_id(guid.entity_id())
+            {
                 log::info!(
                     "[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={}",
                     guid
                 );
-                writer.update_status(StatusKind::LIVELINESS_LOST, None);
+                writer_lease.update_status(StatusKind::LIVELINESS_LOST, None);
             }
         }
     }
@@ -1146,14 +1148,15 @@ impl WlpLogic {
     ) {
         log::debug!("[WLP] mark_monitored_writer_lost: guid={}", guid);
 
-        if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
-            for reader in readers {
+        if let Ok(leases) = participant.find_reader_callback_leases_matched_with_remote_writer(guid)
+        {
+            for lease in leases {
                 log::debug!(
                     "[WLP] mark_monitored_writer_lost: Notifying reader {} of LOST for writer {}",
-                    reader.guid(),
+                    lease.guid(),
                     guid
                 );
-                notify_reader_liveliness_changed(&reader, &guid, LivelinessTransition::Lost);
+                notify_reader_liveliness_changed(&lease, &guid, LivelinessTransition::Lost);
             }
 
             if let Some(mut remote_writers) = remote_participants.get_mut(&guid.prefix()) {
@@ -1170,9 +1173,10 @@ impl WlpLogic {
         guid: Guid,
         transition: LivelinessTransition,
     ) {
-        if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
-            for reader in readers {
-                notify_reader_liveliness_changed(&reader, &guid, transition);
+        if let Ok(leases) = participant.find_reader_callback_leases_matched_with_remote_writer(guid)
+        {
+            for lease in leases {
+                notify_reader_liveliness_changed(&lease, &guid, transition);
             }
         }
     }
@@ -1299,13 +1303,13 @@ impl WlpLogic {
                 // NOT_ALIVE -> ALIVE
                 if was_not_alive {
                     let participant = self.get_upgraded_participant()?;
-                    if let Ok(readers) =
-                        participant.find_readers_matched_with_remote_writer(writer_guid)
+                    if let Ok(leases) = participant
+                        .find_reader_callback_leases_matched_with_remote_writer(writer_guid)
                     {
-                        for reader in readers {
+                        for lease in leases {
                             // Recovery: was NOT_ALIVE, now ALIVE
                             notify_reader_liveliness_changed(
-                                &reader,
+                                &lease,
                                 &writer_guid,
                                 LivelinessTransition::Recovered,
                             );
@@ -1593,7 +1597,7 @@ impl UnicastMessageProcessor for WlpLogic {
 
                 for locator in reader_proxy.unicast_locator_list() {
                     if let Err(e) =
-                        self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
+                        self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(locator))
                     {
                         warn!("[WLP] Failed to send DATA message to locator {}: {:?}", locator, e);
                     }

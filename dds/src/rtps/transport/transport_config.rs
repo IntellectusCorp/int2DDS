@@ -14,12 +14,14 @@ use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_CONGESTION_MISS_THRESHOLD,
-    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
-    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SEND_DEADLINE_MS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
-    PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
+    PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
+    PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PEER_SEARCH_SLOTS, PROP_TCP_PUBLIC_ADDRESS,
+    PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS,
+    PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
+use crate::rtps::transport::peer_spec::{PeerSpec, DEFAULT_PARTICIPANTS_PER_HOST};
+use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::TransportType;
 
 /// IPv4 multicast TTL fallback. Matches RFC 1112 / `IP_MULTICAST_TTL` defaults
@@ -70,11 +72,12 @@ pub(crate) struct TcpConfig {
     pub transport_type: TransportType,
     pub bind_port: Option<u16>,
     pub public_address: Option<SocketAddr>,
-    pub initial_peers: Vec<SocketAddr>,
+    pub initial_peers: Vec<PeerSpec>,
+    pub peer_search_slots: u32,
     pub accept_undefined_peers: bool,
     pub nodelay: bool,
     pub connect_timeout: Duration,
-    pub peer_handshake_timeout: Duration,
+    pub first_frame_timeout: Duration,
     pub tls_handshake_timeout: Duration,
     pub unacked_timeout: Option<Duration>,
     pub keepalive_interval: Duration,
@@ -82,9 +85,6 @@ pub(crate) struct TcpConfig {
     pub keepalive_max_misses: u32,
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
-    pub async_workers: Option<usize>,
-    pub send_deadline: Option<Duration>,
-    pub congestion_miss_threshold: u32,
 }
 
 impl TransportConfig for TcpConfig {
@@ -101,13 +101,18 @@ impl TransportConfig for TcpConfig {
             public_address: prop_parse::<SocketAddr>(property, PROP_TCP_PUBLIC_ADDRESS),
             initial_peers: property
                 .find_property(PROP_INITIAL_PEERS)
-                .map(crate::common::env::parse_initial_peers)
-                .unwrap_or_else(crate::common::env::get_initial_peers),
+                .map(crate::rtps::transport::peer_spec::parse_peer_specs)
+                .unwrap_or_else(|| {
+                    std::env::var("INT2DDS_INITIAL_PEERS")
+                        .map(|peers| crate::rtps::transport::peer_spec::parse_peer_specs(&peers))
+                        .unwrap_or_default()
+                }),
+            peer_search_slots: peer_search_slots(property),
             accept_undefined_peers: prop_parse::<bool>(property, PROP_ACCEPT_UNDEFINED_PEERS)
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
-            connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
-            peer_handshake_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 20_000),
+            connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 1_000),
+            first_frame_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 20_000),
             tls_handshake_timeout: ms(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, 5_000),
             unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
                 Some(0) => None,
@@ -126,25 +131,6 @@ impl TransportConfig for TcpConfig {
             },
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
-            async_workers: prop_parse::<usize>(property, PROP_TCP_ASYNC_WORKERS),
-            send_deadline: match prop_parse::<i64>(property, PROP_TCP_SEND_DEADLINE_MS) {
-                Some(v) if v < 0 => None,
-                Some(v) => Some(Duration::from_millis(v as u64)),
-                None => Some(Duration::from_millis(1000)),
-            },
-            congestion_miss_threshold: match prop_parse::<u32>(
-                property,
-                PROP_TCP_CONGESTION_MISS_THRESHOLD,
-            ) {
-                Some(0) => {
-                    log::warn!(
-                        "{PROP_TCP_CONGESTION_MISS_THRESHOLD} = 0 is invalid (min 1); using 1"
-                    );
-                    1
-                }
-                Some(v) => v,
-                None => 1,
-            },
         }
     }
 }
@@ -168,6 +154,26 @@ impl TransportConfig for HybridConfig {
     }
 }
 
+fn peer_search_slots(property: &PropertyQosPolicy) -> u32 {
+    const MAX_SLOTS: u32 = PortManager::MAX_TCP_PARTICIPANT_ID + 1;
+
+    let configured = prop_parse::<u32>(property, PROP_TCP_PEER_SEARCH_SLOTS)
+        .or_else(crate::common::env::get_tcp_peer_search_slots);
+
+    match configured {
+        None => DEFAULT_PARTICIPANTS_PER_HOST,
+        Some(slots) if (1..=MAX_SLOTS).contains(&slots) => slots,
+        Some(slots) => {
+            let clamped = slots.clamp(1, MAX_SLOTS);
+            log::warn!(
+                "{PROP_TCP_PEER_SEARCH_SLOTS} = {slots} is outside 1..={MAX_SLOTS}, one domain's \
+                 port block; using {clamped}"
+            );
+            clamped
+        }
+    }
+}
+
 /// Parse a single text property into `T`, ignoring absent/invalid values.
 fn prop_parse<T: std::str::FromStr>(property: &PropertyQosPolicy, key: &str) -> Option<T> {
     property.find_property(key).and_then(|v| v.trim().parse::<T>().ok())
@@ -179,6 +185,7 @@ mod tests {
 
     fn clear_env() {
         unsafe { std::env::remove_var("INT2DDS_MULTICAST_TTL") };
+        unsafe { std::env::remove_var("INT2DDS_TCP_PEER_SEARCH_SLOTS") };
     }
 
     #[test]
@@ -188,6 +195,49 @@ mod tests {
             UdpConfig::from_property(&PropertyQosPolicy::default()).multicast_ttl,
             DEFAULT_MULTICAST_TTL
         );
+    }
+
+    #[test]
+    fn the_search_width_is_configurable_and_bounded_by_the_domain_block() {
+        clear_env();
+        assert_eq!(
+            TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
+            DEFAULT_PARTICIPANTS_PER_HOST
+        );
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "40", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 40);
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "0", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 1, "a search of nothing");
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "100000", false);
+        assert_eq!(
+            TcpConfig::from_property(&p).peer_search_slots,
+            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            "a slot past the block belongs to the next domain"
+        );
+
+        // The env var carries the width where no QoS property can be set, and
+        // the property still wins wherever one is.
+        unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "40") };
+        assert_eq!(TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots, 40);
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "8", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 8);
+
+        unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "100000") };
+        assert_eq!(
+            TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
+            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            "the ceiling holds whichever way the width arrives"
+        );
+
+        clear_env();
     }
 
     #[test]
@@ -226,8 +276,8 @@ mod tests {
         assert_eq!(cfg.bind_port, None);
         assert_eq!(cfg.public_address, None);
         assert!(cfg.nodelay);
-        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
-        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(20_000));
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(1_000));
+        assert_eq!(cfg.first_frame_timeout, Duration::from_millis(20_000));
         assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(25_000)));
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
@@ -235,7 +285,6 @@ mod tests {
         assert_eq!(cfg.keepalive_max_misses, 3);
         assert_eq!(cfg.so_rcvbuf, None);
         assert_eq!(cfg.so_sndbuf, None);
-        assert_eq!(cfg.async_workers, None);
     }
 
     #[test]
@@ -243,6 +292,7 @@ mod tests {
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_BIND_PORT, "17400", false);
         p.add_property(PROP_TCP_NODELAY, "false", false);
+        p.add_property(PROP_TCP_CONNECT_TIMEOUT_MS, "1111", false);
         p.add_property(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, "2222", false);
         p.add_property(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, "3333", false);
         p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "7", false);
@@ -253,7 +303,8 @@ mod tests {
         let cfg = TcpConfig::from_property(&p);
         assert_eq!(cfg.bind_port, Some(17400));
         assert!(!cfg.nodelay);
-        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(2222));
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(1111));
+        assert_eq!(cfg.first_frame_timeout, Duration::from_millis(2222));
         assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(3333));
         assert_eq!(cfg.keepalive_max_misses, 7);
         assert_eq!(cfg.public_address, Some("203.0.113.5:7400".parse().unwrap()));
@@ -267,42 +318,5 @@ mod tests {
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "0", false);
         assert_eq!(TcpConfig::from_property(&p).keepalive_max_misses, 1);
-    }
-
-    #[test]
-    fn tcp_config_send_deadline_default() {
-        let cfg = TcpConfig::from_property(&PropertyQosPolicy::default());
-        assert_eq!(cfg.send_deadline, Some(Duration::from_millis(1000)));
-    }
-
-    #[test]
-    fn tcp_config_reads_send_deadline_property() {
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_SEND_DEADLINE_MS, "500", false);
-        assert_eq!(TcpConfig::from_property(&p).send_deadline, Some(Duration::from_millis(500)));
-    }
-
-    #[test]
-    fn tcp_config_send_deadline_minus_one_blocks() {
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_SEND_DEADLINE_MS, "-1", false);
-        assert_eq!(TcpConfig::from_property(&p).send_deadline, None);
-    }
-
-    #[test]
-    fn tcp_config_congestion_miss_threshold_default_and_read() {
-        let cfg = TcpConfig::from_property(&PropertyQosPolicy::default());
-        assert_eq!(cfg.congestion_miss_threshold, 1);
-
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_CONGESTION_MISS_THRESHOLD, "3", false);
-        assert_eq!(TcpConfig::from_property(&p).congestion_miss_threshold, 3);
-    }
-
-    #[test]
-    fn tcp_config_congestion_miss_threshold_zero_is_clamped_to_one() {
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_CONGESTION_MISS_THRESHOLD, "0", false);
-        assert_eq!(TcpConfig::from_property(&p).congestion_miss_threshold, 1);
     }
 }

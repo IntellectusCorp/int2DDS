@@ -94,6 +94,7 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     // sample so a runtime QoS change takes effect immediately.
     time_based_filter: TimeBasedFilter,
     // Receive-side ContentFilteredTopic hook (type-erased so the trait impl can call it).
+    #[allow(clippy::type_complexity)]
     content_filter: Option<Arc<dyn Fn(&CacheChange) -> bool + Send + Sync>>,
     // Sticky: set once a finite-lifespan sample is stored, so read-time purge
     // can skip scanning caches that can never hold an expirable sample.
@@ -1081,27 +1082,40 @@ fn deliver_held_sample<Foo: 'static + Clone + Debug>(
     let Ok(rtps_reader) = data_reader.get_rtps_reader() else { return };
     let Ok(cache_arc) = data_reader.get_datareader_cache() else { return };
 
-    let pending = match cache_arc.lock() {
-        Ok(cache) => {
-            cache.time_based_filter.take_pending_on_timer(instance_handle, RtpsTime::now())
-        }
-        Err(_) => return,
-    };
-    let Some(change) = pending else { return };
+    // Raise the in-flight count, then deliver only if the reader is not being deleted. A late
+    // timer that starts after remove_reader drained sees the mark and skips. A live one keeps the
+    // count raised across the delivery so the delete drains it. enter/exit bracket the whole
+    // section with no early return between them.
+    rtps_reader.enter_callback();
 
-    match rtps_reader.reader_cache().lock() {
-        // Re-deliver without the filter (already decided) so it stores and notifies.
-        Ok(mut reader_cache) => match reader_cache.add_change((*change).clone(), false) {
-            Ok(delivered) => {
-                drop(reader_cache);
-                for change in delivered {
-                    rtps_reader.on_change(change);
-                }
+    if rtps_reader.is_deleted() {
+        debug!("[TimeBasedFilter] reader is being deleted, skipping held-sample delivery");
+    } else {
+        let pending = match cache_arc.lock() {
+            Ok(cache) => {
+                cache.time_based_filter.take_pending_on_timer(instance_handle, RtpsTime::now())
             }
-            Err(e) => debug!("[TimeBasedFilter] Failed to deliver held sample: {:?}", e),
-        },
-        Err(e) => debug!("[TimeBasedFilter] Failed to lock reader cache: {:?}", e),
+            Err(_) => None,
+        };
+
+        if let Some(change) = pending {
+            match rtps_reader.reader_cache().lock() {
+                // Re-deliver without the filter (already decided) so it stores and notifies.
+                Ok(mut reader_cache) => match reader_cache.add_change((*change).clone(), false) {
+                    Ok(delivered) => {
+                        drop(reader_cache);
+                        for change in delivered {
+                            rtps_reader.on_change(change);
+                        }
+                    }
+                    Err(e) => debug!("[TimeBasedFilter] Failed to deliver held sample: {:?}", e),
+                },
+                Err(e) => debug!("[TimeBasedFilter] Failed to lock reader cache: {:?}", e),
+            }
+        }
     }
+
+    rtps_reader.exit_callback();
 }
 
 #[cfg(test)]
@@ -1623,6 +1637,56 @@ mod tests {
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
+    // The TIME_BASED_FILTER timer is the one entity-owned timer that reaches a user listener. Once
+    // the reader is marked deleted, deliver_held_sample must skip so on_data_available cannot fire
+    // after the delete drains.
+    #[test]
+    fn deliver_held_sample_skips_a_deleted_reader() {
+        let (participant, reader) = create_with_key_datareader(DataReaderQos::default());
+        let handle = InstanceHandle::new([9; 16]);
+        let now = RtpsTime::now();
+        let min_separation_nanos = 10_000_000_000u64;
+
+        let cache_arc = reader.get_datareader_cache().unwrap();
+        {
+            let cache = cache_arc.lock().unwrap();
+            assert!(matches!(
+                cache.time_based_filter.on_alive_sample(
+                    &create_change_with_key(1, handle),
+                    min_separation_nanos,
+                    now
+                ),
+                FilterOutcome::Deliver
+            ));
+            assert!(matches!(
+                cache.time_based_filter.on_alive_sample(
+                    &create_change_with_key(2, handle),
+                    min_separation_nanos,
+                    now
+                ),
+                FilterOutcome::Held { .. }
+            ));
+        }
+
+        reader.get_rtps_reader().unwrap().mark_deleted();
+
+        let reader_arc = Arc::new(reader.clone());
+        deliver_held_sample(&Arc::downgrade(&reader_arc), handle);
+
+        assert!(
+            cache_arc
+                .lock()
+                .unwrap()
+                .time_based_filter
+                .take_pending_on_timer(handle, now)
+                .is_some(),
+            "deliver_held_sample delivered on a deleted reader instead of skipping"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
     #[test]
     fn get_changes_returns_instance_blocks_not_insertion_order() {
         // Interleave two instances so insertion order (B1,A2,B3,A4) differs from
@@ -1675,8 +1739,10 @@ mod tests {
     fn by_source_timestamp_orders_bucket_by_source_not_arrival() {
         // BY_SOURCE_TIMESTAMP: a sample with a smaller source_timestamp arriving later still
         // sorts ahead of an earlier-arriving sample with a larger source_timestamp.
-        let mut reader_qos = DataReaderQos::default();
-        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+        let mut reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        };
         reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
 
         let (participant, data_reader) = create_with_key_datareader(reader_qos);
@@ -1754,8 +1820,10 @@ mod tests {
         // Two instances A,B interleaved by ascending source timestamp: A0,B0,A1,B1.
         // get_changes() returns instance blocks; get_changes_for_topic_scoped_ordered_access()
         // k-way merges the buckets into one globally source-ordered list.
-        let mut reader_qos = DataReaderQos::default();
-        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+        let mut reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        };
         reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
 
         let (participant, data_reader) = create_with_key_datareader(reader_qos);
@@ -1955,7 +2023,7 @@ mod tests {
 
             let changes = datareader_cache.get_changes();
             assert!(changes.len() == 3);
-            assert!(changes.get(0).unwrap().sequence_number().to_i64() == 2);
+            assert!(changes.first().unwrap().sequence_number().to_i64() == 2);
             assert!(changes.get(1).unwrap().sequence_number().to_i64() == 3);
             assert!(changes.get(2).unwrap().sequence_number().to_i64() == 4);
 
@@ -2047,7 +2115,7 @@ mod tests {
             let changes = datareader_cache.get_changes();
             assert_eq!(changes.len(), 2);
             // The oldest change (seq=1) should be removed, leaving only seq=2,3
-            assert_eq!(changes.get(0).unwrap().sequence_number().to_i64(), 2);
+            assert_eq!(changes.first().unwrap().sequence_number().to_i64(), 2);
             assert_eq!(changes.get(1).unwrap().sequence_number().to_i64(), 3);
 
             drop(datareader_cache);
@@ -2128,7 +2196,7 @@ mod tests {
             // Add instance A, B (max_instances reached)
             let change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2140,7 +2208,7 @@ mod tests {
 
             let change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_b, // different instance
                 SequenceNumber::from_i64(2),
                 vec![
@@ -2159,7 +2227,7 @@ mod tests {
 
             let change_c = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_c, // different instance
                 SequenceNumber::from_i64(3),
                 vec![
@@ -2177,7 +2245,7 @@ mod tests {
             // Make instance A enter NOT_ALIVE_NO_WRITERS state
             let change_a_unregister = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_1.clone(),
+                writer_1,
                 instance_a,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2249,7 +2317,7 @@ mod tests {
             let changes = datareader_cache.get_changes();
             assert_eq!(changes.len(), 3);
             // The oldest change (seq=1) should be removed, leaving only seq=2,3,4
-            assert_eq!(changes.get(0).unwrap().sequence_number().to_i64(), 2);
+            assert_eq!(changes.first().unwrap().sequence_number().to_i64(), 2);
             assert_eq!(changes.get(1).unwrap().sequence_number().to_i64(), 3);
             assert_eq!(changes.get(2).unwrap().sequence_number().to_i64(), 4);
 
@@ -2328,7 +2396,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2340,7 +2408,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_b, // different instance
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2401,7 +2469,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2413,7 +2481,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2470,7 +2538,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2482,7 +2550,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2547,7 +2615,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2560,7 +2628,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2626,7 +2694,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2635,7 +2703,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2664,7 +2732,7 @@ mod tests {
             // Writer A cannot add change again
             let mut change_a_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -2705,7 +2773,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2714,7 +2782,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2743,7 +2811,7 @@ mod tests {
             // Writer A cannot add change again
             let mut change_a_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -2780,7 +2848,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2801,7 +2869,7 @@ mod tests {
             // Owner disposes the instance
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![],
@@ -2847,7 +2915,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2859,7 +2927,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2889,7 +2957,7 @@ mod tests {
             // Writer A cannot add change again
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![],
@@ -2932,7 +3000,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2953,7 +3021,7 @@ mod tests {
             // Owner disposes the instance
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -2972,7 +3040,7 @@ mod tests {
 
             let mut change_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(3),
                 vec![
@@ -3016,7 +3084,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3037,7 +3105,7 @@ mod tests {
             // Owner disposes the instance
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3062,7 +3130,7 @@ mod tests {
 
             let mut change_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3107,7 +3175,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3128,7 +3196,7 @@ mod tests {
             // Disposes the instance with lesser strength
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3153,7 +3221,7 @@ mod tests {
 
             let mut change_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3201,7 +3269,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3213,7 +3281,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3243,7 +3311,7 @@ mod tests {
             // Writer B now unregister
             let mut change_unregistered = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3295,7 +3363,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3307,7 +3375,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3337,7 +3405,7 @@ mod tests {
             // Writer A, B all unregister
             let mut change_unregistered_a = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3346,7 +3414,7 @@ mod tests {
 
             let mut change_unregistered_b = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3406,7 +3474,7 @@ mod tests {
             // Same writer owns both instances
             let mut alive_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer.clone(),
+                writer,
                 instance_a,
                 SequenceNumber::from_i64(1),
                 data.clone(),
@@ -3417,7 +3485,7 @@ mod tests {
 
             let mut alive_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer.clone(),
+                writer,
                 instance_b,
                 SequenceNumber::from_i64(2),
                 data.clone(),
@@ -3429,7 +3497,7 @@ mod tests {
             // Writer unregisters only instance A
             let mut unregister_a = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer.clone(),
+                writer,
                 instance_a,
                 SequenceNumber::from_i64(3),
                 vec![],
@@ -3475,7 +3543,7 @@ mod tests {
 
             let alive = CacheChange::new(
                 ChangeKind::Alive,
-                writer.clone(),
+                writer,
                 instance,
                 SequenceNumber::from_i64(1),
                 data,
@@ -3486,7 +3554,7 @@ mod tests {
             // The remote disposes the same instance twice; the second moves no state.
             let dispose1 = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer.clone(),
+                writer,
                 instance,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3496,7 +3564,7 @@ mod tests {
 
             let dispose2 = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer.clone(),
+                writer,
                 instance,
                 SequenceNumber::from_i64(3),
                 vec![],

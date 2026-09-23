@@ -762,6 +762,13 @@ pub unsafe extern "C" fn int2dds_datawriter_write_serialized(
     }
 }
 
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `data_out` must be a valid pointer; it receives a writable buffer of
+///   `*capacity_out` bytes that stays valid until the loan is committed or aborted
+/// - `capacity_out` must be a valid pointer
+/// - `loan_out` must be a valid pointer to a null pointer; the returned loan must be
+///   committed or aborted
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_prepare_serialized_write(
     writer: *const Int2DdsDataWriter,
@@ -837,6 +844,9 @@ pub unsafe extern "C" fn int2dds_datawriter_commit_serialized_write(
     }
 }
 
+/// # Safety
+/// - `loan` must be a valid serialized write loan, or null (null is a no-op)
+/// - `loan` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_abort_serialized_write(
     loan: *mut Int2DdsSerializedWriteLoan,

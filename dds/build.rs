@@ -1,4 +1,5 @@
 fn main() {
-    // Dynamic library loading - no build-time linking required
-    // int2dds_feature is loaded at runtime via libloading
+    // No build-time linking required. Enterprise integrations hook in via the
+    // static `enterprise-hooks` feature seams (see dds/src/common/enterprise_hooks.rs),
+    // not dynamic library loading.
 }

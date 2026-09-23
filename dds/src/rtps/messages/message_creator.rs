@@ -743,6 +743,7 @@ impl MessageCreator {
 
     // Split missing fragments into 256-wide windows and pack as many NACK_FRAG
     // submessages as fit under INT2DDS_MAX_MESSAGE_SIZE into each datagram.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_multiple_nackfrag_msgs(
         reader_guid: Guid,
         writer_guid: Guid,

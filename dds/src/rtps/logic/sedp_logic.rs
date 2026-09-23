@@ -38,8 +38,8 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
-                Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
-                LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
+                loopback_locators, Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4,
+                LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             parameters::ParameterList,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
@@ -83,6 +83,7 @@ use crate::{
                 discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
             },
             sending_handler::{MessageType, SendingHandler},
+            stream_unicast_listening_task::StreamUnicastListeningTask,
         },
         transport::plugin::{MessageSource, SendTarget, TransportPlugin},
     },
@@ -309,7 +310,12 @@ impl SedpLogic {
             .collect();
         for (topic, data) in pubs {
             for reader in participant.find_readers_from_topic_name(&topic) {
-                self.match_reader_with_publication(reader, data.clone());
+                let Some(lease) = participant
+                    .find_reader_callback_lease_from_entity_id(reader.guid().entity_id())
+                else {
+                    continue;
+                };
+                self.match_reader_with_publication((*lease).clone(), data.clone());
             }
         }
 
@@ -326,7 +332,12 @@ impl SedpLogic {
             .collect();
         for (topic, data) in subs {
             for writer in participant.find_writers_from_topic_name(&topic) {
-                let _ = self.match_writer_with_subscription(writer, data.clone());
+                let Some(lease) = participant
+                    .find_writer_callback_lease_from_entity_id(writer.guid().entity_id())
+                else {
+                    continue;
+                };
+                let _ = self.match_writer_with_subscription((*lease).clone(), data.clone());
             }
         }
     }
@@ -393,6 +404,7 @@ impl SedpLogic {
         &self,
         discovery_multicast_source: Option<MessageSource>,
         discovery_unicast_source: Option<MessageSource>,
+        stream_source: Option<MessageSource>,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
@@ -432,8 +444,36 @@ impl SedpLogic {
             }
         }
 
-        // unicast listening (only if transport provides a unicast source)
-        if let Some(unicast_source) = discovery_unicast_source {
+        if let Some(stream_source) = stream_source {
+            let mut stream_unicast_listening_task =
+                StreamUnicastListeningTask::new(participant.clone());
+            stream_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
+
+            let stream_guid = participant_guid;
+            let stream_handle = thread::Builder::new()
+                .name("stream_unicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "stream_unicast_listening",
+                            stream_guid.prefix(),
+                        );
+                    }
+
+                    let _ = stream_unicast_listening_task.stream_listening(stream_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("stream unicast listening thread finished");
+                })
+                .expect("Failed to create stream unicast listening thread");
+
+            if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
+                *handle_guard = Some(stream_handle);
+            }
+        } else if let Some(unicast_source) = discovery_unicast_source {
             let mut discovery_unicast_listening_task =
                 DiscoveryUnicastListeningTask::new(participant.clone());
             discovery_unicast_listening_task
@@ -636,8 +676,8 @@ impl SedpLogic {
 
         debug!("Local endpoint detected, proceeding to match for GUID: {}", endpoint_guid);
         if let BuiltinTopicData::Publication(publication_builtin_topic_data) = builtin_topic_data {
-            let local_reader = participant
-                .find_reader_from_entity_id(endpoint_guid.entity_id())
+            let local_reader_lease = participant
+                .find_reader_callback_lease_from_entity_id(endpoint_guid.entity_id())
                 .ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
@@ -647,15 +687,15 @@ impl SedpLogic {
 
             self.match_endpoint(
                 MatchType::ReaderPublication,
-                local_reader.as_any(),
+                local_reader_lease.as_any(),
                 BuiltinTopicData::Publication(publication_builtin_topic_data),
                 true,
             )?;
         } else if let BuiltinTopicData::Subscription(subscription_builtin_topic_data) =
             builtin_topic_data
         {
-            let local_writer = participant
-                .find_writer_from_entity_id(endpoint_guid.entity_id())
+            let local_writer_lease = participant
+                .find_writer_callback_lease_from_entity_id(endpoint_guid.entity_id())
                 .ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
@@ -665,7 +705,7 @@ impl SedpLogic {
 
             self.match_endpoint(
                 MatchType::WriterSubscription,
-                local_writer.as_any(),
+                local_writer_lease.as_any(),
                 BuiltinTopicData::Subscription(subscription_builtin_topic_data),
                 true,
             )?;
@@ -744,6 +784,13 @@ impl SedpLogic {
 
         if !writers.is_empty() {
             for writer in writers {
+                let Some(writer_lease) = participant
+                    .find_writer_callback_lease_from_entity_id(writer.guid().entity_id())
+                else {
+                    continue;
+                };
+                let writer = &*writer_lease;
+
                 let subscription_result = self.match_writer_with_subscription(
                     writer.clone(),
                     subscription_builtin_topic_data.clone(),
@@ -899,7 +946,10 @@ impl SedpLogic {
         let reader_proxy = ReaderProxy::new(
             subscription_builtin_topic_data.endpoint_guid(),
             subscription_builtin_topic_data.endpoint_guid().entity_id(),
-            subscription_builtin_topic_data.unicast_locator_list(),
+            self.endpoint_unicast_locators(
+                subscription_builtin_topic_data.unicast_locator_list(),
+                endpoint_guid.prefix(),
+            ),
             subscription_builtin_topic_data.multicast_locator_list(),
             highest_sent_change_sn,
             SequenceNumber::UNKNOWN,
@@ -1063,7 +1113,11 @@ impl SedpLogic {
         let mut attempted_locators = 0usize;
         let mut added_locators = 0usize;
 
-        for locator in subscription_builtin_topic_data.unicast_locator_list() {
+        let unicast_locator_list = self.endpoint_unicast_locators(
+            subscription_builtin_topic_data.unicast_locator_list(),
+            subscription_builtin_topic_data.endpoint_guid().prefix(),
+        );
+        for locator in unicast_locator_list {
             if !(locator.kind() == LOCATOR_KIND_UDP_V4
                 || locator.kind() == LOCATOR_KIND_UDP_V6
                 || locator.kind() == LOCATOR_KIND_TCP_V4
@@ -1124,6 +1178,36 @@ impl SedpLogic {
         );
 
         Ok(())
+    }
+
+    /// Locator list a proxy for `remote_prefix` should send to. The announced
+    /// list is left as the peer published it in the builtin topic data; only
+    /// the routing decision kept in the proxy is redirected.
+    ///
+    /// A SEDP announcement carries one locator per interface exactly as SPDP
+    /// does, and no source address reaches this path. It does not have to:
+    /// co-location was proven once from the participant's own announcement and
+    /// holds for every endpoint behind it.
+    fn endpoint_unicast_locators(
+        &self,
+        announced: Vec<Locator>,
+        remote_prefix: GuidPrefix,
+    ) -> Vec<Locator> {
+        let Ok(participant) = self.get_upgraded_participant() else {
+            return announced;
+        };
+        let same_host = participant.remote_is_same_host(remote_prefix, None);
+        if !same_host || crate::common::env::get_disable_same_host_loopback() {
+            return announced;
+        }
+
+        let redirected = loopback_locators(&announced);
+        debug!(
+            "Redirected same-host endpoint locators of {} to [{}]",
+            Guid::guid_prefix_to_string(&remote_prefix),
+            redirected.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
+        );
+        redirected
     }
 
     fn handle_empty_locator_lists(
@@ -1232,7 +1316,15 @@ impl SedpLogic {
 
         if !readers.is_empty() {
             for reader in readers {
-                self.match_reader_with_publication(reader, publication_builtin_topic_data.clone());
+                let Some(lease) = participant
+                    .find_reader_callback_lease_from_entity_id(reader.guid().entity_id())
+                else {
+                    continue;
+                };
+                self.match_reader_with_publication(
+                    (*lease).clone(),
+                    publication_builtin_topic_data.clone(),
+                );
             }
         } else {
             // add to pending remote publications
@@ -1360,7 +1452,10 @@ impl SedpLogic {
         let writer_proxy = WriterProxy::new(
             publication_builtin_topic_data.endpoint_guid(),
             publication_builtin_topic_data.endpoint_guid().entity_id(),
-            publication_builtin_topic_data.unicast_locator_list(),
+            self.endpoint_unicast_locators(
+                publication_builtin_topic_data.unicast_locator_list(),
+                endpoint_guid.prefix(),
+            ),
             publication_builtin_topic_data.multicast_locator_list(),
             0, // data_max_size_serialized
             publication_builtin_topic_data.clone(),
@@ -1702,10 +1797,10 @@ impl SedpLogic {
                         if !locator.is_udp() && !locator.is_tcp() {
                             continue;
                         }
-                        if !self.transport.can_handle(&locator) {
+                        if !self.transport.can_handle(locator) {
                             continue;
                         }
-                        match self.transport.send(&buffer, &SendTarget::SEDPDiscovery(&locator)) {
+                        match self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator)) {
                             Ok(_) => {
                                 is_sent = true;
                             }
@@ -2587,7 +2682,10 @@ impl UnicastMessageProcessor for SedpLogic {
                 let _ = participant
                     .unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
             } else {
-                return self.handle_discovered_participant_data(participant_proxy_data.clone());
+                return self.handle_discovered_participant_data(
+                    participant_proxy_data.clone(),
+                    message_receiver.sender_addr(),
+                );
             }
         }
 

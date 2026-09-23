@@ -23,7 +23,7 @@ use crate::rtps::transport::UdpConfig;
 ///   - SHM locator → SHM sender (shared memory ring buffer)
 ///   - UDP locator → UDP sender (fallback for non-SHM peers)
 ///
-/// User data unicast is handed out as `MessageSource::MioPollWithShm`,
+/// User data unicast is handed out as `MessageSource::Shm`,
 /// letting the listening task poll both UDP and SHM in the same loop
 /// (mirroring the develop-branch single-task receive pattern; no extra
 /// merge thread or inter-thread channel).
@@ -218,20 +218,20 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_unicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
         let shm = self.shm_listener.lock().expect("lock poisoned").take();
         Some(match shm {
-            Some(shm) => MessageSource::MioPollWithShm { listener, shm },
-            None => MessageSource::MioPoll { listener },
+            Some(shm) => MessageSource::Shm { listener, shm },
+            None => MessageSource::Udp { listener },
         })
     }
 

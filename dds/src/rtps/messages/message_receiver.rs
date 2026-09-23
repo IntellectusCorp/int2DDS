@@ -121,6 +121,10 @@ impl MessageReceiver {
         self.source_guid_prefix
     }
 
+    pub(crate) fn sender_addr(&self) -> SocketAddr {
+        self.sender_addr
+    }
+
     // 8.3.6.4 Change in state of Receiver
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_header(mut self, header: Header) {
@@ -287,6 +291,7 @@ impl MessageReceiver {
                 }
 
                 let mut inline_qos_params: Option<ParameterList> = None;
+                let mut carries_spdp_data = false;
 
                 for (index, submessage) in submessages.iter().enumerate() {
                     if log_on {
@@ -298,6 +303,7 @@ impl MessageReceiver {
                             if data.writer_id != EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER {
                                 continue;
                             }
+                            carries_spdp_data = true;
 
                             inline_qos_params = data.inline_qos();
 
@@ -364,6 +370,12 @@ impl MessageReceiver {
                         domain_id,
                         Guid::guid_prefix_to_string(&header.guid_prefix())
                     );
+                }
+
+                // Only SPDP data may produce a participant: without it the
+                // result would carry no locators and no builtin endpoints.
+                if !carries_spdp_data {
+                    return None;
                 }
 
                 Some((spdp_discovered_participant_data, inline_qos_params))

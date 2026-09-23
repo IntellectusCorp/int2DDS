@@ -130,12 +130,7 @@ impl DcpsBridge {
             .map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::Io,
-                    format!(
-                        "Failed to create transport plugin (domain={domain_id}): {e}. \
-                         When multiple participants share one process, give each a unique \
-                         TCP listen port via the int2dds.transport.TCPv4.bind_port \
-                         property."
-                    ),
+                    format!("Failed to create transport plugin (domain={domain_id}): {e}"),
                 )
             })?,
         );
@@ -192,6 +187,7 @@ impl DcpsBridge {
             sedp_logic.start_sedp(
                 transport.take_discovery_multicast_source(),
                 transport.take_discovery_unicast_source(),
+                transport.take_stream_source(),
             )?;
         } else {
             log::error!("sedp_logic is not set");
@@ -582,9 +578,14 @@ impl DcpsBridge {
         self.participant.terminate();
 
         // Stop thread monitoring
-        if let Some(thread_monitor) = &self.thread_monitor {
-            thread_monitor.stop_monitoring();
-            debug!("Thread monitoring stopped");
+        match &self.thread_monitor {
+            Some(thread_monitor) => {
+                thread_monitor.stop_monitoring();
+                debug!("Thread monitoring stopped");
+            }
+            None => {
+                ThreadMonitor::remove_threads_by_guid_prefix(&self.participant.guid().prefix());
+            }
         }
 
         let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
@@ -922,14 +923,15 @@ mod tests {
         unsafe {
             std::env::set_var("INT2DDS_DATA_FRAG_SIZE", "1344");
             std::env::set_var("INT2DDS_MAX_MESSAGE_SIZE", "13440");
-            // Both peers must take the "double the OS default" branch below,
+            // Both peers must take the default-policy branch below,
             // not an explicit override left set by another test/session.
             std::env::remove_var("INT2DDS_UDP_SOCKET_BUFFER");
+            std::env::remove_var("INT2DDS_UDP_RECV_BUFFER");
         }
 
         // Independent oracle, computed with socket2 directly (not via
         // UdpListener::new): what any fresh socket on this host is actually
-        // granted after asking to double its default SO_RCVBUF.
+        // granted under the default policy (raise SO_RCVBUF to 1 MiB if smaller).
         let probe = socket2::Socket::new(
             socket2::Domain::IPV4,
             socket2::Type::DGRAM,
@@ -937,7 +939,9 @@ mod tests {
         )
         .expect("probe socket");
         let current = probe.recv_buffer_size().expect("read default SO_RCVBUF");
-        probe.set_recv_buffer_size(current.saturating_mul(2)).expect("set SO_RCVBUF");
+        if current < 1024 * 1024 {
+            probe.set_recv_buffer_size(1024 * 1024).expect("set SO_RCVBUF");
+        }
         let expected = probe.recv_buffer_size().expect("read granted SO_RCVBUF");
 
         let domain_id = unique_domain_id() as u32;
@@ -1057,7 +1061,7 @@ mod tests {
                 let mut i = 0;
                 loop {
                     let changes = reader.available_changes();
-                    if changes.len() > 0 {
+                    if !changes.is_empty() {
                         for change in changes {
                             log::info!("change: {}", change);
                         }
@@ -1086,8 +1090,7 @@ mod tests {
         let test_topic_name = "hello_world_topic_sub";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test =
+        let dcps_bridge_test: Arc<Mutex<DcpsBridge>> =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
 
         let _participant = dcps_bridge_test.lock().unwrap().get_participant().unwrap();
@@ -1349,8 +1352,7 @@ mod tests {
         let test_topic_name = "hello_world_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test =
+        let dcps_bridge_test: Arc<Mutex<DcpsBridge>> =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
@@ -1406,8 +1408,7 @@ mod tests {
         let test_topic_name = "hello_world_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test =
+        let dcps_bridge_test: Arc<Mutex<DcpsBridge>> =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
@@ -1579,7 +1580,7 @@ mod tests {
         // Remove mocked writer proxy
         guard
             .participant
-            .cleanup_resources_for_remote_writer(remote_writer_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_writer(remote_writer_guid, test_topic_name)
             .unwrap();
         assert!(
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
@@ -1648,7 +1649,7 @@ mod tests {
         // Remove mocked reader locator
         guard
             .participant
-            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, test_topic_name)
             .unwrap();
         assert!(
             stateless_writer.reader_locator().lock().unwrap().is_empty(),
@@ -1721,7 +1722,7 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, test_topic_name)
             .unwrap();
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().is_empty(),
@@ -1841,14 +1842,14 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_resources_for_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid_1, test_topic_name)
             .unwrap();
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 1,
             "Stateful writer 1's reader proxy list should contain 1 elements after removal"
         );
         assert!(
-            stateful_writer_2.reader_proxies().lock().unwrap().len() == 0,
+            stateful_writer_2.reader_proxies().lock().unwrap().is_empty(),
             "Stateful writer 2's reader proxy list should contain 0 after removal"
         );
     }

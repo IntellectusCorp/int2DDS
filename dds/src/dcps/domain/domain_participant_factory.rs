@@ -82,50 +82,6 @@ use super::{
     qos::{DomainParticipantFactoryQos, DomainParticipantQos},
 };
 
-// Optional participant-factory hook (feature-gated; no-op by default).
-#[cfg(feature = "factory-hook")]
-mod factory_hook {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    pub type HookFn = extern "C" fn() -> i32;
-
-    extern "C" fn default_hook() -> i32 {
-        1
-    }
-
-    static HOOK: AtomicUsize = AtomicUsize::new(0);
-
-    #[no_mangle]
-    pub extern "C" fn __int2dds_set_factory_hook(f: HookFn) {
-        HOOK.store(f as usize, Ordering::SeqCst);
-    }
-
-    pub(super) fn check() -> i32 {
-        let v = HOOK.load(Ordering::SeqCst);
-        if v == 0 {
-            return default_hook();
-        }
-        // SAFETY: `v` is only ever set from a valid HookFn in the setter.
-        let f: HookFn = unsafe { std::mem::transmute(v) };
-        f()
-    }
-}
-
-#[cfg(feature = "factory-hook")]
-#[inline]
-fn run_factory_hook() -> DdsResult<()> {
-    match factory_hook::check() {
-        0 => Ok(()),
-        code => Err(DdsError::Error(format!("participant creation refused (code {code})"))),
-    }
-}
-
-#[cfg(not(feature = "factory-hook"))]
-#[inline]
-fn run_factory_hook() -> DdsResult<()> {
-    Ok(())
-}
-
 #[derive(Default)]
 pub struct DomainParticipantFactory {
     participants: Mutex<HashMap<DomainId, Vec<Weak<DomainParticipant>>>>,
@@ -170,7 +126,7 @@ impl DomainParticipantFactory {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<DomainParticipant> {
-        run_factory_hook()?;
+        crate::common::enterprise_hooks::call_participant_gate()?;
         let domain_id = if domain_id != DEFAULT_DOMAIN_ID {
             domain_id
         } else {
@@ -192,10 +148,8 @@ impl DomainParticipantFactory {
                     self.default_participant_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) = self.get_participant_qos_from_profile("") {
-                    profile_qos
                 } else {
-                    DomainParticipantQos::default()
+                    self.get_participant_qos_from_profile("").unwrap_or_default()
                 }
             }
         };
@@ -267,6 +221,11 @@ impl DomainParticipantFactory {
         &self,
         participant: &mut DomainParticipant,
     ) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_participant from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         self.remove_orphaned_participant(participant)?;
         if let Ok(true) = participant.has_active_entities() {
             return Err(DdsError::PreconditionNotMet);

@@ -49,7 +49,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         qos_kind::QosKind,
         qos_policy::Qos,
@@ -78,7 +78,7 @@ pub struct Publisher {
     status_condition: Arc<Mutex<StatusCondition<PublisherQos>>>,
     pub(crate) self_ref: Option<Arc<Publisher>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     #[allow(clippy::type_complexity)]
     writers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
@@ -105,7 +105,7 @@ impl Debug for Publisher {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.as_ref().map(|_| "Arc<Publisher>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted())
             .finish()
     }
 }
@@ -133,7 +133,7 @@ impl Drop for Publisher {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if !self.lifecycle.is_deleted() {
             if let Some(ref participant_weak) = self.participant {
                 if let Some(participant) = participant_weak.upgrade() {
                     let publisher_handle = InstanceHandle::from_guid(&self.guid);
@@ -185,7 +185,7 @@ impl Publisher {
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
             self_ref: None,
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             writers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             writers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             orphaned_writers: Arc::new(Mutex::new(Vec::new())),
@@ -253,12 +253,10 @@ impl Publisher {
                     self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    DataWriterQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_datawriter_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         }
@@ -274,7 +272,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let qos = self.resolve_datawriter_qos(qos.into());
 
@@ -473,7 +471,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Same default-resolution chain as the typed create_datawriter: a caller that
         // wants the QoS profile applied passes DATAWRITER_QOS_DEFAULT. Passing a
@@ -491,7 +489,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let arc_writer: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> =
             Arc::new(datawriter.clone());
         match self.try_delete_datawriter(&arc_writer) {
@@ -518,6 +516,14 @@ impl Publisher {
         &self,
         datawriter: &Arc<dyn DataWriterInternal<Qos = DataWriterQos>>,
     ) -> DdsResult<()> {
+        // Deleting from inside a listener callback would block on the writer's in-flight-callback
+        // drain, which only this thread can release. Refuse instead of deadlocking. The caller must
+        // delete from another thread or after the callback returns.
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_datawriter from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         self.remove_orphaned_writer(datawriter);
         if datawriter.get_publisher()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
@@ -525,17 +531,6 @@ impl Publisher {
         let handle = datawriter.get_instance_handle()?;
         let topic_name = datawriter.get_topic()?.get_name().to_string();
         let topic_handle = datawriter.get_topic()?.get_instance_handle()?;
-
-        {
-            let participant = self.get_participant()?;
-            let mut bridge_guard = participant.get_dcps_bridge()?;
-            match bridge_guard.as_mut() {
-                Some(bridge) => bridge
-                    .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
-                    .map_err(|e| DdsError::Error(e.message))?,
-                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-            };
-        }
 
         let mut removed = false;
 
@@ -565,27 +560,44 @@ impl Publisher {
             }
         }
 
-        // If found in first map, also remove from second map
-        if removed {
-            if let Ok(mut writers_by_topic_handle) = self.writers_by_topic_handle.lock() {
-                if let Some(writers) = writers_by_topic_handle.get_mut(&topic_handle) {
-                    writers.retain(|weak_writer| {
-                        weak_writer
-                            .upgrade()
-                            .and_then(|writer| writer.get_instance_handle().ok())
-                            .is_some_and(|h| h != handle)
-                    });
+        if !removed {
+            return Err(DdsError::Error("DataWriter not found".to_string()));
+        }
 
-                    if writers.is_empty() {
-                        writers_by_topic_handle.remove(&topic_handle);
-                    }
+        // Remove from the by-handle map as well
+        if let Ok(mut writers_by_topic_handle) = self.writers_by_topic_handle.lock() {
+            if let Some(writers) = writers_by_topic_handle.get_mut(&topic_handle) {
+                writers.retain(|weak_writer| {
+                    weak_writer
+                        .upgrade()
+                        .and_then(|writer| writer.get_instance_handle().ok())
+                        .is_some_and(|h| h != handle)
+                });
+
+                if writers.is_empty() {
+                    writers_by_topic_handle.remove(&topic_handle);
                 }
             }
-            datawriter.delete();
-            Ok(())
-        } else {
-            Err(DdsError::Error("DataWriter not found".to_string()))
         }
+
+        // Close the writer to new API calls and drain in-flight ones before the rtps writer is
+        // torn down, so no admitted write is aborted or loses its sample.
+        datawriter.mark_deleted_and_await_operation_completion();
+
+        {
+            let participant = self.get_participant()?;
+            let mut bridge_guard = participant.get_dcps_bridge()?;
+            match bridge_guard.as_mut() {
+                Some(bridge) => bridge
+                    .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
+                    .map_err(|e| DdsError::Error(e.message))?,
+                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            };
+        }
+
+        datawriter.delete();
+
+        Ok(())
     }
 
     fn remove_orphaned_writer(
@@ -675,7 +687,6 @@ impl Publisher {
     pub(crate) fn get_datawriters_internal(
         &self,
     ) -> DdsResult<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>> {
-        self.is_deleted()?;
         let mut result = Vec::new();
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -695,7 +706,7 @@ impl Publisher {
         topic_name: &str,
     ) -> DdsResult<DataWriter<Foo>> {
         let _ = self.cleanup_dead_writers();
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             let writers_guard =
                 self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -716,7 +727,6 @@ impl Publisher {
     }
 
     pub fn get_datawriters_of_type<Foo: 'static>(&self) -> DdsResult<Vec<Arc<DataWriter<Foo>>>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
         let mut result = Vec::new();
 
@@ -750,7 +760,6 @@ impl Publisher {
         &self,
         topic_name: &str,
     ) -> DdsResult<Option<Arc<DataWriter<Foo>>>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
@@ -782,7 +791,6 @@ impl Publisher {
         topic_name: &str,
         f: impl FnOnce(&DataWriter<Foo>) -> R,
     ) -> DdsResult<Option<R>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
@@ -809,7 +817,6 @@ impl Publisher {
         &self,
         mut f: impl FnMut(&DataWriter<Foo>),
     ) -> DdsResult<()> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
@@ -835,7 +842,6 @@ impl Publisher {
     pub fn get_writers_by_type(
         &self,
     ) -> DdsResult<HashMap<TypeId, Vec<Box<dyn DataWriterBase<Qos = DataWriterQos>>>>> {
-        self.is_deleted()?;
         let mut type_map: HashMap<TypeId, Vec<Box<dyn DataWriterBase<Qos = DataWriterQos>>>> =
             HashMap::new();
 
@@ -864,7 +870,7 @@ impl Publisher {
             After calling this operation, subsequent modifications must be matched by a call to resume_publications indicating that the modifications have completed.
             If the Publisher is deleted before resume_publications is called, any pending modifications that have not been propagated are discarded.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -877,7 +883,7 @@ impl Publisher {
             The call to resume_publications must match a previous call to suspend_publications.
             Otherwise, this operation returns PRECONDITION_NOT_MET error.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -899,7 +905,7 @@ impl Publisher {
             This is useful, for example, when two data instances represent 'altitude' and 'velocity vector' that change together for the same aircraft.
             Without delivering both values together, readers might misinterpret them as indicating an aircraft on a collision course.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
         self.coherent_depth.fetch_add(1, Ordering::AcqRel);
         Ok(())
@@ -910,7 +916,7 @@ impl Publisher {
             This operation terminates the 'coherent set' initiated by begin_coherent_changes.
             If called without a matching begin_coherent_changes call, this operation returns PRECONDITION_NOT_MET error.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // fetch_update returns the pre-decrement depth; checked_sub refuses to go below zero.
         match self
@@ -960,7 +966,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.get_datawriters_internal() {
                 Ok(writers) => {
@@ -977,7 +983,7 @@ impl Publisher {
         &self,
         qos: impl Into<QosKind<DataWriterQos>>,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match qos.into() {
             QosKind::Default => self.reset_default_datawriter_qos(),
             QosKind::Specific(qos) => {
@@ -1004,7 +1010,7 @@ impl Publisher {
     }
 
     pub fn get_default_datawriter_qos(&self) -> DdsResult<DataWriterQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.default_datawriter_qos.lock() {
             Ok(default_datawriter_qos) => Ok(default_datawriter_qos.clone().unwrap_or_default()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1021,7 +1027,7 @@ impl Publisher {
     ///
     /// Returns an error if the publisher is deleted or the profile is not found.
     pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile(qos_path)
     }
 
@@ -1030,7 +1036,7 @@ impl Publisher {
         mut datawriter_qos: DataWriterQos,
         topic_qos: &TopicQos,
     ) -> DdsResult<DataWriterQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         datawriter_qos.durability = topic_qos.durability;
         datawriter_qos.durability_service = topic_qos.durability_service;
         datawriter_qos.deadline = topic_qos.deadline;
@@ -1056,7 +1062,7 @@ impl Publisher {
             A return value of OK means that all written samples have been acknowledged by all matched reliable DataReaders.
             A return value of TIMEOUT means that not all data was acknowledged before the max_wait time elapsed.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let mut current = max_wait;
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1082,7 +1088,7 @@ impl Publisher {
     }
 
     pub fn get_participant(&self) -> DdsResult<DomainParticipant> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
@@ -1098,10 +1104,9 @@ impl Publisher {
 
     /// Upgraded parent handle without the deep clone [`Self::get_participant`] performs.
     ///
-    /// Same failure modes and messages -- `AlreadyDeleted` when this publisher is deleted,
-    /// `Error` when the parent `Weak` has expired -- but two atomic read-modify-writes instead
-    /// of ~52. `get_participant` clones a struct of 25 `Arc` fields to call one method on it,
-    /// and `write()` does that on every sample.
+    /// Same failure modes and messages -- `Error` when the parent `Weak` has expired -- but two
+    /// atomic read-modify-writes instead of ~52. `get_participant` clones a struct of 25 `Arc`
+    /// fields to call one method on it, and `write()` does that on every sample.
     ///
     /// Returns [`ParticipantRef`], not a bare `Arc`: `get_participant` force-sets `self_ref` on
     /// the value it hands back, so that value performs the factory orphan handoff when it is
@@ -1112,7 +1117,6 @@ impl Publisher {
     /// has `self_ref: None`, so it must not reach `create_*`/`delete_*`; use
     /// [`Self::get_participant`] for those.
     pub(crate) fn participant_arc(&self) -> DdsResult<ParticipantRef> {
-        self.is_deleted()?;
         self.participant
             .as_ref()
             .and_then(|weak_ref| weak_ref.upgrade())
@@ -1123,7 +1127,6 @@ impl Publisher {
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
         {
             match self.writers_by_topic_name.lock() {
                 Ok(writers) => {
@@ -1145,7 +1148,7 @@ impl Publisher {
     }
 
     pub fn contains_entity(&self, handle: InstanceHandle) -> DdsResult<bool> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.writers_by_topic_name.lock() {
             Ok(writers_by_topic_name) => {
                 for weak_writers in writers_by_topic_name.values() {
@@ -1169,7 +1172,7 @@ impl Publisher {
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.listener.write() {
                 Ok(mut guard) => {
@@ -1191,7 +1194,7 @@ impl Publisher {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn PublisherListener>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1216,7 +1219,6 @@ impl Publisher {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -1255,15 +1257,8 @@ impl Publisher {
 
     pub(crate) fn delete(&mut self) {
         self.self_ref = None;
-        self.deleted.store(true, Ordering::SeqCst);
-    }
 
-    fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 }
 
@@ -1281,6 +1276,130 @@ mod tests {
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
+    }
+
+    use std::sync::mpsc::SyncSender;
+    use std::sync::Arc;
+
+    const DRAIN_CALLBACK_SLEEP: std::time::Duration = std::time::Duration::from_millis(400);
+    const DRAIN_MIN_BLOCK: std::time::Duration = std::time::Duration::from_millis(250);
+    const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+    struct MatchSleepWriterListener {
+        entered: SyncSender<()>,
+    }
+
+    impl DataWriterListener for MatchSleepWriterListener {
+        type Foo = HelloWorld;
+
+        fn on_publication_matched(
+            &self,
+            _writer: &DataWriter<Self::Foo>,
+            _status: &crate::infrastructure::status::PublicationMatchedStatus,
+        ) {
+            let _ = self.entered.try_send(());
+            std::thread::sleep(DRAIN_CALLBACK_SLEEP);
+        }
+    }
+
+    #[test]
+    fn deleting_a_writer_waits_for_its_in_flight_publication_matched_callback() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+            subscription::qos::{DataReaderQos, SubscriberQos},
+            test_utils::unique_domain_id,
+            topic::qos::TopicQos,
+        };
+        use std::time::Instant;
+
+        let reliable = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_millis(100),
+        };
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Publisher side: the writer whose PUBLICATION_MATCHED callback we make in-flight.
+        let pub_participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let pub_topic = pub_participant
+            .create_topic::<HelloWorld>(
+                "PubMatchDrainTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = pub_participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &pub_topic,
+                DataWriterQos { reliability: reliable.clone(), ..Default::default() },
+                Some(Arc::new(MatchSleepWriterListener { entered: entered_tx })),
+                StatusMask::PUBLICATION_MATCHED,
+            )
+            .unwrap();
+
+        // Subscriber side: a remote reader whose discovery matches the writer, firing
+        // PUBLICATION_MATCHED on the publisher participant's discovery thread.
+        let sub_participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let sub_topic = sub_participant
+            .create_topic::<HelloWorld>(
+                "PubMatchDrainTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = sub_participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &sub_topic,
+                DataReaderQos { reliability: reliable, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // on_publication_matched has started on the discovery thread and is now sleeping.
+        entered_rx.recv_timeout(DRAIN_DEADLINE).expect("on_publication_matched never ran");
+
+        let start = Instant::now();
+        publisher.delete_datawriter(writer).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= DRAIN_MIN_BLOCK,
+            "delete returned in {elapsed:?}, so it did not wait for the in-flight publication-matched callback"
+        );
+
+        pub_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(pub_participant).unwrap();
+        sub_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(sub_participant).unwrap();
     }
 
     #[test]
@@ -1346,7 +1465,7 @@ mod tests {
         let writer = publisher
             .create_datawriter::<HelloWorld>(
                 &topic1,
-                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                DataWriterQos { reliability: reliable_qos, ..Default::default() },
                 None,
                 StatusMask::default(),
             )

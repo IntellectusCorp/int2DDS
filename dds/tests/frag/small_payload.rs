@@ -86,11 +86,7 @@ fn run_fragmented_exchange(reliability: ReliabilityQosPolicyKind) {
     let data_reader = subscriber
         .create_datareader::<FragPayload>(
             &topic,
-            DataReaderQos {
-                reliability: reliability.clone(),
-                history: history.clone(),
-                ..DataReaderQos::default()
-            },
+            DataReaderQos { reliability, history, ..DataReaderQos::default() },
             None,
             StatusMask::default(),
         )
@@ -224,7 +220,7 @@ fn payload_larger_than_one_datagram_requires_fragmentation() {
     let data_reader = subscriber
         .create_datareader::<FragPayload>(
             &topic,
-            DataReaderQos { reliability: reliability.clone(), ..DataReaderQos::default() },
+            DataReaderQos { reliability, ..DataReaderQos::default() },
             None,
             StatusMask::default(),
         )

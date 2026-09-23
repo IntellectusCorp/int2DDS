@@ -145,9 +145,10 @@ impl std::fmt::Display for EquivalenceHash {
 }
 
 /// TypeIdentifier - compact type reference.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum TypeIdentifier {
     // Primitive types (no additional data)
+    #[default]
     None,
     Boolean,
     Byte,
@@ -233,12 +234,6 @@ pub type SBoundSeq = Vec<u8>;
 
 /// Large bound sequence (max 2^32-1 dimensions, each dimension max 2^32-1)
 pub type LBoundSeq = Vec<u32>;
-
-impl Default for TypeIdentifier {
-    fn default() -> Self {
-        TypeIdentifier::None
-    }
-}
 
 impl TypeIdentifier {
     /// Get the discriminator byte for this TypeIdentifier.
@@ -3240,7 +3235,7 @@ impl TypeInformation {
             if spec_hash(obj) == root_hash {
                 continue;
             }
-            if !id.equivalence_hash().map_or(true, |h| seen.insert(*h)) {
+            if !id.equivalence_hash().is_none_or(|h| seen.insert(*h)) {
                 continue;
             }
             complete_deps.push(TypeIdentifierWithSize::new(id.clone(), spec_size(obj)));
@@ -4064,7 +4059,7 @@ impl CdrDeserialize for TypeIdentifier {
         let bytes = deserializer.deserialize_byte_array(len)?;
         TypeIdentifier::deserialize(&bytes)
             .map(|(id, _)| id)
-            .map_err(|e| crate::serialize::cdr::CdrError::DeserializationError(e))
+            .map_err(crate::serialize::cdr::CdrError::DeserializationError)
     }
 }
 
@@ -4085,7 +4080,7 @@ impl XcdrDeserialize for TypeIdentifier {
         let bytes = deserializer.deserialize_byte_array(len)?;
         TypeIdentifier::deserialize(&bytes)
             .map(|(id, _)| id)
-            .map_err(|e| crate::serialize::cdr::XcdrError::DeserializationError(e))
+            .map_err(crate::serialize::cdr::XcdrError::DeserializationError)
     }
 }
 
@@ -4108,13 +4103,13 @@ impl CdrDeserialize for TypeObject {
         let bytes = deserializer.deserialize_byte_array(len)?;
         TypeObject::deserialize(&bytes)
             .map(|(obj, _)| obj)
-            .map_err(|e| crate::serialize::cdr::CdrError::DeserializationError(e))
+            .map_err(crate::serialize::cdr::CdrError::DeserializationError)
     }
 }
 
 impl XcdrSerialize for TypeObject {
     fn serialize_xcdr(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
-        while serializer.position() % 4 != 0 {
+        while !serializer.position().is_multiple_of(4) {
             serializer.buffer_mut().push(0);
         }
         let bytes = crate::xtypes::type_object_xcdr::serialize_type_object(self);
@@ -4219,7 +4214,7 @@ impl CdrDeserialize for TypeInformation {
         let bytes = deserializer.deserialize_byte_array(len)?;
         TypeInformation::deserialize(&bytes)
             .map(|(obj, _)| obj)
-            .map_err(|e| crate::serialize::cdr::CdrError::DeserializationError(e))
+            .map_err(crate::serialize::cdr::CdrError::DeserializationError)
     }
 }
 
@@ -4239,7 +4234,7 @@ impl XcdrDeserialize for TypeInformation {
         let bytes = deserializer.deserialize_byte_array(len)?;
         TypeInformation::deserialize(&bytes)
             .map(|(obj, _)| obj)
-            .map_err(|e| crate::serialize::cdr::XcdrError::DeserializationError(e))
+            .map_err(crate::serialize::cdr::XcdrError::DeserializationError)
     }
 }
 

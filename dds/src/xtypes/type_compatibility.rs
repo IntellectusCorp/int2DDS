@@ -457,15 +457,11 @@ fn check_minimal_struct_compatibility(
     let w_ext = writer.struct_flags.extensibility();
     let r_ext = reader.struct_flags.extensibility();
 
-    if w_ext == ExtensibilityKind::Final || r_ext == ExtensibilityKind::Final {
-        if w_ext != r_ext {
-            return TypeCompatibility::Incompatible(
-                TypeCompatibilityError::ExtensibilityMismatch {
-                    writer: format!("{:?}", w_ext),
-                    reader: format!("{:?}", r_ext),
-                },
-            );
-        }
+    if (w_ext == ExtensibilityKind::Final || r_ext == ExtensibilityKind::Final) && w_ext != r_ext {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::ExtensibilityMismatch {
+            writer: format!("{:?}", w_ext),
+            reader: format!("{:?}", r_ext),
+        });
     }
 
     let writer_members = build_member_map(&writer.member_seq, tce_policy.ignore_member_names);
@@ -586,15 +582,11 @@ fn check_complete_struct_compatibility(
     let w_ext = writer.struct_flags.extensibility();
     let r_ext = reader.struct_flags.extensibility();
 
-    if w_ext == ExtensibilityKind::Final || r_ext == ExtensibilityKind::Final {
-        if w_ext != r_ext {
-            return TypeCompatibility::Incompatible(
-                TypeCompatibilityError::ExtensibilityMismatch {
-                    writer: format!("{:?}", w_ext),
-                    reader: format!("{:?}", r_ext),
-                },
-            );
-        }
+    if (w_ext == ExtensibilityKind::Final || r_ext == ExtensibilityKind::Final) && w_ext != r_ext {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::ExtensibilityMismatch {
+            writer: format!("{:?}", w_ext),
+            reader: format!("{:?}", r_ext),
+        });
     }
 
     let writer_members: HashMap<String, &crate::xtypes::CompleteStructMember> = writer

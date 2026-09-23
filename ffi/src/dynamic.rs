@@ -132,6 +132,10 @@ pub(crate) unsafe fn copy_str_to_c(
 }
 
 /// Get the builtin subscriber for discovery topics.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_participant_get_builtin_subscriber(
     participant: *const Int2DdsParticipant,
@@ -150,6 +154,12 @@ pub unsafe extern "C" fn int2dds_participant_get_builtin_subscriber(
 /// name. Blocks up to `timeout_ms` milliseconds (negative = infinite). Returns
 /// DYNAMIC_TIMEOUT on no match. Destroy the result via
 /// `int2dds_publication_builtin_topic_data_destroy`.
+///
+/// # Safety
+/// - `builtin_sub` must be a valid subscriber
+/// - `topic_name_filter` must be a valid null-terminated C string, or null to accept
+///   any topic
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscriber_take_publication_data(
     builtin_sub: *const Int2DdsSubscriber,
@@ -235,6 +245,13 @@ pub unsafe extern "C" fn int2dds_subscriber_take_publication_data(
 
 /// High-level helper: wait until a publication for `topic_name` is discovered
 /// AND its TypeObject is present, then return the TypeObject and type name.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` must be a valid null-terminated C string
+/// - `type_obj_out` must be a valid pointer to a null pointer
+/// - `type_name_buf` must point to at least `type_name_buf_len` writable bytes
+/// - `out_len` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_participant_wait_for_type_object(
     participant: *const Int2DdsParticipant,
@@ -323,6 +340,10 @@ pub unsafe extern "C" fn int2dds_participant_wait_for_type_object(
 }
 
 /// Destroy a TypeObject handle. Safe to call with null.
+///
+/// # Safety
+/// - `t` must be a valid TypeObject handle, or null (null is a no-op)
+/// - `t` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_object_destroy(t: *mut Int2DdsTypeObject) {
     if !t.is_null() {
@@ -331,6 +352,10 @@ pub unsafe extern "C" fn int2dds_type_object_destroy(t: *mut Int2DdsTypeObject) 
 }
 
 /// Return extensibility: 0 = Final, 1 = Appendable, 2 = Mutable.
+///
+/// # Safety
+/// - `t` must be a valid TypeObject handle
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_object_extensibility(
     t: *const Int2DdsTypeObject,
@@ -352,6 +377,10 @@ pub unsafe extern "C" fn int2dds_type_object_extensibility(
 }
 
 /// Return the number of struct members.
+///
+/// # Safety
+/// - `t` must be a valid TypeObject handle
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_object_member_count(
     t: *const Int2DdsTypeObject,
@@ -368,6 +397,10 @@ pub unsafe extern "C" fn int2dds_type_object_member_count(
 }
 
 /// Fill `out` with member info at `index`.
+///
+/// # Safety
+/// - `t` must be a valid TypeObject handle
+/// - `out` must be a valid pointer to a member info struct
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_object_member_info(
     t: *const Int2DdsTypeObject,
@@ -407,6 +440,11 @@ pub unsafe extern "C" fn int2dds_type_object_member_info(
 }
 
 /// Copy member name at `index` into `buf`.
+///
+/// # Safety
+/// - `t` must be a valid TypeObject handle
+/// - `buf` must point to at least `buf_len` writable bytes
+/// - `out_len` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_object_member_name(
     t: *const Int2DdsTypeObject,
@@ -430,6 +468,11 @@ pub unsafe extern "C" fn int2dds_type_object_member_name(
 }
 
 /// Find a member index by name.
+///
+/// # Safety
+/// - `t` must be a valid TypeObject handle
+/// - `name` must be a valid null-terminated C string
+/// - `index_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_object_find_member(
     t: *const Int2DdsTypeObject,
@@ -472,6 +515,14 @@ use crate::types::{Int2DdsPublisher, Int2DdsSampleInfo, Int2DdsTopic};
 
 /// Register a topic backed by a discovered TypeObject. The TypeObject is cloned
 /// internally; the caller still owns and must destroy `type_obj`.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` must be a valid null-terminated C string
+/// - `type_name` must be a valid null-terminated C string
+/// - `type_obj` must be a valid TypeObject handle
+/// - `qos` can be null for the default QoS
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
     participant: *const Int2DdsParticipant,
@@ -514,7 +565,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
     // Clone the TypeObject and derive a CompleteTypeId TypeIdentifier from it.
     let to_clone = (*type_obj).inner.clone();
     let hash = to_clone.compute_hash();
-    let type_identifier = TypeIdentifier::CompleteTypeId(hash.clone());
+    let type_identifier = TypeIdentifier::CompleteTypeId(hash);
 
     let type_support = Arc::new(RawTypeSupport::with_type_info(
         type_name_str.to_string(),
@@ -598,6 +649,11 @@ fn get_as<T: FromDynamicValue>(data: &DynamicData, path: &str) -> Result<T, Int2
 
 macro_rules! define_flat_sample_getter {
     ($fn_name:ident, $rust_ty:ty) => {
+        /// # Safety
+        /// - `bytes` must point to at least `len` readable bytes
+        /// - `type_obj` must be a valid TypeObject handle
+        /// - `field_name` must be a valid null-terminated C string
+        /// - `out` must be a valid pointer
         #[no_mangle]
         pub unsafe extern "C" fn $fn_name(
             bytes: *const u8,
@@ -644,6 +700,12 @@ define_flat_sample_getter!(int2dds_dynamic_sample_get_f32, f32);
 define_flat_sample_getter!(int2dds_dynamic_sample_get_f64, f64);
 
 /// Read a char8 field (returned as its byte value) from a flat sample.
+///
+/// # Safety
+/// - `bytes` must point to at least `len` readable bytes
+/// - `type_obj` must be a valid TypeObject handle
+/// - `field_name` must be a valid null-terminated C string
+/// - `out` must point to at least `None` writable bytes
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_sample_get_char8(
     bytes: *const u8,
@@ -675,6 +737,13 @@ pub unsafe extern "C" fn int2dds_dynamic_sample_get_char8(
 }
 
 /// Read a string field by name from a flat sample.
+///
+/// # Safety
+/// - `bytes` must point to at least `len` readable bytes
+/// - `type_obj` must be a valid TypeObject handle
+/// - `field_name` must be a valid null-terminated C string
+/// - `out_buf` must point to at least `buf_cap` writable bytes
+/// - `out_len` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_sample_get_string(
     bytes: *const u8,
@@ -710,6 +779,11 @@ pub struct Int2DdsDynamicData {
     pub(crate) inner: DynamicData,
 }
 
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `bytes` must point to at least `len` readable bytes
+/// - `type_obj` must be a valid TypeObject handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_from_sample(
     participant: *const Int2DdsParticipant,
@@ -751,6 +825,10 @@ pub unsafe extern "C" fn int2dds_dynamic_data_from_sample(
 }
 
 /// Destroy a DynamicData handle. Safe to call with null.
+///
+/// # Safety
+/// - `d` must be a valid DynamicData handle, or null (null is a no-op)
+/// - `d` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_destroy(d: *mut Int2DdsDynamicData) {
     if !d.is_null() {
@@ -761,6 +839,10 @@ pub unsafe extern "C" fn int2dds_dynamic_data_destroy(d: *mut Int2DdsDynamicData
 /// Handle-based getter reading a value at a dotted/indexed `field_path`.
 macro_rules! define_handle_getter {
     ($fn_name:ident, $rust_ty:ty) => {
+        /// # Safety
+        /// - `data` must be a valid DynamicData handle
+        /// - `field_path` must be a valid null-terminated C string
+        /// - `out` must be a valid pointer
         #[no_mangle]
         pub unsafe extern "C" fn $fn_name(
             data: *const Int2DdsDynamicData,
@@ -798,6 +880,11 @@ define_handle_getter!(int2dds_dynamic_data_get_f32, f32);
 define_handle_getter!(int2dds_dynamic_data_get_f64, f64);
 
 /// Read a char8 field (as its byte value) at `field_path`.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field_path` must be a valid null-terminated C string
+/// - `out` must point to at least `None` writable bytes
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_get_char8(
     data: *const Int2DdsDynamicData,
@@ -821,6 +908,12 @@ pub unsafe extern "C" fn int2dds_dynamic_data_get_char8(
 }
 
 /// Read a string field at `field_path` into a caller-supplied buffer.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field_path` must be a valid null-terminated C string
+/// - `out_buf` must point to at least `buf_cap` writable bytes
+/// - `out_len` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_get_string(
     data: *const Int2DdsDynamicData,
@@ -845,6 +938,11 @@ pub unsafe extern "C" fn int2dds_dynamic_data_get_string(
 }
 
 /// Get the element count of a sequence/array field at `field_path`.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field_path` must be a valid null-terminated C string
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_get_len(
     data: *const Int2DdsDynamicData,
@@ -870,6 +968,11 @@ pub unsafe extern "C" fn int2dds_dynamic_data_get_len(
 
 /// Extract a nested struct value at `field_path` as a new DynamicData handle.
 /// Destroy it with `int2dds_dynamic_data_destroy`.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field_path` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_get_member(
     data: *const Int2DdsDynamicData,
@@ -923,6 +1026,10 @@ unsafe impl Send for Int2DdsDynamicDataReader {}
 unsafe impl Sync for Int2DdsDynamicDataReader {}
 
 /// Destroy a dynamic type support handle. Safe to call with null.
+///
+/// # Safety
+/// - `s` must be a valid dynamic type support handle, or null (null is a no-op)
+/// - `s` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_type_support_destroy(s: *mut Int2DdsDynamicTypeSupport) {
     if !s.is_null() {
@@ -932,6 +1039,13 @@ pub unsafe extern "C" fn int2dds_dynamic_type_support_destroy(s: *mut Int2DdsDyn
 
 /// Register a topic backed by a dynamic type support. The support's full type
 /// closure is advertised during discovery.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` must be a valid null-terminated C string
+/// - `type_support` must be a valid dynamic type support handle
+/// - `qos` can be null for the default QoS
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_topic_dynamic(
     participant: *const Int2DdsParticipant,
@@ -969,6 +1083,13 @@ pub unsafe extern "C" fn int2dds_create_topic_dynamic(
 }
 
 /// Create a dynamic DataWriter. Pass null `qos` to use the default.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `topic` must be a valid topic
+/// - `type_support` must be a valid dynamic type support handle
+/// - `qos` can be null for the default QoS
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_datawriter_dynamic(
     publisher: *const Int2DdsPublisher,
@@ -999,6 +1120,13 @@ pub unsafe extern "C" fn int2dds_create_datawriter_dynamic(
 }
 
 /// Create a dynamic DataReader. Pass null `qos` to use the default.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `topic` must be a valid topic
+/// - `type_support` must be a valid dynamic type support handle
+/// - `qos` can be null for the default QoS
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_datareader_dynamic(
     subscriber: *const Int2DdsSubscriber,
@@ -1034,6 +1162,10 @@ pub unsafe extern "C" fn int2dds_create_datareader_dynamic(
 /// parent publisher so the publisher/participant can be deleted afterward.
 /// Best-effort, since a void destructor cannot report a failure code; the
 /// FFI wrapper is freed either way.
+///
+/// # Safety
+/// - `w` must be a valid dynamic datawriter, or null (null is a no-op)
+/// - `w` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_writer_destroy(w: *mut Int2DdsDynamicDataWriter) {
     if w.is_null() {
@@ -1055,6 +1187,10 @@ pub unsafe extern "C" fn int2dds_dynamic_writer_destroy(w: *mut Int2DdsDynamicDa
 /// parent subscriber so the subscriber/participant can be deleted afterward.
 /// Best-effort, since a void destructor cannot report a failure code; the
 /// FFI wrapper is freed either way.
+///
+/// # Safety
+/// - `r` must be a valid dynamic datareader, or null (null is a no-op)
+/// - `r` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_reader_destroy(r: *mut Int2DdsDynamicDataReader) {
     if r.is_null() {
@@ -1122,6 +1258,10 @@ pub unsafe extern "C" fn int2dds_dynamic_reader_get_qos(
 }
 
 /// Current number of DataReaders matched to this dynamic writer.
+///
+/// # Safety
+/// - `writer` must be a valid dynamic datawriter
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_writer_publication_matched_count(
     writer: *const Int2DdsDynamicDataWriter,
@@ -1135,6 +1275,10 @@ pub unsafe extern "C" fn int2dds_dynamic_writer_publication_matched_count(
 }
 
 /// Current number of DataWriters matched to this dynamic reader.
+///
+/// # Safety
+/// - `reader` must be a valid dynamic datareader
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_reader_subscription_matched_count(
     reader: *const Int2DdsDynamicDataReader,
@@ -1150,6 +1294,10 @@ pub unsafe extern "C" fn int2dds_dynamic_reader_subscription_matched_count(
 /// Create an empty, writable DynamicData for the given type support.
 /// Populate it with the `int2dds_dynamic_data_set_*` setters, then publish via
 /// `int2dds_dynamic_writer_write`. Destroy with `int2dds_dynamic_data_destroy`.
+///
+/// # Safety
+/// - `type_support` must be a valid dynamic type support handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_create(
     type_support: *const Int2DdsDynamicTypeSupport,
@@ -1165,6 +1313,9 @@ pub unsafe extern "C" fn int2dds_dynamic_data_create(
 /// Setter writing a primitive value to a top-level field by name.
 macro_rules! define_handle_setter {
     ($fn_name:ident, $rust_ty:ty) => {
+        /// # Safety
+        /// - `data` must be a valid DynamicData handle
+        /// - `field` must be a valid null-terminated C string
         #[no_mangle]
         pub unsafe extern "C" fn $fn_name(
             data: *mut Int2DdsDynamicData,
@@ -1198,6 +1349,10 @@ define_handle_setter!(int2dds_dynamic_data_set_f32, f32);
 define_handle_setter!(int2dds_dynamic_data_set_f64, f64);
 
 /// Set a char8 field (given as its byte value) on a top-level field.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_set_char8(
     data: *mut Int2DdsDynamicData,
@@ -1217,6 +1372,11 @@ pub unsafe extern "C" fn int2dds_dynamic_data_set_char8(
 }
 
 /// Set a string field on a top-level field. `value` must be null-terminated UTF-8.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field` must be a valid null-terminated C string
+/// - `value` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_set_string(
     data: *mut Int2DdsDynamicData,
@@ -1241,6 +1401,10 @@ pub unsafe extern "C" fn int2dds_dynamic_data_set_string(
 }
 
 /// Publish a populated DynamicData sample.
+///
+/// # Safety
+/// - `writer` must be a valid dynamic datawriter
+/// - `data` must be a valid DynamicData handle
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_writer_write(
     writer: *const Int2DdsDynamicDataWriter,
@@ -1258,6 +1422,12 @@ pub unsafe extern "C" fn int2dds_dynamic_writer_write(
 /// new DynamicData handle (destroy with `int2dds_dynamic_data_destroy`) and, if
 /// non-null, `out_info` receives the sample info. Returns INT2DDS_RET_NO_DATA
 /// when no valid sample is available.
+///
+/// # Safety
+/// - `reader` must be a valid dynamic datareader
+/// - `out_data` must be a valid pointer to a null pointer
+/// - `out_info` must be a valid pointer, or null if the caller does not need the
+///   sample info
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_reader_take(
     reader: *const Int2DdsDynamicDataReader,

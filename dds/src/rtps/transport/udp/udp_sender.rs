@@ -3,11 +3,10 @@
 
 use crate::rtps::{
     common::locator::MULTICAST_IP,
-    transport::{port_manager::PortManager, UdpConfig},
+    transport::{port_manager::PortManager, udp::socket_buffer::configure_send_buffer, UdpConfig},
 };
 use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
-use std::env;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
@@ -18,11 +17,6 @@ pub(crate) struct UdpSender {
 }
 
 impl UdpSender {
-    // INT2DDS_UDP_SOCKET_BUFFER check
-    fn get_socket_buffer_size() -> Option<usize> {
-        env::var("INT2DDS_UDP_SOCKET_BUFFER").ok().and_then(|val| val.parse().ok())
-    }
-
     pub(crate) fn port(&self) -> u16 {
         self.socket
             .lock()
@@ -50,11 +44,9 @@ impl UdpSender {
         let bind_addr: Ipv4Addr = bind_ip.parse().unwrap();
         let sock_addr = SockAddr::from(SocketAddr::new(IpAddr::V4(bind_addr), 0));
         socket.bind(&sock_addr)?;
-        if let Some(size) = Self::get_socket_buffer_size() {
-            socket.set_send_buffer_size(size)?;
-        }
+        configure_send_buffer(&socket);
 
-        crate::common::int2dds_feature_ffi::init_extended_discovery(&socket)?;
+        crate::common::enterprise_hooks::call_extended_discovery_init(&socket)?;
 
         Ok(Self { socket: Mutex::new(Some(socket)) })
     }
@@ -93,7 +85,7 @@ impl UdpSender {
         let result = socket.send_to(data, &sock_addr);
         debug!("UDP multicast send (domain {}): {:?}", domain_id, result);
 
-        if let Err(e) = crate::common::int2dds_feature_ffi::send_extended_discovery(
+        if let Err(e) = crate::common::enterprise_hooks::call_extended_discovery_send(
             socket, port, data, domain_id,
         ) {
             log::warn!("[udp_sender] Extended discovery send failed: {}", e);

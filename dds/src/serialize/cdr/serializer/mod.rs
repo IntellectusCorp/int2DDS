@@ -96,6 +96,7 @@ mod cdr_struct_tests {
         },
     };
     use std::collections::HashMap;
+    use std::f64::consts::PI;
     fn encode_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
         let mut serializer = CdrSerializer::new(true);
         serializer.write_encapsulation_header().unwrap();
@@ -200,7 +201,7 @@ mod cdr_struct_tests {
     fn test_keyed_struct_cdr() {
         use crate::dcps::topic::type_support::TypeSupport;
 
-        let value = KeyedStruct { id: 42, name: "test".to_string(), value: 3.14 };
+        let value = KeyedStruct { id: 42, name: "test".to_string(), value: PI };
 
         // Full serialization/deserialization
         let mut serializer = CdrSerializer::new(true);
@@ -356,7 +357,7 @@ mod cdr_struct_tests {
             pub y: f64,
         }
 
-        let value: Box<InnerData> = Box::new(InnerData { x: 100, y: 3.14 });
+        let value: Box<InnerData> = Box::new(InnerData { x: 100, y: PI });
         let mut serializer = CdrSerializer::new(true);
         serializer.write_encapsulation_header().unwrap();
         value.serialize_cdr(&mut serializer).unwrap();
@@ -365,7 +366,7 @@ mod cdr_struct_tests {
         let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
         let result = Box::<InnerData>::deserialize_cdr(&mut deserializer).unwrap();
         assert_eq!(result.x, 100);
-        assert_eq!(result.y, 3.14);
+        assert_eq!(result.y, PI);
     }
 
     // ============================================================================
@@ -389,7 +390,7 @@ mod cdr_struct_tests {
     fn test_struct_inheritance_cdr() {
         let value = ChildStruct {
             base: ParentStruct { parent_id: 42, parent_name: "parent".to_string() },
-            child_value: 3.14,
+            child_value: PI,
         };
 
         let mut serializer = CdrSerializer::new(true);
@@ -401,7 +402,7 @@ mod cdr_struct_tests {
         let result = ChildStruct::deserialize_cdr(&mut deserializer).unwrap();
         assert_eq!(result.base.parent_id, 42);
         assert_eq!(result.base.parent_name, "parent");
-        assert_eq!(result.child_value, 3.14);
+        assert_eq!(result.child_value, PI);
     }
 
     #[derive(DdsType)]

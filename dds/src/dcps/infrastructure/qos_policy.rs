@@ -846,7 +846,9 @@ pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
 /// `INT2DDS_TRANSPORT` env var when absent.
 pub const PROP_TRANSPORT: &str = "int2dds.transport";
 
-/// SPDP initial peers, comma-separated `ip:port` list. Falls back to the
+/// SPDP initial peers, comma-separated `ip:port` list. Port `0` is a wildcard
+/// the TCP transport reads as every participant slot of the domain on that host;
+/// any other port names one exact address. Falls back to the
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
@@ -857,20 +859,30 @@ pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
 
 /// ---------TCP QoS ----------
-/// TCP listen (server bind) port. When absent, defaults to the domain port
-/// formula `PB + DG * domain_id`.
+/// TCP listen (server bind) port. Used exactly as given, so a port already
+/// taken fails participant creation rather than being searched around. When
+/// absent, the formula `PB + DG * domain_id + PG * participant_id` is walked
+/// upwards until a free slot within the domain's own port block is found.
 pub const PROP_TCP_BIND_PORT: &str = "int2dds.transport.TCPv4.bind_port";
 /// Public `ip:port` advertised in SPDP for WAN/NAT traversal.
 pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_address";
+/// How many participant slots a host named in `int2dds.initial_peers` with the
+/// wildcard port stands for. Default `16`, and `1..=125` — the number of slots
+/// one domain's port block holds — with anything outside that range pulled back
+/// to it. Raise it on a host that runs more participants than the default, lower
+/// it to cut the addresses a fresh participant announces to before the list
+/// settles. Falls back to the `INT2DDS_TCP_PEER_SEARCH_SLOTS` env var when
+/// absent.
+pub const PROP_TCP_PEER_SEARCH_SLOTS: &str = "int2dds.transport.TCPv4.peer_search_slots";
 /// Disable Nagle (`TCP_NODELAY`). Default `true`.
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
-/// Outbound connect timeout, milliseconds. Default `5000`.
+/// Outbound connect timeout, milliseconds. Default `1000`.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
-/// Peer handshake timeout, milliseconds. Covers the PEER_HELLO / PORT_RESERVE /
-/// PORT_BIND exchange, not the TCP connect — that one is
-/// [`PROP_TCP_CONNECT_TIMEOUT_MS`]. Outbound it bounds each response wait;
-/// inbound it bounds the window an accepted connection has to finish the
-/// exchange before it is closed. Default `5000`.
+/// First-frame timeout for an accepted TCP connection, milliseconds.
+///
+/// The legacy property name is retained for configuration compatibility after
+/// removal of the TCP control handshake. It now bounds the time from TLS
+/// completion (or plain accept) to the first valid framed message. Default `20000`.
 pub const PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS: &str =
     "int2dds.transport.TCPv4.peer_handshake_timeout_ms";
 /// TLS handshake timeout, milliseconds. Default `5000`.
@@ -894,20 +906,6 @@ pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepali
 pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 /// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
-/// Tokio worker thread count for the TCP runtime.
-pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
-/// User-data wire-write deadline, milliseconds. A send waits up to this long for
-/// the previous frame to reach the socket, then drops the frame rather than
-/// delay sends to other peers. `-1` blocks until it completes (no pre-wire drop,
-/// congestion isolation off); `0` is a try-lock (take the lock if free, else drop
-/// at once, isolation off). Default `1000` — generous by design; lower it to
-/// trade flow-control fidelity for tighter HOL isolation.
-pub const PROP_TCP_SEND_DEADLINE_MS: &str = "int2dds.transport.TCPv4.send_deadline_ms";
-/// Consecutive send-deadline misses before a connection is marked congested and
-/// its writes drop to the short probe deadline, isolating a slow/stalled peer
-/// from the fan-out. Min 1. Default `1`.
-pub const PROP_TCP_CONGESTION_MISS_THRESHOLD: &str =
-    "int2dds.transport.TCPv4.congestion_miss_threshold";
 
 /// Generic name/value extension channel for QoS-driven configuration.
 ///

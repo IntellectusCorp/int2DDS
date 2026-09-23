@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Extract the section for a given version from CHANGELOG.md.
 #
-# Usage: .github/scripts/ci/extract-notes.sh 0.1.1
+# Usage: .github/scripts/ci/extract-notes.sh 0.1.3
 # Reads CHANGELOG.md relative to the working directory, so it has to be run from
 # the repo root.
 set -euo pipefail
@@ -15,7 +15,7 @@ if [[ ! -f CHANGELOG.md ]]; then
 fi
 
 notes="$(awk -v ver="$base_version" '
-  # Find a header of the form "## [0.1.1] - 2026-07-29" or "## [0.1.1] - TBD".
+  # Find a header of the form "## [0.1.3] - 2026-07-29" or "## [0.1.3] - TBD".
   $0 ~ "^## \\[" ver "\\]" { capture = 1; next }
   # Stop at the next "## [" header.
   capture && /^## \[/ { exit }

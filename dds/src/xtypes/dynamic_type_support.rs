@@ -606,9 +606,8 @@ mod nested_enum_width_tests {
         let dynamic = build_dynamic_enum_holder(support.dynamic_type());
         let codegen = concrete_cdr(&concrete_enum_holder());
 
-        match serialize_dynamic_data(&dynamic, &SerializationFormat::Cdr) {
-            Ok(bytes) => assert_ne!(bytes.to_vec(), codegen),
-            Err(_) => {}
+        if let Ok(bytes) = serialize_dynamic_data(&dynamic, &SerializationFormat::Cdr) {
+            assert_ne!(bytes.to_vec(), codegen);
         }
     }
 }

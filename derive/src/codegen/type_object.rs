@@ -887,7 +887,7 @@ pub fn generate_has_type_object_bitset_impl(
         .map(|field| {
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
-            let bitcount = attrs.bitfield.unwrap_or(1) as u8;
+            let bitcount = attrs.bitfield.unwrap_or(1);
             let field_type_id = type_to_identifier(&field.ty, crate_path, false, false, None, true);
             let pos = position;
             position += bitcount as u16;
@@ -910,7 +910,7 @@ pub fn generate_has_type_object_bitset_impl(
         .map(|field| {
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
-            let bitcount = attrs.bitfield.unwrap_or(1) as u8;
+            let bitcount = attrs.bitfield.unwrap_or(1);
             let field_type_id =
                 type_to_identifier(&field.ty, crate_path, false, false, None, false);
             let pos = position;

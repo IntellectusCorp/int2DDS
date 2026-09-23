@@ -38,7 +38,10 @@ pub fn init_from_env() {
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
     // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
     // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
-    // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
+    // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of 127.0.0.1 (true, false) - Default: false
+    // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP receive and send socket buffer sizes (bytes) - Default: OS default, with 1048576 (1MiB) receive / 65536 (64KiB) send requested when the default is smaller
+    // - INT2DDS_UDP_RECV_BUFFER: Set the UDP receive socket buffer size (bytes), overriding INT2DDS_UDP_SOCKET_BUFFER for that direction - Default: INT2DDS_UDP_SOCKET_BUFFER
+    // - INT2DDS_UDP_SEND_BUFFER: Set the UDP send socket buffer size (bytes), overriding INT2DDS_UDP_SOCKET_BUFFER for that direction - Default: INT2DDS_UDP_SOCKET_BUFFER
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
     // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
     // - INT2DDS_MAX_MESSAGE_SIZE: Set max UDP message size (1-65000), header-inclusive datagram budget bounding fragments packed per message - Default: 65000
@@ -49,8 +52,10 @@ pub fn init_from_env() {
     // - INT2DDS_NACK_FRAG_MAX_RETRIES: Reader retries before yielding to the periodic heartbeat - Default: 10
     // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
     // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 250
+    // - INT2DDS_ENABLE_SEND_WINDOW: Bound a fragment burst by the peer's receive buffer. Unset sends every fragment of a change in one go (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
+    // - INT2DDS_TCP_PEER_SEARCH_SLOTS: Set how many participant slots a TCP peer named with the wildcard port stands for (1-125, one domain's port block) - Default: 16
 
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
 
@@ -223,10 +228,49 @@ pub fn set_force_loopback_multicast(enabled: bool) {
     unsafe { std::env::set_var("INT2DDS_FORCE_LOOPBACK_MULTICAST", enabled.to_string()) };
 }
 
+/// Read the same-host loopback gate from `INT2DDS_DISABLE_SAME_HOST_LOOPBACK`
+pub fn get_disable_same_host_loopback() -> bool {
+    get_bool_env("INT2DDS_DISABLE_SAME_HOST_LOOPBACK").unwrap_or(false)
+}
+
+/// Set the same-host loopback gate via environment variable
+pub fn set_disable_same_host_loopback(is_disabled: bool) {
+    log::info!("Environment variable set: INT2DDS_DISABLE_SAME_HOST_LOOPBACK = {}", is_disabled);
+    unsafe { std::env::set_var("INT2DDS_DISABLE_SAME_HOST_LOOPBACK", is_disabled.to_string()) };
+}
+
 /// Set the UDP socket buffer size via environment variable
 pub fn set_udp_socket_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", size);
     unsafe { std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", size.to_string()) };
+}
+
+/// Read a buffer size in bytes from `name`.
+/// Returns `None` when unset, empty, or not a non-negative integer.
+fn get_buffer_size_override(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<usize>() {
+        Ok(size) => Some(size),
+        Err(e) => {
+            log::warn!("Invalid {} value '{}': {}. Ignoring env override.", name, raw, e);
+            None
+        }
+    }
+}
+
+/// Read the UDP socket buffer size from `INT2DDS_UDP_SOCKET_BUFFER`, applied to both directions.
+pub fn get_udp_socket_buffer_size_override() -> Option<usize> {
+    get_buffer_size_override("INT2DDS_UDP_SOCKET_BUFFER")
+}
+
+/// Read the receive-only UDP socket buffer size from `INT2DDS_UDP_RECV_BUFFER`.
+pub fn get_udp_recv_buffer_size_override() -> Option<usize> {
+    get_buffer_size_override("INT2DDS_UDP_RECV_BUFFER")
+}
+
+/// Read the send-only UDP socket buffer size from `INT2DDS_UDP_SEND_BUFFER`.
+pub fn get_udp_send_buffer_size_override() -> Option<usize> {
+    get_buffer_size_override("INT2DDS_UDP_SEND_BUFFER")
 }
 
 /// Set the shared memory buffer size via environment variable
@@ -318,6 +362,24 @@ pub fn get_multicast_ttl_override() -> Option<u8> {
 pub fn set_multicast_ttl(ttl: u8) {
     log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", ttl);
     unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", ttl.to_string()) };
+}
+
+/// Read the TCP peer search width from `INT2DDS_TCP_PEER_SEARCH_SLOTS`.
+/// Returns `None` when unset, empty, or not an integer; the range is the
+/// transport's to check, since the ceiling is one domain's port block.
+pub fn get_tcp_peer_search_slots() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_TCP_PEER_SEARCH_SLOTS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(slots) => Some(slots),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_TCP_PEER_SEARCH_SLOTS value '{}': {}. Ignoring env default.",
+                raw,
+                e
+            );
+            None
+        }
+    }
 }
 
 /// Read the DATA_FRAG fragment size fallback from `INT2DDS_DATA_FRAG_SIZE`.
@@ -557,6 +619,18 @@ pub fn set_send_credit_backstop_ms(ms: u32) {
     unsafe { std::env::set_var("INT2DDS_SEND_CREDIT_BACKSTOP_MS", ms.to_string()) };
 }
 
+// Read the send-window gate from `INT2DDS_ENABLE_SEND_WINDOW`. Off, a writer puts every fragment
+// of a change on the wire in one go instead of bounding the burst by the peer's receive buffer.
+pub fn get_enable_send_window() -> bool {
+    get_bool_env("INT2DDS_ENABLE_SEND_WINDOW").unwrap_or(false)
+}
+
+// Set the send-window gate via `INT2DDS_ENABLE_SEND_WINDOW`.
+pub fn set_enable_send_window(is_enabled: bool) {
+    log::info!("Environment variable set: INT2DDS_ENABLE_SEND_WINDOW = {}", is_enabled);
+    unsafe { std::env::set_var("INT2DDS_ENABLE_SEND_WINDOW", is_enabled.to_string()) };
+}
+
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
 pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
     let raw = std::env::var("INT2DDS_EXTERNAL_ADDRESS").ok().filter(|s| !s.is_empty())?;
@@ -597,12 +671,12 @@ fn parse_port_env(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_disable_preemptive, get_multicast_ttl_override, get_nack_frag_max_retries_override,
-        get_nack_frag_response_delay_ms_override, get_nack_frag_retry_ms_override,
-        get_nack_response_delay_ms_override, get_send_credit_backstop_ms_override,
-        set_disable_preemptive, set_multicast_ttl, set_nack_frag_max_retries,
-        set_nack_frag_response_delay_ms, set_nack_frag_retry_ms, set_nack_response_delay_ms,
-        set_send_credit_backstop_ms,
+        get_disable_preemptive, get_enable_send_window, get_multicast_ttl_override,
+        get_nack_frag_max_retries_override, get_nack_frag_response_delay_ms_override,
+        get_nack_frag_retry_ms_override, get_nack_response_delay_ms_override,
+        get_send_credit_backstop_ms_override, set_disable_preemptive, set_enable_send_window,
+        set_multicast_ttl, set_nack_frag_max_retries, set_nack_frag_response_delay_ms,
+        set_nack_frag_retry_ms, set_nack_response_delay_ms, set_send_credit_backstop_ms,
     };
 
     const ENV_KEY: &str = "INT2DDS_MULTICAST_TTL";
@@ -720,6 +794,24 @@ mod tests {
 
         unsafe { std::env::set_var(KEY, "-1") };
         assert_eq!(get_nack_frag_max_retries_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    #[test]
+    fn send_window_gate_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_ENABLE_SEND_WINDOW";
+        unsafe { std::env::remove_var(KEY) };
+        assert!(!get_enable_send_window(), "unset sends every fragment in one go");
+
+        set_enable_send_window(true);
+        assert!(get_enable_send_window());
+
+        set_enable_send_window(false);
+        assert!(!get_enable_send_window());
+
+        unsafe { std::env::set_var(KEY, "neither") };
+        assert!(!get_enable_send_window(), "unparsable falls back to unbounded");
 
         unsafe { std::env::remove_var(KEY) };
     }
