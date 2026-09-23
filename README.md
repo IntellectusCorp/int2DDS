@@ -33,8 +33,8 @@ Add int2DDS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-int2dds = "0.1.5"
-int2dds-derive = "0.1.5"
+int2dds = "0.1.7"
+int2dds-derive = "0.1.7"
 ```
 
 ### Basic Example
@@ -337,6 +337,8 @@ int2DDS supports various environment variables for configuration:
 - `INT2DDS_CONSOLE_LOG_LEVEL`: Console log level (error, warn, info, debug, trace)
 - `INT2DDS_FILE_LOG_LEVEL`: File log level (error, warn, info, debug, trace)
 - `INT2DDS_UDP_SOCKET_BUFFER`: UDP receive and send buffer size (bytes), increase up to 8388608(8MB) for large payloads (default: OS default, with 1MiB receive / 64KiB send requested when the default is smaller)
+- `INT2DDS_UDP_RECV_BUFFER`: UDP receive buffer size (bytes), overrides `INT2DDS_UDP_SOCKET_BUFFER` for the receive direction
+- `INT2DDS_UDP_SEND_BUFFER`: UDP send buffer size (bytes), overrides `INT2DDS_UDP_SOCKET_BUFFER` for the send direction
 - `INT2DDS_USE_LOOPBACK_INTERFACE`: Enable loopback interface for endpoint communication
 - `INT2DDS_FORCE_LOOPBACK_MULTICAST`: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing, use together with `INT2DDS_USE_LOOPBACK_INTERFACE`
 - `INT2DDS_MULTICAST_TTL`: IPv4 multicast TTL fallback (0-255), used when `PropertyQosPolicy` has no `int2dds.transport.UDPv4.multicast_ttl` entry (default: 1)
