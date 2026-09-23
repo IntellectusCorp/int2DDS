@@ -8022,6 +8022,29 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1ty
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1add_1bitfield<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    type_info: jlong,
+    field_name: JByteArray<'local>,
+    bitcount: jint,
+    holder_type: jint,
+) -> jint {
+    let field_name_buf = crate::generated_support::take_bytes(&mut env, &field_name);
+    let __ret = unsafe {
+        int2dds_ffi::type_info::int2dds_type_info_add_bitfield(
+            type_info as usize as *mut _,
+            crate::generated_support::ptr_or_null(&field_name_buf) as _,
+            bitcount as _,
+            holder_type as _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1add_1bitmask_1flag<
     'local,
 >(
@@ -8082,6 +8105,66 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1ty
             type_info as usize as *mut _,
             crate::generated_support::ptr_or_null(&field_name_buf) as _,
             field_type as _,
+            flags as _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1add_1map_1field<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    type_info: jlong,
+    field_name: JByteArray<'local>,
+    key_type: jint,
+    key_bound: jint,
+    value_type: jint,
+    value_bound: jint,
+    bound: jint,
+    flags: jint,
+) -> jint {
+    let field_name_buf = crate::generated_support::take_bytes(&mut env, &field_name);
+    let __ret = unsafe {
+        int2dds_ffi::type_info::int2dds_type_info_add_map_field(
+            type_info as usize as *mut _,
+            crate::generated_support::ptr_or_null(&field_name_buf) as _,
+            key_type as _,
+            key_bound as _,
+            value_type as _,
+            value_bound as _,
+            bound as _,
+            flags as _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1add_1map_1of_1nested_1field<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    type_info: jlong,
+    field_name: JByteArray<'local>,
+    key_type: jint,
+    key_bound: jint,
+    value_type_info: jlong,
+    bound: jint,
+    flags: jint,
+) -> jint {
+    let field_name_buf = crate::generated_support::take_bytes(&mut env, &field_name);
+    let __ret = unsafe {
+        int2dds_ffi::type_info::int2dds_type_info_add_map_of_nested_field(
+            type_info as usize as *mut _,
+            crate::generated_support::ptr_or_null(&field_name_buf) as _,
+            key_type as _,
+            key_bound as _,
+            value_type_info as usize as *const _,
+            bound as _,
             flags as _,
         )
     };
@@ -8235,6 +8318,27 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1ty
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1add_1union_1label<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    type_info: jlong,
+    member_name: JByteArray<'local>,
+    label: jint,
+) -> jint {
+    let member_name_buf = crate::generated_support::take_bytes(&mut env, &member_name);
+    let __ret = unsafe {
+        int2dds_ffi::type_info::int2dds_type_info_add_union_label(
+            type_info as usize as *mut _,
+            crate::generated_support::ptr_or_null(&member_name_buf) as _,
+            label as _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1add_1wstring_1field<
     'local,
 >(
@@ -8300,6 +8404,25 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1ty
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1create_1bitset<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    type_name: JByteArray<'local>,
+    out: jlong,
+) -> jint {
+    let type_name_buf = crate::generated_support::take_bytes(&mut env, &type_name);
+    let __ret = unsafe {
+        int2dds_ffi::type_info::int2dds_type_info_create_bitset(
+            crate::generated_support::ptr_or_null(&type_name_buf) as _,
+            out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1create_1enum<
     'local,
 >(
@@ -8314,6 +8437,29 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1ty
         int2dds_ffi::type_info::int2dds_type_info_create_enum(
             crate::generated_support::ptr_or_null(&type_name_buf) as _,
             bit_bound as _,
+            out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1type_1info_1create_1union<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    type_name: JByteArray<'local>,
+    extensibility: jint,
+    discriminator_type: jint,
+    out: jlong,
+) -> jint {
+    let type_name_buf = crate::generated_support::take_bytes(&mut env, &type_name);
+    let __ret = unsafe {
+        int2dds_ffi::type_info::int2dds_type_info_create_union(
+            crate::generated_support::ptr_or_null(&type_name_buf) as _,
+            extensibility as _,
+            discriminator_type as _,
             out as usize as *mut _,
         )
     };

@@ -4618,6 +4618,18 @@ public final class Ffi {
         }
     }
 
+    private static final MethodHandle MH_int2dds_type_info_add_bitfield = dc("int2dds_type_info_add_bitfield", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
+
+    static int int2dds_type_info_add_bitfield(long type_info, byte[] field_name, int bitcount, int holder_type) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_bitfield.invokeExact(type_info, __ffi_seg_field_name, bitcount, holder_type);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_bitfield", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_type_info_add_bitmask_flag = dc("int2dds_type_info_add_bitmask_flag", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_type_info_add_bitmask_flag(long type_info, byte[] flag_name, int position) {
@@ -4651,6 +4663,30 @@ public final class Ffi {
             return (int) MH_int2dds_type_info_add_field.invokeExact(type_info, __ffi_seg_field_name, field_type, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_field", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_type_info_add_map_field = dc("int2dds_type_info_add_map_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
+
+    static int int2dds_type_info_add_map_field(long type_info, byte[] field_name, int key_type, int key_bound, int value_type, int value_bound, int bound, int flags) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_map_field.invokeExact(type_info, __ffi_seg_field_name, key_type, key_bound, value_type, value_bound, bound, flags);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_map_field", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_type_info_add_map_of_nested_field = dc("int2dds_type_info_add_map_of_nested_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
+
+    static int int2dds_type_info_add_map_of_nested_field(long type_info, byte[] field_name, int key_type, int key_bound, long value_type_info, int bound, int flags) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_map_of_nested_field.invokeExact(type_info, __ffi_seg_field_name, key_type, key_bound, value_type_info, bound, flags);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_map_of_nested_field", __ffi_thrown);
         }
     }
 
@@ -4730,6 +4766,18 @@ public final class Ffi {
         }
     }
 
+    private static final MethodHandle MH_int2dds_type_info_add_union_label = dc("int2dds_type_info_add_union_label", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+
+    static int int2dds_type_info_add_union_label(long type_info, byte[] member_name, int label) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_member_name = (member_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(member_name.length + 1);
+            if (member_name != null) MemorySegment.copy(member_name, 0, __ffi_seg_member_name, JAVA_BYTE, 0, member_name.length);
+            return (int) MH_int2dds_type_info_add_union_label.invokeExact(type_info, __ffi_seg_member_name, label);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_union_label", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_type_info_add_wstring_field = dc("int2dds_type_info_add_wstring_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
 
     static int int2dds_type_info_add_wstring_field(long type_info, byte[] field_name, int bound, int flags) {
@@ -4766,6 +4814,18 @@ public final class Ffi {
         }
     }
 
+    private static final MethodHandle MH_int2dds_type_info_create_bitset = dc("int2dds_type_info_create_bitset", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+
+    static int int2dds_type_info_create_bitset(byte[] type_name, long out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            return (int) MH_int2dds_type_info_create_bitset.invokeExact(__ffi_seg_type_name, out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_create_bitset", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_type_info_create_enum = dc("int2dds_type_info_create_enum", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
 
     static int int2dds_type_info_create_enum(byte[] type_name, int bit_bound, long out) {
@@ -4775,6 +4835,18 @@ public final class Ffi {
             return (int) MH_int2dds_type_info_create_enum.invokeExact(__ffi_seg_type_name, bit_bound, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_create_enum", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_type_info_create_union = dc("int2dds_type_info_create_union", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_type_info_create_union(byte[] type_name, int extensibility, int discriminator_type, long out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            return (int) MH_int2dds_type_info_create_union.invokeExact(__ffi_seg_type_name, extensibility, discriminator_type, out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_create_union", __ffi_thrown);
         }
     }
 
