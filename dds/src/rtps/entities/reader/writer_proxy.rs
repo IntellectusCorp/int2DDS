@@ -191,6 +191,32 @@ impl WriterProxy {
         })
     }
 
+    /// Incomplete fragmented changes up to `last_sn` due a NACK_FRAG, each marked asked at `now`.
+    /// One asked within `interval` with no new fragments is skipped: its repair is in flight.
+    pub(crate) fn take_nackfrag_due(
+        &mut self,
+        last_sn: SequenceNumber,
+        now: Instant,
+        interval: std::time::Duration,
+    ) -> Vec<SequenceNumber> {
+        let mut due = Vec::new();
+        for (seq_num, change) in self.changes_from_writer.range_mut(..=last_sn) {
+            let Some(info) = change.fragment_info.as_mut().filter(|info| !info.is_complete) else {
+                continue;
+            };
+            let held = info.received_fragments.len();
+            if info
+                .last_nack
+                .is_some_and(|(at, then)| then == held && now.duration_since(at) < interval)
+            {
+                continue;
+            }
+            info.last_nack = Some((now, held));
+            due.push(*seq_num);
+        }
+        due
+    }
+
     pub(crate) fn still_missing_fragments(&self, seq_num: SequenceNumber) -> bool {
         self.changes_from_writer
             .get(&seq_num)
@@ -466,6 +492,7 @@ impl WriterProxy {
                 total_fragments,
                 received_fragments: FragmentSet::new(),
                 is_complete: false,
+                last_nack: None,
             }),
         });
 
@@ -475,6 +502,7 @@ impl WriterProxy {
             total_fragments,
             received_fragments: FragmentSet::new(),
             is_complete: false,
+            last_nack: None,
         });
 
         // A HEARTBEAT_FRAG may have seeded a smaller last-fragment number than
@@ -541,6 +569,9 @@ pub(crate) struct FragmentInfo {
     pub(crate) total_fragments: u32,
     pub(crate) received_fragments: FragmentSet,
     pub(crate) is_complete: bool,
+    /// When a NACK_FRAG last asked for this sample and how many fragments it held then. Asked
+    /// again only once that count moved (the repair landed) or the retry delay passed.
+    pub(crate) last_nack: Option<(Instant, usize)>,
 }
 
 /// Fragment numbers received for one sample, one bit each. The numbers are dense from 1, so a

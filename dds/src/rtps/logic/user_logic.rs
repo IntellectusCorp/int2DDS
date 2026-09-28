@@ -75,8 +75,11 @@ struct NackFragRequest {
     participant: Arc<Participant>,
     reader_guid: Guid,
     remote_writer_guid: Guid,
-    /// The change the fragment numbers belong to; also keys the timer.
+    /// The oldest incomplete change when armed; keys the timer.
     incomplete_sn: SequenceNumber,
+    /// The arming heartbeat's `last_sn`. A later sample may still be arriving, so its gaps are
+    /// not losses yet.
+    last_sn: SequenceNumber,
     /// Re-asks left before the periodic heartbeat takes over again. Bounded so a writer that
     /// has gone away, with its proxy still matched, cannot be re-asked forever.
     retries_left: u32,
@@ -94,68 +97,76 @@ impl NackFragRequest {
         }
     }
 
-    /// Sends the request. Returns whether fragments are still outstanding, i.e. whether a retry
-    /// is owed.
+    /// Asks for every incomplete sample up to `last_sn` not asked for within `retry_delay`.
+    /// Returns whether any is still incomplete, i.e. whether a retry is owed.
     fn fire(&self) -> bool {
-        let Ok(mut proxies) = self.writer_proxies.lock() else {
-            warn!("Failed to acquire writer_proxies lock");
-            return false;
-        };
-        let Some(proxy) =
-            proxies.iter_mut().find(|proxy| proxy.remote_writer_guid() == self.remote_writer_guid)
-        else {
-            return false;
-        };
+        let (messages, locators, outstanding) = {
+            let Ok(mut proxies) = self.writer_proxies.lock() else {
+                warn!("Failed to acquire writer_proxies lock");
+                return false;
+            };
+            let Some(proxy) = proxies
+                .iter_mut()
+                .find(|proxy| proxy.remote_writer_guid() == self.remote_writer_guid)
+            else {
+                return false;
+            };
 
-        // Recomputed rather than carried: fragments may have arrived since this was scheduled,
-        // and a retry that re-requests them would pull the whole sample down again.
-        let mut missing_fragments = proxy.get_ascending_missing_fn_list(self.incomplete_sn);
-        if missing_fragments.is_empty() {
-            return false;
-        }
-
-        // The incomplete fragmented sample is recovered by NACK_FRAG alone. Bundling an ACKNACK
-        // that also nacks this sample makes the writer resend it whole from fragment 1. All
-        // missing fragments are requested at once as 256-wide windows, not one window per round.
-        let first_nackfrag_count = proxy.nackfrag_count().wrapping_add(1);
-        let (messages, consumed_count) = match MessageCreator::create_multiple_nackfrag_msgs(
-            self.participant.guid(),
-            proxy.remote_writer_guid(),
-            self.reader_guid.entity_id(),
-            proxy.remote_writer_guid().entity_id(),
-            self.incomplete_sn,
-            &mut missing_fragments,
-            first_nackfrag_count,
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                warn!("[UserLogic] Failed to create NACK_FRAG: {:?}", e);
-                return true;
+            // Not only the oldest: under sustained loss that is the sample the writer drops
+            // next, and the newer ones would become oldest only once they too are out of reach.
+            let due = proxy.take_nackfrag_due(self.last_sn, Instant::now(), self.retry_delay);
+            let mut messages = Vec::new();
+            for sn in due {
+                // Recomputed rather than carried: fragments may have arrived since this was
+                // scheduled, and re-requesting them would pull the whole sample down again.
+                let mut missing_fragments = proxy.get_ascending_missing_fn_list(sn);
+                // The incomplete fragmented sample is recovered by NACK_FRAG alone: an ACKNACK
+                // that also nacks it would make the writer resend it whole from fragment 1.
+                let first_nackfrag_count = proxy.nackfrag_count().wrapping_add(1);
+                match MessageCreator::create_multiple_nackfrag_msgs(
+                    self.participant.guid(),
+                    proxy.remote_writer_guid(),
+                    self.reader_guid.entity_id(),
+                    proxy.remote_writer_guid().entity_id(),
+                    sn,
+                    &mut missing_fragments,
+                    first_nackfrag_count,
+                ) {
+                    Ok((sample_messages, consumed_count)) => {
+                        for _ in 0..consumed_count {
+                            proxy.increase_nackfrag_count();
+                        }
+                        messages.extend(sample_messages);
+                    }
+                    Err(e) => warn!("[UserLogic] Failed to create NACK_FRAG: {:?}", e),
+                }
             }
-        };
+            let outstanding =
+                proxy.first_incomplete_fragmented_sn(SequenceNumber::ZERO, self.last_sn).is_some();
 
-        for _ in 0..consumed_count {
-            proxy.increase_nackfrag_count();
-        }
-
-        // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with can_handle
-        // guarding the local-side reachability.
-        let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
-        let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
-            let v: Vec<&Locator> = locs
-                .iter()
-                .copied()
-                .filter(|l| is_kind(l) && self.transport.can_handle(l))
+            // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with
+            // can_handle guarding the local-side reachability.
+            let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
+            let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+                let v: Vec<&Locator> = locs
+                    .iter()
+                    .copied()
+                    .filter(|l| is_kind(l) && self.transport.can_handle(l))
+                    .collect();
+                (!v.is_empty()).then_some(v)
+            };
+            let chosen: Vec<Locator> = try_kind(Locator::is_shm)
+                .or_else(|| try_kind(Locator::is_tcp))
+                .or_else(|| try_kind(Locator::is_udp))
+                .unwrap_or(locs)
+                .into_iter()
+                .cloned()
                 .collect();
-            (!v.is_empty()).then_some(v)
-        };
-        let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
-            .or_else(|| try_kind(Locator::is_tcp))
-            .or_else(|| try_kind(Locator::is_udp))
-            .unwrap_or(locs);
+            (messages, chosen, outstanding)
+        }; // released before sending: the receive path takes this lock on every DATA_FRAG
 
         for buffer in &messages {
-            for locator in &chosen {
+            for locator in &locators {
                 match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                     Ok(_) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
@@ -166,7 +177,7 @@ impl NackFragRequest {
             }
         }
 
-        true
+        outstanding
     }
 }
 
@@ -2912,6 +2923,7 @@ impl UnicastMessageProcessor for UserLogic {
                         reader_guid: stateful_reader.guid(),
                         remote_writer_guid: writer_proxy.remote_writer_guid(),
                         incomplete_sn,
+                        last_sn: heartbeat.last_sn,
                         retries_left: stateful_reader.nack_frag_max_retries(),
                         retry_delay: stateful_reader.nack_frag_retry_delay().to_std_duration(),
                     };
@@ -3399,7 +3411,12 @@ impl UnicastMessageProcessor for UserLogic {
                 reader.as_ref(),
                 data_frag.writer_sn,
                 remote_writer_guid,
-                Some(FragmentInfo { total_fragments, received_fragments, is_complete: true }),
+                Some(FragmentInfo {
+                    total_fragments,
+                    received_fragments,
+                    is_complete: true,
+                    last_nack: None,
+                }),
             );
         }
 
@@ -5432,11 +5449,13 @@ mod tests {
     /// real socket.
     struct RecordingTransport {
         sends: Arc<Mutex<Vec<Instant>>>,
+        payloads: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl TransportPlugin for RecordingTransport {
-        fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+        fn send(&self, data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
             self.sends.lock().expect("sends lock").push(Instant::now());
+            self.payloads.lock().expect("payloads lock").push(data.to_vec());
             Ok(())
         }
         fn can_handle(&self, _locator: &Locator) -> bool {
@@ -5480,9 +5499,28 @@ mod tests {
         SequenceNumber,
         Arc<Mutex<Vec<Instant>>>,
     ) {
+        let (participant, user_logic, reader, writer_guid, sn, sends, _) =
+            reader_recording_nack_frags(qos);
+        (participant, user_logic, reader, writer_guid, sn, sends)
+    }
+
+    /// `reader_with_nack_frag_qos`, also keeping every sent datagram's bytes.
+    #[allow(clippy::type_complexity)]
+    fn reader_recording_nack_frags(
+        qos: ReaderReliabilityExtensionQosPolicy,
+    ) -> (
+        Arc<Participant>,
+        UserLogic,
+        Arc<StatefulReader>,
+        Guid,
+        SequenceNumber,
+        Arc<Mutex<Vec<Instant>>>,
+        Arc<Mutex<Vec<Vec<u8>>>>,
+    ) {
         let sends = Arc::new(Mutex::new(Vec::new()));
+        let payloads = Arc::new(Mutex::new(Vec::new()));
         let transport: Arc<dyn TransportPlugin> =
-            Arc::new(RecordingTransport { sends: sends.clone() });
+            Arc::new(RecordingTransport { sends: sends.clone(), payloads: payloads.clone() });
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let user_logic = UserLogic::new(participant.clone(), transport);
         participant.set_user_logic(Arc::new(Some(user_logic.clone())));
@@ -5535,7 +5573,125 @@ mod tests {
         drop(guard);
         participant.add_reader("nack_frag_qos_test_topic", reader.clone());
 
-        (participant, user_logic, reader, writer_guid, sn, sends)
+        (participant, user_logic, reader, writer_guid, sn, sends, payloads)
+    }
+
+    /// The writer sequence number of every NACK_FRAG in `payloads`, in send order.
+    fn nack_frag_sns(payloads: &Mutex<Vec<Vec<u8>>>, local_prefix: GuidPrefix) -> Vec<i64> {
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let mut sns = Vec::new();
+        for payload in payloads.lock().unwrap().iter() {
+            let mut receiver = MessageReceiver::new(local_prefix, &from_addr);
+            let message = receiver.init(&bytes::Bytes::from(payload.clone())).unwrap();
+            for submessage in &message.submessages {
+                if let crate::rtps::messages::submessage_body::SubmessageBody::NackFrag(nack_frag) =
+                    &submessage.body
+                {
+                    sns.push(nack_frag.writer_sn.to_i64());
+                }
+            }
+        }
+        sns
+    }
+
+    fn heartbeat_for(
+        user_logic: &mut UserLogic,
+        writer_guid: Guid,
+        reader_id: EntityId,
+        first: i64,
+        last: i64,
+        count: u32,
+    ) {
+        let heartbeat = Heartbeat::new(
+            reader_id,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(first),
+            SequenceNumber::from_i64(last),
+            count,
+        );
+        let rtps_header = Header::new(writer_guid.prefix());
+        let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
+        user_logic
+            .handle_heartbeat_message(&rtps_header, &submessage_header, &heartbeat)
+            .expect("heartbeat handling must not error");
+    }
+
+    fn wait_for_nack_frags(payloads: &Mutex<Vec<Vec<u8>>>, prefix: GuidPrefix, n: usize) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while nack_frag_sns(payloads, prefix).len() < n && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The oldest incomplete sample is the one the writer drops next; asking only for it failed.
+    #[test]
+    fn every_incomplete_sample_a_heartbeat_covers_is_asked_for() {
+        let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
+            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+        for sn in 1..=2 {
+            let sn = SequenceNumber::from_i64(sn);
+            feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1; 4]);
+        }
+
+        heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 2, 1);
+        wait_for_nack_frags(&payloads, prefix, 2);
+
+        let mut asked = nack_frag_sns(&payloads, prefix);
+        asked.sort_unstable();
+        assert_eq!(asked, vec![1, 2]);
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
+    }
+
+    /// A sample past the heartbeat's `last_sn` may still be arriving; asking for its "missing"
+    /// fragments would pull down fragments already in flight.
+    #[test]
+    fn a_sample_past_the_heartbeat_is_not_asked_for() {
+        let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
+            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+        for sn in 1..=2 {
+            let sn = SequenceNumber::from_i64(sn);
+            feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1; 4]);
+        }
+
+        heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 1, 1);
+        wait_for_nack_frags(&payloads, prefix, 1);
+        thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(nack_frag_sns(&payloads, prefix), vec![1]);
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
+    }
+
+    /// One heartbeat rides on every sample, so without a per-sample interval each would re-ask
+    /// for fragments whose repair is already on the wire.
+    #[test]
+    fn back_to_back_heartbeats_ask_for_a_sample_once_per_retry_delay() {
+        let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
+            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+        let sn = SequenceNumber::from_i64(1);
+        feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1; 4]);
+
+        for count in 1..=5 {
+            heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 1, count);
+            thread::sleep(Duration::from_millis(10));
+        }
+        wait_for_nack_frags(&payloads, prefix, 1);
+        thread::sleep(Duration::from_millis(30));
+
+        // Well inside the 200ms default retry delay.
+        assert_eq!(nack_frag_sns(&payloads, prefix), vec![1]);
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
     }
 
     /// Feeds 1 of 4 fragments, then a heartbeat covering `sn`, which arms the NACK_FRAG chain
