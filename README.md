@@ -320,8 +320,12 @@ python python/examples/hello_world_pub.py
 python python/examples/hello_world_sub.py
 
 # Java (requires cargo build --release -p int2dds-java; see step 5)
-(cd java && ./gradlew :examples:run)
+## Linux / macOS / Git Bash
+(cd java && ./gradlew :examples:runPub)
 (cd java && ./gradlew :examples:runSub)
+## Windows (PowerShell / cmd)
+java\gradlew.bat -p java :examples:runPub
+java\gradlew.bat -p java :examples:runSub
 ```
 
 > These are the minimal per-language hello_world smoke examples that ship in the core repo.
