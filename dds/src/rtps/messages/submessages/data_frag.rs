@@ -7,13 +7,14 @@
 use crate::rtps::common::time::RtpsTime;
 use bytes::{Bytes, BytesMut};
 
-use speedy::{Context, Error, Readable, Writable, Writer};
+use speedy::{Context, Endianness, Error, Readable, Writable, Writer};
 use std::io;
 use std::time::Instant;
 
 use crate::rtps::{
     common::{
         entity_id::EntityId,
+        entity_kind::EntityKind,
         parameters::ParameterList,
         rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
         sequence::{FragmentNumber, SequenceNumber},
@@ -24,6 +25,9 @@ use crate::rtps::{
 
 const EXTRA_FLAGS: u16 = 0; // 9.4.5.3.2 - extraFlags
 const OCTETS_TO_INLINE_QOS: u16 = 28; // 9.4.5.3.3 - octetsToInlineQos
+
+// extraFlags through sampleSize: the 4 bytes before octetsToInlineQos starts counting, plus its 28.
+const FIXED_BODY_LEN: usize = 32;
 
 // Not spec text: no validity rule bounds total_fragments itself -- a
 // self-consistent sample_size/fragment_size pair can still name far more
@@ -149,18 +153,35 @@ impl<'a> DataFrag<'a> {
             .inline_qos_flag()
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None))?;
 
-        let _extra_flags = u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let octets_to_inline_qos =
-            u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
-        let reader_id = EntityId::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let writer_id = EntityId::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let writer_sn =
-            SequenceNumber::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
+        // The fields up to sampleSize sit at fixed offsets, so they are read in place: a speedy
+        // stream reader per field cost more than the rest of the parse.
+        let fixed: &[u8; FIXED_BODY_LEN] = buffer
+            .get(..FIXED_BODY_LEN)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::Io, "DATA_FRAG body too short"))?;
+        let u16_at = |at: usize| {
+            let raw = [fixed[at], fixed[at + 1]];
+            match endianness {
+                Endianness::LittleEndian => u16::from_le_bytes(raw),
+                Endianness::BigEndian => u16::from_be_bytes(raw),
+            }
+        };
+        let u32_at = |at: usize| {
+            let raw = [fixed[at], fixed[at + 1], fixed[at + 2], fixed[at + 3]];
+            match endianness {
+                Endianness::LittleEndian => u32::from_le_bytes(raw),
+                Endianness::BigEndian => u32::from_be_bytes(raw),
+            }
+        };
+        let entity_id_at = |at: usize| EntityId {
+            entity_key: [fixed[at], fixed[at + 1], fixed[at + 2]],
+            entity_kind: EntityKind(fixed[at + 3]),
+        };
+
+        let octets_to_inline_qos = u16_at(2);
+        let reader_id = entity_id_at(4);
+        let writer_id = entity_id_at(8);
+        let writer_sn = SequenceNumber::new(u32_at(12) as i32, u32_at(16));
 
         // 8.3.7.3.3
         if writer_sn.to_i64() <= 0 || writer_sn == SequenceNumber::UNKNOWN {
@@ -170,16 +191,10 @@ impl<'a> DataFrag<'a> {
             ));
         }
 
-        let fragment_starting_num =
-            FragmentNumber::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
-        let fragments_in_submessage =
-            u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
-        let fragment_size = u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let sample_size = u32::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
+        let fragment_starting_num: FragmentNumber = u32_at(20);
+        let fragments_in_submessage = u16_at(24);
+        let fragment_size = u16_at(26);
+        let sample_size = u32_at(28);
 
         // 9.4.5.3.3 - should always use the octetsToInlineQos to skip any submessage headers it does not expect or understand
         cursor.set_position(
@@ -481,6 +496,45 @@ mod tests {
         assert_eq!(datafrag.sample_size, deserialized.sample_size);
         assert_eq!(datafrag.inline_qos, deserialized.inline_qos);
         assert_eq!(datafrag.serialized_data.as_slice(), deserialized.serialized_data.as_slice());
+    }
+
+    #[test]
+    fn test_datafrag_fixed_fields_round_trip_in_both_endiannesses() {
+        // Multi-byte fields whose bytes all differ, so a swapped read cannot pass by symmetry.
+        let datafrag = DataFrag {
+            writer_sn: SequenceNumber::new(0x0102, 0x0304_0506),
+            fragment_starting_num: 2,
+            fragments_in_submessage: 3,
+            fragment_size: 0x0100,
+            sample_size: 0x0001_0203,
+            serialized_data: SubmessagePayload::Owned(Bytes::from(vec![7u8; 600])),
+            ..create_dummy_datafrag()
+        };
+        for (endianness, flags) in [(Endianness::BigEndian, 0), (Endianness::LittleEndian, 1)] {
+            let buffer = datafrag.write_to_vec_with_ctx(endianness).unwrap();
+            let header = SubmessageHeader::new(SubmessageId::DATA_FRAG, flags, buffer.len() as u16);
+
+            let parsed = DataFrag::deserialize(&Bytes::from(buffer), &header).unwrap();
+
+            assert_eq!(parsed.reader_id, datafrag.reader_id, "{endianness:?}");
+            assert_eq!(parsed.writer_id, datafrag.writer_id, "{endianness:?}");
+            assert_eq!(parsed.writer_sn, datafrag.writer_sn, "{endianness:?}");
+            assert_eq!(parsed.fragment_starting_num, 2, "{endianness:?}");
+            assert_eq!(parsed.fragments_in_submessage, 3, "{endianness:?}");
+            assert_eq!(parsed.fragment_size, 0x0100, "{endianness:?}");
+            assert_eq!(parsed.sample_size, 0x0001_0203, "{endianness:?}");
+            assert_eq!(parsed.serialized_data.as_slice(), &[7u8; 600][..], "{endianness:?}");
+        }
+    }
+
+    #[test]
+    fn test_datafrag_rejects_a_body_shorter_than_its_fixed_fields() {
+        let buffer = create_dummy_datafrag().write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let short = Bytes::from(buffer[..FIXED_BODY_LEN - 1].to_vec());
+
+        let result = DataFrag::deserialize(&short, &create_dummy_submessage_header(31));
+
+        assert!(result.is_err());
     }
 
     #[test]
