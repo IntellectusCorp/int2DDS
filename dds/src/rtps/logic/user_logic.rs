@@ -909,6 +909,8 @@ impl UserLogic {
                 "Writer cache should not be empty while sending DATA_FRAG",
             )
         })?;
+        // firstSN is the oldest held change, not the repaired one; the reader drops below it.
+        let first_sn = history_cache_guard.get_seq_num_min().unwrap_or(last_sn);
 
         // Kept apart from `piggyback`: a reliable reader with piggyback disabled still answers
         // off the periodic heartbeat, so its charge is still releasable.
@@ -973,7 +975,7 @@ impl UserLogic {
                 // The heartbeat rides the last datagram of the window, so the reader always has
                 // a trigger for the next NACK_FRAG.
                 let heartbeat_info = (piggyback && is_last)
-                    .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
+                    .then(|| (stateful_writer.heartbeat_count(), first_sn, last_sn, false, false));
 
                 if self.send_data_frag_to_reader_proxy(
                     &change,
@@ -3983,6 +3985,8 @@ mod tests {
         first_fragment: u32,
         fragment_count: u16,
         carries_heartbeat: bool,
+        /// The riding HEARTBEAT's firstSN, if any.
+        heartbeat_first_sn: Option<i64>,
     }
 
     /// A transport that sends nowhere and records what it was asked to send.
@@ -4006,6 +4010,7 @@ mod tests {
                 first_fragment: 0,
                 fragment_count: 0,
                 carries_heartbeat: false,
+                heartbeat_first_sn: None,
             };
             while offset + 4 <= data.len() {
                 let id = data[offset];
@@ -4013,6 +4018,9 @@ mod tests {
                 let body = offset + 4;
                 if id == SubmessageId::HEARTBEAT.as_u8() {
                     datagram.carries_heartbeat = true;
+                    let high = i32::from_le_bytes(data[body + 8..body + 12].try_into().unwrap());
+                    let low = u32::from_le_bytes(data[body + 12..body + 16].try_into().unwrap());
+                    datagram.heartbeat_first_sn = Some(SequenceNumber::new(high, low).to_i64());
                 } else if id == SubmessageId::DATA_FRAG.as_u8() && body + 26 <= data.len() {
                     datagram.first_fragment =
                         u32::from_le_bytes(data[body + 20..body + 24].try_into().unwrap());
@@ -4349,6 +4357,39 @@ mod tests {
         assert_eq!(*delivered.first().unwrap(), 1);
         assert_eq!(*delivered.last().unwrap(), total);
         assert_eq!(remote_prefix, [0xD0; 12]);
+    }
+
+    /// Stamping firstSN with the repaired sample made the reader give up older ones under repair.
+    #[test]
+    fn a_repair_heartbeat_advertises_the_oldest_sample_the_writer_holds() {
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
+        for n in 1..=3 {
+            let change = Arc::new(CacheChange::create_fragmented(
+                ChangeKind::Alive,
+                writer.guid(),
+                InstanceHandle::NIL,
+                SequenceNumber::from_i64(n),
+                // Past one message, so the change is actually fragmented.
+                &vec![0xA5; 20 * WINDOW_TEST_FRAG_SIZE],
+                None,
+                WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+                WINDOW_TEST_FRAG_SIZE,
+            ));
+            writer.writer_cache().lock().unwrap().add_change(change, writer.as_ref()).unwrap();
+        }
+        let reader_guid = {
+            let proxies = writer.reader_proxies();
+            let mut guard = proxies.lock().unwrap();
+            guard[0].requested_fragments_add(SequenceNumber::from_i64(3), 1, 20, vec![2]);
+            guard[0].remote_reader_guid()
+        };
+
+        user_logic.send_requested_fragments(writer.guid().entity_id(), reader_guid).unwrap();
+
+        let first_sns: Vec<i64> =
+            recorder.take().iter().filter_map(|d| d.heartbeat_first_sn).collect();
+        assert_eq!(first_sns, vec![1]);
     }
 
     #[test]
