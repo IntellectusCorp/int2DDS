@@ -595,9 +595,14 @@ impl DcpsBridge {
         self.participant.terminate();
 
         // Stop thread monitoring
-        if let Some(thread_monitor) = &self.thread_monitor {
-            thread_monitor.stop_monitoring();
-            debug!("Thread monitoring stopped");
+        match &self.thread_monitor {
+            Some(thread_monitor) => {
+                thread_monitor.stop_monitoring();
+                debug!("Thread monitoring stopped");
+            }
+            None => {
+                ThreadMonitor::remove_threads_by_guid_prefix(&self.participant.guid().prefix());
+            }
         }
 
         let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
@@ -935,14 +940,15 @@ mod tests {
         unsafe {
             std::env::set_var("INT2DDS_DATA_FRAG_SIZE", "1344");
             std::env::set_var("INT2DDS_MAX_MESSAGE_SIZE", "13440");
-            // Both peers must take the "double the OS default" branch below,
+            // Both peers must take the default-policy branch below,
             // not an explicit override left set by another test/session.
             std::env::remove_var("INT2DDS_UDP_SOCKET_BUFFER");
+            std::env::remove_var("INT2DDS_UDP_RECV_BUFFER");
         }
 
         // Independent oracle, computed with socket2 directly (not via
         // UdpListener::new): what any fresh socket on this host is actually
-        // granted after asking to double its default SO_RCVBUF.
+        // granted under the default policy (raise SO_RCVBUF to 1 MiB if smaller).
         let probe = socket2::Socket::new(
             socket2::Domain::IPV4,
             socket2::Type::DGRAM,
@@ -950,7 +956,9 @@ mod tests {
         )
         .expect("probe socket");
         let current = probe.recv_buffer_size().expect("read default SO_RCVBUF");
-        probe.set_recv_buffer_size(current.saturating_mul(2)).expect("set SO_RCVBUF");
+        if current < 1024 * 1024 {
+            probe.set_recv_buffer_size(1024 * 1024).expect("set SO_RCVBUF");
+        }
         let expected = probe.recv_buffer_size().expect("read granted SO_RCVBUF");
 
         let domain_id = unique_domain_id() as u32;

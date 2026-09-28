@@ -76,6 +76,8 @@ impl ThreadMonitor {
     }
 
     pub(crate) fn stop_monitoring(&self) {
+        Self::remove_threads_by_guid_prefix(&self.participant.guid().prefix());
+
         if !self.enabled {
             return;
         }
@@ -83,7 +85,6 @@ impl ThreadMonitor {
         debug!("Stopping thread monitoring");
 
         let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
-        Self::remove_threads_by_guid_prefix(&self.participant.guid().prefix());
 
         match timer_handler.lock() {
             Ok(handler) => {

@@ -125,6 +125,18 @@ impl DiscoveryMulticastListeningTask {
             return;
         }
 
+        // Only SPDP data is handled here, as on the unicast path; anything else
+        // sent to the SPDP group (such as builtin writer HEARTBEATs) is not a
+        // participant announcement and not a parse error.
+        let carries_spdp_data = message_receiver.parse_submessages().into_iter().any(|submessage| {
+            matches!(submessage,
+                crate::rtps::messages::message_receiver::TypedSubmessage::Data(_, data)
+                    if data.writer_id == crate::rtps::common::entity_id::EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER)
+        });
+        if !carries_spdp_data {
+            return;
+        }
+
         let participant_proxy_data =
             message_receiver.extract_participant_proxy_data(self.domain_id);
 

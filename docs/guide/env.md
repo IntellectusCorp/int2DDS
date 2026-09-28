@@ -14,7 +14,9 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NETWORK_IP`                 | Network IP address                         | auto                    |
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
-| `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
+| `INT2DDS_UDP_SOCKET_BUFFER`          | UDP receive and send buffer size (bytes)   | OS default, see below   |
+| `INT2DDS_UDP_RECV_BUFFER`            | UDP receive buffer size (bytes)            | `INT2DDS_UDP_SOCKET_BUFFER` |
+| `INT2DDS_UDP_SEND_BUFFER`            | UDP send buffer size (bytes)               | `INT2DDS_UDP_SOCKET_BUFFER` |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
 | `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
@@ -24,6 +26,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NACK_FRAG_RETRY_MS`         | Reader NACK_FRAG retry interval (ms)       | 200                     |
 | `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
 | `INT2DDS_SEND_CREDIT_BACKSTOP_MS`    | Writer send-credit backstop (ms)           | 250                     |
+| `INT2DDS_ENABLE_SEND_WINDOW`         | Bound fragment sends by peer receive buffer | false                  |
 | `INT2DDS_NACK_RESPONSE_DELAY_MS`     | Writer delay before repair reply (ms)      | 0                       |
 | `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` | Writer piggyback HEARTBEAT off    | false                   |
 | `INT2DDS_SEDP_HEARTBEAT_MS`          | SEDP heartbeat period (ms)                 | heartbeat_period (2000) |
@@ -253,7 +256,20 @@ cargo run --example hello_world_pub
 
 ### INT2DDS_UDP_SOCKET_BUFFER
 
-Sets the UDP socket buffer size in bytes. Default uses OS default value.
+Sets both the UDP receive (`SO_RCVBUF`) and send (`SO_SNDBUF`) buffer sizes in bytes.
+
+When unset, the OS default is kept unless it is below a floor, in which case the floor is requested:
+
+| Direction | Default                                                           |
+|-----------|-------------------------------------------------------------------|
+| Receive   | OS default (`net.core.rmem_default`); 1 MiB requested if smaller  |
+| Send      | OS default (`net.core.wmem_default`); 64 KiB requested if smaller |
+
+The floor is a request like any other, so `net.core.rmem_max` / `net.core.wmem_max` still cap it.
+
+A configured size is always requested. Linux caps a requested size at `net.core.rmem_max` /
+`net.core.wmem_max` and then doubles it, so the size it reports is twice the capped request.
+A socket left at the OS default reports the default as is.
 
 #### Configuration
 
@@ -267,6 +283,33 @@ cargo run --example hello_world_pub
 ```bash
 # Linux/macOS
 export INT2DDS_UDP_SOCKET_BUFFER=1048576
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_UDP_RECV_BUFFER, INT2DDS_UDP_SEND_BUFFER
+
+Set one direction only: `INT2DDS_UDP_RECV_BUFFER` the receive (`SO_RCVBUF`) size,
+`INT2DDS_UDP_SEND_BUFFER` the send (`SO_SNDBUF`) size, in bytes.
+
+Either one overrides `INT2DDS_UDP_SOCKET_BUFFER` for its own direction. A direction left unset
+falls back to `INT2DDS_UDP_SOCKET_BUFFER`, and without that to the floor policy described above.
+A size set here is always requested, subject to the same OS cap.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_UDP_RECV_BUFFER = "8388608"  # 8MB receive
+$env:INT2DDS_UDP_SEND_BUFFER = "262144"   # 256KB send
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_UDP_RECV_BUFFER=8388608
+export INT2DDS_UDP_SEND_BUFFER=262144
 
 cargo run --example hello_world_pub
 ```
@@ -625,6 +668,48 @@ cargo run --example hello_world_sub
 export INT2DDS_NACK_FRAG_MAX_RETRIES=5
 
 cargo run --example hello_world_sub
+```
+
+### INT2DDS_ENABLE_SEND_WINDOW
+
+Whether a writer bounds a fragmented send by the receive buffer of the peer it
+is sending to. Writer-side, with no QoS field. Off by default, so a fragmented
+sample goes out in one burst unless this is set.
+
+Set it to `true` and a writer puts at most two thirds of that peer's receive
+buffer on the wire in one go -- the value the peer advertised in SPDP, else this
+participant's own socket value, else a 128 KB floor -- and the fragments past it
+are dropped rather than queued. The reader learns the sample's fragment count
+from any `DATA_FRAG` it did receive, so the dropped tail already reads as
+missing to it, and the `HEARTBEAT` riding the window's last datagram is its
+trigger to ask for the rest. The transfer then completes one window per round.
+
+Bounding trades send rate for a peer socket that is never overrun. Turn it on
+where a reader cannot drain fast enough and the loss is showing up as
+`receive buffer errors` in `netstat -su` on the receiving host. Left off, the
+peer's socket has to absorb the whole sample at once, and whatever it cannot
+hold is lost in the kernel and recovered by `NACK_FRAG`.
+
+Read once per send call, so it takes effect on the next sample written.
+
+- Default: `false`
+- Values other than `true`/`1` and `false`/`0` are logged at warn level and
+  ignored -- the default `false` is used.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_ENABLE_SEND_WINDOW = "true"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_ENABLE_SEND_WINDOW=true
+
+cargo run --example hello_world_pub
 ```
 
 ### INT2DDS_SEND_CREDIT_BACKSTOP_MS
