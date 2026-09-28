@@ -631,10 +631,6 @@ impl FragmentSet {
         self.len
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     pub(crate) fn clear(&mut self) {
         self.words.clear();
         self.len = 0;
@@ -864,7 +860,7 @@ mod tests {
     #[test]
     fn fragment_set_counts_each_fragment_once_across_word_boundaries() {
         let mut set = FragmentSet::new();
-        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
         for fragment in [1, 63, 64, 65, 782] {
             assert!(set.insert(fragment), "first insert of {fragment} is new");
         }
@@ -874,7 +870,7 @@ mod tests {
         assert!(!set.contains(&2) && !set.contains(&10_000), "absent and past-the-end");
 
         set.clear();
-        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
         assert!(!set.contains(&64));
     }
 

@@ -662,6 +662,9 @@ impl UserLogic {
             group_id: EntityId,
             reliable: bool,
             requested_change_types: Vec<RequestedChangeType>,
+            // The history's bounds when the plan was read, for the heartbeat that rides the resend.
+            first_sn: SequenceNumber,
+            last_sn: SequenceNumber,
         }
 
         // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
@@ -724,11 +727,14 @@ impl UserLogic {
 
             reader_proxy.empty_requested_changes();
 
+            let last_sn = cache_guard.get_seq_num_max().unwrap_or(SequenceNumber::ZERO);
             SendPlan {
                 locators: reader_proxy.unicast_locator_list().to_vec(),
                 group_id: reader_proxy.remote_group_entity_id(),
                 reliable: reader_proxy.is_reliable(),
                 requested_change_types,
+                first_sn: cache_guard.get_seq_num_min().unwrap_or(last_sn),
+                last_sn,
             }
         };
 
@@ -737,7 +743,8 @@ impl UserLogic {
         }
 
         // Serialize and send outside both locks, reusing one buffer.
-        let SendPlan { locators, group_id, reliable, requested_change_types } = plan;
+        let SendPlan { locators, group_id, reliable, requested_change_types, first_sn, last_sn } =
+            plan;
         let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
 
         let mut send_buffer = participant
@@ -797,11 +804,13 @@ impl UserLogic {
 
                     // The heartbeat rides the last datagram of the window, not only the last of
                     // the sample: without it the reader has no trigger to ask for the rest.
+                    // firstSN is the oldest held change, not the one resent; the reader drops
+                    // below it, including samples this same pass is still repairing.
                     let heartbeat_info = (piggyback && is_last).then(|| {
                         (
                             stateful_writer.heartbeat_count(),
-                            requested_change_sn,
-                            requested_change_sn,
+                            first_sn,
+                            last_sn,
                             false, // final_flag
                             false, // liveliness_flag = false for retransmission
                         )
@@ -4040,9 +4049,13 @@ mod tests {
                 let body = offset + 4;
                 if id == SubmessageId::HEARTBEAT.as_u8() {
                     datagram.carries_heartbeat = true;
-                    let high = i32::from_le_bytes(data[body + 8..body + 12].try_into().unwrap());
-                    let low = u32::from_le_bytes(data[body + 12..body + 16].try_into().unwrap());
-                    datagram.heartbeat_first_sn = Some(SequenceNumber::new(high, low).to_i64());
+                    if body + 16 <= data.len() {
+                        let high =
+                            i32::from_le_bytes(data[body + 8..body + 12].try_into().unwrap());
+                        let low =
+                            u32::from_le_bytes(data[body + 12..body + 16].try_into().unwrap());
+                        datagram.heartbeat_first_sn = Some(SequenceNumber::new(high, low).to_i64());
+                    }
                 } else if id == SubmessageId::DATA_FRAG.as_u8() && body + 26 <= data.len() {
                     datagram.first_fragment =
                         u32::from_le_bytes(data[body + 20..body + 24].try_into().unwrap());
@@ -4121,6 +4134,18 @@ mod tests {
 
         let writer_entity_id =
             EntityId::new([0x10, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        // Spelled out rather than `PublicationBuiltinTopicData::default()`, which reads the
+        // piggyback-heartbeat env var a sibling test sets while these run.
+        let writer_qos = crate::publication::qos::DataWriterQos {
+            writer_reliability_extension:
+                crate::infrastructure::qos_policy::WriterReliabilityExtensionQosPolicy::DEFAULT,
+            ..Default::default()
+        };
+        let topic_data = PublicationBuiltinTopicData::new(
+            &writer_qos,
+            &crate::publication::qos::PublisherQos::default(),
+            &crate::topic::qos::TopicQos::default(),
+        );
         // `Weak::new()` for the cache: `add_change` would otherwise pump the send path itself,
         // and these tests drive it explicitly one round at a time.
         let writer = Arc::new(StatefulWriter::new(
@@ -4132,7 +4157,7 @@ mod tests {
             writer_entity_id,
             -1,
             None,
-            PublicationBuiltinTopicData::default(),
+            topic_data,
             Weak::new(),
         ));
 
@@ -4408,6 +4433,39 @@ mod tests {
         };
 
         user_logic.send_requested_fragments(writer.guid().entity_id(), reader_guid).unwrap();
+
+        let first_sns: Vec<i64> =
+            recorder.take().iter().filter_map(|d| d.heartbeat_first_sn).collect();
+        assert_eq!(first_sns, vec![1]);
+    }
+
+    /// The ACKNACK resend path carries the same heartbeat, so it needs the same firstSN.
+    #[test]
+    fn an_acknack_resend_heartbeat_advertises_the_oldest_sample_the_writer_holds() {
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
+        for n in 1..=3 {
+            let change = Arc::new(CacheChange::create_fragmented(
+                ChangeKind::Alive,
+                writer.guid(),
+                InstanceHandle::NIL,
+                SequenceNumber::from_i64(n),
+                // Past one message, so the change is actually fragmented.
+                &vec![0xA5; 20 * WINDOW_TEST_FRAG_SIZE],
+                None,
+                WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+                WINDOW_TEST_FRAG_SIZE,
+            ));
+            writer.writer_cache().lock().unwrap().add_change(change, writer.as_ref()).unwrap();
+        }
+        let reader_guid = {
+            let proxies = writer.reader_proxies();
+            let mut guard = proxies.lock().unwrap();
+            guard[0].requested_changes_set(vec![SequenceNumber::from_i64(3)]);
+            guard[0].remote_reader_guid()
+        };
+
+        user_logic.send_requested_changes(writer.guid().entity_id(), reader_guid).unwrap();
 
         let first_sns: Vec<i64> =
             recorder.take().iter().filter_map(|d| d.heartbeat_first_sn).collect();
@@ -5666,7 +5724,8 @@ mod tests {
 
         heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 1, 1);
         wait_for_nack_frags(&payloads, prefix, 1);
-        thread::sleep(Duration::from_millis(50));
+        // Half the 200ms default retry delay, so a legitimate retry cannot land inside it.
+        thread::sleep(Duration::from_millis(100));
 
         assert_eq!(nack_frag_sns(&payloads, prefix), vec![1]);
         if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
