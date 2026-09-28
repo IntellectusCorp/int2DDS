@@ -11,4 +11,4 @@ pub(crate) use reader_store::{ReaderCallbackLease, ReaderStore};
 pub(crate) use remote_writer_info::RemoteWriterInfo;
 pub(crate) use stateful_reader::StatefulReader;
 pub(crate) use stateless_reader::StatelessReader;
-pub(crate) use writer_proxy::{FragmentInfo, WriterProxy};
+pub(crate) use writer_proxy::{FragmentInfo, FragmentSet, WriterProxy};

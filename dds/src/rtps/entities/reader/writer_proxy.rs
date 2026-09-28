@@ -464,7 +464,7 @@ impl WriterProxy {
             is_relevant: true,
             fragment_info: Some(FragmentInfo {
                 total_fragments,
-                received_fragments: std::collections::HashSet::new(),
+                received_fragments: FragmentSet::new(),
                 is_complete: false,
             }),
         });
@@ -473,7 +473,7 @@ impl WriterProxy {
         // fragment_info, so ensure it exists before merging received fragments.
         let info = change.fragment_info.get_or_insert_with(|| FragmentInfo {
             total_fragments,
-            received_fragments: std::collections::HashSet::new(),
+            received_fragments: FragmentSet::new(),
             is_complete: false,
         });
 
@@ -539,8 +539,53 @@ pub(crate) struct ChangeFromWriter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FragmentInfo {
     pub(crate) total_fragments: u32,
-    pub(crate) received_fragments: std::collections::HashSet<u32>,
+    pub(crate) received_fragments: FragmentSet,
     pub(crate) is_complete: bool,
+}
+
+/// Fragment numbers received for one sample, one bit each. The numbers are dense from 1, so a
+/// bitmap replaces the per-fragment hashing a `HashSet` costs on every DATA_FRAG.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FragmentSet {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl FragmentSet {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns whether `fragment` was newly added.
+    pub(crate) fn insert(&mut self, fragment: u32) -> bool {
+        let (word, bit) = ((fragment / 64) as usize, 1u64 << (fragment % 64));
+        if word >= self.words.len() {
+            self.words.resize(word + 1, 0);
+        }
+        let added = self.words[word] & bit == 0;
+        self.words[word] |= bit;
+        self.len += usize::from(added);
+        added
+    }
+
+    pub(crate) fn contains(&self, fragment: &u32) -> bool {
+        self.words
+            .get((*fragment / 64) as usize)
+            .is_some_and(|word| word & (1u64 << (*fragment % 64)) != 0)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.words.clear();
+        self.len = 0;
+    }
 }
 
 #[cfg(test)]
@@ -761,6 +806,23 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(proxy.first_incomplete_fragmented_sn(sn, sn), Some(sn));
         assert_eq!(proxy.get_ascending_missing_fn_list(sn), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn fragment_set_counts_each_fragment_once_across_word_boundaries() {
+        let mut set = FragmentSet::new();
+        assert!(set.is_empty());
+        for fragment in [1, 63, 64, 65, 782] {
+            assert!(set.insert(fragment), "first insert of {fragment} is new");
+        }
+        assert!(!set.insert(64), "a duplicate is not counted again");
+        assert_eq!(set.len(), 5);
+        assert!(set.contains(&63) && set.contains(&64) && set.contains(&782));
+        assert!(!set.contains(&2) && !set.contains(&10_000), "absent and past-the-end");
+
+        set.clear();
+        assert!(set.is_empty());
+        assert!(!set.contains(&64));
     }
 
     fn holds_fragment(proxy: &WriterProxy, seq_num: SequenceNumber, fragment: u32) -> bool {

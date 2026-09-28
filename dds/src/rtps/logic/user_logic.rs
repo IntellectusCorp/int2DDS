@@ -27,7 +27,8 @@ use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
-    FragmentInfo, Reader, ReaderCallbackLease, StatefulReader, StatelessReader, WriterProxy,
+    FragmentInfo, FragmentSet, Reader, ReaderCallbackLease, StatefulReader, StatelessReader,
+    WriterProxy,
 };
 use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
@@ -3322,8 +3323,7 @@ impl UnicastMessageProcessor for UserLogic {
                 continue;
             }
             // complete here; delivery FragmentInfo's set is unused when is_complete
-            let received_fragments: std::collections::HashSet<u32> =
-                std::collections::HashSet::new();
+            let received_fragments = FragmentSet::new();
 
             // Move payload from buffer without cloning
             let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
