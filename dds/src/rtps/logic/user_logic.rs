@@ -65,6 +65,9 @@ use std::thread::{self, JoinHandle};
 /// How many in-progress fragmented samples a participant holds before the oldest are evicted.
 /// One entry per (writer, reader, sample), so several readers of one topic each take a slot.
 const FRAGMENT_BUFFER_LIMIT: usize = 128;
+// Payload one writer may pin waiting for a hole. In bytes because what it protects is the
+// allocator reuse the receive path needs, and a sample is a kilobyte or a megabyte.
+const IN_ORDER_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 /// Everything a deferred NACK_FRAG needs to build itself, so it can be re-armed without the
 /// caller's stack.
@@ -2234,6 +2237,8 @@ impl UserLogic {
                         writer_proxy.expected_sn()
                     );
                     writer_proxy.add_buffered_change(change);
+                    let released = writer_proxy.give_up_oldest_hole_if_full(IN_ORDER_BUFFER_BYTES);
+                    change_to_add.extend(released);
                 }
             }
         } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {

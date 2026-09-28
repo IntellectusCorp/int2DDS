@@ -36,6 +36,8 @@ pub(crate) struct WriterProxy {
     last_heartbeat_at: Option<Instant>,
     last_heartbeat_frag_count: Option<u32>,
     buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
+    // Payload bytes `buffered_change` holds, tracked so the bound below stays O(1) per change.
+    buffered_bytes: usize,
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
     status_callback:
@@ -75,6 +77,7 @@ impl WriterProxy {
             last_heartbeat_frag_count: None,
             last_heartbeat_at: None,
             buffered_change: BTreeSet::new(),
+            buffered_bytes: 0,
             publication_builtin_topic_data,
             status_callback,
         }
@@ -142,7 +145,25 @@ impl WriterProxy {
     }
 
     pub(crate) fn add_buffered_change(&mut self, change: CacheChange) {
-        self.buffered_change.insert(change);
+        let payload_len = change.data_value().len();
+        if self.buffered_change.insert(change) {
+            self.buffered_bytes += payload_len;
+        }
+    }
+
+    /// Gives up the oldest hole once the in-order buffer holds `limit_bytes`, returning what it
+    /// releases. Held payloads cannot be reused, so every later sample lands on cold memory.
+    pub(crate) fn give_up_oldest_hole_if_full(&mut self, limit_bytes: usize) -> Vec<CacheChange> {
+        if self.buffered_bytes < limit_bytes {
+            return Vec::new();
+        }
+        let Some(first_buffered) = self.buffered_change.first().map(|c| c.sequence_number) else {
+            return Vec::new();
+        };
+        // Reports the skipped changes lost and drops their ledger entries, as a heartbeat whose
+        // firstSN moved past them would.
+        self.lost_changes_update(first_buffered);
+        self.flush_buffered_changes()
     }
 
     pub(crate) fn flush_buffered_changes(&mut self) -> Vec<CacheChange> {
@@ -151,6 +172,7 @@ impl WriterProxy {
         while let Some(change) = self.buffered_change.first() {
             if change.sequence_number <= self.expected_sn {
                 let change = self.buffered_change.pop_first().unwrap();
+                self.buffered_bytes -= change.data_value().len();
                 flushed_changes.push(change);
                 self.increment_expected_sn();
             } else {
@@ -854,6 +876,68 @@ mod tests {
         set.clear();
         assert!(set.is_empty());
         assert!(!set.contains(&64));
+    }
+
+    fn buffered_change(seq_num: i64) -> CacheChange {
+        // 4-byte payload, so the byte bound in these tests is four changes wide.
+        CacheChange::new(
+            crate::rtps::common::types::ChangeKind::Alive,
+            Guid::default(),
+            crate::common::instance_handle::InstanceHandle::NIL,
+            SequenceNumber::from_i64(seq_num),
+            vec![0u8; 4],
+            None,
+        )
+    }
+
+    /// A hole the writer never fills would otherwise make the reader hold every later sample.
+    #[test]
+    fn a_full_in_order_buffer_gives_up_the_oldest_hole() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        for seq_num in 2..=5 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        let released = proxy.give_up_oldest_hole_if_full(16);
+
+        let seq_nums: Vec<i64> =
+            released.iter().map(|change| change.sequence_number().to_i64()).collect();
+        assert_eq!(seq_nums, vec![2, 3, 4, 5]);
+        assert_eq!(proxy.expected_sn(), SequenceNumber::from_i64(6));
+    }
+
+    /// Under the limit the reader still waits: the hole may yet be repaired.
+    #[test]
+    fn an_in_order_buffer_under_the_limit_keeps_waiting() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        for seq_num in 2..=4 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        assert!(proxy.give_up_oldest_hole_if_full(16).is_empty());
+        assert_eq!(proxy.expected_sn(), SequenceNumber::from_i64(1));
+    }
+
+    /// The total must fall as changes flush and must not count a duplicate twice, or the bound
+    /// fires on a buffer that is not full.
+    #[test]
+    fn the_buffered_byte_total_tracks_what_the_buffer_holds() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        for seq_num in [2, 3, 4, 3] {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        // Three distinct changes, 12 bytes: one short of the bound.
+        assert!(proxy.give_up_oldest_hole_if_full(16).is_empty(), "a duplicate counted twice");
+
+        proxy.set_expected_sn(SequenceNumber::from_i64(2));
+        proxy.flush_buffered_changes();
+        proxy.add_buffered_change(buffered_change(9));
+
+        assert!(proxy.give_up_oldest_hole_if_full(16).is_empty(), "flushed bytes not given back");
     }
 
     fn holds_fragment(proxy: &WriterProxy, seq_num: SequenceNumber, fragment: u32) -> bool {
