@@ -5,6 +5,18 @@ on:
   pull_request:
     branches: [develop]
     types: [opened, synchronize, reopened, ready_for_review]
+    # gen-jni parses ffi/src and formats with rustfmt.toml; the codegen check reads idl/.
+    # Keep "java" out of the required checks: a skipped workflow never reports a status.
+    paths:
+      - "ffi/src/**"
+      - "idl/**"
+      - "java/**"
+      - "scripts/check-jni-drift.sh"
+      - "scripts/check-idl-java.sh"
+      - ".github/workflows/java.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
   workflow_dispatch:
 
 jobs:
@@ -90,8 +102,7 @@ jobs:
         shell: bash
         run: ./scripts/check-idl-java.sh
 
-  # Reports the plain "java" status required by the develop ruleset;
-  # fails unless every check job succeeded.
+  # Reports a single "java" status; fails unless every check job succeeded.
   java-gate:
     name: java
     needs: [jni-drift, idl-java-codegen]
