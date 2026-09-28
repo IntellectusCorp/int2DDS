@@ -33,7 +33,7 @@ const FIXED_BODY_LEN: usize = 32;
 // self-consistent sample_size/fragment_size pair can still name far more
 // fragments than any real sample needs (781 is the largest in this file's tests).
 // Caps the fragment count; MAX_SAMPLE_BYTES below caps the bytes.
-const MAX_FRAGMENTS_PER_SAMPLE: u32 = 1_048_576; // 2^20
+pub(crate) const MAX_FRAGMENTS_PER_SAMPLE: u32 = 1_048_576; // 2^20
 
 // Bounds what FragmentBuffer allocates up front -- sample_size bytes, per matched
 // reader. The fragment count cap above does not bound bytes at all.

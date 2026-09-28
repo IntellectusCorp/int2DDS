@@ -18,6 +18,7 @@ use crate::{
     rtps::{
         common::{entity_id::EntityId, guid::Guid, locator::Locator, sequence::SequenceNumber},
         entities::history::cache_change::CacheChange,
+        messages::submessages::data_frag::MAX_FRAGMENTS_PER_SAMPLE,
     },
 };
 
@@ -506,6 +507,9 @@ impl WriterProxy {
         total_fragments: u32,
         received: impl IntoIterator<Item = u32>,
     ) {
+        // A HEARTBEAT_FRAG's lastFragmentNum reaches here unvalidated, and the missing list walks
+        // one entry per fragment, so it is held to what a sample can hold.
+        let total_fragments = total_fragments.min(MAX_FRAGMENTS_PER_SAMPLE);
         let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
             sequence_number: seq_num,
             status: ChangeFromWriterStatusKind::Received,
@@ -872,6 +876,23 @@ mod tests {
         set.clear();
         assert_eq!(set.len(), 0);
         assert!(!set.contains(&64));
+    }
+
+    /// A HEARTBEAT_FRAG's `lastFragmentNum` is unvalidated wire data, and the missing list walks
+    /// one entry per fragment, so a bogus total would ask for a multi-gigabyte allocation.
+    #[test]
+    fn a_bogus_fragment_total_is_clamped_to_what_a_sample_can_hold() {
+        let mut proxy = empty_writer_proxy();
+        let seq_num = SequenceNumber::from_i64(1);
+
+        proxy.mark_frag_received(seq_num, u32::MAX, [1]);
+
+        let total = proxy
+            .changes_from_writer
+            .get(&seq_num)
+            .and_then(|change| change.fragment_info.as_ref())
+            .map(|info| info.total_fragments);
+        assert_eq!(total, Some(MAX_FRAGMENTS_PER_SAMPLE));
     }
 
     fn buffered_change(seq_num: i64) -> CacheChange {
