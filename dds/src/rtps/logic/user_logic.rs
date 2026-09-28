@@ -5673,8 +5673,13 @@ mod tests {
     /// for fragments whose repair is already on the wire.
     #[test]
     fn back_to_back_heartbeats_ask_for_a_sample_once_per_retry_delay() {
+        // Long enough that the test cannot outlast it and see a legitimate retry.
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_retry_delay: DcpsDuration::from_millis(30_000),
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
         let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
-            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+            reader_recording_nack_frags(qos);
         let prefix = participant.guid().prefix();
         let reader_id = reader.guid().entity_id();
         let sn = SequenceNumber::from_i64(1);
@@ -5687,7 +5692,6 @@ mod tests {
         wait_for_nack_frags(&payloads, prefix, 1);
         thread::sleep(Duration::from_millis(30));
 
-        // Well inside the 200ms default retry delay.
         assert_eq!(nack_frag_sns(&payloads, prefix), vec![1]);
         if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
             handler.terminate();
