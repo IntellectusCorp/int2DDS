@@ -815,16 +815,16 @@ fn emit_struct(
         out.push_str(&format!("package {};\n\n", p));
     }
     let mut imports = vec![
-        "import com.intellectus.int2dds.cdr.CdrReader;".to_string(),
-        "import com.intellectus.int2dds.cdr.CdrWriter;".to_string(),
-        "import com.intellectus.int2dds.cdr.Extensibility;".to_string(),
-        "import com.intellectus.int2dds.types.IDdsType;".to_string(),
+        "import kr.co.intellectus.int2dds.cdr.CdrReader;".to_string(),
+        "import kr.co.intellectus.int2dds.cdr.CdrWriter;".to_string(),
+        "import kr.co.intellectus.int2dds.cdr.Extensibility;".to_string(),
+        "import kr.co.intellectus.int2dds.types.IDdsType;".to_string(),
     ];
     if describable {
-        imports.push("import com.intellectus.int2dds.xtypes.TypeInfo;".to_string());
+        imports.push("import kr.co.intellectus.int2dds.xtypes.TypeInfo;".to_string());
     }
     if uses_field_type {
-        imports.push("import com.intellectus.int2dds.xtypes.FieldType;".to_string());
+        imports.push("import kr.co.intellectus.int2dds.xtypes.FieldType;".to_string());
     }
     imports.sort();
     for imp in &imports {
@@ -945,7 +945,7 @@ fn emit_enum(e: &ResolvedEnum, idl_filename: &str, opts: &JavaOptions) -> Genera
     if let Some(p) = &package {
         out.push_str(&format!("package {};\n\n", p));
     }
-    out.push_str("import com.intellectus.int2dds.xtypes.TypeInfo;\n\n");
+    out.push_str("import kr.co.intellectus.int2dds.xtypes.TypeInfo;\n\n");
     out.push_str(&format!("public enum {} {{\n\n", class));
 
     for (i, v) in e.variants.iter().enumerate() {
@@ -1079,10 +1079,10 @@ mod tests {
     fn named_package_nests_the_path_and_declares_the_package() {
         let files = gen(
             r#"struct HelloWorld { unsigned long index; };"#,
-            &JavaOptions { package: Some("com.intellectus.int2dds.examples".to_string()) },
+            &JavaOptions { package: Some("kr.co.intellectus.int2dds.examples".to_string()) },
         );
-        assert_eq!(files[0].relative_path, "com/intellectus/int2dds/examples/HelloWorld.java");
-        assert!(files[0].source.contains("package com.intellectus.int2dds.examples;"));
+        assert_eq!(files[0].relative_path, "kr/co/intellectus/int2dds/examples/HelloWorld.java");
+        assert!(files[0].source.contains("package kr.co.intellectus.int2dds.examples;"));
     }
 
     #[test]
@@ -1293,7 +1293,7 @@ mod tests {
             assert!(err.contains(bad), "{}", err);
         }
         // Valid packages and the empty (unnamed) case still pass.
-        for ok in ["com.intellectus.int2dds.examples", "generated.enum", "_a.$b.c1", ""] {
+        for ok in ["kr.co.intellectus.int2dds.examples", "generated.enum", "_a.$b.c1", ""] {
             generate(&model, "S.idl", &JavaOptions { package: Some(ok.to_string()) })
                 .unwrap_or_else(|e| panic!("{:?} should be accepted: {}", ok, e));
         }
@@ -1602,8 +1602,8 @@ mod tests {
             &JavaOptions::default(),
         );
         let src = &files[0].source;
-        assert!(src.contains("import com.intellectus.int2dds.xtypes.TypeInfo;"), "{}", src);
-        assert!(src.contains("import com.intellectus.int2dds.xtypes.FieldType;"), "{}", src);
+        assert!(src.contains("import kr.co.intellectus.int2dds.xtypes.TypeInfo;"), "{}", src);
+        assert!(src.contains("import kr.co.intellectus.int2dds.xtypes.FieldType;"), "{}", src);
         assert!(src.contains("public TypeInfo typeInfo() {"), "{}", src);
         assert!(src.contains("new TypeInfo(\"S\", Extensibility.APPENDABLE);"), "{}", src);
         assert!(src.contains("ti.addField(\"id\", FieldType.INT32, 1);"), "{}", src);

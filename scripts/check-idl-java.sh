@@ -40,9 +40,9 @@ echo "Phase 1 OK: generated Java for the IDL corpus compiles."
 # GeneratedTypeConformanceTest hands its bytes to the core. Regenerate in
 # place and let git decide whether the committed copy is still current.
 GOLDEN_IDL="idl/input/CdrGolden.idl"
-GOLDEN_JAVA="java/api/src/test/java/com/intellectus/int2dds/types/CdrGolden.java"
+GOLDEN_JAVA="java/api/src/test/java/kr/co/intellectus/int2dds/types/CdrGolden.java"
 GOLDEN_CMD="./target/debug/int2dds-idl $GOLDEN_IDL -j java/api/src/test/java \
---java-package com.intellectus.int2dds.types"
+--java-package kr.co.intellectus.int2dds.types"
 
 # An untracked file has an empty `git diff`, which would pass vacuously.
 if ! git ls-files --error-unmatch "$GOLDEN_JAVA" >/dev/null 2>&1; then
@@ -51,7 +51,7 @@ if ! git ls-files --error-unmatch "$GOLDEN_JAVA" >/dev/null 2>&1; then
 fi
 
 "$BIN" "$GOLDEN_IDL" -j java/api/src/test/java \
-    --java-package com.intellectus.int2dds.types >/dev/null
+    --java-package kr.co.intellectus.int2dds.types >/dev/null
 
 if ! git diff --quiet -- "$GOLDEN_JAVA"; then
   echo "ERROR: the committed $GOLDEN_JAVA is stale." >&2

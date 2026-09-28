@@ -52,7 +52,7 @@ unsafe extern "C" fn collect(
 /// # Safety
 /// Invoked by the JVM under JNI conventions.
 #[no_mangle]
-pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_participantQosPropertiesWithPrefix<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_participantQosPropertiesWithPrefix<
     'local,
 >(
     mut env: JNIEnv<'local>,

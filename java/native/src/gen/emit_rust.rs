@@ -35,7 +35,7 @@ pub fn emit_rust(fns: &[FfiFn]) -> String {
 }
 
 fn emit_one(f: &FfiFn) -> String {
-    let symbol = format!("Java_com_intellectus_int2dds_internal_ffi_Ffi_{}", mangle(&f.name));
+    let symbol = format!("Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_{}", mangle(&f.name));
 
     // `'local` is always declared: `JNIEnv<'local>` uses it even when no object
     // parameter does, so one uniform shape avoids a second code path.
@@ -192,7 +192,7 @@ mod tests {
         assert!(
             out.contains(
                 "pub extern \"system\" fn \
-                 Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datawriter_1write_1serialized"
+                 Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datawriter_1write_1serialized"
             ),
             "underscores in the Java method name must be escaped as _1:\n{out}"
         );

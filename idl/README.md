@@ -210,7 +210,7 @@ renamed (the default is `int2dds`).
 
 ## Using generated Java types
 
-The Java backend emits classes implementing `com.intellectus.int2dds.types.IDdsType`,
+The Java backend emits classes implementing `kr.co.intellectus.int2dds.types.IDdsType`,
 which is what `DomainParticipant.createTopic` takes:
 
 ```java

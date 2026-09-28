@@ -53,9 +53,9 @@ fn main() -> Result<(), String> {
 
     let rust_path = root.join("java/native/src/generated.rs");
     let java_path =
-        root.join("java/api/src/main/java/com/intellectus/int2dds/internal/ffi/Ffi.java");
+        root.join("java/api/src/main/java/kr/co/intellectus/int2dds/internal/ffi/Ffi.java");
     let java_panama_path =
-        root.join("java/api/src/main/java22/com/intellectus/int2dds/internal/ffi/Ffi.java");
+        root.join("java/api/src/main/java22/kr/co/intellectus/int2dds/internal/ffi/Ffi.java");
 
     if let Some(parent) = java_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;

@@ -3,7 +3,7 @@ plugins {
 }
 
 allprojects {
-    group = "com.intellectus.int2dds"
+    group = "kr.co.intellectus.int2dds"
 }
 
 subprojects {

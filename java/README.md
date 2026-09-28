@@ -30,7 +30,7 @@ cd java
 ```
 
 The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variable →
-bundled JAR resources → `java.library.path`. Gradle's own test tasks set
+bundled JAR resources → `java.library.path`. Gradle's own test and example tasks set
 `INT2DDS_JAVA_LIB` for you; set it by hand only when running outside Gradle:
 
 ```bash
@@ -39,11 +39,22 @@ export INT2DDS_JAVA_LIB=/abs/path/to/target/release/libint2dds_java.so
 
 ## Running the examples
 
+Linux / macOS / Git Bash:
+
 ```bash
 cd java
-./gradlew :examples:runSub    # subscriber, in one terminal
-./gradlew :examples:run       # publisher, in another
+./gradlew :examples:runSub     # subscriber, in one terminal
+./gradlew :examples:runPub     # publisher, in another
 ./gradlew :examples:runDynamic # XTypes dynamic-type variant
+```
+
+Windows (PowerShell / cmd):
+
+```bat
+cd java
+.\gradlew.bat :examples:runSub
+.\gradlew.bat :examples:runPub
+.\gradlew.bat :examples:runDynamic
 ```
 
 Both take `-d`/`--domain <id>` (default 0) and `--reliable` (default `BEST_EFFORT`);
@@ -148,7 +159,7 @@ Generate Java from an `.idl` file:
 # From the repository root
 cargo run -p int2dds-idl -- idl/input/HelloWorld.idl \
     -j java/examples/src/main/java \
-    --java-package com.intellectus.int2dds.examples
+    --java-package kr.co.intellectus.int2dds.examples
 ```
 
 Unlike every other language flag, `-j` takes a **directory**: Java requires one public

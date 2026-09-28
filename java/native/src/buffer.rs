@@ -14,7 +14,7 @@ use jni::JNIEnv;
 /// # Safety
 /// Invoked by the JVM under JNI conventions.
 #[no_mangle]
-pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_directBufferAddress(
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_directBufferAddress(
     env: JNIEnv,
     _class: JClass,
     buf: JByteBuffer,
@@ -39,7 +39,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_directBuffe
 /// the loan the DDS core holds until commit/abort, not by this function.
 /// Invoked by the JVM under JNI conventions.
 #[no_mangle]
-pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_addressToDirectByteBuffer<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_addressToDirectByteBuffer<
     'local,
 >(
     mut env: JNIEnv<'local>,

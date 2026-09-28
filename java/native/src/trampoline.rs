@@ -140,7 +140,7 @@ unsafe extern "C" fn tramp_on_subscription_matched(
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
         let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
-        let cls = "com/intellectus/int2dds/status/SubscriptionMatchedStatus";
+        let cls = "kr/co/intellectus/int2dds/status/SubscriptionMatchedStatus";
         let jstatus = env.new_object(
             cls,
             "(IIII[B)V",
@@ -157,8 +157,8 @@ unsafe extern "C" fn tramp_on_subscription_matched(
         env.call_method(
             listener.as_obj(),
             "onSubscriptionMatched",
-            "(Lcom/intellectus/int2dds/core/DataReader;\
-             Lcom/intellectus/int2dds/status/SubscriptionMatchedStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataReader;\
+             Lkr/co/intellectus/int2dds/status/SubscriptionMatchedStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -179,7 +179,7 @@ unsafe extern "C" fn tramp_on_data_available(
         env.call_method(
             listener.as_obj(),
             "onDataAvailable",
-            "(Lcom/intellectus/int2dds/core/DataReader;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataReader;)V",
             &[JValue::Object(&JObject::null())],
         )?;
         Ok(())
@@ -203,7 +203,7 @@ unsafe extern "C" fn tramp_on_sample_rejected(
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
         let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
-        let cls = "com/intellectus/int2dds/status/SampleRejectedStatus";
+        let cls = "kr/co/intellectus/int2dds/status/SampleRejectedStatus";
         let jstatus = env.new_object(
             cls,
             "(III[B)V",
@@ -217,8 +217,8 @@ unsafe extern "C" fn tramp_on_sample_rejected(
         env.call_method(
             listener.as_obj(),
             "onSampleRejected",
-            "(Lcom/intellectus/int2dds/core/DataReader;\
-             Lcom/intellectus/int2dds/status/SampleRejectedStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataReader;\
+             Lkr/co/intellectus/int2dds/status/SampleRejectedStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -242,7 +242,7 @@ unsafe extern "C" fn tramp_on_liveliness_changed(
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
         let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
-        let cls = "com/intellectus/int2dds/status/LivelinessChangedStatus";
+        let cls = "kr/co/intellectus/int2dds/status/LivelinessChangedStatus";
         let jstatus = env.new_object(
             cls,
             "(IIII[B)V",
@@ -257,8 +257,8 @@ unsafe extern "C" fn tramp_on_liveliness_changed(
         env.call_method(
             listener.as_obj(),
             "onLivelinessChanged",
-            "(Lcom/intellectus/int2dds/core/DataReader;\
-             Lcom/intellectus/int2dds/status/LivelinessChangedStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataReader;\
+             Lkr/co/intellectus/int2dds/status/LivelinessChangedStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -282,7 +282,7 @@ unsafe extern "C" fn tramp_on_requested_deadline_missed(
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
         let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
-        let cls = "com/intellectus/int2dds/status/RequestedDeadlineMissedStatus";
+        let cls = "kr/co/intellectus/int2dds/status/RequestedDeadlineMissedStatus";
         let jstatus = env.new_object(
             cls,
             "(II[B)V",
@@ -295,8 +295,8 @@ unsafe extern "C" fn tramp_on_requested_deadline_missed(
         env.call_method(
             listener.as_obj(),
             "onRequestedDeadlineMissed",
-            "(Lcom/intellectus/int2dds/core/DataReader;\
-             Lcom/intellectus/int2dds/status/RequestedDeadlineMissedStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataReader;\
+             Lkr/co/intellectus/int2dds/status/RequestedDeadlineMissedStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -319,7 +319,7 @@ unsafe extern "C" fn tramp_on_requested_incompatible_qos(
     }
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
-        let cls = "com/intellectus/int2dds/status/RequestedIncompatibleQosStatus";
+        let cls = "kr/co/intellectus/int2dds/status/RequestedIncompatibleQosStatus";
         let jstatus = env.new_object(
             cls,
             "(IIII)V",
@@ -333,8 +333,8 @@ unsafe extern "C" fn tramp_on_requested_incompatible_qos(
         env.call_method(
             listener.as_obj(),
             "onRequestedIncompatibleQos",
-            "(Lcom/intellectus/int2dds/core/DataReader;\
-             Lcom/intellectus/int2dds/status/RequestedIncompatibleQosStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataReader;\
+             Lkr/co/intellectus/int2dds/status/RequestedIncompatibleQosStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -357,7 +357,7 @@ unsafe extern "C" fn tramp_on_sample_lost(
     }
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
-        let cls = "com/intellectus/int2dds/status/SampleLostStatus";
+        let cls = "kr/co/intellectus/int2dds/status/SampleLostStatus";
         let jstatus = env.new_object(
             cls,
             "(II)V",
@@ -366,8 +366,8 @@ unsafe extern "C" fn tramp_on_sample_lost(
         env.call_method(
             listener.as_obj(),
             "onSampleLost",
-            "(Lcom/intellectus/int2dds/core/DataReader;\
-             Lcom/intellectus/int2dds/status/SampleLostStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataReader;\
+             Lkr/co/intellectus/int2dds/status/SampleLostStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -381,7 +381,7 @@ unsafe extern "C" fn tramp_on_sample_lost(
 /// Invoked by the JVM under JNI conventions. `reader` must be a live
 /// `Int2DdsDataReader` handle.
 #[no_mangle]
-pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeReaderListenerSet<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeReaderListenerSet<
     'local,
 >(
     env: JNIEnv<'local>,
@@ -437,7 +437,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
 /// Invoked by the JVM under JNI conventions. `reader` must be a live handle;
 /// `id` must be a value returned by `nativeReaderListenerSet`.
 #[no_mangle]
-pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeReaderListenerClear<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeReaderListenerClear<
     'local,
 >(
     _env: JNIEnv<'local>,
@@ -475,7 +475,7 @@ unsafe extern "C" fn tramp_on_publication_matched(
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
         let handle = env.byte_array_from_slice(&s.last_subscription_handle)?;
-        let cls = "com/intellectus/int2dds/status/PublicationMatchedStatus";
+        let cls = "kr/co/intellectus/int2dds/status/PublicationMatchedStatus";
         let jstatus = env.new_object(
             cls,
             "(IIII[B)V",
@@ -492,8 +492,8 @@ unsafe extern "C" fn tramp_on_publication_matched(
         env.call_method(
             listener.as_obj(),
             "onPublicationMatched",
-            "(Lcom/intellectus/int2dds/core/DataWriter;\
-             Lcom/intellectus/int2dds/status/PublicationMatchedStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
+             Lkr/co/intellectus/int2dds/status/PublicationMatchedStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -517,7 +517,7 @@ unsafe extern "C" fn tramp_on_offered_deadline_missed(
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
         let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
-        let cls = "com/intellectus/int2dds/status/OfferedDeadlineMissedStatus";
+        let cls = "kr/co/intellectus/int2dds/status/OfferedDeadlineMissedStatus";
         let jstatus = env.new_object(
             cls,
             "(II[B)V",
@@ -530,8 +530,8 @@ unsafe extern "C" fn tramp_on_offered_deadline_missed(
         env.call_method(
             listener.as_obj(),
             "onOfferedDeadlineMissed",
-            "(Lcom/intellectus/int2dds/core/DataWriter;\
-             Lcom/intellectus/int2dds/status/OfferedDeadlineMissedStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
+             Lkr/co/intellectus/int2dds/status/OfferedDeadlineMissedStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -554,7 +554,7 @@ unsafe extern "C" fn tramp_on_offered_incompatible_qos(
     }
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
-        let cls = "com/intellectus/int2dds/status/OfferedIncompatibleQosStatus";
+        let cls = "kr/co/intellectus/int2dds/status/OfferedIncompatibleQosStatus";
         let jstatus = env.new_object(
             cls,
             "(IIII)V",
@@ -568,8 +568,8 @@ unsafe extern "C" fn tramp_on_offered_incompatible_qos(
         env.call_method(
             listener.as_obj(),
             "onOfferedIncompatibleQos",
-            "(Lcom/intellectus/int2dds/core/DataWriter;\
-             Lcom/intellectus/int2dds/status/OfferedIncompatibleQosStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
+             Lkr/co/intellectus/int2dds/status/OfferedIncompatibleQosStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -592,7 +592,7 @@ unsafe extern "C" fn tramp_on_liveliness_lost(
     }
     let s = &*status;
     run_trampoline(user_context, |env, listener| {
-        let cls = "com/intellectus/int2dds/status/LivelinessLostStatus";
+        let cls = "kr/co/intellectus/int2dds/status/LivelinessLostStatus";
         let jstatus = env.new_object(
             cls,
             "(II)V",
@@ -601,8 +601,8 @@ unsafe extern "C" fn tramp_on_liveliness_lost(
         env.call_method(
             listener.as_obj(),
             "onLivelinessLost",
-            "(Lcom/intellectus/int2dds/core/DataWriter;\
-             Lcom/intellectus/int2dds/status/LivelinessLostStatus;)V",
+            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
+             Lkr/co/intellectus/int2dds/status/LivelinessLostStatus;)V",
             &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
         )?;
         Ok(())
@@ -617,7 +617,7 @@ unsafe extern "C" fn tramp_on_liveliness_lost(
 /// Invoked by the JVM under JNI conventions. `writer` must be a live
 /// `Int2DdsDataWriter` handle.
 #[no_mangle]
-pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeWriterListenerSet<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeWriterListenerSet<
     'local,
 >(
     env: JNIEnv<'local>,
@@ -670,7 +670,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
 /// Invoked by the JVM under JNI conventions. `writer` must be a live handle;
 /// `id` must be a value returned by `nativeWriterListenerSet`.
 #[no_mangle]
-pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeWriterListenerClear<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeWriterListenerClear<
     'local,
 >(
     _env: JNIEnv<'local>,

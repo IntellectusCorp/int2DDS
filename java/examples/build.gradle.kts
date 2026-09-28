@@ -3,7 +3,7 @@
 //
 //   cargo run -p int2dds-idl -- idl/input/HelloWorld.idl \
 //       -j java/examples/src/main/java \
-//       --java-package com.intellectus.int2dds.examples
+//       --java-package kr.co.intellectus.int2dds.examples
 //
 // The build does not do this itself: an example that needed a Rust toolchain
 // to compile would not be one anybody could copy.
@@ -18,7 +18,7 @@ dependencies {
 }
 
 application {
-    mainClass.set("com.intellectus.int2dds.examples.HelloWorldPub")
+    mainClass.set("kr.co.intellectus.int2dds.examples.HelloWorldPub")
 }
 
 // The example loads the native library the same way the tests do. It sets
@@ -30,29 +30,35 @@ application {
 // INT2DDS_USE_LOOPBACK_INTERFACE gets a receive side that never has 127.0.0.1
 // in its working-IP list. The tests set both, deliberately, because they must
 // not discover each other across a subnet; an example has no such need.
-tasks.named<JavaExec>("run") {
-    environment("INT2DDS_JAVA_LIB",
-            rootProject.file("../target/release/libint2dds_java.so").absolutePath)
+val nativeLibName = when {
+    org.gradle.internal.os.OperatingSystem.current().isWindows -> "int2dds_java.dll"
+    org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "libint2dds_java.dylib"
+    else -> "libint2dds_java.so"
+}
+val nativeLib = System.getenv("INT2DDS_JAVA_LIB")
+        ?: rootProject.file("../target/release/$nativeLibName").absolutePath
+
+tasks.withType<JavaExec>().configureEach {
+    environment("INT2DDS_JAVA_LIB", nativeLib)
 }
 
-// Launches DynamicHelloWorld the same way "run" launches HelloWorldPub: same
-// native lib env var, nothing else added (see the note above "run" for why).
-tasks.register<JavaExec>("runDynamic") {
+tasks.register<JavaExec>("runPub") {
     group = "application"
-    description = "Runs the DynamicHelloWorld (XTypes) example."
-    mainClass.set("com.intellectus.int2dds.examples.DynamicHelloWorld")
+    description = "Runs the HelloWorldPub example."
+    mainClass.set("kr.co.intellectus.int2dds.examples.HelloWorldPub")
     classpath = sourceSets["main"].runtimeClasspath
-    environment("INT2DDS_JAVA_LIB",
-            rootProject.file("../target/release/libint2dds_java.so").absolutePath)
 }
 
-// Launches HelloWorldSub the same way "run" launches HelloWorldPub: same
-// native lib env var, nothing else added (see the note above "run" for why).
 tasks.register<JavaExec>("runSub") {
     group = "application"
     description = "Runs the HelloWorldSub example."
-    mainClass.set("com.intellectus.int2dds.examples.HelloWorldSub")
+    mainClass.set("kr.co.intellectus.int2dds.examples.HelloWorldSub")
     classpath = sourceSets["main"].runtimeClasspath
-    environment("INT2DDS_JAVA_LIB",
-            rootProject.file("../target/release/libint2dds_java.so").absolutePath)
+}
+
+tasks.register<JavaExec>("runDynamic") {
+    group = "application"
+    description = "Runs the DynamicHelloWorld (XTypes) example."
+    mainClass.set("kr.co.intellectus.int2dds.examples.DynamicHelloWorld")
+    classpath = sourceSets["main"].runtimeClasspath
 }
