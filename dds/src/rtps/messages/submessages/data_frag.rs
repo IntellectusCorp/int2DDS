@@ -7,13 +7,14 @@
 use crate::rtps::common::time::RtpsTime;
 use bytes::{Bytes, BytesMut};
 
-use speedy::{Context, Error, Readable, Writable, Writer};
+use speedy::{Context, Endianness, Error, Readable, Writable, Writer};
 use std::io;
 use std::time::Instant;
 
 use crate::rtps::{
     common::{
         entity_id::EntityId,
+        entity_kind::EntityKind,
         parameters::ParameterList,
         rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
         sequence::{FragmentNumber, SequenceNumber},
@@ -25,11 +26,14 @@ use crate::rtps::{
 const EXTRA_FLAGS: u16 = 0; // 9.4.5.3.2 - extraFlags
 const OCTETS_TO_INLINE_QOS: u16 = 28; // 9.4.5.3.3 - octetsToInlineQos
 
+// extraFlags through sampleSize: the 4 bytes before octetsToInlineQos starts counting, plus its 28.
+const FIXED_BODY_LEN: usize = 32;
+
 // Not spec text: no validity rule bounds total_fragments itself -- a
 // self-consistent sample_size/fragment_size pair can still name far more
 // fragments than any real sample needs (781 is the largest in this file's tests).
 // Caps the fragment count; MAX_SAMPLE_BYTES below caps the bytes.
-const MAX_FRAGMENTS_PER_SAMPLE: u32 = 1_048_576; // 2^20
+pub(crate) const MAX_FRAGMENTS_PER_SAMPLE: u32 = 1_048_576; // 2^20
 
 // Bounds what FragmentBuffer allocates up front -- sample_size bytes, per matched
 // reader. The fragment count cap above does not bound bytes at all.
@@ -123,13 +127,13 @@ impl<'a> DataFrag<'a> {
         payload_len + Self::alignment_padding(payload_len as usize)
     }
 
-    /// Return the payload as `Bytes` for zero-copy sub-slicing on the receive path.
+    /// Return the received payload, borrowed from the datagram it was parsed from.
     ///
     /// Returns `None` if the payload is `Borrowed` (only happens on the send
-    /// path, where the caller would not need shared ownership anyway).
-    pub(crate) fn serialized_bytes(&self) -> Option<Bytes> {
+    /// path, which never reassembles).
+    pub(crate) fn serialized_bytes(&self) -> Option<&[u8]> {
         match &self.serialized_data {
-            SubmessagePayload::Owned(b) => Some(b.clone()),
+            SubmessagePayload::Owned(b) => Some(b.as_ref()),
             SubmessagePayload::Borrowed(_) => None,
         }
     }
@@ -149,18 +153,35 @@ impl<'a> DataFrag<'a> {
             .inline_qos_flag()
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None))?;
 
-        let _extra_flags = u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let octets_to_inline_qos =
-            u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
-        let reader_id = EntityId::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let writer_id = EntityId::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let writer_sn =
-            SequenceNumber::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
+        // The fields up to sampleSize sit at fixed offsets, so they are read in place: a speedy
+        // stream reader per field cost more than the rest of the parse.
+        let fixed: &[u8; FIXED_BODY_LEN] = buffer
+            .get(..FIXED_BODY_LEN)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::Io, "DATA_FRAG body too short"))?;
+        let u16_at = |at: usize| {
+            let raw = [fixed[at], fixed[at + 1]];
+            match endianness {
+                Endianness::LittleEndian => u16::from_le_bytes(raw),
+                Endianness::BigEndian => u16::from_be_bytes(raw),
+            }
+        };
+        let u32_at = |at: usize| {
+            let raw = [fixed[at], fixed[at + 1], fixed[at + 2], fixed[at + 3]];
+            match endianness {
+                Endianness::LittleEndian => u32::from_le_bytes(raw),
+                Endianness::BigEndian => u32::from_be_bytes(raw),
+            }
+        };
+        let entity_id_at = |at: usize| EntityId {
+            entity_key: [fixed[at], fixed[at + 1], fixed[at + 2]],
+            entity_kind: EntityKind(fixed[at + 3]),
+        };
+
+        let octets_to_inline_qos = u16_at(2);
+        let reader_id = entity_id_at(4);
+        let writer_id = entity_id_at(8);
+        let writer_sn = SequenceNumber::new(u32_at(12) as i32, u32_at(16));
 
         // 8.3.7.3.3
         if writer_sn.to_i64() <= 0 || writer_sn == SequenceNumber::UNKNOWN {
@@ -170,16 +191,10 @@ impl<'a> DataFrag<'a> {
             ));
         }
 
-        let fragment_starting_num =
-            FragmentNumber::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
-        let fragments_in_submessage =
-            u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-                .map_err(map_speedy_err)?;
-        let fragment_size = u16::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
-        let sample_size = u32::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
-            .map_err(map_speedy_err)?;
+        let fragment_starting_num: FragmentNumber = u32_at(20);
+        let fragments_in_submessage = u16_at(24);
+        let fragment_size = u16_at(26);
+        let sample_size = u32_at(28);
 
         // 9.4.5.3.3 - should always use the octetsToInlineQos to skip any submessage headers it does not expect or understand
         cursor.set_position(
@@ -195,7 +210,15 @@ impl<'a> DataFrag<'a> {
             None
         };
 
+        // `octetsToInlineQos` is unvalidated wire data and `Bytes::slice` panics past the end,
+        // which would take the receive thread down with one malformed datagram.
         let start_pos = cursor.position() as usize;
+        if start_pos > buffer.len() {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "octetsToInlineQos points past the end of the DATA_FRAG body",
+            ));
+        }
         let serialized_data_bytes = buffer.slice(start_pos..);
 
         // 8.3.7.3.3 Validity
@@ -323,8 +346,8 @@ impl<C: Context> Writable<C> for DataFrag<'_> {
 pub(crate) struct FragmentBuffer {
     pub sequence_number: SequenceNumber,
     pub total_size: u32,
-    // One contiguous buffer for the whole sample. Fragments are written at their
-    // offset, so reassembly costs one allocation instead of one per fragment.
+    // One contiguous buffer for the whole sample, left uninitialized: fragments are
+    // written into spare capacity and len is set only when the buffer is handed out.
     pub buf: BytesMut,
     // Which fragment slots have arrived, so retransmits do not over-count.
     pub filled: Vec<bool>,
@@ -351,11 +374,7 @@ impl FragmentBuffer {
         Self {
             sequence_number,
             total_size,
-            buf: {
-                let mut b = BytesMut::with_capacity(total_size as usize);
-                b.resize(total_size as usize, 0);
-                b
-            },
+            buf: BytesMut::with_capacity(total_size as usize),
             filled: vec![false; total_fragments as usize],
             received_count: 0,
             total_fragments,
@@ -372,7 +391,7 @@ impl FragmentBuffer {
 
     // Write a fragment into its place in the sample buffer. Copying here detaches
     // the receive arena, whose chunk would otherwise stay resident until delivery.
-    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: Bytes) -> bool {
+    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: &[u8]) -> bool {
         if fragment_num == 0 || fragment_num > self.total_fragments {
             return false;
         }
@@ -390,7 +409,11 @@ impl FragmentBuffer {
 
         let idx = (fragment_num - 1) as usize;
         let off = idx * self.fragment_size as usize;
-        self.buf[off..off + data.len()].copy_from_slice(&data);
+        let dst = &mut self.buf.spare_capacity_mut()[off..off + data.len()];
+        // SAFETY: `dst` is exactly `data.len()` bytes of owned capacity, disjoint from `data`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst.as_mut_ptr().cast(), data.len())
+        };
         if !self.filled[idx] {
             self.filled[idx] = true;
             self.received_count += 1;
@@ -401,12 +424,30 @@ impl FragmentBuffer {
 
     // The assembled sample. Fragments were written in place, so this hands the
     // buffer over without another copy.
-    pub(crate) fn assemble(self) -> Vec<u8> {
+    pub(crate) fn assemble(mut self) -> Vec<u8> {
+        self.expose_payload();
         self.buf.to_vec()
     }
 
-    pub(crate) fn into_bytes(self) -> Bytes {
+    pub(crate) fn into_bytes(mut self) -> Bytes {
+        self.expose_payload();
         self.buf.freeze()
+    }
+
+    // Zero the slots that never arrived, then expose all `total_size` bytes.
+    // Callers normally hand out only complete buffers, so the loop rarely writes.
+    fn expose_payload(&mut self) {
+        let total = self.total_size as usize;
+        let frag = self.fragment_size as usize;
+        let spare = self.buf.spare_capacity_mut();
+        for (idx, _) in self.filled.iter().enumerate().filter(|(_, filled)| !**filled) {
+            let off = idx * frag;
+            for byte in &mut spare[off..(off + frag).min(total)] {
+                byte.write(0);
+            }
+        }
+        // SAFETY: every slot in 0..total was written by a fragment or zeroed above.
+        unsafe { self.buf.set_len(total) };
     }
 }
 
@@ -463,6 +504,59 @@ mod tests {
         assert_eq!(datafrag.sample_size, deserialized.sample_size);
         assert_eq!(datafrag.inline_qos, deserialized.inline_qos);
         assert_eq!(datafrag.serialized_data.as_slice(), deserialized.serialized_data.as_slice());
+    }
+
+    #[test]
+    fn test_datafrag_fixed_fields_round_trip_in_both_endiannesses() {
+        // Multi-byte fields whose bytes all differ, so a swapped read cannot pass by symmetry.
+        let datafrag = DataFrag {
+            writer_sn: SequenceNumber::new(0x0102, 0x0304_0506),
+            fragment_starting_num: 2,
+            fragments_in_submessage: 3,
+            fragment_size: 0x0100,
+            sample_size: 0x0001_0203,
+            serialized_data: SubmessagePayload::Owned(Bytes::from(vec![7u8; 600])),
+            ..create_dummy_datafrag()
+        };
+        for (endianness, flags) in [(Endianness::BigEndian, 0), (Endianness::LittleEndian, 1)] {
+            let buffer = datafrag.write_to_vec_with_ctx(endianness).unwrap();
+            let header = SubmessageHeader::new(SubmessageId::DATA_FRAG, flags, buffer.len() as u16);
+
+            let parsed = DataFrag::deserialize(&Bytes::from(buffer), &header).unwrap();
+
+            assert_eq!(parsed.reader_id, datafrag.reader_id, "{endianness:?}");
+            assert_eq!(parsed.writer_id, datafrag.writer_id, "{endianness:?}");
+            assert_eq!(parsed.writer_sn, datafrag.writer_sn, "{endianness:?}");
+            assert_eq!(parsed.fragment_starting_num, 2, "{endianness:?}");
+            assert_eq!(parsed.fragments_in_submessage, 3, "{endianness:?}");
+            assert_eq!(parsed.fragment_size, 0x0100, "{endianness:?}");
+            assert_eq!(parsed.sample_size, 0x0001_0203, "{endianness:?}");
+            assert_eq!(parsed.serialized_data.as_slice(), &[7u8; 600][..], "{endianness:?}");
+        }
+    }
+
+    #[test]
+    fn test_datafrag_rejects_a_body_shorter_than_its_fixed_fields() {
+        let buffer = create_dummy_datafrag().write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let short = Bytes::from(buffer[..FIXED_BODY_LEN - 1].to_vec());
+
+        let result = DataFrag::deserialize(&short, &create_dummy_submessage_header(31));
+
+        assert!(result.is_err());
+    }
+
+    /// `octetsToInlineQos` is unvalidated wire data, and the slice it drives panicked past the
+    /// end of the body -- one malformed datagram took the receive thread down with it.
+    #[test]
+    fn test_datafrag_rejects_an_octets_to_inline_qos_past_the_body() {
+        let mut buffer =
+            create_dummy_datafrag().write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        buffer[2..4].copy_from_slice(&u16::MAX.to_be_bytes());
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(buffer), &header);
+
+        assert!(matches!(result, Err(err) if err.code == RtpsErrorCode::InvalidSubmessageBody));
     }
 
     #[test]
@@ -646,9 +740,9 @@ mod tests {
     fn test_fragment_buffer_assembles_in_fragment_order() {
         let mut buffer = three_fragment_buffer();
         // Insert out of order with distinct bytes per fragment
-        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
-        assert!(buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])));
-        assert!(buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21])));
+        assert!(buffer.copy_fragment_data(3, &[30]));
+        assert!(buffer.copy_fragment_data(1, &[10, 11]));
+        assert!(buffer.copy_fragment_data(2, &[20, 21]));
 
         assert!(buffer.all_fragments_received());
         assert_eq!(buffer.assemble(), vec![10, 11, 20, 21, 30]);
@@ -657,31 +751,40 @@ mod tests {
     #[test]
     fn test_fragment_buffer_into_bytes_in_fragment_order() {
         let mut buffer = three_fragment_buffer();
-        buffer.copy_fragment_data(3, Bytes::from_static(&[30]));
-        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
-        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+        buffer.copy_fragment_data(3, &[30]);
+        buffer.copy_fragment_data(1, &[10, 11]);
+        buffer.copy_fragment_data(2, &[20, 21]);
 
         // Fragments land at their offset, so arrival order does not matter.
         assert_eq!(&buffer.into_bytes()[..], &[10, 11, 20, 21, 30]);
     }
 
     #[test]
+    fn test_fragment_buffer_zeroes_missing_slots_on_handout() {
+        let mut buffer = three_fragment_buffer();
+        buffer.copy_fragment_data(2, &[20, 21]);
+
+        // The buffer starts uninitialized, so a missing slot must still read as zero.
+        assert_eq!(&buffer.into_bytes()[..], &[0, 0, 20, 21, 0]);
+    }
+
+    #[test]
     fn test_fragment_buffer_incomplete_until_all_received() {
         let mut buffer = three_fragment_buffer();
-        assert!(buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])));
+        assert!(buffer.copy_fragment_data(1, &[10, 11]));
         assert!(!buffer.all_fragments_received());
-        assert!(buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21])));
+        assert!(buffer.copy_fragment_data(2, &[20, 21]));
         assert!(!buffer.all_fragments_received());
-        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
+        assert!(buffer.copy_fragment_data(3, &[30]));
         assert!(buffer.all_fragments_received());
     }
 
     #[test]
     fn test_fragment_buffer_duplicate_does_not_complete() {
         let mut buffer = three_fragment_buffer();
-        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
-        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])); // duplicate
-        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+        buffer.copy_fragment_data(1, &[10, 11]);
+        buffer.copy_fragment_data(1, &[10, 11]); // duplicate
+        buffer.copy_fragment_data(2, &[20, 21]);
         // Only 2 distinct fragments; fragment 3 still missing
         assert!(!buffer.all_fragments_received());
     }
@@ -691,25 +794,25 @@ mod tests {
         let mut buffer = three_fragment_buffer();
         // Fragment 1 must carry a full fragment_size (2). One byte would mark the
         // slot filled and leave buf[1] zeroed, which deserializes as real data.
-        assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[10])));
+        assert!(!buffer.copy_fragment_data(1, &[10]));
         assert_eq!(buffer.received_count, 0);
         // The sample's own last fragment is legitimately short (total_size 5).
-        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
+        assert!(buffer.copy_fragment_data(3, &[30]));
         assert_eq!(buffer.received_count, 1);
     }
 
     #[test]
     fn test_fragment_buffer_rejects_out_of_range() {
         let mut buffer = three_fragment_buffer();
-        assert!(!buffer.copy_fragment_data(0, Bytes::from_static(&[0])));
-        assert!(!buffer.copy_fragment_data(4, Bytes::from_static(&[0])));
+        assert!(!buffer.copy_fragment_data(0, &[0]));
+        assert!(!buffer.copy_fragment_data(4, &[0]));
     }
 
     #[test]
     fn test_fragment_buffer_rejects_oversized() {
         let mut buffer = three_fragment_buffer();
         // fragment 1 allows at most fragment_size (2) bytes
-        assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[1, 2, 3])));
+        assert!(!buffer.copy_fragment_data(1, &[1, 2, 3]));
     }
 
     /// Build the final fragment of a sample, which is the only one whose payload is not a
