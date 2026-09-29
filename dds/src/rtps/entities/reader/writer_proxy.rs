@@ -247,6 +247,25 @@ impl WriterProxy {
         due
     }
 
+    /// Records how far the writer says it has fragmented `seq_num`, which is all the reader has
+    /// when every DATA_FRAG of the sample was lost. A total the DATA_FRAGs settled wins.
+    pub(crate) fn seed_fragment_total(&mut self, seq_num: SequenceNumber, last_fragment_num: u32) {
+        let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
+            sequence_number: seq_num,
+            status: ChangeFromWriterStatusKind::Received,
+            is_relevant: true,
+            fragment_info: None,
+        });
+        if change.fragment_info.is_none() {
+            change.fragment_info = Some(FragmentInfo {
+                total_fragments: last_fragment_num.min(MAX_FRAGMENTS_PER_SAMPLE),
+                received_fragments: FragmentSet::new(),
+                is_complete: false,
+                last_nack: None,
+            });
+        }
+    }
+
     pub(crate) fn still_missing_fragments(&self, seq_num: SequenceNumber) -> bool {
         self.changes_from_writer
             .get(&seq_num)
@@ -522,9 +541,6 @@ impl WriterProxy {
         total_fragments: u32,
         received: impl IntoIterator<Item = u32>,
     ) {
-        // A HEARTBEAT_FRAG's lastFragmentNum reaches here unvalidated, and the missing list walks
-        // one entry per fragment, so it is held to what a sample can hold.
-        let total_fragments = total_fragments.min(MAX_FRAGMENTS_PER_SAMPLE);
         let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
             sequence_number: seq_num,
             status: ChangeFromWriterStatusKind::Received,
@@ -546,9 +562,9 @@ impl WriterProxy {
             last_nack: None,
         });
 
-        // A HEARTBEAT_FRAG may have seeded a smaller last-fragment number than
-        // the sample's true total, so keep the max.
-        info.total_fragments = info.total_fragments.max(total_fragments);
+        // Assigned, not merged: only a DATA_FRAG carries the sample's true total, and a
+        // HEARTBEAT_FRAG may have seeded a different one.
+        info.total_fragments = total_fragments;
         // Reject fragment numbers outside the sample's total: an unbounded insert would let a
         // mislabeled range satisfy the completion count without the buffer holding those bytes.
         for fragment in received.into_iter().filter(|f| (1..=info.total_fragments).contains(f)) {
@@ -900,7 +916,7 @@ mod tests {
         let mut proxy = empty_writer_proxy();
         let seq_num = SequenceNumber::from_i64(1);
 
-        proxy.mark_frag_received(seq_num, u32::MAX, [1]);
+        proxy.seed_fragment_total(seq_num, u32::MAX);
 
         let total = proxy
             .changes_from_writer
@@ -950,6 +966,19 @@ mod tests {
         proxy.give_up_oldest_hole_if_full(16);
 
         assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    /// A HEARTBEAT_FRAG only announces how far the writer has got, so it cannot raise a total
+    /// the DATA_FRAGs already settled -- doing so left the sample impossible to finish.
+    #[test]
+    fn a_heartbeat_frag_cannot_raise_a_total_the_data_frags_settled() {
+        let mut proxy = empty_writer_proxy();
+        let seq_num = SequenceNumber::from_i64(1);
+        proxy.mark_frag_received(seq_num, 4, [1, 2, 3, 4]);
+
+        proxy.seed_fragment_total(seq_num, 10_000);
+
+        assert!(!proxy.still_missing_fragments(seq_num));
     }
 
     fn buffered_change(seq_num: i64) -> CacheChange {

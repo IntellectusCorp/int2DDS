@@ -3015,11 +3015,8 @@ impl UnicastMessageProcessor for UserLogic {
             // Seed fragment knowledge for this sequence number so the missing
             // set is computable even when every DATA_FRAG of the sample was
             // lost (the announcement carries the last available fragment).
-            writer_proxy.mark_frag_received(
-                heartbeat_frag.writer_sn,
-                heartbeat_frag.last_fragment_num,
-                std::iter::empty::<u32>(),
-            );
+            writer_proxy
+                .seed_fragment_total(heartbeat_frag.writer_sn, heartbeat_frag.last_fragment_num);
 
             if !writer_proxy.still_missing_fragments(heartbeat_frag.writer_sn) {
                 continue;
