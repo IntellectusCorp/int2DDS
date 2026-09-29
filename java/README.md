@@ -1,7 +1,8 @@
 # int2dds-java
 
 Java binding for int2DDS. A JNI layer (`int2dds-java`, a Rust `cdylib`) exposes the
-core's C ABI, and the `api` module wraps it in a DDS-shaped Java API.
+core's C ABI, and the `api` module wraps it in a DDS-shaped Java API. On JDK 22+ the
+multi-release JAR calls the same library through FFM (Panama) downcalls instead of JNI.
 
 ## Requirements
 
@@ -9,6 +10,8 @@ core's C ABI, and the `api` module wraps it in a DDS-shaped Java API.
 - The published classes target **Java 8** (`options.release.set(8)`), with
   multi-release source sets for 9 and 22. The test suite runs on 8, 11, 17, 21 or 25
   via `./gradlew test -PtestJavaVersion=<N>`.
+- The 22 source set is compiled with a JDK 24 toolchain, which Gradle downloads on the
+  first build if none is installed.
 - A Rust toolchain to build the native library.
 
 ## Building
@@ -59,7 +62,7 @@ cd java
 
 Both take `-d`/`--domain <id>` (default 0) and `--reliable` (default `BEST_EFFORT`);
 pass the same reliability on both sides for the two to match. They use the same topic
-and type name as the C# and Rust `HelloWorldPub` examples, so any pair of them
+and type name as the Rust, C# and Python hello_world examples, so any pair of them
 interoperates on the wire.
 
 ## Quick start

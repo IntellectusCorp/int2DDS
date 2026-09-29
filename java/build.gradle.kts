@@ -23,8 +23,8 @@ subprojects {
         useJUnitPlatform()
     }
 
-    // CI runs the test suite on each supported JDK to prove one JAR works
-    // across 8 through 25. Locally this is unset and the build JDK is used.
+    // -PtestJavaVersion=<N> runs the test suite on JDK N, to check that one JAR
+    // works across 8 through 25. Unset, the build JDK is used.
     val testJavaVersion = providers.gradleProperty("testJavaVersion").orNull
     if (testJavaVersion != null) {
         tasks.withType<Test>().configureEach {

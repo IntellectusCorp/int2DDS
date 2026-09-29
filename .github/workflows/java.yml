@@ -48,8 +48,8 @@ jobs:
       - name: Verify the C ABI stays re-exported from the JNI library
         shell: bash
         run: |
-          # Spike S2: the Panama backend planned for a later branch reuses this
-          # same .so, which only works while the dependency rlib's #[no_mangle]
+          # The JDK 22+ Panama (FFM) backend reuses this same .so, which only
+          # works while the dependency rlib's #[no_mangle]
           # symbols reach the dynamic symbol table. They do so because the
           # forwarders reference them — a linker dead-code pass would drop them
           # again if that ever stopped being true.

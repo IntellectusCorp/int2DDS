@@ -48,7 +48,7 @@ import java.util.Objects;
  * is held by a binding-owned native context whose pointer this writer tracks.
  * {@link NativeEntity#close()} is final and does not clear it, so a caller that
  * installed a listener must call {@code setListener(null, null)} before closing
- * to release that context; automatic teardown is deferred to a later branch.
+ * to release that context; automatic teardown is not implemented yet.
  *
  * @param <T> the DDS data type this writer publishes.
  */

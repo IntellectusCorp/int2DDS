@@ -10,8 +10,7 @@ version = Regex("""\[workspace\.package\][\s\S]*?version\s*=\s*"([^"]+)"""")
     .find(cargoToml)?.groupValues?.get(1)
     ?: error("could not read [workspace.package] version from ../Cargo.toml")
 
-// Source set for the JDK 22+ Panama backend, populated on
-// feature/java-panama-backend. Wired now so that branch is purely additive.
+// Source set for the JDK 22+ Panama (FFM) backend.
 val java22 by sourceSets.creating {
     java.srcDir("src/main/java22")
     compileClasspath += sourceSets.main.get().output
@@ -50,7 +49,7 @@ dependencies {
 }
 
 // Tests load the native library built by `cargo build --release -p int2dds-java`.
-// Overridable so CI can point at a downloaded artifact instead.
+// Overridable through INT2DDS_JAVA_LIB.
 tasks.withType<Test>().configureEach {
     // JarLayoutTest's multi-release check inspects the packaged jar itself,
     // not the exploded classes this task otherwise runs against -- without

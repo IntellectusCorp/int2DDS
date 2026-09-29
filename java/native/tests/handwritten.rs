@@ -1,6 +1,6 @@
-// Tests the pure collection logic. The JNI wrapper is exercised end-to-end by
-// the Java-side test added on the feature/java-core-api branch, which is the
-// first branch with a DomainParticipant to build a QoS from.
+// Tests the pure collection logic. The JNI wrapper
+// (participantQosPropertiesWithPrefix) has no Java caller yet, so nothing
+// exercises it end to end.
 use int2dds_java::handwritten::flatten_pairs;
 
 #[test]
