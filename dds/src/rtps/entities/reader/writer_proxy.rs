@@ -161,9 +161,16 @@ impl WriterProxy {
         let Some(first_buffered) = self.buffered_change.first().map(|c| c.sequence_number) else {
             return Vec::new();
         };
-        // Reports the skipped changes lost and drops their ledger entries, as a heartbeat whose
-        // firstSN moved past them would.
-        self.lost_changes_update(first_buffered);
+        // Every sample up to the first buffered one is abandoned here. `lost_changes_update`
+        // reports only what a heartbeat marked missing, and a half-received sample is not that.
+        let mut seq_num = self.expected_sn;
+        while seq_num < first_buffered {
+            if self.changes_from_writer.get(&seq_num).is_none_or(|change| change.is_relevant) {
+                self.on_sample_lost();
+            }
+            seq_num += 1;
+        }
+        self.drop_changes_below(first_buffered);
         self.flush_buffered_changes()
     }
 
@@ -354,6 +361,14 @@ impl WriterProxy {
             })
             .collect();
 
+        self.drop_changes_below(first_available_seq_num);
+    }
+
+    /// Advances past `first_available_seq_num` and forgets what is below it, reporting nothing.
+    fn drop_changes_below(&mut self, first_available_seq_num: SequenceNumber) {
+        self.expected_sn = max(self.expected_sn, first_available_seq_num);
+        let keys: Vec<SequenceNumber> =
+            self.changes_from_writer.range(..first_available_seq_num).map(|(k, _)| *k).collect();
         for key in keys {
             self.changes_from_writer.remove(&key);
         }
@@ -893,6 +908,48 @@ mod tests {
             .and_then(|change| change.fragment_info.as_ref())
             .map(|info| info.total_fragments);
         assert_eq!(total, Some(MAX_FRAGMENTS_PER_SAMPLE));
+    }
+
+    /// A proxy whose SAMPLE_LOST notifications land in the returned counter.
+    #[allow(clippy::type_complexity)]
+    fn counting_writer_proxy() -> (WriterProxy, Arc<std::sync::atomic::AtomicUsize>) {
+        let lost = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = lost.clone();
+        let callback: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync> =
+            Arc::new(move |kind, _| {
+                if kind == StatusKind::SAMPLE_LOST {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        let pub_data = PublicationBuiltinTopicData::default();
+        let proxy = WriterProxy::new(
+            pub_data.endpoint_guid(),
+            pub_data.endpoint_guid().entity_id(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            pub_data,
+            Arc::new(Mutex::new(Some(callback))),
+        );
+        (proxy, lost)
+    }
+
+    /// A half-received sample sits in the ledger as `Received`, so giving it up reported
+    /// nothing; a gapped one is not a loss at all. Both are abandoned here alike.
+    #[test]
+    fn giving_up_a_hole_reports_every_sample_the_writer_still_owed() {
+        let (mut proxy, lost) = counting_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        proxy.mark_frag_received(SequenceNumber::from_i64(1), 4, [1]); // a loss: half received
+        proxy.irrelevant_change_set(SequenceNumber::from_i64(2)); // not a loss: gapped
+                                                                  // 3 is never heard of at all, which is still a loss.
+        for seq_num in 4..=7 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        proxy.give_up_oldest_hole_if_full(16);
+
+        assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 
     fn buffered_change(seq_num: i64) -> CacheChange {
