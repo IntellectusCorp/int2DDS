@@ -333,7 +333,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         // startup burst this is meant to survive.
         let sedp_period = match crate::common::env::get_sedp_heartbeat_ms() {
             Some(ms) => std::time::Duration::from_millis(ms),
-            None => period,
+            None => crate::rtps::logic::sedp_logic::BUILTIN_SEDP_HB_PERIOD,
         };
         let spdp_payload = self.create_spdp_message()?;
 
