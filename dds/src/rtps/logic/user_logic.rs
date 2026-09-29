@@ -29,7 +29,8 @@ use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
-    FragmentInfo, Reader, ReaderCallbackLease, StatefulReader, StatelessReader, WriterProxy,
+    FragmentInfo, FragmentSet, Reader, ReaderCallbackLease, StatefulReader, StatelessReader,
+    WriterProxy,
 };
 use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
@@ -73,6 +74,9 @@ use std::thread::{self, JoinHandle};
 /// How many in-progress fragmented samples a participant holds before the oldest are evicted.
 /// One entry per (writer, reader, sample), so several readers of one topic each take a slot.
 const FRAGMENT_BUFFER_LIMIT: usize = 128;
+// Payload one writer may pin waiting for a hole. In bytes because what it protects is the
+// allocator reuse the receive path needs, and a sample is a kilobyte or a megabyte.
+const IN_ORDER_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 /// Everything a deferred NACK_FRAG needs to build itself, so it can be re-armed without the
 /// caller's stack.
@@ -83,8 +87,9 @@ struct NackFragRequest {
     participant: Arc<Participant>,
     reader_guid: Guid,
     remote_writer_guid: Guid,
-    /// The change the fragment numbers belong to; also keys the timer.
-    incomplete_sn: SequenceNumber,
+    /// The arming heartbeat's `last_sn`. A later sample may still be arriving, so its gaps are
+    /// not losses yet.
+    last_sn: SequenceNumber,
     /// Re-asks left before the periodic heartbeat takes over again. Bounded so a writer that
     /// has gone away, with its proxy still matched, cannot be re-asked forever.
     retries_left: u32,
@@ -98,72 +103,79 @@ impl NackFragRequest {
         TimerId::NackFrag {
             reader_entity_id: self.reader_guid.entity_id(),
             remote_writer_guid: self.remote_writer_guid,
-            sequence_number: self.incomplete_sn,
         }
     }
 
-    /// Sends the request. Returns whether fragments are still outstanding, i.e. whether a retry
-    /// is owed.
+    /// Asks for every incomplete sample up to `last_sn` not asked for within `retry_delay`.
+    /// Returns whether any is still incomplete, i.e. whether a retry is owed.
     fn fire(&self) -> bool {
-        let Ok(mut proxies) = self.writer_proxies.lock() else {
-            warn!("Failed to acquire writer_proxies lock");
-            return false;
-        };
-        let Some(proxy) =
-            proxies.iter_mut().find(|proxy| proxy.remote_writer_guid() == self.remote_writer_guid)
-        else {
-            return false;
-        };
+        let (messages, locators, outstanding) = {
+            let Ok(mut proxies) = self.writer_proxies.lock() else {
+                warn!("Failed to acquire writer_proxies lock");
+                return false;
+            };
+            let Some(proxy) = proxies
+                .iter_mut()
+                .find(|proxy| proxy.remote_writer_guid() == self.remote_writer_guid)
+            else {
+                return false;
+            };
 
-        // Recomputed rather than carried: fragments may have arrived since this was scheduled,
-        // and a retry that re-requests them would pull the whole sample down again.
-        let mut missing_fragments = proxy.get_ascending_missing_fn_list(self.incomplete_sn);
-        if missing_fragments.is_empty() {
-            return false;
-        }
-
-        // The incomplete fragmented sample is recovered by NACK_FRAG alone. Bundling an ACKNACK
-        // that also nacks this sample makes the writer resend it whole from fragment 1. All
-        // missing fragments are requested at once as 256-wide windows, not one window per round.
-        let first_nackfrag_count = proxy.nackfrag_count().wrapping_add(1);
-        let (messages, consumed_count) = match MessageCreator::create_multiple_nackfrag_msgs(
-            self.participant.guid(),
-            proxy.remote_writer_guid(),
-            self.reader_guid.entity_id(),
-            proxy.remote_writer_guid().entity_id(),
-            self.incomplete_sn,
-            &mut missing_fragments,
-            first_nackfrag_count,
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                warn!("[UserLogic] Failed to create NACK_FRAG: {:?}", e);
-                return true;
+            // Not only the oldest: under sustained loss that is the sample the writer drops
+            // next, and the newer ones would become oldest only once they too are out of reach.
+            let due = proxy.take_nackfrag_due(self.last_sn, Instant::now(), self.retry_delay);
+            let mut messages = Vec::new();
+            for sn in due {
+                // Recomputed rather than carried: fragments may have arrived since this was
+                // scheduled, and re-requesting them would pull the whole sample down again.
+                let mut missing_fragments = proxy.get_ascending_missing_fn_list(sn);
+                // The incomplete fragmented sample is recovered by NACK_FRAG alone: an ACKNACK
+                // that also nacks it would make the writer resend it whole from fragment 1.
+                let first_nackfrag_count = proxy.nackfrag_count().wrapping_add(1);
+                match MessageCreator::create_multiple_nackfrag_msgs(
+                    self.participant.guid(),
+                    proxy.remote_writer_guid(),
+                    self.reader_guid.entity_id(),
+                    proxy.remote_writer_guid().entity_id(),
+                    sn,
+                    &mut missing_fragments,
+                    first_nackfrag_count,
+                ) {
+                    Ok((sample_messages, consumed_count)) => {
+                        for _ in 0..consumed_count {
+                            proxy.increase_nackfrag_count();
+                        }
+                        messages.extend(sample_messages);
+                    }
+                    Err(e) => warn!("[UserLogic] Failed to create NACK_FRAG: {:?}", e),
+                }
             }
-        };
+            let outstanding =
+                proxy.first_incomplete_fragmented_sn(SequenceNumber::ZERO, self.last_sn).is_some();
 
-        for _ in 0..consumed_count {
-            proxy.increase_nackfrag_count();
-        }
-
-        // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with can_handle
-        // guarding the local-side reachability.
-        let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
-        let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
-            let v: Vec<&Locator> = locs
-                .iter()
-                .copied()
-                .filter(|l| is_kind(l) && self.transport.can_handle(l))
+            // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with
+            // can_handle guarding the local-side reachability.
+            let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
+            let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+                let v: Vec<&Locator> = locs
+                    .iter()
+                    .copied()
+                    .filter(|l| is_kind(l) && self.transport.can_handle(l))
+                    .collect();
+                (!v.is_empty()).then_some(v)
+            };
+            let chosen: Vec<Locator> = try_kind(Locator::is_shm)
+                .or_else(|| try_kind(Locator::is_tcp))
+                .or_else(|| try_kind(Locator::is_udp))
+                .unwrap_or(locs)
+                .into_iter()
+                .cloned()
                 .collect();
-            (!v.is_empty()).then_some(v)
-        };
-        let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
-            .or_else(|| try_kind(Locator::is_tcp))
-            .or_else(|| try_kind(Locator::is_udp))
-            .unwrap_or(locs);
+            (messages, chosen, outstanding)
+        }; // released before sending: the receive path takes this lock on every DATA_FRAG
 
         for buffer in &messages {
-            for locator in &chosen {
+            for locator in &locators {
                 match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                     Ok(_) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
@@ -174,7 +186,7 @@ impl NackFragRequest {
             }
         }
 
-        true
+        outstanding
     }
 }
 
@@ -368,6 +380,9 @@ fn carried_spend(spent: usize, since: Instant, now: Instant, backstop: Duration)
 /// participant owns. Without that, every send call opened a fresh full window, and the peer's
 /// socket -- which drains at the peer's pace, not ours -- saw the sum of them.
 struct SendWindows {
+    /// `INT2DDS_ENABLE_SEND_WINDOW`, read once per send. False resolves every window unbounded
+    /// and records no charge, so neither the peer's proxy list nor the shared budget is touched.
+    is_enabled: bool,
     /// This participant's own receive buffer, the fallback for a peer that does not advertise.
     own: Option<usize>,
     /// (window, bytes charged in this call) per destination, resolved on first use. The second
@@ -385,6 +400,7 @@ impl SendWindows {
         credit: Option<Arc<DashMap<GuidPrefix, SendCredit>>>,
     ) -> Self {
         Self {
+            is_enabled: crate::common::env::get_enable_send_window(),
             own: transport.advertised_receive_buffer_size(),
             state: HashMap::new(),
             credit,
@@ -404,6 +420,41 @@ impl SendWindows {
         } else {
             None
         }
+    }
+
+    /// The part of `plan` this send may put toward `dst`, charging what it keeps.
+    ///
+    /// Disabled, the plan comes back as it went in and nothing else here runs: no window is
+    /// resolved, `dst`'s proxy list is never locked and the shared budget is never written.
+    fn bound_plan_to_window(
+        &mut self,
+        participant: &Participant,
+        dst: GuidPrefix,
+        reliable: bool,
+        plan: Vec<(u32, u32, bool)>,
+        fragment_size: usize,
+        sample_size: usize,
+        locator_count: usize,
+        with_heartbeat: bool,
+    ) -> Vec<(u32, u32, bool)> {
+        if !self.is_enabled {
+            return plan;
+        }
+
+        let (remaining, untouched) = self.remaining(participant, dst, reliable);
+
+        let (bounded, charged) = bound_fragment_plan(
+            &plan,
+            fragment_size,
+            sample_size,
+            locator_count,
+            remaining,
+            untouched,
+            with_heartbeat,
+        );
+        self.charge(dst, charged, reliable);
+
+        bounded
     }
 
     /// Bytes still allowed toward `dst`, and whether nothing has gone out to it yet in this send.
@@ -722,6 +773,9 @@ impl UserLogic {
             group_id: EntityId,
             reliable: bool,
             requested_change_types: Vec<RequestedChangeType>,
+            // The history's bounds when the plan was read, for the heartbeat that rides the resend.
+            first_sn: SequenceNumber,
+            last_sn: SequenceNumber,
         }
 
         // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
@@ -784,11 +838,14 @@ impl UserLogic {
 
             reader_proxy.empty_requested_changes();
 
+            let last_sn = cache_guard.get_seq_num_max().unwrap_or(SequenceNumber::ZERO);
             SendPlan {
                 locators: reader_proxy.unicast_locator_list().to_vec(),
                 group_id: reader_proxy.remote_group_entity_id(),
                 reliable: reader_proxy.is_reliable(),
                 requested_change_types,
+                first_sn: cache_guard.get_seq_num_min().unwrap_or(last_sn),
+                last_sn,
             }
         };
 
@@ -797,7 +854,8 @@ impl UserLogic {
         }
 
         // Serialize and send outside both locks, reusing one buffer.
-        let SendPlan { locators, group_id, reliable, requested_change_types } = plan;
+        let SendPlan { locators, group_id, reliable, requested_change_types, first_sn, last_sn } =
+            plan;
         let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
 
         let mut send_buffer = participant
@@ -853,17 +911,18 @@ impl UserLogic {
                 let plan = fragment_send_plan(&[(1, total_fragments)], frags_per_msg);
 
                 // Bound the resend by what this participant's receive buffer still allows.
-                let (remaining, untouched) = windows.remaining(&participant, dst_prefix, reliable);
-                let (plan, charged) = bound_fragment_plan(
-                    &plan,
+                let plan = windows.bound_plan_to_window(
+                    &participant,
+                    dst_prefix,
+                    reliable,
+                    plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    selected.len(),
+                    self.locators_to_send_to(locators.iter()).len(),
                     remaining,
                     untouched,
                     piggyback,
                 );
-                windows.charge(dst_prefix, charged, reliable);
 
                 for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
@@ -874,11 +933,14 @@ impl UserLogic {
 
                     // The heartbeat rides the last datagram of the window, not only the last of
                     // the sample: without it the reader has no trigger to ask for the rest.
+                    //
+                    // firstSN is the oldest held change, not the one resent; the reader drops
+                    // below it, including samples this same pass is still repairing.
                     let heartbeat_info = (piggyback && is_last).then(|| {
                         (
                             stateful_writer.heartbeat_count(),
-                            requested_change_sn,
-                            requested_change_sn,
+                            first_sn,
+                            last_sn,
                             false, // final_flag
                             false, // liveliness_flag = false for retransmission
                         )
@@ -1001,6 +1063,8 @@ impl UserLogic {
                 "Writer cache should not be empty while sending DATA_FRAG",
             )
         })?;
+        // firstSN is the oldest held change, not the repaired one; the reader drops below it.
+        let first_sn = history_cache_guard.get_seq_num_min().unwrap_or(last_sn);
 
         // Kept apart from `piggyback`: a reliable reader with piggyback disabled still answers
         // off the periodic heartbeat, so its charge is still releasable.
@@ -1050,23 +1114,22 @@ impl UserLogic {
 
             // A request larger than one window is served as far as the window reaches; the rest
             // is dropped, and the reader re-asks once this window's heartbeat arrives.
-            let (remaining, untouched) = windows.remaining(&participant, dst_prefix, reliable);
-            let (plan, charged) = bound_fragment_plan(
-                &plan,
+            let plan = windows.bound_plan_to_window(
+                &participant,
+                dst_prefix,
+                reliable,
+                plan,
                 change.fragment_size() as usize,
                 change.data_value().len(),
                 locator_count,
-                remaining,
-                untouched,
                 piggyback,
             );
-            windows.charge(dst_prefix, charged, reliable);
 
             for (fragment_num, count, is_last) in plan {
                 // The heartbeat rides the last datagram of the window, so the reader always has
                 // a trigger for the next NACK_FRAG.
                 let heartbeat_info = (piggyback && is_last)
-                    .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
+                    .then(|| (stateful_writer.heartbeat_count(), first_sn, last_sn, false, false));
 
                 if self.send_data_frag_to_reader_proxy(
                     &change,
@@ -1332,18 +1395,18 @@ impl UserLogic {
                 // Bound the burst by this participant's receive buffer; the fragments beyond
                 // the window are dropped, and the reader asks for them off the heartbeat below.
                 let is_reliable_batch = members.iter().any(|(_, plan)| plan.reliable);
-                let (remaining, untouched) =
-                    windows.remaining(&participant, dst_prefix, is_reliable_batch);
-                let (plan, charged) = bound_fragment_plan(
-                    &plan,
+                let plan = windows.bound_plan_to_window(
+                    &participant,
+                    dst_prefix,
+                    is_reliable_batch,
+                    plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    selected.len(),
+                    self.locators_to_send_to(locators.iter()).len(),
                     remaining,
                     untouched,
                     is_piggyback_wanted,
                 );
-                windows.charge(dst_prefix, charged, is_reliable_batch);
 
                 for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
@@ -1527,18 +1590,18 @@ impl UserLogic {
 
                             // Bound the burst by this participant's receive buffer; what is left
                             // over is dropped and re-requested off the window's heartbeat.
-                            let (remaining, untouched) =
-                                windows.remaining(&participant, reader_guid.prefix(), reliable);
-                            let (plan, charged) = bound_fragment_plan(
-                                &plan,
+                            let plan = windows.bound_plan_to_window(
+                                &participant,
+                                reader_guid.prefix(),
+                                reliable,
+                                plan,
                                 a_change.fragment_size() as usize,
                                 a_change.data_value().len(),
-                                selected.len(),
+                                self.locators_to_send_to(locators.iter()).len(),
                                 remaining,
                                 untouched,
                                 reliable && piggyback,
                             );
-                            windows.charge(reader_guid.prefix(), charged, reliable);
 
                             for (fragment_num, count, is_last) in plan {
                                 let Some(fragment_data) =
@@ -2410,6 +2473,8 @@ impl UserLogic {
                         writer_proxy.expected_sn()
                     );
                     writer_proxy.add_buffered_change(change);
+                    let released = writer_proxy.give_up_oldest_hole_if_full(IN_ORDER_BUFFER_BYTES);
+                    change_to_add.extend(released);
                 }
             }
         } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
@@ -2494,6 +2559,58 @@ impl UserLogic {
             reader_proxy.remove_cached_sn_on_cache_change_removal(sequence_number);
         }
         Ok(())
+    }
+
+    /// Evict old reassembly buffers once the map is over its cap, sparing this sample's keys.
+    /// Called only when a DATA_FRAG opens a new buffer: `len` read-locks every shard.
+    fn evict_fragment_buffers_if_full(
+        &self,
+        writer_guid: Guid,
+        matched_readers: &[ReaderCallbackLease],
+        sn: SequenceNumber,
+    ) {
+        if self.fragment_buffers.len() <= FRAGMENT_BUFFER_LIMIT {
+            return;
+        }
+        debug!(
+            "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
+            self.fragment_buffers.len()
+        );
+        // This datagram writes one key per matched reader; excluding all of them is what stops
+        // the arriving fragment from evicting its own buffer.
+        let arriving_keys: Vec<(Guid, EntityId, SequenceNumber)> = matched_readers
+            .iter()
+            .map(|reader| (writer_guid, reader.guid().entity_id(), sn))
+            .collect();
+        for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
+            self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
+        {
+            // The bytes are gone, so the ledger must stop claiming them. The key names the
+            // one reader that lost them; every other reader's buffer is still whole.
+            let Ok(readers) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
+            else {
+                continue;
+            };
+            for reader in readers {
+                let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+                    continue;
+                };
+                let writer_proxies = stateful_reader.writer_proxies();
+                let Ok(mut matched_writers) = writer_proxies.lock() else {
+                    continue;
+                };
+                if let Some(writer_proxy) = matched_writers
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
+                {
+                    // A complete ledger means the sample was already delivered and a late
+                    // repair merely recreated the buffer. Only a stranded one is retracted.
+                    if !writer_proxy.all_fragments_received(evicted_sn) {
+                        writer_proxy.forget_fragments(evicted_sn);
+                    }
+                }
+            }
+        }
     }
 
     /// Evicts buffers over the cap and returns the keys removed, so the caller can retract the
@@ -3257,11 +3374,11 @@ impl UnicastMessageProcessor for UserLogic {
                     }
                 }
             } else {
-                // Case when fragments are not completely received yet - apply suppression delay
-                // `incomplete_sn`, not `heartbeat.last_sn`: the writer resolves the request
-                // against `writer_sn`, and it also keys the suppression timer.
-                if let Some(incomplete_sn) = writer_proxy
+                // Fragments are still missing somewhere in the heartbeat's range, so arm the
+                // chain that asks for all of them.
+                if writer_proxy
                     .first_incomplete_fragmented_sn(heartbeat.first_sn, heartbeat.last_sn)
+                    .is_some()
                 {
                     let request = NackFragRequest {
                         writer_proxies: writer_proxies.clone(),
@@ -3269,7 +3386,7 @@ impl UnicastMessageProcessor for UserLogic {
                         participant: participant.clone(),
                         reader_guid: stateful_reader.guid(),
                         remote_writer_guid: writer_proxy.remote_writer_guid(),
-                        incomplete_sn,
+                        last_sn: heartbeat.last_sn,
                         retries_left: stateful_reader.nack_frag_max_retries(),
                         retry_delay: stateful_reader.nack_frag_retry_delay().to_std_duration(),
                     };
@@ -3351,11 +3468,8 @@ impl UnicastMessageProcessor for UserLogic {
             // Seed fragment knowledge for this sequence number so the missing
             // set is computable even when every DATA_FRAG of the sample was
             // lost (the announcement carries the last available fragment).
-            writer_proxy.mark_frag_received(
-                heartbeat_frag.writer_sn,
-                heartbeat_frag.last_fragment_num,
-                std::iter::empty::<u32>(),
-            );
+            writer_proxy
+                .seed_fragment_total(heartbeat_frag.writer_sn, heartbeat_frag.last_fragment_num);
 
             if !writer_proxy.still_missing_fragments(heartbeat_frag.writer_sn) {
                 continue;
@@ -3592,52 +3706,7 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
-        // DashMap is thread-safe, so no explicit lock is needed
-        //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
-        // Raised with the per-reader key: the same workload now needs one buffer per reader,
-        // and evicting an in-progress one is the very loss this key change removes.
-        if self.fragment_buffers.len() > FRAGMENT_BUFFER_LIMIT {
-            debug!(
-                "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
-                self.fragment_buffers.len()
-            );
-            // This datagram is about to write one key per matched reader below; excluding all
-            // of them is what stops the arriving fragment from evicting its own buffer.
-            let arriving_keys: Vec<(Guid, EntityId, SequenceNumber)> = matched_readers
-                .iter()
-                .map(|reader| (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn))
-                .collect();
-            for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
-                self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
-            {
-                // The bytes are gone, so the ledger must stop claiming them. The key names the
-                // one reader that lost them; every other reader's buffer is still whole.
-                let Ok(readers) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
-                else {
-                    continue;
-                };
-                for reader in readers {
-                    let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
-                    else {
-                        continue;
-                    };
-                    let writer_proxies = stateful_reader.writer_proxies();
-                    let Ok(mut matched_writers) = writer_proxies.lock() else {
-                        continue;
-                    };
-                    if let Some(writer_proxy) = matched_writers
-                        .iter_mut()
-                        .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
-                    {
-                        // A complete ledger means the sample was already delivered and a late
-                        // repair merely recreated the buffer. Only a stranded one is retracted.
-                        if !writer_proxy.all_fragments_received(evicted_sn) {
-                            writer_proxy.forget_fragments(evicted_sn);
-                        }
-                    }
-                }
-            }
-        }
+        let payload = data_frag.serialized_bytes();
 
         // The key carries the reader, so the fragments go into each matched reader's own
         // buffer. Completion is then single-reader: a buffer belongs to exactly one.
@@ -3648,11 +3717,26 @@ impl UnicastMessageProcessor for UserLogic {
             // its payload holds, and the ledger drives NACK_FRAG.
             let mut accepted: Vec<u32> = Vec::new();
 
-            // Copy fragment data using DashMap entry API
-            {
-                let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
-                    FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
-                });
+            // One map lookup per reader, plus `remove` on completion. Only a DATA_FRAG that opens
+            // a buffer pays for the cap check, since `len` read-locks every shard.
+            let (total_fragments, complete) = {
+                let mut buffer = match self.fragment_buffers.get_mut(&key) {
+                    Some(buffer) => buffer,
+                    None => {
+                        self.evict_fragment_buffers_if_full(
+                            remote_writer_guid,
+                            &matched_readers,
+                            data_frag.writer_sn,
+                        );
+                        self.fragment_buffers.entry(key).or_insert_with(|| {
+                            FragmentBuffer::new(
+                                data_frag.writer_sn,
+                                total_size,
+                                data_frag.fragment_size,
+                            )
+                        })
+                    }
+                };
 
                 if buffer.source_timestamp.is_none() {
                     // timestamp does not be set in buffer.source_timestmap yet
@@ -3661,9 +3745,9 @@ impl UnicastMessageProcessor for UserLogic {
                     }
                 }
 
-                // Zero-copy: per-fragment slices are refcount bumps on the socket buffer, so
-                // fanning the write out across readers costs slot arrays, not payload copies.
-                if let Some(serialized_bytes) = data_frag.serialized_bytes() {
+                // Fragments are copied straight out of the datagram; a per-fragment `Bytes::slice`
+                // would only add a refcount round trip.
+                if let Some(serialized_bytes) = payload {
                     let frag_size = data_frag.fragment_size as usize;
                     let total_len = serialized_bytes.len();
                     for i in 0..data_frag.fragments_in_submessage {
@@ -3677,57 +3761,43 @@ impl UnicastMessageProcessor for UserLogic {
                         let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
                         if buffer.copy_fragment_data(
                             fragment_num,
-                            serialized_bytes.slice(frag_data_start..frag_data_end),
+                            &serialized_bytes[frag_data_start..frag_data_end],
                         ) {
                             accepted.push(fragment_num);
                         }
                     }
                 }
-            } // buffer RefMut is automatically dropped here
+                (buffer.total_fragments, buffer.all_fragments_received())
+            }; // buffer RefMut is dropped here, releasing its shard
 
             // Update this reader's ChangeFromWriter state from the buffer that just took them.
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                // Query buffer information from DashMap again
-                if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-                    let total_fragments = buffer_ref.total_fragments;
-                    drop(buffer_ref);
+                let writer_proxies = stateful_reader.writer_proxies();
+                let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        format!("Failed to acquire writer_proxies lock: {}", e),
+                    )
+                })?;
 
-                    let writer_proxies = stateful_reader.writer_proxies();
-                    let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to acquire writer_proxies lock: {}", e),
-                        )
-                    })?;
-
-                    if let Some(writer_proxy) = matched_writers
-                        .iter_mut()
-                        .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                    {
-                        // Update fragment information with what the buffer took
-                        writer_proxy.mark_frag_received(
-                            data_frag.writer_sn,
-                            total_fragments,
-                            accepted.iter().copied(),
-                        );
-                    }
+                if let Some(writer_proxy) = matched_writers
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                {
+                    // Update fragment information with what the buffer took
+                    writer_proxy.mark_frag_received(
+                        data_frag.writer_sn,
+                        total_fragments,
+                        accepted.iter().copied(),
+                    );
                 }
             }
 
-            // Check if all fragments have been received and process
-            let Some(buffer_ref) = self.fragment_buffers.get(&key) else {
-                continue;
-            };
-            if !buffer_ref.all_fragments_received() {
+            if !complete {
                 continue;
             }
-            let total_fragments = buffer_ref.total_fragments;
             // complete here; delivery FragmentInfo's set is unused when is_complete
-            let received_fragments: std::collections::HashSet<u32> =
-                std::collections::HashSet::new();
-
-            // Drop buffer_ref to release DashMap lock
-            drop(buffer_ref);
+            let received_fragments = FragmentSet::new();
 
             // Move payload from buffer without cloning
             let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
@@ -3801,7 +3871,12 @@ impl UnicastMessageProcessor for UserLogic {
                 reader.as_ref(),
                 data_frag.writer_sn,
                 remote_writer_guid,
-                Some(FragmentInfo { total_fragments, received_fragments, is_complete: true }),
+                Some(FragmentInfo {
+                    total_fragments,
+                    received_fragments,
+                    is_complete: true,
+                    last_nack: None,
+                }),
             );
         }
 
@@ -4390,6 +4465,9 @@ mod tests {
         first_fragment: u32,
         fragment_count: u16,
         carries_heartbeat: bool,
+        /// The riding HEARTBEAT's firstSN and lastSN, if any.
+        heartbeat_first_sn: Option<i64>,
+        heartbeat_last_sn: Option<i64>,
     }
 
     /// A transport that sends nowhere and records what it was asked to send.
@@ -4413,6 +4491,8 @@ mod tests {
                 first_fragment: 0,
                 fragment_count: 0,
                 carries_heartbeat: false,
+                heartbeat_first_sn: None,
+                heartbeat_last_sn: None,
             };
             while offset + 4 <= data.len() {
                 let id = data[offset];
@@ -4420,6 +4500,15 @@ mod tests {
                 let body = offset + 4;
                 if id == SubmessageId::HEARTBEAT.as_u8() {
                     datagram.carries_heartbeat = true;
+                    if body + 24 <= data.len() {
+                        let sn_at = |at: usize| {
+                            let high = i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+                            let low = u32::from_le_bytes(data[at + 4..at + 8].try_into().unwrap());
+                            SequenceNumber::new(high, low).to_i64()
+                        };
+                        datagram.heartbeat_first_sn = Some(sn_at(body + 8));
+                        datagram.heartbeat_last_sn = Some(sn_at(body + 16));
+                    }
                 } else if id == SubmessageId::DATA_FRAG.as_u8() && body + 26 <= data.len() {
                     datagram.first_fragment =
                         u32::from_le_bytes(data[body + 20..body + 24].try_into().unwrap());
@@ -4490,6 +4579,9 @@ mod tests {
         locators: Vec<Locator>,
         advertised: Option<usize>,
     ) -> (Arc<Participant>, UserLogic, Arc<DatagramRecorder>, Arc<StatefulWriter>, GuidPrefix) {
+        // Every caller is about what the window does, and the window is off unless asked for.
+        crate::common::env::set_enable_send_window(true);
+
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let recorder = Arc::new(DatagramRecorder::default());
         let transport: Arc<dyn TransportPlugin> = recorder.clone();
@@ -4507,6 +4599,18 @@ mod tests {
 
         let writer_entity_id =
             EntityId::new([0x10, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        // Spelled out rather than `PublicationBuiltinTopicData::default()`, which reads the
+        // piggyback-heartbeat env var a sibling test sets while these run.
+        let writer_qos = crate::publication::qos::DataWriterQos {
+            writer_reliability_extension:
+                crate::infrastructure::qos_policy::WriterReliabilityExtensionQosPolicy::DEFAULT,
+            ..Default::default()
+        };
+        let topic_data = PublicationBuiltinTopicData::new(
+            &writer_qos,
+            &crate::publication::qos::PublisherQos::default(),
+            &crate::topic::qos::TopicQos::default(),
+        );
         // `Weak::new()` for the cache: `add_change` would otherwise pump the send path itself,
         // and these tests drive it explicitly one round at a time.
         let writer = Arc::new(StatefulWriter::new(
@@ -4518,7 +4622,7 @@ mod tests {
             writer_entity_id,
             -1,
             None,
-            PublicationBuiltinTopicData::default(),
+            topic_data,
             Weak::new(),
         ));
 
@@ -4871,6 +4975,78 @@ mod tests {
         assert_eq!(remote_prefix, [0xD0; 12]);
     }
 
+    /// Stamping firstSN with the repaired sample made the reader give up older ones under repair.
+    #[test]
+    fn a_repair_heartbeat_advertises_the_oldest_sample_the_writer_holds() {
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
+        for n in 1..=3 {
+            let change = Arc::new(CacheChange::create_fragmented(
+                ChangeKind::Alive,
+                writer.guid(),
+                InstanceHandle::NIL,
+                SequenceNumber::from_i64(n),
+                // Past one message, so the change is actually fragmented.
+                &vec![0xA5; 20 * WINDOW_TEST_FRAG_SIZE],
+                None,
+                WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+                WINDOW_TEST_FRAG_SIZE,
+            ));
+            writer.writer_cache().lock().unwrap().add_change(change, writer.as_ref()).unwrap();
+        }
+        let reader_guid = {
+            let proxies = writer.reader_proxies();
+            let mut guard = proxies.lock().unwrap();
+            guard[0].requested_fragments_add(SequenceNumber::from_i64(2), 1, 20, vec![2]);
+            guard[0].remote_reader_guid()
+        };
+
+        user_logic.send_requested_fragments(writer.guid().entity_id(), reader_guid).unwrap();
+
+        let advertised: Vec<(i64, i64)> = recorder
+            .take()
+            .iter()
+            .filter_map(|d| Some((d.heartbeat_first_sn?, d.heartbeat_last_sn?)))
+            .collect();
+        assert_eq!(advertised, vec![(1, 3)]);
+    }
+
+    /// The ACKNACK resend path carries the same heartbeat, so it needs the same firstSN.
+    #[test]
+    fn an_acknack_resend_heartbeat_advertises_the_oldest_sample_the_writer_holds() {
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
+        for n in 1..=3 {
+            let change = Arc::new(CacheChange::create_fragmented(
+                ChangeKind::Alive,
+                writer.guid(),
+                InstanceHandle::NIL,
+                SequenceNumber::from_i64(n),
+                // Past one message, so the change is actually fragmented.
+                &vec![0xA5; 20 * WINDOW_TEST_FRAG_SIZE],
+                None,
+                WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+                WINDOW_TEST_FRAG_SIZE,
+            ));
+            writer.writer_cache().lock().unwrap().add_change(change, writer.as_ref()).unwrap();
+        }
+        let reader_guid = {
+            let proxies = writer.reader_proxies();
+            let mut guard = proxies.lock().unwrap();
+            guard[0].requested_changes_set(vec![SequenceNumber::from_i64(2)]);
+            guard[0].remote_reader_guid()
+        };
+
+        user_logic.send_requested_changes(writer.guid().entity_id(), reader_guid).unwrap();
+
+        let advertised: Vec<(i64, i64)> = recorder
+            .take()
+            .iter()
+            .filter_map(|d| Some((d.heartbeat_first_sn?, d.heartbeat_last_sn?)))
+            .collect();
+        assert_eq!(advertised, vec![(1, 3)]);
+    }
+
     #[test]
     fn a_peer_that_does_not_advertise_falls_back_without_stalling() {
         let (_participant, user_logic, recorder, writer, _) = windowed_writer(1, 1, None);
@@ -5125,10 +5301,7 @@ mod tests {
             let mut buffer =
                 FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
             for fragment in 1..=4u32 {
-                buffer.copy_fragment_data(
-                    fragment,
-                    bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
-                );
+                buffer.copy_fragment_data(fragment, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
             }
             assert!(buffer.all_fragments_received(), "filler buffers must not be eviction bait");
             user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
@@ -5411,6 +5584,82 @@ mod tests {
         );
     }
 
+    /// Over the cap, a burst addressed to both readers opens one buffer per reader and runs
+    /// the cap check before each. The second check must not evict the first reader's new buffer.
+    #[test]
+    fn a_fan_out_over_the_cap_keeps_every_buffer_it_opens() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
+
+        fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8 + 1);
+        assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            1,
+            vec![1, 1, 1, 1],
+        );
+
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)));
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_b_id, sn)));
+        assert_eq!(
+            user_logic.fragment_buffers.len(),
+            FRAGMENT_BUFFER_LIMIT + 1,
+            "each opened buffer must be paid for by evicting one filler"
+        );
+        assert_eq!(ledger_missing(&reader_a, writer_guid, sn), vec![2, 3, 4]);
+        assert_eq!(ledger_missing(&reader_b, writer_guid, sn), vec![2, 3, 4]);
+    }
+
+    /// Only a DATA_FRAG that opens a buffer runs the cap check, so one that continues an
+    /// existing buffer leaves an over-cap map as it is.
+    #[test]
+    fn continuing_a_buffer_over_the_cap_evicts_nothing() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            1,
+            1,
+            vec![1, 1, 1, 1],
+        );
+        fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8);
+        assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            2,
+            1,
+            vec![2, 2, 2, 2],
+        );
+
+        assert_eq!(
+            user_logic.fragment_buffers.len(),
+            FRAGMENT_BUFFER_LIMIT + 1,
+            "a continuing fragment must not evict"
+        );
+        assert_eq!(ledger_missing(&reader_a, writer_guid, sn), vec![3, 4]);
+    }
+
     #[test]
     fn evicting_one_readers_buffer_leaves_the_other_readers_ledger_alone() {
         let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
@@ -5446,14 +5695,14 @@ mod tests {
         fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8 - 1);
         assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
 
-        // One more datagram for reader B: the cap check evicts one buffer, reader A's.
+        // Reader B opens the next sample: the cap check evicts one buffer, reader A's.
         feed_fragment(
             &mut user_logic,
             prefix,
             writer_guid,
-            sn,
+            sn.next(),
             reader_b_id,
-            3,
+            1,
             1,
             vec![3, 3, 3, 3],
         );
@@ -5473,8 +5722,8 @@ mod tests {
         );
         assert_eq!(
             ledger_missing(&reader_b, writer_guid, sn),
-            vec![4],
-            "reader B's buffer still holds fragments 1..=3; retracting its record would make it \
+            vec![3, 4],
+            "reader B's buffer still holds fragments 1..=2; retracting its record would make it \
              re-request bytes it has, and the writer resend them into a buffer that already \
              counted them"
         );
@@ -5638,10 +5887,7 @@ mod tests {
             let sn = SequenceNumber::new(0, 1);
             let mut buffer =
                 FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
-            buffer.copy_fragment_data(
-                1,
-                bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
-            );
+            buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
             user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
         }
 
@@ -5680,10 +5926,7 @@ mod tests {
                 let key = (writer_guid, reader_id, sn);
                 let mut buffer =
                     FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
-                buffer.copy_fragment_data(
-                    1,
-                    bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
-                );
+                buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
                 buffers.insert(key, buffer);
                 key
             })
@@ -5844,11 +6087,13 @@ mod tests {
     /// real socket.
     struct RecordingTransport {
         sends: Arc<Mutex<Vec<Instant>>>,
+        payloads: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl TransportPlugin for RecordingTransport {
-        fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+        fn send(&self, data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
             self.sends.lock().expect("sends lock").push(Instant::now());
+            self.payloads.lock().expect("payloads lock").push(data.to_vec());
             Ok(())
         }
         fn can_handle(&self, _locator: &Locator) -> bool {
@@ -5892,9 +6137,28 @@ mod tests {
         SequenceNumber,
         Arc<Mutex<Vec<Instant>>>,
     ) {
+        let (participant, user_logic, reader, writer_guid, sn, sends, _) =
+            reader_recording_nack_frags(qos);
+        (participant, user_logic, reader, writer_guid, sn, sends)
+    }
+
+    /// `reader_with_nack_frag_qos`, also keeping every sent datagram's bytes.
+    #[allow(clippy::type_complexity)]
+    fn reader_recording_nack_frags(
+        qos: ReaderReliabilityExtensionQosPolicy,
+    ) -> (
+        Arc<Participant>,
+        UserLogic,
+        Arc<StatefulReader>,
+        Guid,
+        SequenceNumber,
+        Arc<Mutex<Vec<Instant>>>,
+        Arc<Mutex<Vec<Vec<u8>>>>,
+    ) {
         let sends = Arc::new(Mutex::new(Vec::new()));
+        let payloads = Arc::new(Mutex::new(Vec::new()));
         let transport: Arc<dyn TransportPlugin> =
-            Arc::new(RecordingTransport { sends: sends.clone() });
+            Arc::new(RecordingTransport { sends: sends.clone(), payloads: payloads.clone() });
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let user_logic = UserLogic::new(participant.clone(), transport);
         participant.set_user_logic(Arc::new(Some(user_logic.clone())));
@@ -5947,7 +6211,167 @@ mod tests {
         drop(guard);
         participant.add_reader("nack_frag_qos_test_topic", reader.clone());
 
-        (participant, user_logic, reader, writer_guid, sn, sends)
+        (participant, user_logic, reader, writer_guid, sn, sends, payloads)
+    }
+
+    /// The bound is only worth having if the receive path applies it: without the wiring the
+    /// reader buffers every later sample for a hole that never fills.
+    #[test]
+    fn the_receive_path_gives_up_a_hole_once_the_in_order_buffer_is_full() {
+        let (_participant, user_logic, reader, writer_guid, sn, _, _) =
+            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+        // `sn` never arrives. The four that follow fill the bound exactly.
+        let payload = vec![0u8; IN_ORDER_BUFFER_BYTES / 4];
+        for step in 1..=4 {
+            let seq_num = SequenceNumber::from_i64(sn.to_i64() + step);
+            let change = CacheChange::new(
+                ChangeKind::Alive,
+                writer_guid,
+                InstanceHandle::NIL,
+                seq_num,
+                payload.clone(),
+                None,
+            );
+            user_logic
+                .deliver_change_to_reader(change, reader.as_ref(), seq_num, writer_guid, None)
+                .expect("delivery must not error");
+        }
+
+        let cache = reader.reader_cache();
+        let guard = cache.lock().expect("reader cache lock");
+        assert_eq!(guard.get_seq_num_max(), Some(SequenceNumber::from_i64(sn.to_i64() + 4)));
+    }
+
+    /// The writer sequence number of every NACK_FRAG in `payloads`, in send order.
+    fn nack_frag_sns(payloads: &Mutex<Vec<Vec<u8>>>, local_prefix: GuidPrefix) -> Vec<i64> {
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let mut sns = Vec::new();
+        for payload in payloads.lock().unwrap().iter() {
+            let mut receiver = MessageReceiver::new(local_prefix, &from_addr);
+            let message = receiver.init(&bytes::Bytes::from(payload.clone())).unwrap();
+            for submessage in &message.submessages {
+                if let crate::rtps::messages::submessage_body::SubmessageBody::NackFrag(nack_frag) =
+                    &submessage.body
+                {
+                    sns.push(nack_frag.writer_sn.to_i64());
+                }
+            }
+        }
+        sns
+    }
+
+    fn heartbeat_for(
+        user_logic: &mut UserLogic,
+        writer_guid: Guid,
+        reader_id: EntityId,
+        first: i64,
+        last: i64,
+        count: u32,
+    ) {
+        let heartbeat = Heartbeat::new(
+            reader_id,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(first),
+            SequenceNumber::from_i64(last),
+            count,
+        );
+        let rtps_header = Header::new(writer_guid.prefix());
+        let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
+        user_logic
+            .handle_heartbeat_message(&rtps_header, &submessage_header, &heartbeat)
+            .expect("heartbeat handling must not error");
+    }
+
+    fn wait_for_nack_frags(payloads: &Mutex<Vec<Vec<u8>>>, prefix: GuidPrefix, n: usize) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while nack_frag_sns(payloads, prefix).len() < n && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The oldest incomplete sample is the one the writer drops next; asking only for it failed.
+    #[test]
+    fn every_incomplete_sample_a_heartbeat_covers_is_asked_for() {
+        // Long enough that a legitimate retry cannot land inside the test and skew the count.
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_retry_delay: DcpsDuration::from_millis(30_000),
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
+            reader_recording_nack_frags(qos);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+        for sn in 1..=2 {
+            let sn = SequenceNumber::from_i64(sn);
+            feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1; 4]);
+        }
+
+        heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 2, 1);
+        wait_for_nack_frags(&payloads, prefix, 2);
+
+        let mut asked = nack_frag_sns(&payloads, prefix);
+        asked.sort_unstable();
+        assert_eq!(asked, vec![1, 2]);
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
+    }
+
+    /// A sample past the heartbeat's `last_sn` may still be arriving; asking for its "missing"
+    /// fragments would pull down fragments already in flight.
+    #[test]
+    fn a_sample_past_the_heartbeat_is_not_asked_for() {
+        // Long enough that a legitimate retry cannot land inside the test and skew the count.
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_retry_delay: DcpsDuration::from_millis(30_000),
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
+            reader_recording_nack_frags(qos);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+        for sn in 1..=2 {
+            let sn = SequenceNumber::from_i64(sn);
+            feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1; 4]);
+        }
+
+        heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 1, 1);
+        wait_for_nack_frags(&payloads, prefix, 1);
+        thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(nack_frag_sns(&payloads, prefix), vec![1]);
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
+    }
+
+    /// One heartbeat rides on every sample, so without a per-sample interval each would re-ask
+    /// for fragments whose repair is already on the wire.
+    #[test]
+    fn back_to_back_heartbeats_ask_for_a_sample_once_per_retry_delay() {
+        // Long enough that the test cannot outlast it and see a legitimate retry.
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_retry_delay: DcpsDuration::from_millis(30_000),
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
+            reader_recording_nack_frags(qos);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+        let sn = SequenceNumber::from_i64(1);
+        feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1; 4]);
+
+        for count in 1..=5 {
+            heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 1, count);
+            thread::sleep(Duration::from_millis(10));
+        }
+        wait_for_nack_frags(&payloads, prefix, 1);
+        thread::sleep(Duration::from_millis(30));
+
+        assert_eq!(nack_frag_sns(&payloads, prefix), vec![1]);
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
     }
 
     /// Feeds 1 of 4 fragments, then a heartbeat covering `sn`, which arms the NACK_FRAG chain
@@ -6295,43 +6719,5 @@ mod tests {
             user_logic.send_credit.get(&remote_prefix).is_none(),
             "a builtin writer's send left a charge on the shared budget"
         );
-    }
-
-    fn reader_id(n: u8) -> EntityId {
-        EntityId::new([n, 0, 0], EntityKind::USER_DEFINED_READER_NO_KEY)
-    }
-
-    #[test]
-    fn a_stateless_writer_sends_one_copy_per_reader_over_the_kind_it_can_reach() {
-        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
-        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
-        let readers = vec![
-            ([0xA0; 12], reader_id(0x10), shm.clone()),
-            ([0xA0; 12], reader_id(0x10), udp.clone()),
-        ];
-        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false]);
-        // An SHM locator the transport cannot reach does not shadow the UDP one.
-        assert_eq!(stateless_send_mask(&readers, |l| !l.is_shm()), vec![false, true]);
-        assert_eq!(stateless_send_mask(&readers[1..], |_| true), vec![true]);
-    }
-
-    #[test]
-    fn a_refused_ring_falls_back_to_the_masked_off_udp_sibling() {
-        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
-        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
-        let readers = vec![
-            ([0xA0; 12], reader_id(0x10), shm.clone()),
-            ([0xA0; 12], reader_id(0x10), udp.clone()),
-            ([0xB0; 12], reader_id(0x20), udp.clone()),
-        ];
-
-        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false, true]);
-        assert_eq!(
-            stateless_fallback_locators(&readers, [0xA0; 12], reader_id(0x10)),
-            vec![udp.clone()]
-        );
-
-        assert_eq!(stateless_fallback_locators(&readers, [0xB0; 12], reader_id(0x20)), vec![udp]);
-        assert!(stateless_fallback_locators(&readers[..1], [0xA0; 12], reader_id(0x10)).is_empty());
     }
 }

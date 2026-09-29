@@ -199,6 +199,8 @@ fn a_multi_window_sample_is_paced_by_the_round_trip_not_by_the_fixed_delays() {
     // Read by every listener as it binds, so it has to be set before the first participant.
     // This binary holds one test, so no other test in the process sees the change.
     std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", SOCKET_BUFFER_BYTES);
+    // The window this test is named for is off unless asked for.
+    int2dds::common::env::set_enable_send_window(true);
 
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();

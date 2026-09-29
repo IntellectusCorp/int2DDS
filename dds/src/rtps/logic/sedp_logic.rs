@@ -114,7 +114,19 @@ enum MatchDecision {
 
 const TYPE_LOOKUP_MATCH_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
-pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(2000);
+/// First interval of the SEDP heartbeat to a remote; it backs off to `BUILTIN_SEDP_HB_PERIOD_MAX`.
+pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(100);
+const BUILTIN_SEDP_HB_PERIOD_MAX: StdDuration = StdDuration::from_millis(2000);
+
+/// How many of the first heartbeats to a silent remote also carry our SPDP announcement.
+const SPDP_REPEAT_LIMIT: u32 = 4;
+
+/// Heartbeat interval after `attempts` heartbeats: 100ms for the first five, then doubling
+/// every second heartbeat up to 2s.
+pub(crate) fn sedp_hb_interval(attempts: u32) -> StdDuration {
+    let doublings = attempts.saturating_sub(5) / 2;
+    BUILTIN_SEDP_HB_PERIOD.saturating_mul(1 << doublings.min(5)).min(BUILTIN_SEDP_HB_PERIOD_MAX)
+}
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -131,6 +143,8 @@ pub(crate) struct SedpLogic {
     pub(crate) type_lookup_pending:
         Arc<Mutex<HashMap<SampleIdentity, (GuidPrefix, TypeIdentifier)>>>,
     deferred_type_matches: Arc<Mutex<HashMap<Guid, Instant>>>,
+    /// Heartbeats sent per (remote, builtin writer) since it was armed.
+    sedp_hb_attempts: Arc<dashmap::DashMap<(GuidPrefix, EntityId), u32>>,
 }
 
 impl SedpLogic {
@@ -387,6 +401,7 @@ impl SedpLogic {
             timer_handler,
             type_lookup_pending: Arc::new(Mutex::new(HashMap::new())),
             deferred_type_matches: Arc::new(Mutex::new(HashMap::new())),
+            sedp_hb_attempts: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -1770,9 +1785,17 @@ impl SedpLogic {
             );
             // The timer handler is a separate lock; do not hold the proxies while taking it.
             drop(reader_proxies);
+            self.sedp_hb_attempts.remove(&(*guid_prefix, entity_id));
             self.disarm_sedp_periodic_heartbeat(*guid_prefix, entity_id);
             return Ok(false);
         }
+
+        // A remote that has not answered may not know us yet; it ignores our SEDP heartbeats until it
+        // has our SPDP.
+        let unanswered = reader_proxies
+            .iter()
+            .filter(|p| p.remote_reader_guid().prefix() == *guid_prefix && p.is_active())
+            .all(|p| p.last_acknack_count().is_none());
 
         let mut is_sent = false;
         for reader_proxy in reader_proxies
@@ -1817,7 +1840,50 @@ impl SedpLogic {
             }
         }
 
-        Ok(is_sent)
+        if !is_sent {
+            return Ok(false);
+        }
+        let attempts = {
+            let mut entry = self.sedp_hb_attempts.entry((*guid_prefix, entity_id)).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        let next = sedp_hb_interval(attempts);
+        if next != duration {
+            if let Ok(handler) = self.timer_handler.lock() {
+                let timer_id = TimerId::SedpScheduledMessage {
+                    remote_prefix: *guid_prefix,
+                    writer_entity_id: entity_id,
+                };
+                handler.modify_timer(timer_id, next);
+            }
+        }
+        if unanswered
+            && entity_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER
+            && attempts <= SPDP_REPEAT_LIMIT
+        {
+            drop(reader_proxies);
+            self.resend_spdp_to(*guid_prefix);
+        }
+        Ok(true)
+    }
+
+    /// Send our SPDP announcement to one remote again; it ignores our SEDP heartbeats until it
+    /// knows us.
+    fn resend_spdp_to(&self, remote_prefix: GuidPrefix) {
+        let destination = Guid::new(remote_prefix, EntityId::PARTICIPANT);
+        if let Ok(Some(spdp)) = self.create_spdp_message() {
+            if let Err(e) =
+                self.send_to_participant_metatraffic_locators(&spdp, destination, "spdp")
+            {
+                debug!("Failed to repeat SPDP to {:?}: {:?}", remote_prefix, e);
+            }
+        }
+    }
+
+    /// Drop the heartbeat backoff state kept for a remote participant that is gone.
+    pub(crate) fn forget_sedp_hb_attempts(&self, remote_prefix: GuidPrefix) {
+        self.sedp_hb_attempts.retain(|(prefix, _), _| *prefix != remote_prefix);
     }
 
     /// Cancel the periodic heartbeat towards `remote_prefix` for one builtin writer. A later
@@ -3335,9 +3401,18 @@ mod tests {
     fn sedp_publications_writer(
         reader_has_acked: bool,
     ) -> (SedpLogic, Arc<Participant>, GuidPrefix, SequenceNumber, Arc<Mutex<usize>>) {
-        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let transport = Arc::new(CountingTransport::default());
         let sends = Arc::clone(&transport.sends);
+        let (sedp_logic, participant, remote_prefix, last_sn) =
+            sedp_publications_writer_on(reader_has_acked, transport);
+        (sedp_logic, participant, remote_prefix, last_sn, sends)
+    }
+
+    fn sedp_publications_writer_on(
+        reader_has_acked: bool,
+        transport: Arc<CountingTransport>,
+    ) -> (SedpLogic, Arc<Participant>, GuidPrefix, SequenceNumber) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let sedp_logic = SedpLogic::new(participant.clone(), transport);
 
         let remote_prefix: GuidPrefix = [9u8; 12];
@@ -3369,7 +3444,109 @@ mod tests {
             SequenceNumber::UNKNOWN,
         ));
 
-        (sedp_logic, participant, remote_prefix, last_sn, sends)
+        (sedp_logic, participant, remote_prefix, last_sn)
+    }
+
+    /// The fixture above with the remote participant known; returns every datagram sent.
+    fn sedp_publications_writer_to_known_remote(
+    ) -> (SedpLogic, Arc<Participant>, GuidPrefix, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let transport = Arc::new(CountingTransport::default());
+        let buffers = Arc::clone(&transport.buffers);
+        let (sedp_logic, participant, remote_prefix, _last_sn) =
+            sedp_publications_writer_on(false, transport);
+
+        let mut remote = SPDPDiscoveredParticipantData::new(
+            0,
+            remote_prefix,
+            Participant::init_builtin_endpoints(),
+        );
+        remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
+            &Ipv4Addr::new(127, 0, 0, 1),
+            7410,
+        ));
+        participant.add_remote_participant_proxy_data(remote);
+
+        (sedp_logic, participant, remote_prefix, buffers)
+    }
+
+    fn spdp_datagrams(buffers: &Arc<Mutex<Vec<Vec<u8>>>>, receiver_prefix: GuidPrefix) -> usize {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        buffers
+            .lock()
+            .expect("send buffers")
+            .iter()
+            .filter(|buffer| {
+                let mut receiver = MessageReceiver::new(receiver_prefix, &addr);
+                receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
+                receiver.parse_submessages().iter().any(|submessage| {
+                    matches!(submessage, TypedSubmessage::Data(_, data)
+                        if data.writer_id == EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER)
+                })
+            })
+            .count()
+    }
+
+    fn run_periodic_publications_heartbeat(sedp_logic: &SedpLogic, remote_prefix: GuidPrefix) {
+        sedp_logic
+            .send_sedp_periodic_heartbeat_message(
+                None,
+                BUILTIN_SEDP_HB_PERIOD,
+                Arc::new(remote_prefix),
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            )
+            .expect("the periodic pass runs");
+    }
+
+    #[test]
+    fn the_sedp_heartbeat_starts_at_100ms_and_backs_off_to_2s() {
+        let ms = |a| sedp_hb_interval(a).as_millis();
+        assert_eq!(
+            [ms(0), ms(5), ms(6), ms(7), ms(9), ms(11), ms(13), ms(15)],
+            [100, 100, 100, 200, 400, 800, 1600, 2000]
+        );
+        assert_eq!(ms(u32::MAX), 2000);
+    }
+
+    /// A silent remote gets our SPDP announcement with each of the first heartbeats, no more.
+    #[test]
+    fn a_silent_remote_is_sent_our_spdp_announcement_only_with_the_first_heartbeats() {
+        let (sedp_logic, _participant, remote_prefix, buffers) =
+            sedp_publications_writer_to_known_remote();
+
+        for _ in 0..(SPDP_REPEAT_LIMIT + 3) {
+            run_periodic_publications_heartbeat(&sedp_logic, remote_prefix);
+        }
+        assert_eq!(
+            spdp_datagrams(&buffers, remote_prefix),
+            SPDP_REPEAT_LIMIT as usize,
+            "one repeat per heartbeat up to the limit, none after"
+        );
+    }
+
+    /// A remote that has answered knows us: no repeat, while heartbeats go on.
+    #[test]
+    fn a_remote_that_has_answered_is_not_sent_our_spdp_announcement_again() {
+        let (mut sedp_logic, _participant, remote_prefix, buffers) =
+            sedp_publications_writer_to_known_remote();
+
+        // Base 1 acks nothing: the reader answered but is still behind, so heartbeats go on.
+        let (header, submessage_header, acknack) = plain_acknack(SequenceNumber::new(0, 1), 1);
+        sedp_logic
+            .handle_acknack_message(&header, &submessage_header, &acknack)
+            .expect("the acknack is accepted");
+        let before = buffers.lock().expect("send buffers").len();
+
+        run_periodic_publications_heartbeat(&sedp_logic, remote_prefix);
+
+        assert!(
+            buffers.lock().expect("send buffers").len() > before,
+            "a reader that is still behind keeps receiving the heartbeat"
+        );
+        assert_eq!(
+            spdp_datagrams(&buffers, remote_prefix),
+            0,
+            "a remote that has answered already knows us"
+        );
     }
 
     /// An ACKNACK carrying `bitmap_base`, acking everything below it and reporting nothing
