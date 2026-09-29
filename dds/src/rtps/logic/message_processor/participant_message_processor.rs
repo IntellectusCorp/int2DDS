@@ -370,9 +370,9 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         if let Some(sedp_logic) = sedp_logic_arc.as_ref().as_ref() {
             // Announcements made before this peer existed are only in the history; the heartbeats
             // armed below advertise them but nothing pumps a builtin writer's unsent changes.
-            if let Err(e) = sedp_logic.push_sedp_history_to_participant(remote_prefix) {
-                log::warn!("Failed to push SEDP history to {:?}: {}", remote_prefix, e);
-            }
+            // Queue the push behind our SPDP above: a peer drops announcements from a participant
+            // it does not know yet.
+            sending_handler.push_message_and_wake(MessageType::SedpHistoryPush(remote_prefix));
 
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
