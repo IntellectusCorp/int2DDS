@@ -4010,8 +4010,9 @@ mod tests {
         first_fragment: u32,
         fragment_count: u16,
         carries_heartbeat: bool,
-        /// The riding HEARTBEAT's firstSN, if any.
+        /// The riding HEARTBEAT's firstSN and lastSN, if any.
         heartbeat_first_sn: Option<i64>,
+        heartbeat_last_sn: Option<i64>,
     }
 
     /// A transport that sends nowhere and records what it was asked to send.
@@ -4036,6 +4037,7 @@ mod tests {
                 fragment_count: 0,
                 carries_heartbeat: false,
                 heartbeat_first_sn: None,
+                heartbeat_last_sn: None,
             };
             while offset + 4 <= data.len() {
                 let id = data[offset];
@@ -4043,12 +4045,14 @@ mod tests {
                 let body = offset + 4;
                 if id == SubmessageId::HEARTBEAT.as_u8() {
                     datagram.carries_heartbeat = true;
-                    if body + 16 <= data.len() {
-                        let high =
-                            i32::from_le_bytes(data[body + 8..body + 12].try_into().unwrap());
-                        let low =
-                            u32::from_le_bytes(data[body + 12..body + 16].try_into().unwrap());
-                        datagram.heartbeat_first_sn = Some(SequenceNumber::new(high, low).to_i64());
+                    if body + 24 <= data.len() {
+                        let sn_at = |at: usize| {
+                            let high = i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+                            let low = u32::from_le_bytes(data[at + 4..at + 8].try_into().unwrap());
+                            SequenceNumber::new(high, low).to_i64()
+                        };
+                        datagram.heartbeat_first_sn = Some(sn_at(body + 8));
+                        datagram.heartbeat_last_sn = Some(sn_at(body + 16));
                     }
                 } else if id == SubmessageId::DATA_FRAG.as_u8() && body + 26 <= data.len() {
                     datagram.first_fragment =
@@ -4422,15 +4426,18 @@ mod tests {
         let reader_guid = {
             let proxies = writer.reader_proxies();
             let mut guard = proxies.lock().unwrap();
-            guard[0].requested_fragments_add(SequenceNumber::from_i64(3), 1, 20, vec![2]);
+            guard[0].requested_fragments_add(SequenceNumber::from_i64(2), 1, 20, vec![2]);
             guard[0].remote_reader_guid()
         };
 
         user_logic.send_requested_fragments(writer.guid().entity_id(), reader_guid).unwrap();
 
-        let first_sns: Vec<i64> =
-            recorder.take().iter().filter_map(|d| d.heartbeat_first_sn).collect();
-        assert_eq!(first_sns, vec![1]);
+        let advertised: Vec<(i64, i64)> = recorder
+            .take()
+            .iter()
+            .filter_map(|d| Some((d.heartbeat_first_sn?, d.heartbeat_last_sn?)))
+            .collect();
+        assert_eq!(advertised, vec![(1, 3)]);
     }
 
     /// The ACKNACK resend path carries the same heartbeat, so it needs the same firstSN.
@@ -4455,15 +4462,18 @@ mod tests {
         let reader_guid = {
             let proxies = writer.reader_proxies();
             let mut guard = proxies.lock().unwrap();
-            guard[0].requested_changes_set(vec![SequenceNumber::from_i64(3)]);
+            guard[0].requested_changes_set(vec![SequenceNumber::from_i64(2)]);
             guard[0].remote_reader_guid()
         };
 
         user_logic.send_requested_changes(writer.guid().entity_id(), reader_guid).unwrap();
 
-        let first_sns: Vec<i64> =
-            recorder.take().iter().filter_map(|d| d.heartbeat_first_sn).collect();
-        assert_eq!(first_sns, vec![1]);
+        let advertised: Vec<(i64, i64)> = recorder
+            .take()
+            .iter()
+            .filter_map(|d| Some((d.heartbeat_first_sn?, d.heartbeat_last_sn?)))
+            .collect();
+        assert_eq!(advertised, vec![(1, 3)]);
     }
 
     #[test]
@@ -5631,6 +5641,34 @@ mod tests {
         participant.add_reader("nack_frag_qos_test_topic", reader.clone());
 
         (participant, user_logic, reader, writer_guid, sn, sends, payloads)
+    }
+
+    /// The bound is only worth having if the receive path applies it: without the wiring the
+    /// reader buffers every later sample for a hole that never fills.
+    #[test]
+    fn the_receive_path_gives_up_a_hole_once_the_in_order_buffer_is_full() {
+        let (_participant, user_logic, reader, writer_guid, sn, _, _) =
+            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+        // `sn` never arrives. The four that follow fill the bound exactly.
+        let payload = vec![0u8; IN_ORDER_BUFFER_BYTES / 4];
+        for step in 1..=4 {
+            let seq_num = SequenceNumber::from_i64(sn.to_i64() + step);
+            let change = CacheChange::new(
+                ChangeKind::Alive,
+                writer_guid,
+                InstanceHandle::NIL,
+                seq_num,
+                payload.clone(),
+                None,
+            );
+            user_logic
+                .deliver_change_to_reader(change, reader.as_ref(), seq_num, writer_guid, None)
+                .expect("delivery must not error");
+        }
+
+        let cache = reader.reader_cache();
+        let guard = cache.lock().expect("reader cache lock");
+        assert_eq!(guard.get_seq_num_max(), Some(SequenceNumber::from_i64(sn.to_i64() + 4)));
     }
 
     /// The writer sequence number of every NACK_FRAG in `payloads`, in send order.

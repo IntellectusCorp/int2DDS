@@ -1010,6 +1010,26 @@ mod tests {
         assert_eq!(proxy.expected_sn(), SequenceNumber::from_i64(6));
     }
 
+    /// Only the run that follows the oldest hole is released. A later hole may still be
+    /// repaired, so the samples behind it stay buffered.
+    #[test]
+    fn giving_up_the_oldest_hole_leaves_the_next_one_buffered() {
+        let (mut proxy, lost) = counting_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        // 1 and 4 are holes; 2, 3, 5, 6 arrived.
+        for seq_num in [2, 3, 5, 6] {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        let released = proxy.give_up_oldest_hole_if_full(16);
+
+        let seq_nums: Vec<i64> =
+            released.iter().map(|change| change.sequence_number().to_i64()).collect();
+        assert_eq!(seq_nums, vec![2, 3]);
+        assert_eq!(proxy.expected_sn(), SequenceNumber::from_i64(4));
+        assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), 1, "only sample 1 is given up");
+    }
+
     /// Under the limit the reader still waits: the hole may yet be repaired.
     #[test]
     fn an_in_order_buffer_under_the_limit_keeps_waiting() {
