@@ -918,9 +918,7 @@ impl UserLogic {
                     plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    self.locators_to_send_to(locators.iter()).len(),
-                    remaining,
-                    untouched,
+                    selected.len(),
                     piggyback,
                 );
 
@@ -1402,9 +1400,7 @@ impl UserLogic {
                     plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    self.locators_to_send_to(locators.iter()).len(),
-                    remaining,
-                    untouched,
+                    selected.len(),
                     is_piggyback_wanted,
                 );
 
@@ -1597,9 +1593,7 @@ impl UserLogic {
                                 plan,
                                 a_change.fragment_size() as usize,
                                 a_change.data_value().len(),
-                                self.locators_to_send_to(locators.iter()).len(),
-                                remaining,
-                                untouched,
+                                selected.len(),
                                 reliable && piggyback,
                             );
 
@@ -6718,6 +6712,76 @@ mod tests {
         assert!(
             user_logic.send_credit.get(&remote_prefix).is_none(),
             "a builtin writer's send left a charge on the shared budget"
+        );
+    }
+
+    fn reader_id(n: u8) -> EntityId {
+        EntityId::new([n, 0, 0], EntityKind::USER_DEFINED_READER_NO_KEY)
+    }
+
+    #[test]
+    fn a_stateless_writer_sends_one_copy_per_reader_over_the_kind_it_can_reach() {
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let readers = vec![
+            ([0xA0; 12], reader_id(0x10), shm.clone()),
+            ([0xA0; 12], reader_id(0x10), udp.clone()),
+        ];
+        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false]);
+        // An SHM locator the transport cannot reach does not shadow the UDP one.
+        assert_eq!(stateless_send_mask(&readers, |l| !l.is_shm()), vec![false, true]);
+        assert_eq!(stateless_send_mask(&readers[1..], |_| true), vec![true]);
+    }
+
+    #[test]
+    fn a_refused_ring_falls_back_to_the_masked_off_udp_sibling() {
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let readers = vec![
+            ([0xA0; 12], reader_id(0x10), shm.clone()),
+            ([0xA0; 12], reader_id(0x10), udp.clone()),
+            ([0xB0; 12], reader_id(0x20), udp.clone()),
+        ];
+
+        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false, true]);
+        assert_eq!(
+            stateless_fallback_locators(&readers, [0xA0; 12], reader_id(0x10)),
+            vec![udp.clone()]
+        );
+
+        assert_eq!(stateless_fallback_locators(&readers, [0xB0; 12], reader_id(0x20)), vec![udp]);
+        assert!(stateless_fallback_locators(&readers[..1], [0xA0; 12], reader_id(0x10)).is_empty());
+    }
+
+    /// `INT2DDS_ENABLE_SEND_WINDOW=false`. The field is set directly rather than through the env,
+    /// because other tests in this binary assert exact window sizes against the same process env.
+    #[test]
+    fn a_disabled_window_returns_the_plan_untouched_and_records_no_charge() {
+        let (participant, user_logic, _recorder, writer, remote_prefix) =
+            windowed_writer(1, 1, Some(300_000));
+
+        let mut windows = SendWindows::new(&NullTransport, user_logic.shared_send_credit(&writer));
+        windows.is_enabled = false;
+
+        // Far past what a 300_000-byte peer buffer would ever admit, and several runs so the
+        // heartbeat flag sits on the final chunk of the final run rather than on a lone entry.
+        let plan = fragment_send_plan(&[(1, 300), (700, 200), (1400, 61)], fpm(10));
+
+        let bounded = windows.bound_plan_to_window(
+            &participant,
+            remote_prefix,
+            true,
+            plan.clone(),
+            WINDOW_TEST_FRAG_SIZE,
+            1024 * 1024,
+            4,
+            true,
+        );
+
+        assert_eq!(bounded, plan, "a disabled window must hand the plan back as it came");
+        assert!(
+            user_logic.send_credit.get(&remote_prefix).is_none(),
+            "a disabled window left a charge on the shared budget"
         );
     }
 }

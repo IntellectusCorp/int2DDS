@@ -314,7 +314,6 @@ export INT2DDS_UDP_SEND_BUFFER=262144
 cargo run --example hello_world_pub
 ```
 
-
 ### INT2DDS_SHM_POOL_SIZE
 
 Sets the shared memory each participant sets aside for zero-copy payloads when
