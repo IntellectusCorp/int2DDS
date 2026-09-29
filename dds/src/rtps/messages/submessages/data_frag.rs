@@ -210,7 +210,15 @@ impl<'a> DataFrag<'a> {
             None
         };
 
+        // `octetsToInlineQos` is unvalidated wire data and `Bytes::slice` panics past the end,
+        // which would take the receive thread down with one malformed datagram.
         let start_pos = cursor.position() as usize;
+        if start_pos > buffer.len() {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "octetsToInlineQos points past the end of the DATA_FRAG body",
+            ));
+        }
         let serialized_data_bytes = buffer.slice(start_pos..);
 
         // 8.3.7.3.3 Validity
@@ -535,6 +543,20 @@ mod tests {
         let result = DataFrag::deserialize(&short, &create_dummy_submessage_header(31));
 
         assert!(result.is_err());
+    }
+
+    /// `octetsToInlineQos` is unvalidated wire data, and the slice it drives panicked past the
+    /// end of the body -- one malformed datagram took the receive thread down with it.
+    #[test]
+    fn test_datafrag_rejects_an_octets_to_inline_qos_past_the_body() {
+        let mut buffer =
+            create_dummy_datafrag().write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        buffer[2..4].copy_from_slice(&u16::MAX.to_be_bytes());
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(buffer), &header);
+
+        assert!(matches!(result, Err(err) if err.code == RtpsErrorCode::InvalidSubmessageBody));
     }
 
     #[test]
