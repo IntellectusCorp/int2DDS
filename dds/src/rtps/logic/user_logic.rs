@@ -801,6 +801,7 @@ impl UserLogic {
 
                     // The heartbeat rides the last datagram of the window, not only the last of
                     // the sample: without it the reader has no trigger to ask for the rest.
+                    //
                     // firstSN is the oldest held change, not the one resent; the reader drops
                     // below it, including samples this same pass is still repairing.
                     let heartbeat_info = (piggyback && is_last).then(|| {
@@ -5682,8 +5683,13 @@ mod tests {
     /// The oldest incomplete sample is the one the writer drops next; asking only for it failed.
     #[test]
     fn every_incomplete_sample_a_heartbeat_covers_is_asked_for() {
+        // Long enough that a legitimate retry cannot land inside the test and skew the count.
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_retry_delay: DcpsDuration::from_millis(30_000),
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
         let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
-            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+            reader_recording_nack_frags(qos);
         let prefix = participant.guid().prefix();
         let reader_id = reader.guid().entity_id();
         for sn in 1..=2 {
@@ -5706,8 +5712,13 @@ mod tests {
     /// fragments would pull down fragments already in flight.
     #[test]
     fn a_sample_past_the_heartbeat_is_not_asked_for() {
+        // Long enough that a legitimate retry cannot land inside the test and skew the count.
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_retry_delay: DcpsDuration::from_millis(30_000),
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
         let (participant, mut user_logic, reader, writer_guid, _, _, payloads) =
-            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+            reader_recording_nack_frags(qos);
         let prefix = participant.guid().prefix();
         let reader_id = reader.guid().entity_id();
         for sn in 1..=2 {
@@ -5717,8 +5728,7 @@ mod tests {
 
         heartbeat_for(&mut user_logic, writer_guid, reader_id, 1, 1, 1);
         wait_for_nack_frags(&payloads, prefix, 1);
-        // Half the 200ms default retry delay, so a legitimate retry cannot land inside it.
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50));
 
         assert_eq!(nack_frag_sns(&payloads, prefix), vec![1]);
         if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
