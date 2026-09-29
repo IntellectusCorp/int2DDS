@@ -78,8 +78,6 @@ struct NackFragRequest {
     participant: Arc<Participant>,
     reader_guid: Guid,
     remote_writer_guid: Guid,
-    /// The oldest incomplete change when armed; keys the timer.
-    incomplete_sn: SequenceNumber,
     /// The arming heartbeat's `last_sn`. A later sample may still be arriving, so its gaps are
     /// not losses yet.
     last_sn: SequenceNumber,
@@ -96,7 +94,6 @@ impl NackFragRequest {
         TimerId::NackFrag {
             reader_entity_id: self.reader_guid.entity_id(),
             remote_writer_guid: self.remote_writer_guid,
-            sequence_number: self.incomplete_sn,
         }
     }
 
@@ -2924,11 +2921,11 @@ impl UnicastMessageProcessor for UserLogic {
                     }
                 }
             } else {
-                // Case when fragments are not completely received yet - apply suppression delay
-                // `incomplete_sn`, not `heartbeat.last_sn`: the writer resolves the request
-                // against `writer_sn`, and it also keys the suppression timer.
-                if let Some(incomplete_sn) = writer_proxy
+                // Fragments are still missing somewhere in the heartbeat's range, so arm the
+                // chain that asks for all of them.
+                if writer_proxy
                     .first_incomplete_fragmented_sn(heartbeat.first_sn, heartbeat.last_sn)
+                    .is_some()
                 {
                     let request = NackFragRequest {
                         writer_proxies: writer_proxies.clone(),
@@ -2936,7 +2933,6 @@ impl UnicastMessageProcessor for UserLogic {
                         participant: participant.clone(),
                         reader_guid: stateful_reader.guid(),
                         remote_writer_guid: writer_proxy.remote_writer_guid(),
-                        incomplete_sn,
                         last_sn: heartbeat.last_sn,
                         retries_left: stateful_reader.nack_frag_max_retries(),
                         retry_delay: stateful_reader.nack_frag_retry_delay().to_std_duration(),

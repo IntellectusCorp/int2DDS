@@ -345,7 +345,6 @@ mod tests {
     use crate::rtps::common::entity_id::EntityId;
     use crate::rtps::common::entity_kind::EntityKind;
     use crate::rtps::common::guid::Guid;
-    use crate::rtps::common::sequence::SequenceNumber;
     use std::sync::Arc;
 
     fn noop_callback() -> TimerCallback {
@@ -371,18 +370,10 @@ mod tests {
             TimerId::NackResponse { writer_entity_id: writer_id, remote_reader_guid: remote_guid },
             TimerId::PreemptiveHeartbeat { entity_id: writer_id, remote_reader_guid: remote_guid },
             TimerId::Acknack { reader_entity_id: reader_a, remote_writer_guid: remote_guid },
-            TimerId::NackFrag {
-                reader_entity_id: reader_a,
-                remote_writer_guid: remote_guid,
-                sequence_number: SequenceNumber::new(0, 1),
-            },
+            TimerId::NackFrag { reader_entity_id: reader_a, remote_writer_guid: remote_guid },
             TimerId::PreemptiveAcknack { entity_id: reader_a, remote_writer_guid: remote_guid },
             TimerId::Acknack { reader_entity_id: reader_b, remote_writer_guid: remote_guid },
-            TimerId::NackFrag {
-                reader_entity_id: reader_b,
-                remote_writer_guid: remote_guid,
-                sequence_number: SequenceNumber::new(0, 1),
-            },
+            TimerId::NackFrag { reader_entity_id: reader_b, remote_writer_guid: remote_guid },
             TimerId::PreemptiveAcknack { entity_id: reader_b, remote_writer_guid: remote_guid },
         ];
 
