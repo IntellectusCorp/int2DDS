@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 ### Added
 
 - Java code generation in `int2dds-idl` (`-j`/`--java <DIR>`, `--java-package <PKG>`).
@@ -17,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IDdsType`, including a `typeInfo()` that describes every member so `createTopic`
   advertises the same TypeObject the other bindings do. Batch `--output-dir` now
   emits Java alongside the other targets.
-- `scripts/check-idl-java.sh`, which generates every `idl/input/*.idl` file and
+- `java/scripts/check-idl-java.sh`, which generates every `idl/input/*.idl` file and
   compiles the result with `javac -Xlint:all`, then verifies the committed
   `CdrGolden.java` still matches the generator. Wired into the `java` CI status.
 - `GeneratedTypeConformanceTest`, which hands bytes produced by a generated Java
@@ -38,10 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   places and the CI symbol check in a sixth. Four of them now derive from the parsed
   surface, so adding a C ABI function requires updating exactly one constant.
 
-## [0.1.1] - TBD
-=======
-=======
->>>>>>> develop
 ## [0.1.7] - 2026-09-23
 
 The UDP socket buffers follow the OS default and can be sized per direction.
@@ -247,10 +241,6 @@ Over a hundred fixes. The largest clusters:
 - The `dlopen` feature-FFI path, with core call sites routed through hooks
 
 ## [0.1.1] - 2026-07-31
-<<<<<<< HEAD
->>>>>>> develop
-=======
->>>>>>> develop
 
 First tagged release of int2DDS. Development started on 2025-12-01 and no earlier
 version was ever tagged or published, so this entry is cumulative — it describes

@@ -11,8 +11,6 @@ on:
       - "ffi/src/**"
       - "idl/**"
       - "java/**"
-      - "scripts/check-jni-drift.sh"
-      - "scripts/check-idl-java.sh"
       - ".github/workflows/java.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -45,7 +43,7 @@ jobs:
 
       - name: Check for generator drift
         shell: bash
-        run: ./scripts/check-jni-drift.sh
+        run: ./java/scripts/check-jni-drift.sh
 
       - name: Verify the C ABI stays re-exported from the JNI library
         shell: bash
@@ -100,7 +98,7 @@ jobs:
       # builds java/api/build/classes itself when the runner has none.
       - name: Check the IDL Java backend
         shell: bash
-        run: ./scripts/check-idl-java.sh
+        run: ./java/scripts/check-idl-java.sh
 
   # Reports a single "java" status; fails unless every check job succeeded.
   java-gate:

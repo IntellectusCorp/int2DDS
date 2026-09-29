@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IDdsType`, including a `typeInfo()` that describes every member so `createTopic`
   advertises the same TypeObject the other bindings do. Batch `--output-dir` now
   emits Java alongside the other targets.
-- `scripts/check-idl-java.sh`, which generates every `idl/input/*.idl` file and
+- `java/scripts/check-idl-java.sh`, which generates every `idl/input/*.idl` file and
   compiles the result with `javac -Xlint:all`, then verifies the committed
   `CdrGolden.java` still matches the generator. Wired into the `java` CI status.
 - `GeneratedTypeConformanceTest`, which hands bytes produced by a generated Java

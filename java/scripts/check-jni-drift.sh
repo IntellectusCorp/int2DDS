@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fails when the committed JNI/FFM layers differ from what the generator produces.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 cargo run --quiet -p int2dds-java --bin gen-jni
 if ! git diff --quiet -- \
     java/native/src/generated.rs \

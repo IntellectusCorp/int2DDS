@@ -211,7 +211,7 @@ The JNI layer and both `Ffi.java` variants are **generated** from the FFI surfac
 
 ```bash
 cargo run -p int2dds-java --bin gen-jni
-./scripts/check-jni-drift.sh    # fails if the committed output is stale
+./java/scripts/check-jni-drift.sh    # fails if the committed output is stale
 ```
 
 ## Tests
@@ -219,7 +219,7 @@ cargo run -p int2dds-java --bin gen-jni
 ```bash
 cd java && ./gradlew test          # the Java suite
 cargo test -p int2dds-java         # the JNI crate's own tests
-./scripts/check-idl-java.sh        # generated Java compiles; committed golden type is current
+./java/scripts/check-idl-java.sh   # generated Java compiles; committed golden type is current
 ```
 
 `GeneratedTypeConformanceTest` hands bytes produced by a **generated** type to the

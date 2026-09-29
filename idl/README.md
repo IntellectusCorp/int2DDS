@@ -337,7 +337,7 @@ The Java backend has a second gate, because a Rust string assertion cannot catch
 malformed brace in emitted Java:
 
 ```bash
-./scripts/check-idl-java.sh
+./java/scripts/check-idl-java.sh
 ```
 
 It generates every file in `input/` and compiles the result with `javac -Xlint:all`,

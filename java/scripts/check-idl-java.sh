@@ -4,7 +4,7 @@
 #      (string snapshots cannot catch a syntax error; javac can), and
 #   2. the committed CdrGolden.java still matches what the generator emits.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 API_CLASSES="java/api/build/classes/java/main"
 if [ ! -d "$API_CLASSES" ]; then
