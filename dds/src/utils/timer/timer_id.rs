@@ -3,7 +3,6 @@ use std::fmt;
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
-use crate::rtps::common::sequence::SequenceNumber;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::messages::submessage_id::SubmessageId;
 
@@ -39,11 +38,11 @@ pub(crate) enum TimerId {
         remote_writer_guid: Guid,
     },
 
-    // Reader: delayed NACK_FRAG for missing fragments
+    // Reader: delayed NACK_FRAG for missing fragments. No sequence number: one chain asks for
+    // every incomplete sample, so arming again must replace the pending one.
     NackFrag {
         reader_entity_id: EntityId,
         remote_writer_guid: Guid,
-        sequence_number: SequenceNumber,
     },
 
     // Writer: one-shot preemptive HEARTBEAT on new reader match
@@ -150,14 +149,13 @@ impl fmt::Display for TimerId {
                     Self::guid_u128(remote_writer_guid)
                 )
             }
-            TimerId::NackFrag { reader_entity_id, remote_writer_guid, sequence_number } => {
+            TimerId::NackFrag { reader_entity_id, remote_writer_guid } => {
                 write!(
                     f,
-                    "{}_{:02x}_{:x}_{}",
+                    "{}_{:02x}_{:x}",
                     Self::id_hex(reader_entity_id),
                     SubmessageId::NACK_FRAG.as_u8(),
-                    Self::guid_u128(remote_writer_guid),
-                    sequence_number.to_i64()
+                    Self::guid_u128(remote_writer_guid)
                 )
             }
             TimerId::PreemptiveHeartbeat { entity_id, remote_reader_guid } => {
@@ -293,11 +291,8 @@ mod tests {
         // Reader timers
         let acknack =
             TimerId::Acknack { reader_entity_id: reader_id, remote_writer_guid: remote_guid };
-        let nackfrag = TimerId::NackFrag {
-            reader_entity_id: reader_id,
-            remote_writer_guid: remote_guid,
-            sequence_number: SequenceNumber::new(0, 1),
-        };
+        let nackfrag =
+            TimerId::NackFrag { reader_entity_id: reader_id, remote_writer_guid: remote_guid };
         let pre_ack =
             TimerId::PreemptiveAcknack { entity_id: reader_id, remote_writer_guid: remote_guid };
 
