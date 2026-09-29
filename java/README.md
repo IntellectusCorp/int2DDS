@@ -46,9 +46,8 @@ Linux / macOS / Git Bash:
 
 ```bash
 cd java
-./gradlew :examples:runSub     # subscriber, in one terminal
-./gradlew :examples:runPub     # publisher, in another
-./gradlew :examples:runDynamic # XTypes dynamic-type variant
+./gradlew :examples:runSub  # subscriber, in one terminal
+./gradlew :examples:runPub  # publisher, in another
 ```
 
 Windows (PowerShell / cmd):
@@ -57,7 +56,6 @@ Windows (PowerShell / cmd):
 cd java
 .\gradlew.bat :examples:runSub
 .\gradlew.bat :examples:runPub
-.\gradlew.bat :examples:runDynamic
 ```
 
 Both take `-d`/`--domain <id>` (default 0) and `--reliable` (default `BEST_EFFORT`);
@@ -204,7 +202,7 @@ Gradle modules (`settings.gradle.kts`):
 | Module | Contents |
 |---|---|
 | `api` | The public Java API — packages `core`, `qos`, `cdr`, `types`, `conditions`, `listeners`, `discovery`, `xtypes`, `async`, `status`, `exceptions`, plus internal `internal` |
-| `examples` | `HelloWorldPub` / `HelloWorldSub` / `DynamicHelloWorld` |
+| `examples` | `HelloWorldPub` / `HelloWorldSub` |
 | `bench` | JMH benchmarks |
 
 `native/` is not a Gradle module — it is the Rust crate (`int2dds-java`) that builds

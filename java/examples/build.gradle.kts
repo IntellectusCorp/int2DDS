@@ -55,10 +55,3 @@ tasks.register<JavaExec>("runSub") {
     mainClass.set("kr.co.intellectus.int2dds.examples.HelloWorldSub")
     classpath = sourceSets["main"].runtimeClasspath
 }
-
-tasks.register<JavaExec>("runDynamic") {
-    group = "application"
-    description = "Runs the DynamicHelloWorld (XTypes) example."
-    mainClass.set("kr.co.intellectus.int2dds.examples.DynamicHelloWorld")
-    classpath = sourceSets["main"].runtimeClasspath
-}
