@@ -3499,6 +3499,11 @@ impl UnicastMessageProcessor for UserLogic {
                     }
                 }
 
+                // The sample's inline QoS rides its first fragment, so keep it for assembly.
+                if buffer.inline_qos.is_none() {
+                    buffer.inline_qos = data_frag.inline_qos();
+                }
+
                 // Fragments are copied straight out of the datagram; a per-fragment `Bytes::slice`
                 // would only add a refcount round trip.
                 if let Some(serialized_bytes) = payload {
@@ -3554,9 +3559,10 @@ impl UnicastMessageProcessor for UserLogic {
             let received_fragments = FragmentSet::new();
 
             // Move payload from buffer without cloning
-            let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
+            let Some((_, mut buffer)) = self.fragment_buffers.remove(&key) else {
                 continue;
             };
+            let assembled_inline_qos = buffer.inline_qos.take();
             // Use timestamp from first fragment, fallback to current message
             let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
             if assembled_timestamp.is_none() {
@@ -3619,6 +3625,10 @@ impl UnicastMessageProcessor for UserLogic {
             );
             assembled_change.set_shared_payload(payload);
             assembled_change.set_ownership_strength(ownership_strength);
+
+            if let Some(inline_qos) = &assembled_inline_qos {
+                self.apply_inline_qos_to_change(inline_qos, &mut assembled_change)?;
+            }
 
             let _ = self.deliver_change_to_reader(
                 assembled_change,
@@ -4833,6 +4843,32 @@ mod tests {
         fragments_in_submessage: u16,
         payload: Vec<u8>,
     ) {
+        feed_fragment_with_inline_qos(
+            user_logic,
+            participant_prefix,
+            writer_guid,
+            sn,
+            reader_id,
+            fragment_starting_num,
+            fragments_in_submessage,
+            payload,
+            None,
+        );
+    }
+
+    /// Like `feed_fragment`, but the submessage also carries `inline_qos`.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_fragment_with_inline_qos(
+        user_logic: &mut UserLogic,
+        participant_prefix: GuidPrefix,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+        reader_id: EntityId,
+        fragment_starting_num: u32,
+        fragments_in_submessage: u16,
+        payload: Vec<u8>,
+        inline_qos: Option<ParameterList>,
+    ) {
         let mut data_frag = DataFrag::new(
             reader_id,
             writer_guid.entity_id(),
@@ -4843,6 +4879,9 @@ mod tests {
             FRAG_TEST_SAMPLE_SIZE,
         );
         data_frag.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(payload)));
+        if let Some(inline_qos) = inline_qos {
+            data_frag.set_inline_qos_list(inline_qos);
+        }
 
         let rtps_header = Header::new(writer_guid.prefix());
         let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
@@ -4904,6 +4943,68 @@ mod tests {
             .expect("cache lock")
             .get_change(sn, writer_guid)
             .map(|c| c.data_value().to_vec())
+    }
+
+    /// The inline QoS the assembled sample at `sn` kept, if this reader holds it.
+    fn held_presentation_info(
+        reader: &Arc<StatefulReader>,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+    ) -> Option<PresentationInfo> {
+        reader
+            .reader_cache()
+            .lock()
+            .expect("cache lock")
+            .get_change(sn, writer_guid)
+            .map(|c| c.presentation_info().clone())
+    }
+
+    // A GROUP-scope sample larger than one fragment must keep the group sequence number its
+    // first fragment carried, or the Subscriber HistoryCache has nothing to order it by.
+    #[test]
+    fn a_fragmented_samples_group_inline_qos_survives_assembly() {
+        let (participant, mut user_logic, reader, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+
+        let mut inline_qos = ParameterList::default();
+        inline_qos.set_group_seq_num(SequenceNumber::from_i64(11));
+        inline_qos.set_coherent_set(sn);
+        inline_qos.set_group_coherent_set(SequenceNumber::from_i64(9));
+
+        // Only the first fragment carries it, and the sample is not assembled until the last.
+        feed_fragment_with_inline_qos(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            1,
+            vec![1, 1, 1, 1],
+            Some(inline_qos),
+        );
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            2,
+            3,
+            vec![2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4],
+        );
+
+        assert_eq!(held_sample(&reader, writer_guid, sn), Some(whole_sample()));
+        assert_eq!(
+            held_presentation_info(&reader, writer_guid, sn),
+            Some(PresentationInfo {
+                coherent_set: Some(sn),
+                group_seq_num: Some(SequenceNumber::from_i64(11)),
+                group_coherent_set: Some(SequenceNumber::from_i64(9)),
+                writer_group_info: None,
+            })
+        );
     }
 
     /// Fragment numbers this reader's ledger still calls missing for `sn`. Empty means the
