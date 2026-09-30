@@ -150,7 +150,9 @@ impl PublisherProxy {
             samples.len()
         );
 
-        samples
+        // An End Coherent Set marker has done its work by moving the cursor above; it is a group
+        // boundary, not a sample.
+        samples.into_iter().filter(|sample| !sample.change.is_end_coherent_set()).collect()
     }
 
     // No alive writer of this Publisher will ever fill the position before the given one. One

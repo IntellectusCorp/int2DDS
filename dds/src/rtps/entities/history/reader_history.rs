@@ -33,6 +33,27 @@ struct PendingCoherentSet {
     changes: Vec<CacheChange>,
 }
 
+// The outcome of closing a remote writer's open coherent set.
+#[derive(Debug)]
+pub(crate) enum CoherentSetCloseResult {
+    // The writer had no open set to close.
+    NoOpenSet,
+    // A member is missing or out of place, so none of the set is delivered.
+    Incomplete,
+    // Every member of the set arrived, in order.
+    Complete(Vec<CacheChange>),
+}
+
+impl CoherentSetCloseResult {
+    // The members of a set that closed complete, and nothing for the other two outcomes.
+    pub(crate) fn into_complete_members(self) -> Vec<CacheChange> {
+        match self {
+            Self::Complete(members) => members,
+            Self::NoOpenSet | Self::Incomplete => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 #[allow(clippy::type_complexity)]
 pub struct ReaderHistoryCache {
@@ -179,12 +200,28 @@ impl ReaderHistoryCache {
         let coherent_set = a_change.presentation_info().coherent_set;
         let writer_guid = a_change.writer_guid();
 
-        // End marker: a payload-less Data closes the writer's open set and is never stored,
-        // regardless of this reader's presentation QoS. Accepts both an explicit
-        // PID_COHERENT_SET=UNKNOWN and a payload-less Data carrying no coherent set id.
+        // TOPIC: a payload-less Data carrying no coherent set id closes this writer's open set and
+        // is never stored, regardless of this reader's presentation QoS.
         if a_change.is_coherent_end_marker() {
-            let members = self.close_and_take_coherent_set(writer_guid, a_change.sequence_number());
-            return members.into_iter().map(|c| (c, false)).collect();
+            return self
+                .close_and_take_coherent_set(writer_guid, a_change.sequence_number())
+                .into_complete_members()
+                .into_iter()
+                .map(|member| (member, false))
+                .collect();
+        }
+
+        // GROUP: an End Coherent Set marker belongs to the group cursor, not to this cache. Drop it
+        // rather than store a payload-less sample.
+        if a_change.is_end_coherent_set() {
+            debug!(
+                "End Coherent Set marker at sequence number {} from writer {} reached the reader \
+                 history cache, which does not handle group coherent sets",
+                a_change.sequence_number().to_i64(),
+                writer_guid
+            );
+
+            return Vec::new();
         }
 
         // A coherent reader holds set members back until their set closes; any other
@@ -203,6 +240,7 @@ impl ReaderHistoryCache {
                             writer_guid,
                             a_change.sequence_number().previous(),
                         )
+                        .into_complete_members()
                     } else {
                         Vec::new()
                     };
@@ -221,6 +259,7 @@ impl ReaderHistoryCache {
                             writer_guid,
                             a_change.sequence_number().previous(),
                         )
+                        .into_complete_members()
                     } else {
                         Vec::new()
                     };
@@ -358,14 +397,14 @@ impl ReaderHistoryCache {
     // Close a writer's open coherent set and return its members ready for commit (coherent
     // id cleared), or an empty Vec when the set is incomplete or none is open. The caller
     // stores the returned members under one lock so the whole set is committed atomically.
-    fn close_and_take_coherent_set(
+    pub(crate) fn close_and_take_coherent_set(
         &mut self,
         writer_guid: Guid,
         end_sn: SequenceNumber,
-    ) -> Vec<CacheChange> {
+    ) -> CoherentSetCloseResult {
         // Removing closes the set; its members will not be buffered again.
         let Some(pending) = self.coherent_pending.remove(&writer_guid) else {
-            return Vec::new();
+            return CoherentSetCloseResult::NoOpenSet;
         };
 
         // A complete set holds exactly one member per seq in [set_start_sn, end_sn), in order.
@@ -374,21 +413,23 @@ impl ReaderHistoryCache {
         for (idx, sn) in (start..end_sn.to_i64()).enumerate() {
             if pending.changes.get(idx).map(|m| m.sequence_number().to_i64()) != Some(sn) {
                 debug!("Discarding incomplete coherent set {} from writer {} since sequence number {} is missing", start, writer_guid, sn);
-                return Vec::new();
+                return CoherentSetCloseResult::Incomplete;
             }
         }
 
         // Clear each member's coherent id so re-insertion is not taken as a set boundary.
-        pending
-            .changes
-            .into_iter()
-            .map(|mut member| {
-                let mut info = member.presentation_info().clone();
-                info.coherent_set = None;
-                member.set_presentation_info(info);
-                member
-            })
-            .collect()
+        CoherentSetCloseResult::Complete(
+            pending
+                .changes
+                .into_iter()
+                .map(|mut member| {
+                    let mut info = member.presentation_info().clone();
+                    info.coherent_set = None;
+                    member.set_presentation_info(info);
+                    member
+                })
+                .collect(),
+        )
     }
 
     // True when the attached DCPS reader requests coherent access (INSTANCE or TOPIC scope).
@@ -427,6 +468,7 @@ impl ReaderHistoryCache {
 mod tests {
     use super::*;
     use crate::rtps::common::{entity_kind::EntityKind, types::ChangeKind};
+    use crate::rtps::entities::history::cache_change::PresentationInfo;
 
     fn writer_guid() -> Guid {
         Guid::new([1; 12], EntityId::new([0, 0, 2], EntityKind::USER_DEFINED_WRITER_WITH_KEY))
@@ -447,6 +489,53 @@ mod tests {
     fn reader_cache() -> ReaderHistoryCache {
         let owner = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY);
         ReaderHistoryCache::new(owner, None)
+    }
+
+    // An End Coherent Set marker at the given seq, closing the group coherent set named by
+    // `group_coherent_set`. `coherent_set` is the writer's own first seq in the set, absent when
+    // the writer wrote nothing in it.
+    fn end_coherent_set(
+        seq: i64,
+        group_coherent_set: i64,
+        coherent_set: Option<i64>,
+    ) -> CacheChange {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid(),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(seq),
+            Vec::new(),
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: coherent_set.map(SequenceNumber::from_i64),
+            group_coherent_set: Some(SequenceNumber::from_i64(group_coherent_set)),
+            ..PresentationInfo::default()
+        });
+
+        change
+    }
+
+    // A marker from a writer that wrote in the set carries PID_COHERENT_SET, one from a writer
+    // that wrote nothing does not. Both name the group coherent set they close.
+    #[test]
+    fn reads_the_group_coherent_set_off_an_end_coherent_set_marker() {
+        let ten = Some(SequenceNumber::from_i64(10));
+
+        assert_eq!(end_coherent_set(13, 10, Some(10)).ended_group_coherent_set(), ten);
+        assert_eq!(end_coherent_set(1, 10, None).ended_group_coherent_set(), ten);
+        // A set member carries a payload, so it is never a marker.
+        assert_eq!(coherent_member(10).ended_group_coherent_set(), None);
+    }
+
+    // A reader that never buffers a set still receives the markers of a GROUP Publisher.
+    #[test]
+    fn closing_a_set_a_reader_never_buffered_reports_no_open_set() {
+        let mut cache = reader_cache();
+
+        let closed = cache.close_and_take_coherent_set(writer_guid(), SequenceNumber::from_i64(13));
+
+        assert!(matches!(closed, CoherentSetCloseResult::NoOpenSet), "got {closed:?}");
     }
 
     // The judgement and the storing are separate steps, so a caller may hold the change back
@@ -473,10 +562,13 @@ mod tests {
         cache.buffer_coherent_member(guid, set_id, coherent_member(11));
 
         // Set B's first member at seq 14 implicitly closes A: end_sn = 14 - 1 = 13.
-        let committed =
+        let closed =
             cache.close_and_take_coherent_set(guid, SequenceNumber::from_i64(14).previous());
 
-        assert!(committed.is_empty(), "set with a lost tail must be discarded on implicit close");
+        assert!(
+            matches!(closed, CoherentSetCloseResult::Incomplete),
+            "set with a lost tail must be discarded on implicit close, got {closed:?}"
+        );
     }
 
     #[test]
@@ -491,8 +583,9 @@ mod tests {
         }
 
         // Set B's first member at seq 14 implicitly closes A: end_sn = 13, last(12).next() == 13.
-        let committed =
-            cache.close_and_take_coherent_set(guid, SequenceNumber::from_i64(14).previous());
+        let committed = cache
+            .close_and_take_coherent_set(guid, SequenceNumber::from_i64(14).previous())
+            .into_complete_members();
 
         let seqs: Vec<i64> = committed.iter().map(|c| c.sequence_number().to_i64()).collect();
         assert_eq!(
