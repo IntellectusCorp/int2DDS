@@ -61,14 +61,32 @@ fn group_without_ordered_access_takes_every_sample() {
     writer.write(&KeyedDataType::new(1, 1), InstanceHandle::NIL).unwrap();
     writer.write(&KeyedDataType::new(1, 2), InstanceHandle::NIL).unwrap();
 
-    subscriber.begin_access().unwrap();
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let entries = loop {
+        subscriber.begin_access().unwrap();
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
+        let held = reader
+            .read(10, ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .map(|samples| samples.len())
+            .unwrap_or(0);
 
-    wait_for_samples(&reader, 2);
+        if held == 2 {
+            break entries;
+        }
+
+        subscriber.end_access().unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for 2 samples, the reader held {}",
+            held
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    };
 
     // Two samples in one reader, and the set names it once.
-    let entries = subscriber
-        .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
-        .unwrap();
     assert_eq!(entries.len(), 1);
 
     let taken = reader.take(10, ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES).unwrap();

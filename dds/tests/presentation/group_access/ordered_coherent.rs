@@ -41,13 +41,12 @@ fn a_closed_group_coherent_set_walks_in_publication_order() {
 
     publisher.end_coherent_changes().unwrap();
 
-    subscriber.begin_access().unwrap();
-
     // With ordered_access the collection is a list, so the four samples name their readers four
     // times instead of twice.
-    // The set lands as soon as the End Coherent Set of every writer has arrived.
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
     let deadline = Instant::now() + POLL_TIMEOUT;
     let entries = loop {
+        subscriber.begin_access().unwrap();
         let entries = subscriber
             .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
             .unwrap();
@@ -56,6 +55,7 @@ fn a_closed_group_coherent_set_walks_in_publication_order() {
             break entries;
         }
 
+        subscriber.end_access().unwrap();
         assert!(
             Instant::now() < deadline,
             "timed out waiting for 4 entries, the collection held {}",
