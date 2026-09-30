@@ -26,9 +26,11 @@ struct Args {
     ros2_package: Option<String>,
     ros2_kind: Option<String>,
     include_dirs: Vec<PathBuf>,
-    // Restrict auto-naming to these languages (rust, c, python, csharp, xml, rpc).
+    java_output: Option<String>,
+    java_package: Option<String>,
+    // Restrict auto-naming to these languages (rust, c, python, csharp, xml, rpc, java).
     // None = unrestricted (batch -o emits every language).
-    langs: Option<[bool; 6]>,
+    langs: Option<[bool; 7]>,
 }
 
 fn parse_args() -> Args {
@@ -51,6 +53,8 @@ fn parse_args() -> Args {
     let mut ros2_package = None;
     let mut ros2_kind = None;
     let mut include_dirs = Vec::new();
+    let mut java_output = None;
+    let mut java_package: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -70,6 +74,14 @@ fn parse_args() -> Args {
             "-s" | "--csharp" => {
                 i += 1;
                 csharp_output = Some(args.get(i).cloned().unwrap_or_default());
+            }
+            "-j" | "--java" => {
+                i += 1;
+                java_output = Some(args.get(i).cloned().unwrap_or_default());
+            }
+            "--java-package" => {
+                i += 1;
+                java_package = args.get(i).cloned();
             }
             "-x" | "--xml" => {
                 i += 1;
@@ -162,6 +174,8 @@ fn parse_args() -> Args {
         ros2_package,
         ros2_kind,
         include_dirs,
+        java_output,
+        java_package,
         langs: None,
     }
 }
@@ -170,19 +184,23 @@ fn print_usage() {
     eprintln!(
         "Usage: int2dds-idl [OPTIONS] <INPUT.idl>...
 
-Generates Rust, C, Python, and C# code from OMG IDL files.
+Generates Rust, C, Python, C#, and Java code from OMG IDL files.
 
 OPTIONS:
     -r, --rust <PATH>         Generate Rust output to PATH
     -c, --c-header <PATH>     Generate C header output to PATH
     -p, --python <PATH>       Generate Python output to PATH
     -s, --csharp <PATH>       Generate C# output to PATH
+    -j, --java <DIR>          Generate Java output under DIR (a directory: one
+                              file per type)
     -x, --xml <PATH>          Generate XML type representation to PATH
     -o, --output-dir <DIR>    Output directory (auto-names files)
     -I, --include <DIR>       Add a search directory for #include resolution (repeatable)
     --crate-path <PATH>       Rust crate path (default: int2dds)
     --python-module <PATH>    Python module path (default: int2dds)
     --csharp-namespace <NS>   C# namespace (default: GeneratedTypes)
+    --java-package <PKG>      Java package (default: none -- unnamed package,
+                              files land flat in DIR)
     --string-bound <N>        Default unbounded string size in C (default: 256)
     --string-pointer          Use char* pointers for strings (OMG standard)
     --rpc <PATH>            Generate RPC types (includes base types + RPC infrastructure)
@@ -370,8 +388,8 @@ fn run_wizard() -> Args {
     };
 
     // 2) Target languages (checkbox multi-select)
-    let lang_items = ["Rust", "C", "Python", "C#", "XML", "RPC"];
-    let lang_defaults = [true, false, false, false, false, false];
+    let lang_items = ["Rust", "C", "Python", "C#", "XML", "RPC", "Java"];
+    let lang_defaults = [true, false, false, false, false, false, false];
     let chosen = MultiSelect::with_theme(&theme)
         .with_prompt("Languages to generate (↑↓ move, space to toggle, enter to confirm)")
         .items(&lang_items)
@@ -383,8 +401,8 @@ fn run_wizard() -> Args {
         process::exit(1);
     }
     let want = |i: usize| chosen.contains(&i);
-    let (gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc) =
-        (want(0), want(1), want(2), want(3), want(4), want(5));
+    let (gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc, gen_java) =
+        (want(0), want(1), want(2), want(3), want(4), want(5), want(6));
 
     // 3) Output directory
     let output_dir: String = Input::with_theme(&theme)
@@ -404,6 +422,7 @@ fn run_wizard() -> Args {
     let mut ros2_package = None;
     let mut ros2_kind = None;
     let mut include_dirs = Vec::new();
+    let mut java_package: Option<String> = None;
 
     let advanced = Confirm::with_theme(&theme)
         .with_prompt("Configure advanced options?")
@@ -458,6 +477,16 @@ fn run_wizard() -> Args {
                 .interact_text()
                 .unwrap_or_else(|_| wizard_cancelled());
         }
+        if gen_java {
+            let pkg: String = Input::with_theme(&theme)
+                .with_prompt("Java package (leave empty for the unnamed package)")
+                .allow_empty(true)
+                .default(String::new())
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+            let pkg = pkg.trim().to_string();
+            java_package = if pkg.is_empty() { None } else { Some(pkg) };
+        }
         if gen_c {
             string_pointer = Confirm::with_theme(&theme)
                 .with_prompt("Generate C strings as char* pointers?")
@@ -504,7 +533,9 @@ fn run_wizard() -> Args {
         ros2_package,
         ros2_kind,
         include_dirs,
-        langs: Some([gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc]),
+        java_output: None,
+        java_package,
+        langs: Some([gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc, gen_java]),
     }
 }
 
@@ -519,13 +550,63 @@ fn main() {
         }
     }
 
+    // A bad --java-package is an argument error, unrelated to any input file, so
+    // it stops here instead of warning per file the way a backend refusal does.
+    if args.java_package.is_some() {
+        let opts = codegen::java::JavaOptions { package: args.java_package.clone() };
+        if let Err(e) = codegen::java::validate_package(&opts) {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+    }
+
+    // Java names files after types, so different inputs can collide on one path.
+    // Remember which input wrote it first and report the overwrite.
+    let mut java_written: HashMap<String, String> = HashMap::new();
     for input_file in &args.input_files {
-        process_file(&args, input_file);
+        process_file(&args, input_file, &mut java_written);
     }
 }
 
+/// The Rust+C default fires only when no language flag and no -o resolved a path.
+#[allow(clippy::too_many_arguments)]
+fn wants_default_rust_c(
+    rust: &Option<String>,
+    c: &Option<String>,
+    python: &Option<String>,
+    rpc: &Option<String>,
+    csharp: &Option<String>,
+    xml: &Option<String>,
+    java: &Option<String>,
+) -> bool {
+    rust.is_none()
+        && c.is_none()
+        && python.is_none()
+        && rpc.is_none()
+        && csharp.is_none()
+        && xml.is_none()
+        && java.is_none()
+}
+
+/// True when the user asked for Java by name: `-j`, or the wizard's Java
+/// checkbox (which sets `langs`). `-o` alone only implies Java, so a backend
+/// refusal there is a warning, not a failed run.
+fn java_requested_explicitly(java_output: &Option<String>, langs: &Option<[bool; 7]>) -> bool {
+    java_output.is_some() || langs.is_some_and(|l| l[6])
+}
+
+/// Records `path` as written by `input_file`, returning the earlier input file
+/// when this run already produced that same Java path.
+fn note_java_output(
+    written: &mut HashMap<String, String>,
+    path: &str,
+    input_file: &str,
+) -> Option<String> {
+    written.insert(path.to_string(), input_file.to_string()).filter(|prev| prev != input_file)
+}
+
 /// Generate the selected outputs for a single input IDL file.
-fn process_file(args: &Args, input_file: &str) {
+fn process_file(args: &Args, input_file: &str, java_written: &mut HashMap<String, String>) {
     // Read input, resolving #include directives into a single translation unit.
     let (source, loaded) = match preprocess::load_with_includes_ex(
         std::path::Path::new(input_file),
@@ -621,14 +702,22 @@ fn process_file(args: &Args, input_file: &str) {
     });
     let xml_path = args.xml_output.clone().or_else(|| auto("xml", 4));
 
-    // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
-    let (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path) = if rust_path.is_none()
-        && c_path.is_none()
-        && python_path.is_none()
-        && rpc_path.is_none()
-        && csharp_path.is_none()
-        && xml_path.is_none()
-    {
+    // Java takes a directory, not a file: the backend returns one file per type.
+    let java_dir = args
+        .java_output
+        .clone()
+        .or_else(|| args.output_dir.as_ref().filter(|_| allowed(6)).cloned());
+
+    // If no output flag and no -o are given, default to generating Rust and C.
+    let (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path) = if wants_default_rust_c(
+        &rust_path,
+        &c_path,
+        &python_path,
+        &rpc_path,
+        &csharp_path,
+        &xml_path,
+        &java_dir,
+    ) {
         (
             Some(format!("{}.rs", base_name)),
             Some(format!("{}.h", base_name)),
@@ -711,6 +800,38 @@ fn process_file(args: &Args, input_file: &str) {
         eprintln!("generated: {}", path);
     }
 
+    // Generate Java
+    if let Some(dir) = &java_dir {
+        let java_opts = codegen::java::JavaOptions { package: args.java_package.clone() };
+        let generated = match codegen::java::generate(&model, idl_filename, &java_opts) {
+            Ok(f) => Some(f),
+            // A -o batch only implies Java. One construct the other languages
+            // handle fine must not kill the whole batch.
+            Err(e) if !java_requested_explicitly(&args.java_output, &args.langs) => {
+                eprintln!("warning: skipping Java for {}: {}", input_file, e);
+                None
+            }
+            Err(e) => {
+                eprintln!("{}: {}", input_file, e);
+                process::exit(1);
+            }
+        };
+        for f in generated.iter().flatten() {
+            let path = java_out_path(dir, &f.relative_path);
+            if let Some(prev) = note_java_output(java_written, &path, input_file) {
+                eprintln!(
+                    "warning: '{}' overwrites the file already generated from {}",
+                    path, prev
+                );
+            }
+            if let Err(e) = write_file(&path, &f.source) {
+                eprintln!("error: cannot write '{}': {}", path, e);
+                process::exit(1);
+            }
+            eprintln!("generated: {}", path);
+        }
+    }
+
     // Generate XML type representation
     if let Some(path) = &xml_path {
         let code = match codegen::xml::generate(
@@ -769,6 +890,11 @@ fn build_import_modules(
         }
     }
     map
+}
+
+/// Join a backend-relative path under the Java output directory.
+fn java_out_path(dir: &str, relative: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches(['/', '\\']), relative)
 }
 
 /// Write file, creating parent directories if needed
@@ -833,5 +959,78 @@ mod tests {
     fn no_match_returns_none() {
         let comp = PathCompletion::default();
         assert!(comp.get("definitely_nonexistent_xyz").is_none());
+    }
+
+    #[test]
+    fn java_relative_paths_join_under_the_output_dir() {
+        // -j takes a directory; the backend's relative path is joined under it.
+        assert_eq!(java_out_path("out", "HelloWorld.java"), "out/HelloWorld.java");
+        assert_eq!(java_out_path("out/", "com/x/HelloWorld.java"), "out/com/x/HelloWorld.java");
+    }
+
+    #[test]
+    fn a_java_path_written_twice_in_one_run_is_reported() {
+        let mut written = HashMap::new();
+        assert_eq!(note_java_output(&mut written, "out/Point2D.java", "Complex_Arrays.idl"), None);
+        // A second input on the same path returns the one that wrote it first.
+        assert_eq!(
+            note_java_output(&mut written, "out/Point2D.java", "Tuple_Structs.idl").as_deref(),
+            Some("Complex_Arrays.idl")
+        );
+        // The same input twice is not an overwrite.
+        assert_eq!(note_java_output(&mut written, "out/Point2D.java", "Tuple_Structs.idl"), None);
+    }
+
+    #[test]
+    fn only_a_named_java_request_is_a_hard_error() {
+        // -j names Java outright, so a refusal must fail.
+        assert!(java_requested_explicitly(&Some("out".to_string()), &None));
+        // Picking Java in the wizard is just as explicit.
+        assert!(java_requested_explicitly(
+            &None,
+            &Some([true, false, false, false, false, false, true])
+        ));
+        // A -o batch only implies Java: warn, then emit the other languages.
+        assert!(!java_requested_explicitly(&None, &None));
+        // Not picking Java in the wizard is not explicit.
+        assert!(!java_requested_explicitly(
+            &None,
+            &Some([true, false, false, false, false, false, false])
+        ));
+    }
+
+    #[test]
+    fn java_output_suppresses_the_rust_c_default() {
+        let none = || None::<String>;
+        // Nothing requested -> the Rust+C default fires.
+        assert!(wants_default_rust_c(
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none()
+        ));
+        // -j alone requested Java, so the default must not fire.
+        assert!(!wants_default_rust_c(
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &Some("out".to_string())
+        ));
+        // A non-Java flag suppresses it too, as it always has.
+        assert!(!wants_default_rust_c(
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &Some("out.cs".to_string()),
+            &none(),
+            &none()
+        ));
     }
 }

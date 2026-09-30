@@ -42,6 +42,30 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_type_info_add_enum_literal(IntPtr type_info, byte* literal_name, int value, int is_default);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_create_bitmask(byte* type_name, ushort bit_bound, out IntPtr out_type_info);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_bitmask_flag(IntPtr type_info, byte* flag_name, ushort position);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_create_bitset(byte* type_name, out IntPtr out_type_info);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_bitfield(IntPtr type_info, byte* field_name, byte bitcount, int holder_type);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_create_union(byte* type_name, int extensibility, int discriminator_type, out IntPtr out_type_info);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_union_label(IntPtr type_info, byte* member_name, int label);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_map_field(IntPtr type_info, byte* field_name, int key_type, uint key_bound, int value_type, uint value_bound, uint bound, int flags);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_map_of_nested_field(IntPtr type_info, byte* field_name, int key_type, uint key_bound, IntPtr value_type_info, uint bound, int flags);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_type_info_add_sequence_of_named_field(IntPtr type_info, byte* field_name, byte* element_hash_name, uint bound, int flags);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

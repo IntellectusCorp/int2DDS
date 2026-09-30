@@ -369,6 +369,19 @@ impl XmlTypeRegistry {
         self.registry.lookup_complete(hash)
     }
 
+    /// Return a type's TypeObject together with its full nested-dependency
+    /// closure, so a standalone decode (that rebuilds a registry from the deps)
+    /// resolves struct/array/sequence members. Mirrors `get()`'s use of the
+    /// internal registry, exposing the closure for the C-ABI TypeObject path.
+    pub fn get_type_object_with_deps(
+        &self,
+        name: &str,
+    ) -> Option<(CompleteTypeObject, Vec<(TypeIdentifier, TypeObject)>)> {
+        let complete = self.get_type_object(name)?.clone();
+        let deps = self.registry.dependency_closure_of(&complete);
+        Some((complete, deps))
+    }
+
     pub fn get(&self, name: &str) -> DdsResult<DynamicTypeSupport> {
         let complete = self
             .get_type_object(name)

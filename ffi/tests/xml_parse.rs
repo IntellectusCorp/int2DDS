@@ -78,3 +78,36 @@ fn simple_sample_parses() {
         assert!(names.iter().any(|n| n == "SensorData"));
     }
 }
+
+#[test]
+fn unknown_type_name_is_not_found_from_both_lookups() {
+    unsafe {
+        let mut registry = ptr::null_mut();
+        assert_eq!(
+            int2dds_xml_type_registry_from_file(
+                xml_path("sensor_data.xml").as_ptr(),
+                &mut registry
+            ),
+            INT2DDS_RET_OK
+        );
+
+        let bogus = CString::new("NoSuchType").unwrap();
+
+        // Both lookups must report an unknown name the same way.
+        let mut support = ptr::null_mut();
+        assert_eq!(
+            int2dds_xml_type_registry_get_type_support(registry, bogus.as_ptr(), &mut support),
+            INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND
+        );
+        assert!(support.is_null());
+
+        let mut type_obj = ptr::null_mut();
+        assert_eq!(
+            int2dds_xml_type_registry_get_type_object(registry, bogus.as_ptr(), &mut type_obj),
+            INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND
+        );
+        assert!(type_obj.is_null());
+
+        int2dds_xml_type_registry_destroy(registry);
+    }
+}

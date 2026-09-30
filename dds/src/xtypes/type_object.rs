@@ -3704,6 +3704,41 @@ pub fn plain_collection_equiv_kind(element: &TypeIdentifier) -> EquivalenceKind 
     kind_of(element)
 }
 
+/// Build the plain-map `TypeIdentifier` for `map<key, element, bound>`: SMALL when
+/// `bound <= 255` (unbounded == 0 -> SMALL), else LARGE, with the header `equiv_kind`
+/// derived from both the key and the element. Shared by the derive macro, the
+/// `HashMap`/`BTreeMap` trait impls and the FFI type_info builder so every binding
+/// advertises the same id for the same map.
+pub fn plain_map_identifier(
+    key: TypeIdentifier,
+    element: TypeIdentifier,
+    bound: u32,
+) -> TypeIdentifier {
+    let header = PlainCollectionHeader {
+        equiv_kind: EquivalenceKind::Both,
+        element_flags: CollectionElementFlag::default(),
+    };
+    let key_flags = CollectionElementFlag::default();
+    let id = if bound <= 255 {
+        TypeIdentifier::PlainMapSmall {
+            header,
+            bound: bound as u8,
+            key_flags,
+            key_identifier: Box::new(key),
+            element_identifier: Box::new(element),
+        }
+    } else {
+        TypeIdentifier::PlainMapLarge {
+            header,
+            bound,
+            key_flags,
+            key_identifier: Box::new(key),
+            element_identifier: Box::new(element),
+        }
+    };
+    recompute_collection_kind(id)
+}
+
 /// Return `id` with its plain-collection header `equiv_kind` recomputed from its
 /// (current) element/key via [`plain_collection_equiv_kind`]. Callers rewrite inner
 /// ids first, so applying this bottom-up keeps nested collection headers correct
@@ -3829,6 +3864,48 @@ impl<T: HasTypeObject> HasTypeObject for Vec<T> {
         T::collect_nested_type_objects(out);
     }
 }
+
+/// `map<K, V>` for the std map types: an unbounded plain-map id over the key and
+/// element ids (the derive macro emits the bounded form for `#[dds(bound = N)]`
+/// fields itself), with the nested closure forwarded to both parameters.
+macro_rules! impl_map_has_type_object {
+    ($($map:ident),* $(,)?) => {
+        $(
+            impl<K: HasTypeObject, V: HasTypeObject> HasTypeObject for std::collections::$map<K, V> {
+                fn type_identifier() -> TypeIdentifier {
+                    plain_map_identifier(K::type_identifier(), V::type_identifier(), 0)
+                }
+
+                fn minimal_type_identifier() -> TypeIdentifier {
+                    plain_map_identifier(
+                        K::minimal_type_identifier(),
+                        V::minimal_type_identifier(),
+                        0,
+                    )
+                }
+
+                fn minimal_type_object() -> MinimalTypeObject {
+                    MinimalTypeObject::Struct(MinimalStructType::default())
+                }
+
+                fn complete_type_object() -> CompleteTypeObject {
+                    CompleteTypeObject::Struct(CompleteStructType::default())
+                }
+
+                fn dds_type_name() -> &'static str {
+                    "map"
+                }
+
+                fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+                    K::collect_nested_type_objects(out);
+                    V::collect_nested_type_objects(out);
+                }
+            }
+        )*
+    };
+}
+
+impl_map_has_type_object!(HashMap, BTreeMap);
 
 impl<T: HasTypeObject> HasTypeObject for Option<T> {
     fn type_identifier() -> TypeIdentifier {
