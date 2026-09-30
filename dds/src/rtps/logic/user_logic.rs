@@ -2384,11 +2384,8 @@ impl UserLogic {
             .lock()
             .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
 
-        let subscriber_history_cache =
-            subscriber_history_cache.filter(|_| !cache_guard.is_coherent_access());
-
         match subscriber_history_cache {
-            // Not GROUP access scope, or GROUP with coherent access. Stored right here.
+            // Not GROUP access scope. Stored right here.
             None => {
                 let committed = cache_guard.add_change(change, true)?;
                 drop(cache_guard);
@@ -2450,28 +2447,26 @@ impl UserLogic {
             return Ok(());
         }
 
-        // The portion is complete, so the marker is a group boundary and the set is committed.
-        let members = closed_result
-            .into_complete_members()
-            .into_iter()
-            .map(|member| (member, false))
-            .collect::<Vec<(CacheChange, bool)>>();
+        let members = closed_result.into_complete_members();
 
-        let committed = cache_guard.commit_changes_to_datareader_cache(members)?;
-        drop(cache_guard);
-
-        for change in committed {
-            reader.on_change(change);
-        }
-
-        // Only a GROUP access scope reader has a group cursor for the marker to move.
         let subscriber_history_cache = reader
             .as_any()
             .downcast_ref::<StatefulReader>()
             .and_then(StatefulReader::subscriber_history_cache);
+
+        // Outside GROUP access scope this writer's portion is the whole set, so it is stored here.
         let Some(subscriber_history_cache) = subscriber_history_cache else {
+            let members = members.into_iter().map(|member| (member, false)).collect::<Vec<_>>();
+            let committed = cache_guard.commit_changes_to_datareader_cache(members)?;
+            drop(cache_guard);
+
+            for change in committed {
+                reader.on_change(change);
+            }
+
             return Ok(());
         };
+        drop(cache_guard);
 
         // One lock over the hand-off and the gate, so no event slips in between them.
         let reader_id = reader.guid().entity_id();
@@ -2479,8 +2474,13 @@ impl UserLogic {
             .lock()
             .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
 
-        // The marker's own group position moves the cursor; it is dropped before release.
+        // The portion joins the group order under its own positions, and the marker takes the
+        // position the set ends at.
+        for member in members {
+            subscriber_history_cache.add_change(reader_id, member, false)?;
+        }
         subscriber_history_cache.add_change(reader_id, marker, false)?;
+
         let released = subscriber_history_cache.flush_pending_changes();
         drop(subscriber_history_cache);
 
@@ -2544,13 +2544,14 @@ impl UserLogic {
         subscriber_history_caches: &[Arc<Mutex<SubscriberHistoryCache>>],
         remote_writer_guid: Guid,
         group_info: gap::GroupInfo,
+        filtered_count: Option<i64>,
     ) -> RtpsResult<()> {
         for subscriber_history_cache in subscriber_history_caches {
             let mut cache = subscriber_history_cache
                 .lock()
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
 
-            cache.record_gap_group_info(remote_writer_guid, group_info)?;
+            cache.record_gap_group_info(remote_writer_guid, group_info, filtered_count)?;
 
             let released = cache.flush_pending_changes();
             drop(cache);
@@ -3899,6 +3900,7 @@ impl UnicastMessageProcessor for UserLogic {
                 &subscriber_history_caches,
                 remote_writer_guid,
                 group_info,
+                gap.filtered_count,
             );
         }
 
