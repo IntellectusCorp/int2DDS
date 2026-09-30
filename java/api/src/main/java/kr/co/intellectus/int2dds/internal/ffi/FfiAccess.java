@@ -4529,4 +4529,322 @@ public final class FfiAccess {
             long reader, byte[] handle, long keyBuf, long keyCapacity, long keySizeOut) {
         return Ffi.int2dds_datareader_get_key_value(reader, handle, keyBuf, keyCapacity, keySizeOut);
     }
+
+    // --- DomainParticipantFactory QoS / lookup ---
+
+    /** The factory's {@code autoenable_created_entities} flag, written to {@code out[0]} on success. */
+    public static int participantFactoryGetQos(long factory, boolean[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_domain_participant_factory_get_qos(factory, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte
+        }
+        return rc;
+    }
+
+    /** Sets the factory's {@code autoenable_created_entities} flag. */
+    public static int participantFactorySetQos(long factory, boolean autoenableCreatedEntities) {
+        return Ffi.int2dds_domain_participant_factory_set_qos(factory, autoenableCreatedEntities);
+    }
+
+    /** Sets the factory's default participant QoS; {@code qos == 0L} resets it to the built-in default. */
+    public static int participantFactorySetDefaultParticipantQos(long factory, long qos) {
+        return Ffi.int2dds_domain_participant_factory_set_default_participant_qos(factory, qos);
+    }
+
+    /**
+     * Copies the factory's default participant QoS into a new handle, written to
+     * {@code handleOut[0]} on success and released with {@link #destroyParticipantQos}.
+     */
+    public static int participantFactoryGetDefaultParticipantQos(long factory, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_domain_participant_factory_get_default_participant_qos(
+                factory, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Looks up a participant on {@code domainId}. On success writes a new handle
+     * aliasing the existing participant, or {@code 0L} when there is none, to
+     * {@code handleOut[0]}. The alias is released with {@link #deleteParticipant},
+     * which deletes the participant for every holder.
+     */
+    public static int participantFactoryLookupParticipant(long factory, int domainId, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_domain_participant_factory_lookup_participant(
+                factory, domainId, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Text properties whose names start with {@code prefix}, as alternating
+     * name/value UTF-8 entries; an empty array means none or an error. Passthrough
+     * to {@link FfiHandwritten}.
+     */
+    public static byte[][] participantQosPropertiesWithPrefix(long qos, byte[] prefix) {
+        return FfiHandwritten.participantQosPropertiesWithPrefix(qos, prefix);
+    }
+
+    // --- DomainParticipant QoS: property helpers ---
+
+    /** Adds or overwrites one binary property entry; {@code dataAddr} may be 0 when {@code dataLen} is 0. */
+    public static int participantQosAddBinaryProperty(
+            long qos, byte[] name, long dataAddr, long dataLen, boolean propagate) {
+        return Ffi.int2dds_participant_qos_add_binary_property(qos, name, dataAddr, dataLen, propagate);
+    }
+
+    /**
+     * Copies the text property {@code name} into {@code outBuf} without a NUL and
+     * writes its byte length to {@code lenOut[0]}, on {@code RET_OK} and on {@code
+     * RET_BUFFER_TOO_SMALL} alike. {@code RET_NO_DATA} when the name is absent.
+     */
+    public static int participantQosFindProperty(long qos, byte[] name, byte[] outBuf, long[] lenOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_qos_find_property(
+                qos, name, outBuf, outBuf.length, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0 || rc == DdsException.RET_BUFFER_TOO_SMALL) {
+            lenOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Removes the text property {@code name}; {@code RET_NO_DATA} when it is absent. */
+    public static int participantQosRemoveProperty(long qos, byte[] name) {
+        return Ffi.int2dds_participant_qos_remove_property(qos, name);
+    }
+
+    // --- Contained-entity deletion ---
+
+    /** Deletes every entity created through {@code participant}. Returns the C ABI status code. */
+    public static int participantDeleteContainedEntities(long participant) {
+        return Ffi.int2dds_participant_delete_contained_entities(participant);
+    }
+
+    /** Deletes every datawriter created through {@code publisher}. Returns the C ABI status code. */
+    public static int publisherDeleteContainedEntities(long publisher) {
+        return Ffi.int2dds_publisher_delete_contained_entities(publisher);
+    }
+
+    /** Deletes every datareader created through {@code subscriber}. Returns the C ABI status code. */
+    public static int subscriberDeleteContainedEntities(long subscriber) {
+        return Ffi.int2dds_subscriber_delete_contained_entities(subscriber);
+    }
+
+    // --- Builtin subscriber (DCPSPublication) ---
+
+    /**
+     * The participant's builtin subscriber as a new handle, written to {@code
+     * handleOut[0]} on success. The C ABI has no release for it: {@link
+     * #deleteSubscriber} refuses a builtin subscriber with {@code
+     * RET_PRECONDITION_NOT_MET}, so callers keep one handle per participant.
+     */
+    public static int participantGetBuiltinSubscriber(long participant, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_get_builtin_subscriber(participant, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Takes one DCPSPublication sample through the builtin subscriber, blocking up
+     * to {@code timeoutMs} (negative = infinite) for one whose topic name equals
+     * {@code topicNameFilter} ({@code null} accepts any). {@code RET_DYNAMIC_TIMEOUT}
+     * when none arrives. The box written to {@code dataOut[0]} is released with
+     * {@link #pubDataDestroy}.
+     */
+    public static int subscriberTakePublicationData(
+            long builtinSub, byte[] topicNameFilter, int timeoutMs, long[] dataOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscriber_take_publication_data(
+                builtinSub, topicNameFilter, timeoutMs, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            dataOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Clones the TypeObject a publication advertised into a new handle written to
+     * {@code out[0]}, released with {@link #typeObjectDestroy}. {@code
+     * RET_DYNAMIC_FIELD_NOT_FOUND} when the publication carried none.
+     */
+    public static int pubDataTakeTypeObject(long data, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_take_type_object(
+                data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    // --- Environment ---
+
+    /** Sets {@code INT2DDS_MULTICAST_TTL}; {@code ttl} must be 0..255. */
+    public static int envSetMulticastTtl(int ttl) {
+        return Ffi.int2dds_env_set_multicast_ttl(ttl);
+    }
+
+    /**
+     * Reads the {@code INT2DDS_MULTICAST_TTL} override into {@code ttlOut[0]} and
+     * whether one is set into {@code hasValueOut[0]}. Both native outs are one byte.
+     */
+    public static int envGetMulticastTtl(int[] ttlOut, boolean[] hasValueOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        long addr = directBufferAddress(slot);
+        int rc = Ffi.int2dds_env_get_multicast_ttl(addr, addr + 1);
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            hasValueOut[0] = slot.get(1) != 0;
+            ttlOut[0] = slot.get(0) & 0xFF;
+        }
+        return rc;
+    }
+
+    /** Sets {@code DDS_QOS_PROFILE}, the profile file path(s) the factory auto-loads. */
+    public static int envSetQosProfile(byte[] path) {
+        return Ffi.int2dds_env_set_qos_profile(path);
+    }
+
+    /** Sets {@code DDS_DEFAULT_QOS_PROFILE}, the {@code "Library::Profile"} default-QoS creation draws from. */
+    public static int envSetDefaultQosProfile(byte[] profile) {
+        return Ffi.int2dds_env_set_default_qos_profile(profile);
+    }
+
+    // --- DataReader QoS: lifespan reference ---
+
+    public static int readerQosSetLifespanReference(long qos, int kind) {
+        return Ffi.int2dds_datareader_qos_set_lifespan_reference(qos, kind);
+    }
+
+    public static int readerQosGetLifespanReference(long qos, long kindOut) {
+        return Ffi.int2dds_datareader_qos_get_lifespan_reference(qos, kindOut);
+    }
+
+    // --- DataReader: loaned serialized take ---
+
+    /**
+     * Takes the next sample without copying: on {@code RET_OK} the native
+     * addresses receive the payload pointer, its size, the valid-data flag (one
+     * byte) and the loan handle. A non-zero loan must be returned exactly once
+     * with {@link #datareaderReturnSerializedLoan}; the payload is readable only
+     * until then. {@code RET_NO_DATA} when the cache is empty.
+     */
+    public static int datareaderTakeSerializedLoaned(
+            long reader, long dataOut, long actualSizeOut, long validDataOut, long loanOut) {
+        return Ffi.int2dds_datareader_take_serialized_loaned(
+                reader, dataOut, actualSizeOut, validDataOut, loanOut);
+    }
+
+    /** Returns a loan from {@link #datareaderTakeSerializedLoaned}; a {@code 0L} loan is ignored. */
+    public static int datareaderReturnSerializedLoan(long loan) {
+        return Ffi.int2dds_datareader_return_serialized_loan(loan);
+    }
+
+    // --- Topic name getters ---
+
+    /**
+     * Copies the topic name, NUL-terminated, into {@code nameOut}. {@code
+     * RET_BUFFER_TOO_SMALL} without a size report when it does not fit, so the
+     * caller grows and retries.
+     */
+    public static int topicGetName(long topic, byte[] nameOut) {
+        return Ffi.int2dds_topic_get_name(topic, nameOut, nameOut.length);
+    }
+
+    /** The topic's type name; same buffer contract as {@link #topicGetName}. */
+    public static int topicGetTypeName(long topic, byte[] typeNameOut) {
+        return Ffi.int2dds_topic_get_type_name(topic, typeNameOut, typeNameOut.length);
+    }
+
+    // --- Topic from a TypeObject ---
+
+    /**
+     * Creates a topic advertising {@code typeObj}, which is cloned natively and
+     * stays owned by the caller. {@code qos} may be {@code 0L}. Same {@code (rc,
+     * long[] handleOut)} shape as {@link #createTopic}; released with {@link
+     * #deleteTopic}.
+     */
+    public static int createTopicWithTypeObject(long participant, byte[] topicName, byte[] typeName,
+            long typeObj, long qos, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_topic_with_type_object(
+                participant, topicName, typeName, typeObj, qos, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    // --- TypeInfo: union / bitset / map ---
+
+    /**
+     * Creates a union type-info builder switching on the scalar {@code
+     * discriminatorType} (an {@code INT2DDS_FIELD_*} kind; string kinds are
+     * rejected). Same {@code (rc, long[] out)} shape as {@link #typeInfoCreateEnum}.
+     */
+    public static int typeInfoCreateUnion(byte[] typeName, int extensibility, int discriminatorType, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_info_create_union(
+                typeName, extensibility, discriminatorType, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Creates a bitset type-info builder. Same {@code (rc, long[] out)} shape as {@link #typeInfoCreateEnum}. */
+    public static int typeInfoCreateBitset(byte[] typeName, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_info_create_bitset(typeName, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Appends a {@code bitfield<bitcount>} held in the integer kind {@code holderType} to a bitset builder. */
+    public static int typeInfoAddBitfield(long typeInfo, byte[] fieldName, int bitcount, int holderType) {
+        return Ffi.int2dds_type_info_add_bitfield(typeInfo, fieldName, bitcount, holderType);
+    }
+
+    /** Attaches the case label {@code label} to the already-added union member {@code memberName}. */
+    public static int typeInfoAddUnionLabel(long typeInfo, byte[] memberName, int label) {
+        return Ffi.int2dds_type_info_add_union_label(typeInfo, memberName, label);
+    }
+
+    /**
+     * Appends a {@code map<K, V>} field of scalar kinds. The bounds apply to
+     * string kinds only ({@code 0} = unbounded); {@code bound} is the map's own.
+     */
+    public static int typeInfoAddMapField(long typeInfo, byte[] fieldName, int keyType, int keyBound,
+            int valueType, int valueBound, int bound, int flags) {
+        return Ffi.int2dds_type_info_add_map_field(
+                typeInfo, fieldName, keyType, keyBound, valueType, valueBound, bound, flags);
+    }
+
+    /** Appends a {@code map<K, Nested>} field; {@code valueTypeInfo} is borrowed, not consumed. */
+    public static int typeInfoAddMapOfNestedField(long typeInfo, byte[] fieldName, int keyType,
+            int keyBound, long valueTypeInfo, int bound, int flags) {
+        return Ffi.int2dds_type_info_add_map_of_nested_field(
+                typeInfo, fieldName, keyType, keyBound, valueTypeInfo, bound, flags);
+    }
 }

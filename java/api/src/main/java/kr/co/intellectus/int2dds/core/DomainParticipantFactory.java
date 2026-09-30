@@ -1,7 +1,10 @@
 package kr.co.intellectus.int2dds.core;
 
+import kr.co.intellectus.int2dds.exceptions.DdsErrorException;
+import kr.co.intellectus.int2dds.internal.QosMarshal;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
+import kr.co.intellectus.int2dds.qos.ParticipantQos;
 import kr.co.intellectus.int2dds.xtypes.DynamicTypeSupport;
 import java.nio.charset.Charset;
 import java.util.List;
@@ -40,6 +43,67 @@ public final class DomainParticipantFactory {
     /** The native factory handle, for entities built on top of this class. */
     public long handle() {
         return handle;
+    }
+
+    /** The factory's {@code autoenable_created_entities} policy, the only member of its QoS. */
+    public boolean getAutoenableCreatedEntities() {
+        boolean[] out = new boolean[1];
+        ReturnCodes.check(FfiAccess.participantFactoryGetQos(handle, out));
+        return out[0];
+    }
+
+    /** Sets the factory's {@code autoenable_created_entities} policy. */
+    public void setAutoenableCreatedEntities(boolean autoenable) {
+        ReturnCodes.check(FfiAccess.participantFactorySetQos(handle, autoenable));
+    }
+
+    /**
+     * Sets the QoS a participant created with the core's default QoS receives.
+     * {@code null} resets it to the built-in default.
+     */
+    public void setDefaultParticipantQos(ParticipantQos qos) {
+        if (qos == null) {
+            ReturnCodes.check(FfiAccess.participantFactorySetDefaultParticipantQos(handle, 0L));
+            return;
+        }
+        long qosHandle = FfiAccess.createParticipantQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException("failed to allocate a native ParticipantQos handle");
+        }
+        try {
+            QosMarshal.applyParticipantQos(qosHandle, qos);
+            ReturnCodes.check(FfiAccess.participantFactorySetDefaultParticipantQos(handle, qosHandle));
+        } finally {
+            FfiAccess.destroyParticipantQos(qosHandle);
+        }
+    }
+
+    /**
+     * The default participant QoS as the core resolves it (registered default,
+     * then the configured default profile, then the spec default). Only {@code
+     * Property} entries can be read back; see {@link QosMarshal#readParticipantQos}.
+     */
+    public ParticipantQos getDefaultParticipantQos() {
+        long[] out = new long[1];
+        ReturnCodes.check(FfiAccess.participantFactoryGetDefaultParticipantQos(handle, out));
+        try {
+            return QosMarshal.readParticipantQos(out[0]);
+        } finally {
+            FfiAccess.destroyParticipantQos(out[0]);
+        }
+    }
+
+    /**
+     * An existing participant on {@code domainId}, or null when there is none.
+     * The result aliases that participant: reads work, but this core cannot create
+     * child entities through an alias. Closing the alias deletes the participant
+     * for every holder, as DDS {@code lookup_participant} semantics require; a
+     * dropped, unclosed alias releases nothing.
+     */
+    public DomainParticipant lookupParticipant(int domainId) {
+        long[] out = new long[1];
+        ReturnCodes.check(FfiAccess.participantFactoryLookupParticipant(handle, domainId, out));
+        return out[0] == 0L ? null : DomainParticipant.lookedUp(out[0], domainId);
     }
 
     /**

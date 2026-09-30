@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gen-jni --count`, printing the size of the exported C ABI surface.
 - The `java` CI status now runs `cargo test -p int2dds-java` and the Gradle test
   suite on Linux and Windows. Neither ran in CI before.
+- Java API for the C ABI functions the binding had not exposed:
+  `DomainParticipantFactory` `getAutoenableCreatedEntities`/`setAutoenableCreatedEntities`,
+  `getDefaultParticipantQos`/`setDefaultParticipantQos` and `lookupParticipant`;
+  `deleteContainedEntities()` on `DomainParticipant`, `Publisher` and `Subscriber`;
+  `DomainParticipant.getBuiltinSubscriber()` with `Subscriber.takePublicationData`,
+  whose result carries the advertised `TypeObject`; `DomainParticipant.getQos()`,
+  `findProperty`, `removeProperty` and binary `Property` entries; `Env` for the
+  `INT2DDS_MULTICAST_TTL`, `DDS_QOS_PROFILE` and `DDS_DEFAULT_QOS_PROFILE`
+  overrides; the `LifespanReference` reader QoS policy; `DataReader.takeSerializedLoaned()`;
+  `DynamicTopic.name()`/`typeName()`; `DomainParticipant.createDynamicTopic` from a
+  discovered `TypeObject`; `TypeInfo` union, bitset and map builders.
 
 ### Changed
 

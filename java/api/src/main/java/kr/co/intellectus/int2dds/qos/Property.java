@@ -29,6 +29,11 @@ public class Property {
         entries.add(new PropertyEntry(name, value, propagate));
     }
 
+    /** Appends a binary entry; {@code data} is copied. */
+    public void addBinary(String name, byte[] data, boolean propagate) {
+        entries.add(new PropertyEntry(name, data, propagate));
+    }
+
     /** Removes any existing multicast TTL entry, then appends the new value. */
     public void setMulticastTtl(int ttl) {
         entries.removeIf(e -> MULTICAST_TTL_NAME.equals(e.getName()));

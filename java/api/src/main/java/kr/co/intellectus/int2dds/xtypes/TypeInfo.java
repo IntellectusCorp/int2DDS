@@ -24,6 +24,8 @@ public final class TypeInfo implements AutoCloseable {
     public static final int MEMBER_OPTIONAL = 1 << 1;
     public static final int MEMBER_MUST_UNDERSTAND = 1 << 2;
     public static final int MEMBER_EXTERNAL = 1 << 3;
+    /** Marks the {@code default:} member of a union built with {@link #createUnion}. */
+    public static final int MEMBER_DEFAULT = 1 << 4;
 
     private final NativeHandle handle;
     private boolean hasKey;
@@ -61,6 +63,33 @@ public final class TypeInfo implements AutoCloseable {
     public static TypeInfo createBitmask(String name, int bitBound) {
         long[] out = new long[1];
         int rc = FfiAccess.typeInfoCreateBitmask(name.getBytes(UTF8), bitBound, out);
+        ReturnCodes.check(rc);
+        return new TypeInfo(out[0]);
+    }
+
+    /**
+     * Creates a union type-info builder switching on {@code discriminatorType}, a
+     * scalar {@link FieldType} (string kinds are rejected). Add each case member
+     * with the same {@code add*Field} calls a struct uses, giving the {@code
+     * default:} member {@link #MEMBER_DEFAULT}, then attach its labels with
+     * {@link #addUnionLabel}.
+     */
+    public static TypeInfo createUnion(String name, Extensibility extensibility, int discriminatorType) {
+        long[] out = new long[1];
+        int rc = FfiAccess.typeInfoCreateUnion(
+                name.getBytes(UTF8), extensibility.value(), discriminatorType, out);
+        ReturnCodes.check(rc);
+        return new TypeInfo(out[0]);
+    }
+
+    /**
+     * Creates a bitset type-info builder. Populate it with {@link #addBitfield} in
+     * declaration order, then reference it from a struct builder with {@link
+     * #addNestedField}.
+     */
+    public static TypeInfo createBitset(String name) {
+        long[] out = new long[1];
+        int rc = FfiAccess.typeInfoCreateBitset(name.getBytes(UTF8), out);
         ReturnCodes.check(rc);
         return new TypeInfo(out[0]);
     }
@@ -249,6 +278,55 @@ public final class TypeInfo implements AutoCloseable {
                 handle(), fieldName.getBytes(UTF8), elementTypeName.getBytes(UTF8), arraySize, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
+        fieldAdded(rc, flags);
+    }
+
+    /**
+     * Appends a {@code bitfield<bitcount>} to a bitset builder. {@code holderType} is
+     * the integer {@link FieldType} that holds it ({@code BYTE} up to 8 bits, then
+     * {@code UINT16}/{@code UINT32}/{@code UINT64}); the bit position follows the
+     * previous bitfield.
+     */
+    public void addBitfield(String name, int bitcount, int holderType) {
+        int rc = FfiAccess.typeInfoAddBitfield(handle(), name.getBytes(UTF8), bitcount, holderType);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Attaches the case label {@code label} to the union member {@code memberName},
+     * which must already have been added. Boolean labels are {@code 1}/{@code 0};
+     * enum labels are their literal value.
+     */
+    public void addUnionLabel(String memberName, int label) {
+        int rc = FfiAccess.typeInfoAddUnionLabel(handle(), memberName.getBytes(UTF8), label);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Appends a {@code map<K, V>} field of scalar {@link FieldType} kinds. {@code
+     * keyBound}/{@code valueBound} apply to string kinds only and {@code bound} is
+     * the map's own; {@code 0} means unbounded throughout.
+     */
+    public void addMapField(String name, int keyType, int keyBound, int valueType, int valueBound,
+            int bound, int flags) {
+        int rc = FfiAccess.typeInfoAddMapField(
+                handle(), name.getBytes(UTF8), keyType, keyBound, valueType, valueBound, bound, flags);
+        NativeKeepAlive.keepAlive(this);
+        fieldAdded(rc, flags);
+    }
+
+    /**
+     * Appends a {@code map<K, Nested>} field whose values are described by {@code
+     * value}'s builder. {@code value} is borrowed, not consumed.
+     */
+    public void addMapOfNestedField(String name, int keyType, int keyBound, TypeInfo value, int bound,
+            int flags) {
+        int rc = FfiAccess.typeInfoAddMapOfNestedField(
+                handle(), name.getBytes(UTF8), keyType, keyBound, value.handle(), bound, flags);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(value);
         fieldAdded(rc, flags);
     }
 

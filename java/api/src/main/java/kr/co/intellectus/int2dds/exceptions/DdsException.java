@@ -33,6 +33,7 @@ public class DdsException extends RuntimeException {
     public static final int RET_BUFFER_TOO_SMALL = 101;
 
     // Dynamic (XTypes) return codes (200-204).
+    public static final int RET_DYNAMIC_FIELD_NOT_FOUND = 200;
     public static final int RET_DYNAMIC_TIMEOUT = 203;
 
     private final int code;

@@ -1,7 +1,10 @@
 package kr.co.intellectus.int2dds.core;
 
+import kr.co.intellectus.int2dds.conditions.InstanceState;
 import kr.co.intellectus.int2dds.conditions.StatusCondition;
+import kr.co.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import kr.co.intellectus.int2dds.exceptions.DdsErrorException;
+import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.QosMarshal;
@@ -69,6 +72,60 @@ public final class Subscriber extends NativeEntity {
      */
     static Subscriber createForTest(DomainParticipant participant, NativeCleaner.Deleter deleter) {
         return new Subscriber(participant, deleter);
+    }
+
+    private Subscriber(DomainParticipant participant, long builtinHandle) {
+        super(participant, builtinHandle, Subscriber::releaseBuiltin);
+    }
+
+    /**
+     * Wraps the participant's builtin subscriber, reached through {@link
+     * DomainParticipant#getBuiltinSubscriber}. {@code int2dds_delete_subscriber}
+     * refuses a builtin subscriber, so this wrapper's deleter releases nothing.
+     */
+    static Subscriber builtin(DomainParticipant participant, long handle) {
+        return new Subscriber(participant, handle);
+    }
+
+    private static int releaseBuiltin(long ignored) {
+        return 0;
+    }
+
+    /**
+     * Takes one DCPSPublication discovery sample, blocking up to {@code timeoutMs}
+     * (negative = indefinitely) for one whose topic name equals {@code
+     * topicNameFilter} ({@code null} accepts any). Returns null on timeout.
+     * Meaningful only on the builtin subscriber. The result carries the
+     * TypeObject when the publication sent one inline; see {@link
+     * PublicationBuiltinTopicData#typeObject()} for when that is the case.
+     */
+    public PublicationBuiltinTopicData takePublicationData(String topicNameFilter, int timeoutMs) {
+        long[] out = new long[1];
+        int rc = FfiAccess.subscriberTakePublicationData(handle(),
+                topicNameFilter == null ? null : topicNameFilter.getBytes(UTF8), timeoutMs, out);
+        NativeKeepAlive.keepAlive(this);
+        if (rc == DdsException.RET_DYNAMIC_TIMEOUT) {
+            return null;
+        }
+        ReturnCodes.check(rc);
+        long data = out[0];
+        try {
+            return PublicationBuiltinTopicData.materialize(data, InstanceState.ALIVE, true);
+        } finally {
+            FfiAccess.pubDataDestroy(data);
+        }
+    }
+
+    /**
+     * Deletes every datareader created through this subscriber. Their Java
+     * wrappers are closed first, so none outlives its native reader; the
+     * native call then removes any reader the tree does not track.
+     */
+    public void deleteContainedEntities() {
+        closeChildren();
+        int rc = FfiAccess.subscriberDeleteContainedEntities(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
     }
 
     /** This subscriber's own DDS instance handle. */

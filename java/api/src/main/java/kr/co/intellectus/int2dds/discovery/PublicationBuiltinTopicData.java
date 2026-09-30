@@ -1,8 +1,10 @@
 package kr.co.intellectus.int2dds.discovery;
 
 import kr.co.intellectus.int2dds.conditions.InstanceState;
+import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
+import kr.co.intellectus.int2dds.xtypes.TypeObject;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
@@ -42,12 +44,13 @@ public final class PublicationBuiltinTopicData {
     private final byte[] userData;
     private final int instanceState;
     private final boolean hasData;
+    private final TypeObject typeObject;
 
     private PublicationBuiltinTopicData(byte[] key, byte[] endpointGuid, byte[] participantKey,
             String topicName, String typeName, int reliabilityKind, int durabilityKind,
             int livelinessKind, int deadlineSeconds, int deadlineNanos, int lifespanSeconds,
             int lifespanNanos, int livelinessLeaseSeconds, int livelinessLeaseNanos,
-            byte[] userData, int instanceState, boolean hasData) {
+            byte[] userData, int instanceState, boolean hasData, TypeObject typeObject) {
         this.key = key;
         this.endpointGuid = endpointGuid;
         this.participantKey = participantKey;
@@ -65,6 +68,20 @@ public final class PublicationBuiltinTopicData {
         this.userData = userData;
         this.instanceState = instanceState;
         this.hasData = hasData;
+        this.typeObject = typeObject;
+    }
+
+    /**
+     * The TypeObject this publication carried inline in its discovery data, or
+     * null when it carried none or this snapshot was not taken through {@link
+     * kr.co.intellectus.int2dds.core.Subscriber#takePublicationData}. An int2DDS
+     * peer serves its TypeObject on demand through TypeLookup instead of inline,
+     * so for one this is null; use {@link
+     * kr.co.intellectus.int2dds.core.DomainParticipant#waitForTypeObject} there.
+     * Owned by the caller; close it when done.
+     */
+    public TypeObject typeObject() {
+        return typeObject;
     }
 
     /**
@@ -158,11 +175,29 @@ public final class PublicationBuiltinTopicData {
     /** A key-only snapshot entry; {@code endpointGuid} is the entry's 16-byte instance handle. */
     public static PublicationBuiltinTopicData keyOnly(byte[] endpointGuid, int instanceState) {
         return new PublicationBuiltinTopicData(new byte[12], endpointGuid.clone(), new byte[12],
-                "", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, new byte[0], instanceState, false);
+                "", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, new byte[0], instanceState, false, null);
     }
 
     /** {@link #materialize(long)} for a snapshot entry whose instance state is known. */
     public static PublicationBuiltinTopicData materialize(long data, int instanceState) {
+        return materialize(data, instanceState, false);
+    }
+
+    /**
+     * {@link #materialize(long, int)} that also clones the advertised TypeObject
+     * out of the box when {@code withTypeObject} is set; see {@link #typeObject()}.
+     */
+    public static PublicationBuiltinTopicData materialize(long data, int instanceState,
+            boolean withTypeObject) {
+        TypeObject typeObject = null;
+        if (withTypeObject) {
+            long[] out = new long[1];
+            int rc = FfiAccess.pubDataTakeTypeObject(data, out);
+            if (rc != DdsException.RET_DYNAMIC_FIELD_NOT_FOUND) {
+                ReturnCodes.check(rc);
+                typeObject = TypeObject.fromHandle(out[0]);
+            }
+        }
         byte[] key = new byte[12];
         ReturnCodes.check(FfiAccess.pubDataGetKey(data, key));
 
@@ -230,7 +265,7 @@ public final class PublicationBuiltinTopicData {
         return new PublicationBuiltinTopicData(key, endpointGuid, participantKey, topicName,
                 typeName, reliabilityKind[0], durabilityKind[0], livelinessKind[0],
                 deadlineSeconds[0], deadlineNanos[0], lifespanSeconds[0], lifespanNanos[0],
-                leaseSeconds[0], leaseNanos[0], userDataBytes[0], instanceState, true);
+                leaseSeconds[0], leaseNanos[0], userDataBytes[0], instanceState, true, typeObject);
     }
 
     @Override

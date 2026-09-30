@@ -14,6 +14,8 @@ import kr.co.intellectus.int2dds.qos.History;
 import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.qos.LatencyBudget;
 import kr.co.intellectus.int2dds.qos.Lifespan;
+import kr.co.intellectus.int2dds.qos.LifespanReference;
+import kr.co.intellectus.int2dds.qos.LifespanReferenceKind;
 import kr.co.intellectus.int2dds.qos.Liveliness;
 import kr.co.intellectus.int2dds.qos.LivelinessKind;
 import kr.co.intellectus.int2dds.qos.Ownership;
@@ -21,6 +23,7 @@ import kr.co.intellectus.int2dds.qos.OwnershipKind;
 import kr.co.intellectus.int2dds.qos.OwnershipStrength;
 import kr.co.intellectus.int2dds.qos.ParticipantQos;
 import kr.co.intellectus.int2dds.qos.Partition;
+import kr.co.intellectus.int2dds.qos.Property;
 import kr.co.intellectus.int2dds.qos.PropertyEntry;
 import kr.co.intellectus.int2dds.qos.PublisherQos;
 import kr.co.intellectus.int2dds.qos.ReaderDataLifecycle;
@@ -117,10 +120,30 @@ public final class QosMarshal {
         }
         if (q.getProperty() != null) {
             for (PropertyEntry e : q.getProperty().getEntries()) {
-                ReturnCodes.check(FfiAccess.participantQosAddProperty(
-                        h, utf8(e.getName()), utf8(e.getValue()), e.isPropagate()));
+                if (e.isBinary()) {
+                    applyBinaryProperty(h, e);
+                } else {
+                    ReturnCodes.check(FfiAccess.participantQosAddProperty(
+                            h, utf8(e.getName()), utf8(e.getValue()), e.isPropagate()));
+                }
             }
         }
+    }
+
+    /**
+     * Reads back a participant QoS handle's text properties. {@code UserData} has
+     * no getter and stays null; binary entries and {@code propagate} flags are not
+     * reported, so every entry reads back as text with {@code propagate == false}.
+     */
+    public static ParticipantQos readParticipantQos(long h) {
+        byte[][] flat = FfiAccess.participantQosPropertiesWithPrefix(h, new byte[0]);
+        Property property = new Property();
+        for (int i = 0; i + 1 < flat.length; i += 2) {
+            property.add(new String(flat[i], UTF8), new String(flat[i + 1], UTF8), false);
+        }
+        ParticipantQos q = new ParticipantQos();
+        q.setProperty(property);
+        return q;
     }
 
     public static void applyPublisherQos(long h, PublisherQos q) {
@@ -300,6 +323,10 @@ public final class QosMarshal {
             ReturnCodes.check(FfiAccess.readerQosSetLiveliness(
                     h, q.getLiveliness().getKind().value(), q.getLiveliness().leaseDurationNs()));
         }
+        if (q.getLifespanReference() != null) {
+            ReturnCodes.check(FfiAccess.readerQosSetLifespanReference(
+                    h, q.getLifespanReference().getKind().value()));
+        }
     }
 
     /**
@@ -434,6 +461,9 @@ public final class QosMarshal {
         q.setLiveliness(new Liveliness(
                 LivelinessKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
 
+        ReturnCodes.check(FfiAccess.readerQosGetLifespanReference(h, addr));
+        q.setLifespanReference(new LifespanReference(LifespanReferenceKind.fromValue(slot.getInt(0))));
+
 
         // One slot address feeds every getter above. The ordinary later
         // slot.getInt/getLong reads are what keep it reachable in practice,
@@ -473,6 +503,17 @@ public final class QosMarshal {
         buf.put(data);
         long addr = FfiAccess.directBufferAddress(buf);
         int rc = setter.set(addr, data.length);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+    }
+
+    /** Same direct-buffer hand-off as {@link #applyUserData}, for one binary property entry. */
+    private static void applyBinaryProperty(long h, PropertyEntry e) {
+        byte[] data = e.getBinaryValue();
+        ByteBuffer buf = ByteBuffer.allocateDirect(Math.max(1, data.length)).order(ByteOrder.nativeOrder());
+        buf.put(data);
+        int rc = FfiAccess.participantQosAddBinaryProperty(
+                h, utf8(e.getName()), FfiAccess.directBufferAddress(buf), data.length, e.isPropagate());
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
     }

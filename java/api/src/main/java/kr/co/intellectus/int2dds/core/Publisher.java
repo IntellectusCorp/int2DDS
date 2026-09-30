@@ -194,6 +194,18 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
+     * Deletes every datawriter created through this publisher. Their Java
+     * wrappers are closed first, so none outlives its native writer; the
+     * native call then removes any writer the tree does not track.
+     */
+    public void deleteContainedEntities() {
+        closeChildren();
+        int rc = FfiAccess.publisherDeleteContainedEntities(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
      * Blocks until every matched reliable {@link DataReader} of every writer
      * belonging to this publisher has acknowledged all samples sent so far,
      * or {@code timeoutMillis} elapses. Returns {@code true} if

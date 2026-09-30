@@ -775,6 +775,46 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return nextSerialized(false);
     }
 
+    /**
+     * {@link #takeSerialized()} through the core's loan path: the sample is
+     * copied once, straight out of the loaned buffer, with no caller-side
+     * buffer to size. Same return contract -- {@code null} for an empty cache,
+     * {@code byte[0]} for an invalid-data sample. The loan is returned before
+     * this method returns.
+     */
+    public byte[] takeSerializedLoaned() {
+        long h = handle();
+        ByteBuffer slots = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());
+        long base = addr(slots);
+        int rc = FfiAccess.datareaderTakeSerializedLoaned(h, base, base + 8, base + 16, base + 24);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(slots);
+        if (!ReturnCodes.checkOrNoData(rc)) {
+            return null;
+        }
+        long loan = slots.getLong(24);
+        try {
+            if (slots.get(16) == 0 || loan == 0L) {
+                return new byte[0];
+            }
+            long size = slots.getLong(8);
+            if (size > MAX_SAMPLE_BYTES) {
+                throw new DdsErrorException("serialized sample too large: " + size + " bytes");
+            }
+            ByteBuffer view = FfiAccess.addressToDirectByteBuffer(slots.getLong(0), size);
+            if (view == null) {
+                throw new DdsErrorException("failed to map the loaned sample buffer");
+            }
+            byte[] out = new byte[(int) size];
+            view.get(out);
+            return out;
+        } finally {
+            if (loan != 0L) {
+                FfiAccess.datareaderReturnSerializedLoan(loan);
+            }
+        }
+    }
+
     private byte[] nextSerialized(boolean take) {
         long h = handle();
         while (true) {

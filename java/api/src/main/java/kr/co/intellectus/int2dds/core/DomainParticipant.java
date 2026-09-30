@@ -45,6 +45,11 @@ public final class DomainParticipant extends NativeEntity {
 
     private final int domainId;
 
+    // Non-null only for a wrapper from DomainParticipantFactory.lookupParticipant.
+    private LookedUpAlias alias;
+
+    private Subscriber builtinSubscriber;
+
     /**
      * Creates a participant in {@code domainId} with the core's default QoS
      * (registered default → configured default profile → spec default).
@@ -99,6 +104,44 @@ public final class DomainParticipant extends NativeEntity {
      */
     static DomainParticipant createForTest(int domainId, NativeCleaner.Deleter deleter) {
         return new DomainParticipant(domainId, deleter);
+    }
+
+    private DomainParticipant(LookedUpAlias alias, int domainId) {
+        super(null, alias.handle, alias);
+        this.domainId = domainId;
+        this.alias = alias;
+    }
+
+    /**
+     * Wraps the aliasing handle {@link DomainParticipantFactory#lookupParticipant}
+     * returns. Only an explicit {@link #close()} deletes the aliased participant:
+     * a wrapper the reaper collects releases nothing, so a dropped lookup cannot
+     * delete a participant another holder still uses. The alias box itself then
+     * leaks, which is why callers should close a lookup they are done with.
+     */
+    static DomainParticipant lookedUp(long handle, int domainId) {
+        return new DomainParticipant(new LookedUpAlias(handle), domainId);
+    }
+
+    private static final class LookedUpAlias implements NativeCleaner.Deleter {
+        final long handle;
+        volatile boolean explicitClose;
+
+        LookedUpAlias(long handle) {
+            this.handle = handle;
+        }
+
+        @Override
+        public int delete(long h) {
+            return explicitClose ? FfiAccess.deleteParticipant(h) : 0;
+        }
+    }
+
+    @Override
+    void beforeClose() {
+        if (alias != null) {
+            alias.explicitClose = true;
+        }
     }
 
     /** The domain id this participant was constructed with. */
@@ -311,6 +354,131 @@ public final class DomainParticipant extends NativeEntity {
      */
     public Subscriber createSubscriber(String profilePath) {
         return new Subscriber(this, Objects.requireNonNull(profilePath, "profilePath"));
+    }
+
+    /**
+     * Creates a topic named {@code name} for a discovered {@code type} (e.g. from
+     * {@link #waitForTypeObject}), registered under {@code typeName}, with the
+     * core's default QoS. {@code type} is cloned natively and stays owned by the
+     * caller. Requires a struct TypeObject.
+     */
+    public DynamicTopic createDynamicTopic(String name, String typeName, TypeObject type) {
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(typeName, "typeName");
+        Objects.requireNonNull(type, "type");
+        long h = handle();
+        long t = type.handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.createTopicWithTypeObject(
+                h, name.getBytes(UTF8), typeName.getBytes(UTF8), t, 0L, out);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(type);
+        ReturnCodes.check(rc);
+        return DynamicTopic.fromHandle(out[0]);
+    }
+
+    /**
+     * Deletes every entity created through this participant. The Java wrappers
+     * in this participant's tree are closed first, so none outlives its native
+     * entity; the native call then removes whatever the tree does not track.
+     * {@link DynamicTopic}, {@link kr.co.intellectus.int2dds.xtypes.DynamicDataWriter}
+     * and {@link kr.co.intellectus.int2dds.xtypes.DynamicDataReader} are not in
+     * the tree: close them before calling this, or their own {@code close()}
+     * fails afterwards.
+     */
+    public void deleteContainedEntities() {
+        closeChildren();
+        int rc = FfiAccess.participantDeleteContainedEntities(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * The builtin subscriber that owns the discovery readers, for {@link
+     * Subscriber#takePublicationData}. One wrapper per participant, reused until
+     * it is closed. The C ABI cannot delete a builtin subscriber, so closing the
+     * wrapper releases nothing native.
+     */
+    public synchronized Subscriber getBuiltinSubscriber() {
+        if (builtinSubscriber == null || builtinSubscriber.isClosed()) {
+            long[] out = new long[1];
+            int rc = FfiAccess.participantGetBuiltinSubscriber(handle(), out);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+            builtinSubscriber = Subscriber.builtin(this, out[0]);
+        }
+        return builtinSubscriber;
+    }
+
+    /**
+     * This participant's current QoS. Only {@code Property} entries can be read
+     * back; {@code UserData} has no native getter and is left null, and each
+     * entry's {@code propagate} flag reads back as false.
+     */
+    public ParticipantQos getQos() {
+        long[] qosOut = new long[1];
+        int rc = FfiAccess.getParticipantQos(handle(), qosOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        try {
+            return QosMarshal.readParticipantQos(qosOut[0]);
+        } finally {
+            FfiAccess.destroyParticipantQos(qosOut[0]);
+        }
+    }
+
+    /** The value of the text property {@code name} on this participant, or null when it is not set. */
+    public String findProperty(String name) {
+        Objects.requireNonNull(name, "name");
+        long[] qosOut = new long[1];
+        int rc = FfiAccess.getParticipantQos(handle(), qosOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long qos = qosOut[0];
+        try {
+            byte[] nameBytes = name.getBytes(UTF8);
+            byte[] buf = new byte[256];
+            long[] len = new long[1];
+            while (true) {
+                int frc = FfiAccess.participantQosFindProperty(qos, nameBytes, buf, len);
+                if (frc == DdsException.RET_BUFFER_TOO_SMALL) {
+                    buf = new byte[(int) len[0]];
+                    continue;
+                }
+                if (frc == DdsException.RET_NO_DATA) {
+                    return null;
+                }
+                ReturnCodes.check(frc);
+                return new String(buf, 0, (int) len[0], UTF8);
+            }
+        } finally {
+            FfiAccess.destroyParticipantQos(qos);
+        }
+    }
+
+    /**
+     * Removes the text property {@code name} from this participant's QoS and
+     * applies the result. Returns false, changing nothing, when it was not set.
+     * {@link #setQos} only merges entries, so this is the way to drop one.
+     */
+    public boolean removeProperty(String name) {
+        Objects.requireNonNull(name, "name");
+        long[] qosOut = new long[1];
+        ReturnCodes.check(FfiAccess.getParticipantQos(handle(), qosOut));
+        long qos = qosOut[0];
+        try {
+            int rc = FfiAccess.participantQosRemoveProperty(qos, name.getBytes(UTF8));
+            if (rc == DdsException.RET_NO_DATA) {
+                return false;
+            }
+            ReturnCodes.check(rc);
+            rc = FfiAccess.participantSetQos(handle(), qos);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+            return true;
+        } finally {
+            FfiAccess.destroyParticipantQos(qos);
+        }
     }
 
     /** Whether this participant contains the entity identified by {@code handle}. */

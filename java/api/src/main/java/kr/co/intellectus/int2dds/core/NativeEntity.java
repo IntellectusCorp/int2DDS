@@ -176,10 +176,10 @@ abstract class NativeEntity implements AutoCloseable {
      * open, still retryable — rather than spent on a native delete that a
      * live child would just get refused again anyway.
      *
-     * <p>Nothing calls
-     * {@code int2dds_participant_delete_contained_entities}: it would free
-     * handles this side still owns, and the reaper would later release them a
-     * second time.
+     * <p>{@code deleteContainedEntities()} on a participant, publisher or
+     * subscriber runs this same child pass before its native {@code
+     * delete_contained_entities}, so that call never frees a handle this side
+     * still owns for the reaper to release a second time.
      *
      * <p>Idempotent. Throws the mapped {@code DdsException} (or, if one or
      * more children failed, the first such failure with the rest suppressed)
@@ -188,6 +188,16 @@ abstract class NativeEntity implements AutoCloseable {
      */
     @Override
     public final void close() {
+        closeChildren();
+        if (!handle.isClosed()) {
+            beforeClose();
+        }
+        int rc = handle.close();
+        ReturnCodes.check(rc);
+    }
+
+    /** The child pass of {@link #close()}, also run by {@code deleteContainedEntities()}. */
+    final void closeChildren() {
         List<NativeEntity> live;
         synchronized (childLock) {
             live = new ArrayList<NativeEntity>(children.size());
@@ -235,11 +245,5 @@ abstract class NativeEntity implements AutoCloseable {
         if (firstFailure != null) {
             throw firstFailure;
         }
-
-        if (!handle.isClosed()) {
-            beforeClose();
-        }
-        int rc = handle.close();
-        ReturnCodes.check(rc);
     }
 }

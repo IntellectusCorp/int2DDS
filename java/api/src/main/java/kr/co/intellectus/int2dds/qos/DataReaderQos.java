@@ -23,6 +23,7 @@ public class DataReaderQos {
     private DataRepresentation dataRepresentation;
     private Deadline deadline;
     private Liveliness liveliness;
+    private LifespanReference lifespanReference;
 
     public DataReaderQos() {}
 
@@ -130,6 +131,14 @@ public class DataReaderQos {
         this.liveliness = liveliness;
     }
 
+    public LifespanReference getLifespanReference() {
+        return lifespanReference;
+    }
+
+    public void setLifespanReference(LifespanReference lifespanReference) {
+        this.lifespanReference = lifespanReference;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -151,7 +160,8 @@ public class DataReaderQos {
                 && Objects.equals(readerDataLifecycle, other.readerDataLifecycle)
                 && Objects.equals(dataRepresentation, other.dataRepresentation)
                 && Objects.equals(deadline, other.deadline)
-                && Objects.equals(liveliness, other.liveliness);
+                && Objects.equals(liveliness, other.liveliness)
+                && Objects.equals(lifespanReference, other.lifespanReference);
     }
 
     @Override
@@ -169,7 +179,8 @@ public class DataReaderQos {
                 readerDataLifecycle,
                 dataRepresentation,
                 deadline,
-                liveliness);
+                liveliness,
+                lifespanReference);
     }
 
     @Override
@@ -200,6 +211,8 @@ public class DataReaderQos {
                 + deadline
                 + ", liveliness="
                 + liveliness
+                + ", lifespanReference="
+                + lifespanReference
                 + "}";
     }
 }
