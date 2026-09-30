@@ -2554,14 +2554,16 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         self.is_builtin
     }
 
-    // Close this writer's open coherent set with a payload-less marker. Under GROUP scope it is
-    // an End Coherent Set carrying the group inline QoS; otherwise it carries no coherent set id.
+    // Mark the end of this writer's coherent set with a payload-less marker. Under GROUP scope it
+    // is an End Coherent Set carrying the group inline QoS, sent even by a writer that wrote nothing.
     fn end_coherent_set(&self, presentation_info: Option<&PresentationInfo>) -> DdsResult<()> {
-        let started =
+        let coherent_set_start =
             self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?.take();
-        let Some(coherent_set_start) = started else {
+
+        // No open set and no group inline QoS to carry: nothing to mark.
+        if coherent_set_start.is_none() && presentation_info.is_none() {
             return Ok(());
-        };
+        }
 
         let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         let rtps_writer = self.get_rtps_writer()?;
@@ -2586,7 +2588,7 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         };
 
         change.set_presentation_info(PresentationInfo {
-            coherent_set: Some(coherent_set_start),
+            coherent_set: coherent_set_start,
             ..presentation_info.clone()
         });
         cache.add_end_coherent_set(Arc::new(change))
@@ -3797,6 +3799,77 @@ mod tests {
         assert_eq!(
             get_presentation_info_of_change(&first_writer, 3).group_seq_num,
             Some(SequenceNumber::from_i64(4))
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn a_writer_that_wrote_nothing_in_a_group_coherent_set_sends_a_marker_without_a_coherent_set() {
+        use crate::infrastructure::qos_policy::PresentationQosAccessScopeKind;
+        use crate::rtps::common::guid::GroupDigest;
+
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "GroupEcsSilentWriterTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        publisher_qos.presentation.coherent_access = true;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+        let mut writer_qos = DataWriterQos::default();
+        writer_qos.history.kind = HistoryQosPolicyKind::KeepAll;
+        let writing_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos.clone(), None, StatusMask::default())
+            .unwrap();
+        let silent_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Only one writer writes, so the single member takes GSN 1 and both markers carry GSN 2.
+        publisher.begin_coherent_changes().unwrap();
+        writing_writer.write(&TestData { id: 1 }, InstanceHandle::NIL).unwrap();
+        publisher.end_coherent_changes().unwrap();
+
+        let writer_set = GroupDigest::from_entity_ids(&[
+            writing_writer.get_instance_handle().unwrap().to_guid().entity_id(),
+            silent_writer.get_instance_handle().unwrap().to_guid().entity_id(),
+        ]);
+
+        assert_eq!(
+            get_presentation_info_of_change(&writing_writer, 2),
+            PresentationInfo {
+                coherent_set: Some(SequenceNumber::from_i64(1)),
+                group_seq_num: Some(SequenceNumber::from_i64(2)),
+                group_coherent_set: Some(SequenceNumber::from_i64(1)),
+                writer_group_info: Some(writer_set),
+            }
+        );
+
+        // The silent writer has no first sequence number in the set, so it omits PID_COHERENT_SET.
+        assert_eq!(
+            get_presentation_info_of_change(&silent_writer, 1),
+            PresentationInfo {
+                coherent_set: None,
+                group_seq_num: Some(SequenceNumber::from_i64(2)),
+                group_coherent_set: Some(SequenceNumber::from_i64(1)),
+                writer_group_info: Some(writer_set),
+            }
         );
 
         participant.delete_contained_entities().unwrap();
