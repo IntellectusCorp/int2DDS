@@ -36,7 +36,10 @@ pub(crate) struct PendingSample {
 pub(crate) struct WriterGsnInfo {
     reader_ids: HashSet<EntityId>,
     is_alive: bool,
-    max_committed_gsn: Option<SequenceNumber>,
+    // Highest group position of this writer that has reached this cache.
+    highest_gsn_in_subscriber_history_cache: Option<SequenceNumber>,
+    // Highest group position of this writer that this cache has handed over.
+    last_released_gsn: Option<SequenceNumber>,
     heartbeat_group_info: Option<heartbeat::GroupInfo>,
     highest_gap_end_gsn: Option<SequenceNumber>,
 }
@@ -46,7 +49,8 @@ impl WriterGsnInfo {
         Self {
             reader_ids: HashSet::new(),
             is_alive: true,
-            max_committed_gsn: None,
+            highest_gsn_in_subscriber_history_cache: None,
+            last_released_gsn: None,
             heartbeat_group_info: None,
             highest_gap_end_gsn: None,
         }
@@ -57,9 +61,11 @@ impl WriterGsnInfo {
     fn has_passed_group_seq_num(&self, group_seq_num: SequenceNumber) -> bool {
         let previous = group_seq_num.previous();
 
-        // Advanced past the GSN-1 by committing a Data sample with groupSequenceNumber >= GSN
-        let has_committed_beyond =
-            self.max_committed_gsn.is_some_and(|committed| committed >= group_seq_num);
+        // A sample of this writer at or past GSN reached the cache. Its stream is in writer
+        // sequence number order, so it holds nothing at GSN-1 that has yet to arrive.
+        let has_committed_beyond = self
+            .highest_gsn_in_subscriber_history_cache
+            .is_some_and(|arrived| arrived >= group_seq_num);
         // Or a Gap message with Gap.gapEndGSN.value >= GSN-1
         let has_declared_unavailable =
             self.highest_gap_end_gsn.is_some_and(|gap_end| gap_end >= previous);
@@ -131,11 +137,10 @@ impl PublisherProxy {
         // The next position is judged against this one.
         self.last_committed_gsn = Some(group_seq_num);
 
-        // Each writer now counts as advanced past this position, and a late copy of it from the
-        // same writer is let through without a judgement.
+        // A late copy of this position from the same writer is let through without a judgement.
         for sample in &samples {
             if let Some(writer) = self.writers.get_mut(&sample.change.writer_guid()) {
-                writer.max_committed_gsn = Some(group_seq_num);
+                writer.last_released_gsn = Some(group_seq_num);
             }
         }
 
@@ -218,15 +223,20 @@ impl SubscriberHistoryCache {
 
         let proxy = self.find_publisher_proxy_of_writer_mut(writer_guid)?;
 
-        let has_writer_passed_this_gsn = proxy
-            .writers
-            .get(&writer_guid)
-            .and_then(|writer| writer.max_committed_gsn)
-            .is_some_and(|committed| committed >= group_seq_num);
+        let mut has_writer_released_this_gsn = false;
+        if let Some(writer) = proxy.writers.get_mut(&writer_guid) {
+            has_writer_released_this_gsn =
+                writer.last_released_gsn.is_some_and(|released| released >= group_seq_num);
+
+            writer.highest_gsn_in_subscriber_history_cache = Some(max(
+                writer.highest_gsn_in_subscriber_history_cache.unwrap_or(SequenceNumber::ZERO),
+                group_seq_num,
+            ));
+        }
 
         let sample = PendingSample { reader_id, change, apply_filter };
 
-        if has_writer_passed_this_gsn {
+        if has_writer_released_this_gsn {
             proxy.ready.push(sample);
             return Ok(());
         }
@@ -602,7 +612,7 @@ mod tests {
     #[test]
     fn sends_a_position_the_writer_passed_straight_to_ready() {
         let mut cache = cache_with_one_matched_writer();
-        cache.find_writer_mut(writer_guid(1)).expect("writer registered").max_committed_gsn =
+        cache.find_writer_mut(writer_guid(1)).expect("writer registered").last_released_gsn =
             Some(SequenceNumber::from_i64(7));
 
         cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(7)), true).expect("accepted");
@@ -872,6 +882,49 @@ mod tests {
         let released = cache.flush_pending_changes();
 
         assert_eq!(released_group_seq_nums(&released), vec![6]);
+    }
+
+    // The hole at 2 belongs to a writer this Subscriber never discovered, so the Heartbeat range
+    // [1, 3] of the only known writer spans it and cannot say it never held it. The arrival of 3
+    // from that writer is what proves it holds nothing at 2.
+    #[test]
+    fn releases_a_hole_a_writers_own_arrival_left_behind() {
+        let mut cache = cache_with_one_matched_writer();
+        set_last_committed_group_seq_num(&mut cache, 1);
+        cache
+            .record_heartbeat_group_info(writer_guid(1), heartbeat_group_info(3, 1, 3))
+            .expect("writer registered");
+
+        cache.add_change(reader_id(1), change(writer_guid(1), 2, Some(3)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![3]);
+    }
+
+    // A writer's group positions do not always arrive in order, and the lower arrival must not
+    // take back what the higher one proved: 12 still passes on writer 2 having reached 12.
+    #[test]
+    fn keeps_the_highest_arrived_group_seq_num_when_a_lower_one_arrives_late() {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(2), publisher_guid())
+            .expect("registered");
+        set_last_committed_group_seq_num(&mut cache, 8);
+
+        // Writer 1 never held 11, which is what covers the hole between 9 and 12.
+        cache
+            .record_heartbeat_group_info(writer_guid(1), heartbeat_group_info(12, 12, 12))
+            .expect("writer registered");
+
+        cache
+            .add_change(reader_id(1), change(writer_guid(2), 2, Some(12)), true)
+            .expect("accepted");
+        cache.add_change(reader_id(1), change(writer_guid(2), 1, Some(9)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![9, 12]);
     }
 
     // The announced writer set covers writers we have not discovered, so the Heartbeat does not
