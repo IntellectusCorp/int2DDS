@@ -18,8 +18,13 @@ use crate::{
     rtps::{
         common::{entity_id::EntityId, guid::Guid, locator::Locator, sequence::SequenceNumber},
         entities::history::cache_change::CacheChange,
+        messages::submessages::data_frag::MAX_FRAGMENTS_PER_SAMPLE,
     },
 };
+
+/// How many SAMPLE_LOST callbacks one give-up may fire. Past this the listener learns nothing
+/// more, and the span it walks is bounded only by what a peer put in a sequence number field.
+const MAX_GIVE_UP_REPORTS: i64 = 4096;
 
 #[derive(Clone)]
 pub(crate) struct WriterProxy {
@@ -36,6 +41,8 @@ pub(crate) struct WriterProxy {
     last_heartbeat_at: Option<Instant>,
     last_heartbeat_frag_count: Option<u32>,
     buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
+    // Payload bytes `buffered_change` holds, tracked so the bound below stays O(1) per change.
+    buffered_bytes: usize,
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
     status_callback:
@@ -75,6 +82,7 @@ impl WriterProxy {
             last_heartbeat_frag_count: None,
             last_heartbeat_at: None,
             buffered_change: BTreeSet::new(),
+            buffered_bytes: 0,
             publication_builtin_topic_data,
             status_callback,
         }
@@ -142,7 +150,45 @@ impl WriterProxy {
     }
 
     pub(crate) fn add_buffered_change(&mut self, change: CacheChange) {
-        self.buffered_change.insert(change);
+        let payload_len = change.data_value().len();
+        if self.buffered_change.insert(change) {
+            self.buffered_bytes += payload_len;
+        }
+    }
+
+    /// Gives up the oldest hole once the in-order buffer holds `limit_bytes`, returning what it
+    /// releases. Held payloads cannot be reused, so every later sample lands on cold memory.
+    pub(crate) fn give_up_oldest_hole_if_full(&mut self, limit_bytes: usize) -> Vec<CacheChange> {
+        if self.buffered_bytes < limit_bytes {
+            return Vec::new();
+        }
+        let Some(first_buffered) = self.buffered_change.first().map(|c| c.sequence_number) else {
+            return Vec::new();
+        };
+        // Before the first heartbeat there is no cursor to count from, and `UNKNOWN` is -2^32:
+        // walking from it would report billions of samples the writer never sent.
+        if self.expected_sn != SequenceNumber::UNKNOWN {
+            self.report_abandoned_samples(first_buffered);
+        }
+        self.drop_changes_below(first_buffered);
+        self.flush_buffered_changes()
+    }
+
+    /// Reports every sample still owed below `first_buffered`. `lost_changes_update` reports only
+    /// what a heartbeat marked missing, and a half-received sample is not that.
+    fn report_abandoned_samples(&mut self, first_buffered: SequenceNumber) {
+        let span = first_buffered.to_i64().saturating_sub(self.expected_sn.to_i64());
+        let gapped = self
+            .changes_from_writer
+            .range(self.expected_sn..first_buffered)
+            .filter(|(_, change)| !change.is_relevant)
+            .count() as i64;
+        // Capped: a peer may name a sequence number 2^62 ahead, and one callback per sample in
+        // that span would never return.
+        let lost = (span - gapped).clamp(0, MAX_GIVE_UP_REPORTS);
+        for _ in 0..lost {
+            self.on_sample_lost();
+        }
     }
 
     pub(crate) fn flush_buffered_changes(&mut self) -> Vec<CacheChange> {
@@ -151,6 +197,7 @@ impl WriterProxy {
         while let Some(change) = self.buffered_change.first() {
             if change.sequence_number <= self.expected_sn {
                 let change = self.buffered_change.pop_first().unwrap();
+                self.buffered_bytes -= change.data_value().len();
                 flushed_changes.push(change);
                 self.increment_expected_sn();
             } else {
@@ -189,6 +236,51 @@ impl WriterProxy {
         self.changes_from_writer.range(first_sn..=last_sn).any(|(_, change)| {
             change.fragment_info.as_ref().map(|info| !info.is_complete).unwrap_or(false)
         })
+    }
+
+    /// Incomplete fragmented changes up to `last_sn` due a NACK_FRAG, each marked asked at `now`.
+    /// One asked within `interval` with no new fragments is skipped: its repair is in flight.
+    pub(crate) fn take_nackfrag_due(
+        &mut self,
+        last_sn: SequenceNumber,
+        now: Instant,
+        interval: std::time::Duration,
+    ) -> Vec<SequenceNumber> {
+        let mut due = Vec::new();
+        for (seq_num, change) in self.changes_from_writer.range_mut(..=last_sn) {
+            let Some(info) = change.fragment_info.as_mut().filter(|info| !info.is_complete) else {
+                continue;
+            };
+            let held = info.received_fragments.len();
+            if info
+                .last_nack
+                .is_some_and(|(at, then)| then == held && now.duration_since(at) < interval)
+            {
+                continue;
+            }
+            info.last_nack = Some((now, held));
+            due.push(*seq_num);
+        }
+        due
+    }
+
+    /// Records how far the writer says it has fragmented `seq_num`, which is all the reader has
+    /// when every DATA_FRAG of the sample was lost. A total the DATA_FRAGs settled wins.
+    pub(crate) fn seed_fragment_total(&mut self, seq_num: SequenceNumber, last_fragment_num: u32) {
+        let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
+            sequence_number: seq_num,
+            status: ChangeFromWriterStatusKind::Received,
+            is_relevant: true,
+            fragment_info: None,
+        });
+        if change.fragment_info.is_none() {
+            change.fragment_info = Some(FragmentInfo {
+                total_fragments: last_fragment_num.min(MAX_FRAGMENTS_PER_SAMPLE),
+                received_fragments: FragmentSet::new(),
+                is_complete: false,
+                last_nack: None,
+            });
+        }
     }
 
     pub(crate) fn still_missing_fragments(&self, seq_num: SequenceNumber) -> bool {
@@ -289,22 +381,24 @@ impl WriterProxy {
         change.is_relevant = false;
     }
 
-    #[allow(clippy::unnecessary_filter_map)]
     pub(crate) fn lost_changes_update(&mut self, first_available_seq_num: SequenceNumber) {
         self.expected_sn = max(self.expected_sn, first_available_seq_num);
 
-        let keys: Vec<SequenceNumber> = self
-            .changes_from_writer
-            .range(..first_available_seq_num)
-            .filter_map(|(seq_num, change_from_writer)| {
-                if change_from_writer.status == ChangeFromWriterStatusKind::Missing {
-                    debug!("Sample Lost!: {}", change_from_writer.sequence_number);
-                    self.on_sample_lost();
-                }
-                Some(*seq_num)
-            })
-            .collect();
+        for (_, change_from_writer) in self.changes_from_writer.range(..first_available_seq_num) {
+            if change_from_writer.status == ChangeFromWriterStatusKind::Missing {
+                debug!("Sample Lost!: {}", change_from_writer.sequence_number);
+                self.on_sample_lost();
+            }
+        }
 
+        self.drop_changes_below(first_available_seq_num);
+    }
+
+    /// Advances past `first_available_seq_num` and forgets what is below it, reporting nothing.
+    fn drop_changes_below(&mut self, first_available_seq_num: SequenceNumber) {
+        self.expected_sn = max(self.expected_sn, first_available_seq_num);
+        let keys: Vec<SequenceNumber> =
+            self.changes_from_writer.range(..first_available_seq_num).map(|(k, _)| *k).collect();
         for key in keys {
             self.changes_from_writer.remove(&key);
         }
@@ -325,6 +419,9 @@ impl WriterProxy {
     ) -> (SequenceNumber, Vec<SequenceNumber>) {
         self.lost_changes_update(first_sn);
 
+        // Nothing below `expected_sn` can still be delivered -- `deliver_change_to_reader` drops
+        // it -- so reopening it here would only buy a retransmission the reader throws away.
+        let first_sn = max(first_sn, self.expected_sn);
         self.update_changes_for_heartbeat_range(first_sn, last_sn);
 
         (self.calculate_bitmap_base(), self.missing_changes_for_heartbeat(first_sn, last_sn))
@@ -464,8 +561,9 @@ impl WriterProxy {
             is_relevant: true,
             fragment_info: Some(FragmentInfo {
                 total_fragments,
-                received_fragments: std::collections::HashSet::new(),
+                received_fragments: FragmentSet::new(),
                 is_complete: false,
+                last_nack: None,
             }),
         });
 
@@ -473,13 +571,17 @@ impl WriterProxy {
         // fragment_info, so ensure it exists before merging received fragments.
         let info = change.fragment_info.get_or_insert_with(|| FragmentInfo {
             total_fragments,
-            received_fragments: std::collections::HashSet::new(),
+            received_fragments: FragmentSet::new(),
             is_complete: false,
+            last_nack: None,
         });
 
-        // A HEARTBEAT_FRAG may have seeded a smaller last-fragment number than
-        // the sample's true total, so keep the max.
-        info.total_fragments = info.total_fragments.max(total_fragments);
+        // Only a DATA_FRAG carries the sample's true total, so it may lower one a HEARTBEAT_FRAG
+        // seeded -- and fragments above the new total go with it, or the count never settles.
+        if total_fragments != info.total_fragments {
+            info.total_fragments = total_fragments;
+            info.received_fragments.truncate(total_fragments);
+        }
         // Reject fragment numbers outside the sample's total: an unbounded insert would let a
         // mislabeled range satisfy the completion count without the buffer holding those bytes.
         for fragment in received.into_iter().filter(|f| (1..=info.total_fragments).contains(f)) {
@@ -539,8 +641,64 @@ pub(crate) struct ChangeFromWriter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FragmentInfo {
     pub(crate) total_fragments: u32,
-    pub(crate) received_fragments: std::collections::HashSet<u32>,
+    pub(crate) received_fragments: FragmentSet,
     pub(crate) is_complete: bool,
+    /// When a NACK_FRAG last asked for this sample and how many fragments it held then. Asked
+    /// again only once that count moved (the repair landed) or the retry delay passed.
+    pub(crate) last_nack: Option<(Instant, usize)>,
+}
+
+/// Fragment numbers received for one sample, one bit each. The numbers are dense from 1, so a
+/// bitmap replaces the per-fragment hashing a `HashSet` costs on every DATA_FRAG.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FragmentSet {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl FragmentSet {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns whether `fragment` was newly added.
+    pub(crate) fn insert(&mut self, fragment: u32) -> bool {
+        let (word, bit) = ((fragment / 64) as usize, 1u64 << (fragment % 64));
+        if word >= self.words.len() {
+            self.words.resize(word + 1, 0);
+        }
+        let added = self.words[word] & bit == 0;
+        self.words[word] |= bit;
+        self.len += usize::from(added);
+        added
+    }
+
+    pub(crate) fn contains(&self, fragment: &u32) -> bool {
+        self.words
+            .get((*fragment / 64) as usize)
+            .is_some_and(|word| word & (1u64 << (*fragment % 64)) != 0)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.words.clear();
+        self.len = 0;
+    }
+
+    /// Drops every fragment above `last_fragment`.
+    pub(crate) fn truncate(&mut self, last_fragment: u32) {
+        let (word, bit) = ((last_fragment / 64) as usize, last_fragment % 64);
+        if word >= self.words.len() {
+            return;
+        }
+        self.words.truncate(word + 1);
+        // Keeps bits 0..=bit; written as a right shift so `bit == 63` cannot shift by 64.
+        self.words[word] &= u64::MAX >> (63 - bit);
+        self.len = self.words.iter().map(|w| w.count_ones() as usize).sum();
+    }
 }
 
 #[cfg(test)]
@@ -761,6 +919,258 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(proxy.first_incomplete_fragmented_sn(sn, sn), Some(sn));
         assert_eq!(proxy.get_ascending_missing_fn_list(sn), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn fragment_set_counts_each_fragment_once_across_word_boundaries() {
+        let mut set = FragmentSet::new();
+        assert_eq!(set.len(), 0);
+        for fragment in [1, 63, 64, 65, 782] {
+            assert!(set.insert(fragment), "first insert of {fragment} is new");
+        }
+        assert!(!set.insert(64), "a duplicate is not counted again");
+        assert_eq!(set.len(), 5);
+        assert!(set.contains(&63) && set.contains(&64) && set.contains(&782));
+        assert!(!set.contains(&2) && !set.contains(&10_000), "absent and past-the-end");
+
+        set.clear();
+        assert_eq!(set.len(), 0);
+        assert!(!set.contains(&64));
+    }
+
+    /// A HEARTBEAT_FRAG's `lastFragmentNum` is unvalidated wire data, and the missing list walks
+    /// one entry per fragment, so a bogus total would ask for a multi-gigabyte allocation.
+    #[test]
+    fn a_bogus_fragment_total_is_clamped_to_what_a_sample_can_hold() {
+        let mut proxy = empty_writer_proxy();
+        let seq_num = SequenceNumber::from_i64(1);
+
+        proxy.seed_fragment_total(seq_num, u32::MAX);
+
+        let total = proxy
+            .changes_from_writer
+            .get(&seq_num)
+            .and_then(|change| change.fragment_info.as_ref())
+            .map(|info| info.total_fragments);
+        assert_eq!(total, Some(MAX_FRAGMENTS_PER_SAMPLE));
+    }
+
+    /// A proxy whose SAMPLE_LOST notifications land in the returned counter.
+    #[allow(clippy::type_complexity)]
+    fn counting_writer_proxy() -> (WriterProxy, Arc<std::sync::atomic::AtomicUsize>) {
+        let lost = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = lost.clone();
+        let callback: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync> =
+            Arc::new(move |kind, _| {
+                if kind == StatusKind::SAMPLE_LOST {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        let pub_data = PublicationBuiltinTopicData::default();
+        let proxy = WriterProxy::new(
+            pub_data.endpoint_guid(),
+            pub_data.endpoint_guid().entity_id(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            pub_data,
+            Arc::new(Mutex::new(Some(callback))),
+        );
+        (proxy, lost)
+    }
+
+    /// A half-received sample sits in the ledger as `Received`, so giving it up reported
+    /// nothing; a gapped one is not a loss at all. Both are abandoned here alike.
+    #[test]
+    fn giving_up_a_hole_reports_every_sample_the_writer_still_owed() {
+        let (mut proxy, lost) = counting_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        proxy.mark_frag_received(SequenceNumber::from_i64(1), 4, [1]); // a loss: half received
+        proxy.irrelevant_change_set(SequenceNumber::from_i64(2)); // not a loss: gapped
+                                                                  // 3 is never heard of at all, which is still a loss.
+        for seq_num in 4..=7 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        proxy.give_up_oldest_hole_if_full(16);
+
+        assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    /// A HEARTBEAT_FRAG only announces how far the writer has got, so it cannot raise a total
+    /// the DATA_FRAGs already settled -- doing so left the sample impossible to finish.
+    #[test]
+    fn a_heartbeat_frag_cannot_raise_a_total_the_data_frags_settled() {
+        let mut proxy = empty_writer_proxy();
+        let seq_num = SequenceNumber::from_i64(1);
+        proxy.mark_frag_received(seq_num, 4, [1, 2, 3, 4]);
+
+        proxy.seed_fragment_total(seq_num, 10_000);
+
+        assert!(!proxy.still_missing_fragments(seq_num));
+    }
+
+    /// A fresh proxy sits at `expected_sn == UNKNOWN`, which is -2^32. Counting losses from
+    /// there reported billions of samples nobody sent and pinned the receive thread for hours.
+    #[test]
+    fn an_unprimed_proxy_gives_up_without_reporting_a_loss_per_sequence_number() {
+        let (mut proxy, lost) = counting_writer_proxy();
+        for seq_num in 2..=5 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        let released = proxy.give_up_oldest_hole_if_full(16);
+
+        assert_eq!(
+            released.iter().map(|c| c.sequence_number().to_i64()).collect::<Vec<_>>(),
+            vec![2, 3, 4, 5]
+        );
+        assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// Nothing stops a peer naming a sequence number far ahead of the cursor, and one callback
+    /// per sample in that span would never return.
+    #[test]
+    fn giving_up_a_hole_caps_how_many_losses_it_reports() {
+        let (mut proxy, lost) = counting_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        for seq_num in 1_000_000..=1_000_003 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        proxy.give_up_oldest_hole_if_full(16);
+
+        assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), MAX_GIVE_UP_REPORTS as usize);
+    }
+
+    /// The writer still holds the abandoned sample, so its next heartbeat reaches back past
+    /// `expected_sn`. Reopening it there walked the ACKNACK base backwards.
+    #[test]
+    fn a_heartbeat_does_not_reopen_a_sample_the_reader_has_moved_past() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        for seq_num in 2..=5 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+        proxy.give_up_oldest_hole_if_full(16);
+
+        let (base, missing) =
+            proxy.process_heartbeat(SequenceNumber::from_i64(1), SequenceNumber::from_i64(6));
+
+        assert_eq!(base.to_i64(), 6);
+        assert_eq!(missing.iter().map(|sn| sn.to_i64()).collect::<Vec<_>>(), vec![6]);
+    }
+
+    /// A HEARTBEAT_FRAG arriving first seeds a total from `lastFragmentNum`; only the DATA_FRAGs
+    /// carry the real one, so they have to be able to lower it or the sample never completes.
+    #[test]
+    fn data_frags_lower_a_total_a_heartbeat_frag_seeded_too_high() {
+        let mut proxy = empty_writer_proxy();
+        let seq_num = SequenceNumber::from_i64(1);
+        proxy.seed_fragment_total(seq_num, 10);
+
+        proxy.mark_frag_received(seq_num, 2, [1, 2]);
+
+        assert!(!proxy.still_missing_fragments(seq_num));
+    }
+
+    /// A second DATA_FRAG for a settled sample may carry a smaller `sampleSize`. Lowering the
+    /// total while keeping the fragments above it left `len() == total` unreachable for good.
+    #[test]
+    fn a_lowered_fragment_total_takes_the_fragments_above_it() {
+        let mut proxy = empty_writer_proxy();
+        let seq_num = SequenceNumber::from_i64(1);
+        proxy.mark_frag_received(seq_num, 4, [1, 2, 3, 4]);
+
+        proxy.mark_frag_received(seq_num, 2, [1, 2]);
+
+        assert!(!proxy.still_missing_fragments(seq_num));
+    }
+
+    /// 63 is the top bit of the first word and 64 the bottom of the second.
+    #[test]
+    fn truncating_a_fragment_set_drops_only_what_is_above_the_new_total() {
+        let mut set = FragmentSet::new();
+        for fragment in [1, 63, 64, 65, 200] {
+            set.insert(fragment);
+        }
+
+        set.truncate(64);
+
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&1) && set.contains(&63) && set.contains(&64));
+        assert!(!set.contains(&65) && !set.contains(&200));
+    }
+
+    fn buffered_change(seq_num: i64) -> CacheChange {
+        // 4-byte payload, so the byte bound in these tests is four changes wide.
+        CacheChange::new(
+            crate::rtps::common::types::ChangeKind::Alive,
+            Guid::default(),
+            crate::common::instance_handle::InstanceHandle::NIL,
+            SequenceNumber::from_i64(seq_num),
+            vec![0u8; 4],
+            None,
+        )
+    }
+
+    /// A hole the writer never fills would otherwise make the reader hold every later sample.
+    #[test]
+    fn a_full_in_order_buffer_gives_up_the_oldest_hole() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        for seq_num in 2..=5 {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        let released = proxy.give_up_oldest_hole_if_full(16);
+
+        let seq_nums: Vec<i64> =
+            released.iter().map(|change| change.sequence_number().to_i64()).collect();
+        assert_eq!(seq_nums, vec![2, 3, 4, 5]);
+        assert_eq!(proxy.expected_sn(), SequenceNumber::from_i64(6));
+    }
+
+    /// Only the run that follows the oldest hole is released. A later hole may still be
+    /// repaired, so the samples behind it stay buffered.
+    #[test]
+    fn giving_up_the_oldest_hole_leaves_the_next_one_buffered() {
+        let (mut proxy, lost) = counting_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        // 1 and 4 are holes; 2, 3, 5, 6 arrived.
+        for seq_num in [2, 3, 5, 6] {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        let released = proxy.give_up_oldest_hole_if_full(16);
+
+        let seq_nums: Vec<i64> =
+            released.iter().map(|change| change.sequence_number().to_i64()).collect();
+        assert_eq!(seq_nums, vec![2, 3]);
+        assert_eq!(proxy.expected_sn(), SequenceNumber::from_i64(4));
+        assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), 1, "only sample 1 is given up");
+    }
+
+    /// The total must fall as changes flush and must not count a duplicate twice, or the bound
+    /// fires on a buffer that is not full.
+    #[test]
+    fn the_buffered_byte_total_tracks_what_the_buffer_holds() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        for seq_num in [2, 3, 4, 3] {
+            proxy.add_buffered_change(buffered_change(seq_num));
+        }
+
+        // Three distinct changes, 12 bytes: one short of the bound.
+        assert!(proxy.give_up_oldest_hole_if_full(16).is_empty(), "a duplicate counted twice");
+        // Under the limit the reader still waits: the hole may yet be repaired.
+        assert_eq!(proxy.expected_sn(), SequenceNumber::from_i64(1));
+
+        proxy.set_expected_sn(SequenceNumber::from_i64(2));
+        proxy.flush_buffered_changes();
+        proxy.add_buffered_change(buffered_change(9));
+
+        assert!(proxy.give_up_oldest_hole_if_full(16).is_empty(), "flushed bytes not given back");
     }
 
     fn holds_fragment(proxy: &WriterProxy, seq_num: SequenceNumber, fragment: u32) -> bool {

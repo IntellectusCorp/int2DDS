@@ -219,7 +219,8 @@ impl<C: Context> Writable<C> for Parameter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParameterList {
-    parameter: SmallVec<[Parameter; 4]>,
+    // Two inline: key hash plus sentinel is the common case; RtpsMessage inlines four of these.
+    parameter: SmallVec<[Parameter; 2]>,
 }
 impl ParameterList {
     pub fn parameters(&self) -> &[Parameter] {
@@ -267,7 +268,7 @@ impl ParameterList {
 impl<'a, C: Context> Readable<'a, C> for ParameterList {
     #[allow(clippy::needless_maybe_sized)]
     fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
-        let mut parameter: SmallVec<[Parameter; 4]> = SmallVec::new();
+        let mut parameter: SmallVec<[Parameter; 2]> = SmallVec::new();
         loop {
             let param = Parameter::read_from(reader)?;
 

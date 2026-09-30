@@ -268,6 +268,10 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     ) -> DdsResult<Arc<CacheChange>> {
         if self.is_reliable && self.has_key {
             self.remove_oldest_change_of_instance_reliable(instance_handle)
+        } else if self.is_reliable && self.is_keep_all {
+            // Without a key the instance is the whole cache, and KEEP_ALL still waits for an ack.
+            let changes = self.changes.clone();
+            self.remove_first_acked_change_or_block(&changes)
         } else {
             self.remove_oldest_change_of_all()
         }
@@ -1064,6 +1068,51 @@ mod tests {
         assert!(matches!(result, Err(DdsError::OutOfResources)));
 
         drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    // A keyless topic's changes carry the NIL handle, so the per-instance limit is the whole cache.
+    fn keyless_keepall_writer_with_unacked_reader(
+    ) -> (crate::domain::domain_participant::DomainParticipant, DataWriter<TestData>) {
+        let (participant, data_writer) = create_datawriter(keepall_writer_qos_capped(2));
+        let rtps_writer = data_writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        add_reliable_reader(stateful_writer, 1);
+        data_writer.get_datawriter_cache().unwrap().lock().unwrap().has_key = false;
+        (participant, data_writer)
+    }
+
+    fn keepall_writer_qos_capped(max_samples: i32) -> DataWriterQos {
+        DataWriterQos {
+            resource_limits: ResourceLimitsQosPolicy {
+                max_samples,
+                max_instances: 1,
+                max_samples_per_instance: max_samples,
+            },
+            ..keepall_writer_qos(
+                ReliabilityQosPolicyKind::Reliable,
+                DurabilityQosPolicyKind::Volatile,
+                true,
+            )
+        }
+    }
+
+    #[test]
+    fn keyless_reliable_keepall_blocks_instead_of_dropping_an_unacked_change() {
+        let (participant, data_writer) = keyless_keepall_writer_with_unacked_reader();
+        let cache = data_writer.get_datawriter_cache().unwrap();
+        let mut guard = cache.lock().unwrap();
+        for seq in 1..=2 {
+            guard.add_change_with_cleanup(create_change(seq, InstanceHandle::NIL), false).unwrap();
+        }
+
+        let result = guard.add_change_with_cleanup(create_change(3, InstanceHandle::NIL), false);
+
+        assert!(matches!(result, Err(DdsError::OutOfResources)), "got {result:?}");
+        let kept: Vec<i64> = guard.changes.iter().map(|c| c.sequence_number().to_i64()).collect();
+        assert_eq!(kept, vec![1, 2], "no unacked change may be dropped");
+        drop(guard);
         participant.delete_contained_entities().unwrap();
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }

@@ -3,7 +3,6 @@ use std::fmt;
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
-use crate::rtps::common::sequence::SequenceNumber;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::messages::submessage_id::SubmessageId;
 
@@ -12,101 +11,59 @@ use crate::rtps::messages::submessage_id::SubmessageId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TimerId {
     // Writer: periodic HEARTBEAT sender
-    PeriodicHeartbeat {
-        entity_id: EntityId,
-    },
+    PeriodicHeartbeat { entity_id: EntityId },
 
     // Writer: initial delay before periodic HEARTBEAT
-    PeriodicHeartbeatDelay {
-        entity_id: EntityId,
-    },
+    PeriodicHeartbeatDelay { entity_id: EntityId },
 
     // Writer: delayed DATA resend in response to NACK
-    NackResponse {
-        writer_entity_id: EntityId,
-        remote_reader_guid: Guid,
-    },
+    NackResponse { writer_entity_id: EntityId, remote_reader_guid: Guid },
 
     // Writer: delayed DATA_FRAG resend in response to NACK_FRAG
-    NackFragResponse {
-        writer_entity_id: EntityId,
-        remote_reader_guid: Guid,
-    },
+    NackFragResponse { writer_entity_id: EntityId, remote_reader_guid: Guid },
 
     // Reader: delayed ACKNACK in response to HEARTBEAT
-    Acknack {
-        reader_entity_id: EntityId,
-        remote_writer_guid: Guid,
-    },
+    Acknack { reader_entity_id: EntityId, remote_writer_guid: Guid },
 
-    // Reader: delayed NACK_FRAG for missing fragments
-    NackFrag {
-        reader_entity_id: EntityId,
-        remote_writer_guid: Guid,
-        sequence_number: SequenceNumber,
-    },
+    // Reader: delayed NACK_FRAG for missing fragments. No sequence number: one chain asks for
+    // every incomplete sample, so arming again must replace the pending one.
+    NackFrag { reader_entity_id: EntityId, remote_writer_guid: Guid },
 
     // Writer: one-shot preemptive HEARTBEAT on new reader match
-    PreemptiveHeartbeat {
-        entity_id: EntityId,
-        remote_reader_guid: Guid,
-    },
+    PreemptiveHeartbeat { entity_id: EntityId, remote_reader_guid: Guid },
 
     // Reader: one-shot preemptive ACKNACK on new writer match
-    PreemptiveAcknack {
-        entity_id: EntityId,
-        remote_writer_guid: Guid,
-    },
+    PreemptiveAcknack { entity_id: EntityId, remote_writer_guid: Guid },
 
     // Lifespan expiry timer for writer-side history cache
-    LifespanWriter {
-        writer_guid: Guid,
-    },
+    LifespanWriter { writer_guid: Guid },
 
     // Lifespan expiry timer for reader-side history cache
-    LifespanReader {
-        writer_guid: Guid,
-    },
+    LifespanReader { writer_guid: Guid },
 
     // Autopurge disposed samples delay
-    AutopurgeDisposed {
-        reader_guid: Guid,
-    },
+    AutopurgeDisposed { reader_guid: Guid },
 
     // Autopurge no-writer samples delay
-    AutopurgeNowriter {
-        reader_guid: Guid,
-    },
+    AutopurgeNowriter { reader_guid: Guid },
 
     // SPDP periodic multicast announcement
-    SpdpMulticast {
-        domain_id: DomainId,
-    },
+    SpdpMulticast { domain_id: DomainId },
 
     // WLP participant-to-participant liveliness
-    WlpP2p {
-        guid_prefix: GuidPrefix,
-    },
+    WlpP2p { guid_prefix: GuidPrefix },
 
     // SEDP periodic scheduled message per (remote participant, builtin writer)
-    SedpScheduledMessage {
-        remote_prefix: GuidPrefix,
-        writer_entity_id: EntityId,
-    },
+    SedpScheduledMessage { remote_prefix: GuidPrefix, writer_entity_id: EntityId },
 
     // Thread monitoring periodic timer
     ThreadMonitoring,
 
     // Reader: one-shot delivery of a held sample for TIME_BASED_FILTER
-    TimeBasedFilter {
-        reader_entity_id: EntityId,
-        instance_handle: InstanceHandle,
-    },
+    TimeBasedFilter { reader_entity_id: EntityId, instance_handle: InstanceHandle },
 
     // SEDP: one-shot deferred endpoint match timeout while resolving a TypeObject
-    DeferredTypeMatch {
-        remote_guid: Guid,
-    },
+    DeferredTypeMatch { remote_guid: Guid },
 }
 
 impl fmt::Display for TimerId {
@@ -150,14 +107,13 @@ impl fmt::Display for TimerId {
                     Self::guid_u128(remote_writer_guid)
                 )
             }
-            TimerId::NackFrag { reader_entity_id, remote_writer_guid, sequence_number } => {
+            TimerId::NackFrag { reader_entity_id, remote_writer_guid } => {
                 write!(
                     f,
-                    "{}_{:02x}_{:x}_{}",
+                    "{}_{:02x}_{:x}",
                     Self::id_hex(reader_entity_id),
                     SubmessageId::NACK_FRAG.as_u8(),
-                    Self::guid_u128(remote_writer_guid),
-                    sequence_number.to_i64()
+                    Self::guid_u128(remote_writer_guid)
                 )
             }
             TimerId::PreemptiveHeartbeat { entity_id, remote_reader_guid } => {
@@ -293,11 +249,8 @@ mod tests {
         // Reader timers
         let acknack =
             TimerId::Acknack { reader_entity_id: reader_id, remote_writer_guid: remote_guid };
-        let nackfrag = TimerId::NackFrag {
-            reader_entity_id: reader_id,
-            remote_writer_guid: remote_guid,
-            sequence_number: SequenceNumber::new(0, 1),
-        };
+        let nackfrag =
+            TimerId::NackFrag { reader_entity_id: reader_id, remote_writer_guid: remote_guid };
         let pre_ack =
             TimerId::PreemptiveAcknack { entity_id: reader_id, remote_writer_guid: remote_guid };
 
