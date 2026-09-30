@@ -36,6 +36,7 @@ pub(crate) enum MessageType {
     ),
     PeriodicPublicationHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     PeriodicSubscriptionHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    SedpHistoryPush(GuidPrefix),
     // PeriodicSedpTopicHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     // Not used anymore since asynchronous sending can cause participant to be already removed
     // when the task is executed, so now sent synchronously via SendingTask method
