@@ -207,32 +207,6 @@ pub(crate) fn wait_for_matched_readers(writer: &DataWriter<KeyedDataType>, expec
     }
 }
 
-// Polls inside the caller's access block until the list holds the expected number of entries.
-pub(crate) fn wait_for_entries(
-    subscriber: &Subscriber,
-    expected_entries: usize,
-) -> Vec<Arc<dyn DataReaderBase<Qos = DataReaderQos>>> {
-    let deadline = Instant::now() + POLL_TIMEOUT;
-
-    loop {
-        let entries = subscriber
-            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
-            .unwrap();
-
-        if entries.len() == expected_entries {
-            return entries;
-        }
-
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {} entries, the list held {}",
-            expected_entries,
-            entries.len()
-        );
-        std::thread::sleep(POLL_INTERVAL);
-    }
-}
-
 // Polls until the reader holds the expected number of samples, without consuming any.
 pub(crate) fn wait_for_samples(reader: &DataReader<KeyedDataType>, expected_samples: usize) {
     let deadline = Instant::now() + POLL_TIMEOUT;

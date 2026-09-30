@@ -28,19 +28,52 @@ fn deleting_one_reader_leaves_the_other_receiving() {
     writer_a.write(&KeyedDataType::new(1, 1), InstanceHandle::NIL).unwrap();
     writer_b.write(&KeyedDataType::new(2, 2), InstanceHandle::NIL).unwrap();
 
-    subscriber.begin_access().unwrap();
-    wait_for_entries(&subscriber, 2);
-    subscriber.end_access().unwrap();
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    loop {
+        subscriber.begin_access().unwrap();
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
+        subscriber.end_access().unwrap();
+
+        if entries.len() == 2 {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for 2 entries, the list held {}",
+            entries.len()
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    }
 
     subscriber.delete_datareader(reader_b).unwrap();
 
     writer_a.write(&KeyedDataType::new(1, 3), InstanceHandle::NIL).unwrap();
     writer_b.write(&KeyedDataType::new(2, 4), InstanceHandle::NIL).unwrap();
 
-    subscriber.begin_access().unwrap();
-
     // Reader A keeps its first sample and gains the third. The deleted reader's share is gone.
-    let entries = wait_for_entries(&subscriber, 2);
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let entries = loop {
+        subscriber.begin_access().unwrap();
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
+
+        if entries.len() == 2 {
+            break entries;
+        }
+
+        subscriber.end_access().unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for 2 entries, the list held {}",
+            entries.len()
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    };
     let values: Vec<i16> = entries.iter().map(take_one).collect();
 
     subscriber.end_access().unwrap();

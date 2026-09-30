@@ -45,13 +45,12 @@ fn a_group_coherent_set_reaches_both_readers_only_once_it_is_closed() {
 
     publisher.end_coherent_changes().unwrap();
 
-    subscriber.begin_access().unwrap();
-
     // Without ordered_access the collection is a set, so each reader appears once however many
     // samples it holds. Ordered access would have named them four times.
-    // The set lands as soon as the End Coherent Set of every writer has arrived.
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
     let deadline = Instant::now() + POLL_TIMEOUT;
     let entries = loop {
+        subscriber.begin_access().unwrap();
         let entries = subscriber
             .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
             .unwrap();
@@ -60,6 +59,7 @@ fn a_group_coherent_set_reaches_both_readers_only_once_it_is_closed() {
             break entries;
         }
 
+        subscriber.end_access().unwrap();
         assert!(
             Instant::now() < deadline,
             "timed out waiting for 2 entries, the collection held {}",
@@ -124,11 +124,10 @@ fn a_late_reader_receives_a_group_coherent_set_closed_before_it_matched() {
     wait_for_match(&writer_a);
     wait_for_match(&writer_b);
 
-    subscriber.begin_access().unwrap();
-
-    // The set lands as soon as the End Coherent Set of every writer has arrived.
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
     let deadline = Instant::now() + POLL_TIMEOUT;
     let entries = loop {
+        subscriber.begin_access().unwrap();
         let entries = subscriber
             .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
             .unwrap();
@@ -137,6 +136,7 @@ fn a_late_reader_receives_a_group_coherent_set_closed_before_it_matched() {
             break entries;
         }
 
+        subscriber.end_access().unwrap();
         assert!(
             Instant::now() < deadline,
             "timed out waiting for 2 entries, the collection held {}",
@@ -188,10 +188,10 @@ fn consecutive_group_coherent_sets_keep_their_boundary() {
 
     std::thread::sleep(SETTLE);
 
-    subscriber.begin_access().unwrap();
-
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
     let deadline = Instant::now() + POLL_TIMEOUT;
     let entries = loop {
+        subscriber.begin_access().unwrap();
         let entries = subscriber
             .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
             .unwrap();
@@ -200,6 +200,7 @@ fn consecutive_group_coherent_sets_keep_their_boundary() {
             break entries;
         }
 
+        subscriber.end_access().unwrap();
         assert!(
             Instant::now() < deadline,
             "timed out waiting for the first set, the collection held {}",
@@ -216,10 +217,9 @@ fn consecutive_group_coherent_sets_keep_their_boundary() {
 
     publisher.end_coherent_changes().unwrap();
 
-    subscriber.begin_access().unwrap();
-
     let deadline = Instant::now() + POLL_TIMEOUT;
     let entries = loop {
+        subscriber.begin_access().unwrap();
         let entries = subscriber
             .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
             .unwrap();
@@ -228,6 +228,7 @@ fn consecutive_group_coherent_sets_keep_their_boundary() {
             break entries;
         }
 
+        subscriber.end_access().unwrap();
         assert!(
             Instant::now() < deadline,
             "timed out waiting for the second set, the collection held {}",

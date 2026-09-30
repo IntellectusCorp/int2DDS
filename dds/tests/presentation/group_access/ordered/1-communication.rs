@@ -31,9 +31,26 @@ fn group_ordered_list_walks_two_readers_in_publication_order() {
     writer_a.write(&KeyedDataType::new(1, 3), InstanceHandle::NIL).unwrap();
     writer_b.write(&KeyedDataType::new(2, 4), InstanceHandle::NIL).unwrap();
 
-    subscriber.begin_access().unwrap();
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let entries = loop {
+        subscriber.begin_access().unwrap();
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
 
-    let entries = wait_for_entries(&subscriber, 4);
+        if entries.len() == 4 {
+            break entries;
+        }
+
+        subscriber.end_access().unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for 4 entries, the list held {}",
+            entries.len()
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    };
     let values: Vec<i16> = entries.iter().map(take_one).collect();
 
     subscriber.end_access().unwrap();
@@ -64,10 +81,27 @@ fn group_ordered_read_returns_one_sample_like_take() {
     writer.write(&KeyedDataType::new(1, 1), InstanceHandle::NIL).unwrap();
     writer.write(&KeyedDataType::new(1, 2), InstanceHandle::NIL).unwrap();
 
-    subscriber.begin_access().unwrap();
-
     // Two samples in one reader, so the list names it twice.
-    wait_for_entries(&subscriber, 2);
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    loop {
+        subscriber.begin_access().unwrap();
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
+
+        if entries.len() == 2 {
+            break;
+        }
+
+        subscriber.end_access().unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for 2 entries, the list held {}",
+            entries.len()
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    }
 
     let first = reader.read(10, ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES).unwrap();
     assert_eq!(first.len(), 1);
@@ -112,9 +146,26 @@ fn two_publishers_keep_their_own_group_order() {
     writer_a.write(&KeyedDataType::new(1, 3), InstanceHandle::NIL).unwrap();
     writer_b.write(&KeyedDataType::new(2, 4), InstanceHandle::NIL).unwrap();
 
-    subscriber.begin_access().unwrap();
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let entries = loop {
+        subscriber.begin_access().unwrap();
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
 
-    let entries = wait_for_entries(&subscriber, 4);
+        if entries.len() == 4 {
+            break entries;
+        }
+
+        subscriber.end_access().unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for 4 entries, the list held {}",
+            entries.len()
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    };
     let values: Vec<i16> = entries.iter().map(take_one).collect();
 
     subscriber.end_access().unwrap();
@@ -151,9 +202,26 @@ fn group_ordered_get_datareaders_honours_the_state_masks() {
     writer.write(&KeyedDataType::new(1, 1), InstanceHandle::NIL).unwrap();
     writer.write(&KeyedDataType::new(1, 2), InstanceHandle::NIL).unwrap();
 
-    subscriber.begin_access().unwrap();
+    // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let entries = loop {
+        subscriber.begin_access().unwrap();
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
 
-    let entries = wait_for_entries(&subscriber, 2);
+        if entries.len() == 2 {
+            break entries;
+        }
+
+        subscriber.end_access().unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for 2 entries, the list held {}",
+            entries.len()
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    };
     assert_eq!(entries.len(), 2);
 
     // Reading the earliest sample turns its sample state to READ.
