@@ -25,6 +25,7 @@ use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo};
 use crate::rtps::entities::history::history_cache::HistoryCache;
+use crate::rtps::entities::history::reader_history::CoherentSetCloseResult;
 use crate::rtps::entities::history::subscriber_history::SubscriberHistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
@@ -2369,6 +2370,10 @@ impl UserLogic {
     // Add a change to the reader cache and notify every change it makes available:
     // none when held (TIME_BASED_FILTER) or buffered, several when a coherent set closes.
     fn deliver_change(&self, reader: &dyn Reader, change: CacheChange) -> RtpsResult<()> {
+        if let Some(group_coherent_set) = change.ended_group_coherent_set() {
+            return self.deliver_end_coherent_set(reader, change, group_coherent_set);
+        }
+
         let subscriber_history_cache = reader
             .as_any()
             .downcast_ref::<StatefulReader>()
@@ -2415,6 +2420,71 @@ impl UserLogic {
                 self.get_upgraded_participant()?.commit_released_samples(released)?;
             }
         }
+
+        Ok(())
+    }
+
+    // Close this writer's portion of a group coherent set. The marker is a group boundary and is
+    // never stored: a complete portion is committed, an incomplete one takes its set down.
+    fn deliver_end_coherent_set(
+        &self,
+        reader: &dyn Reader,
+        marker: CacheChange,
+        group_coherent_set: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let reader_cache = reader.reader_cache();
+        let mut cache_guard = reader_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        let closed_result =
+            cache_guard.close_and_take_coherent_set(marker.writer_guid(), marker.sequence_number());
+
+        // The rest of the set is dropped where the group cursor lives, once 5-12 wires it.
+        if matches!(closed_result, CoherentSetCloseResult::Incomplete) {
+            debug!(
+                "[UserLogic] Reader {} discarded its portion of group coherent set {}",
+                reader.guid(),
+                group_coherent_set.to_i64()
+            );
+            return Ok(());
+        }
+
+        // The portion is complete, so the marker is a group boundary and the set is committed.
+        let members = closed_result
+            .into_complete_members()
+            .into_iter()
+            .map(|member| (member, false))
+            .collect::<Vec<(CacheChange, bool)>>();
+
+        let committed = cache_guard.commit_changes_to_datareader_cache(members)?;
+        drop(cache_guard);
+
+        for change in committed {
+            reader.on_change(change);
+        }
+
+        // Only a GROUP access scope reader has a group cursor for the marker to move.
+        let subscriber_history_cache = reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .and_then(StatefulReader::subscriber_history_cache);
+        let Some(subscriber_history_cache) = subscriber_history_cache else {
+            return Ok(());
+        };
+
+        // One lock over the hand-off and the gate, so no event slips in between them.
+        let reader_id = reader.guid().entity_id();
+        let mut subscriber_history_cache = subscriber_history_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // The marker's own group position moves the cursor; it is dropped before release.
+        subscriber_history_cache.add_change(reader_id, marker, false)?;
+        let released = subscriber_history_cache.flush_pending_changes();
+        drop(subscriber_history_cache);
+
+        self.get_upgraded_participant()?.commit_released_samples(released)?;
 
         Ok(())
     }
