@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overrides; the `LifespanReference` reader QoS policy; `DataReader.takeSerializedLoaned()`;
   `DynamicTopic.name()`/`typeName()`; `DomainParticipant.createDynamicTopic` from a
   discovered `TypeObject`; `TypeInfo` union, bitset and map builders.
+- Typed batch reads on `DataReader`: `takeBatch`/`readBatch` (all, capped, state-filtered
+  or `ReadCondition`-filtered) and `takeInstanceBatch`/`readInstanceBatch`, returning
+  `List<Sample<T>>` like the Python and C# batch APIs; `DataWriter.write(sample,
+  timestampNanos)` with an explicit source timestamp; `DynamicValue.toString()`, the
+  core's `Display` form for a value of any kind.
 
 ### Changed
 

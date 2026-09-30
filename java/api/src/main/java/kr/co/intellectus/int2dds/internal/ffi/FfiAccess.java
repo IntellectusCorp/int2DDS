@@ -78,6 +78,32 @@ public final class FfiAccess {
         return Ffi.int2dds_dynamic_value_to_string(value, buf, bufLen, outLen);
     }
 
+    /**
+     * Grow-and-retry driver over {@link #dynamicValueToString(long, byte[],
+     * long, long)}, with the same buffer contract as {@link
+     * #dynamicValueAsString}: {@code out_len} excludes the trailing NUL.
+     */
+    public static int dynamicValueToString(long value, byte[][] bytesOut) {
+        int cap = 64;
+        while (true) {
+            byte[] buf = new byte[cap];
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            int rc = Ffi.int2dds_dynamic_value_to_string(value, buf, cap, directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) sizeSlot.getLong(0) + 1;
+                continue;
+            }
+            if (rc == 0) {
+                int n = (int) sizeSlot.getLong(0);
+                byte[] out = new byte[n];
+                System.arraycopy(buf, 0, out, 0, n);
+                bytesOut[0] = out;
+            }
+            return rc;
+        }
+    }
+
     /** Releases a dynamic value handle. */
     public static void dynamicValueDestroy(long value) {
         Ffi.int2dds_dynamic_value_destroy(value);

@@ -64,6 +64,9 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     /** Largest power-of-two direct buffer size an int capacity can hold (2^30). */
     private static final long MAX_SAMPLE_BYTES = 1 << 30;
 
+    /** The core's {@code LENGTH_UNLIMITED} for a batch {@code max_samples}. */
+    private static final int LENGTH_UNLIMITED = -1;
+
     // Exactly one of topic/cft is non-null, matching which constructor built
     // this reader. Both exist purely to keep the entity that was created
     // against reachable -- see topic()'s own doc for why the accessor stays
@@ -750,6 +753,109 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     }
 
     /**
+     * Takes (removes) every sample in the cache, decoded into {@code T}, in one
+     * native call -- the typed counterpart of {@link #takeSerializedBatch(int)}.
+     * Matches sample/view/instance state {@code ANY}, so unlike a {@link #take()}
+     * loop it also returns already-READ samples. Empty when the cache is empty.
+     * An invalid-data (dispose/unregister) entry has a null {@link Sample#data()}.
+     */
+    public List<Sample<T>> takeBatch() {
+        return drainSeqTyped(batchSeq(true, LENGTH_UNLIMITED));
+    }
+
+    /** Non-removing counterpart of {@link #takeBatch()}. */
+    public List<Sample<T>> readBatch() {
+        return drainSeqTyped(batchSeq(false, LENGTH_UNLIMITED));
+    }
+
+    /**
+     * {@link #takeBatch()} capped at {@code maxSamples}.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> takeBatch(int maxSamples) {
+        return drainSeqTyped(batchSeq(true, requirePositive(maxSamples)));
+    }
+
+    /**
+     * {@link #readBatch()} capped at {@code maxSamples}.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> readBatch(int maxSamples) {
+        return drainSeqTyped(batchSeq(false, requirePositive(maxSamples)));
+    }
+
+    /**
+     * State-filtered {@link #takeBatch(int)}; same mask semantics as {@link
+     * #takeSerializedBatch(int, int, int, int)}.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> takeBatch(
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return drainSeqTyped(batchSeqWStates(true, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeBatch(int, int, int, int)}.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> readBatch(
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return drainSeqTyped(batchSeqWStates(false, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
+    }
+
+    /**
+     * Instance-scoped {@link #takeBatch(int, int, int, int)}; same instance and
+     * mask semantics as {@link #takeInstanceSerializedBatch}.
+     *
+     * @throws NullPointerException if {@code instance} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> takeInstanceBatch(InstanceHandle instance,
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return drainSeqTyped(batchSeqInstance(true, instance, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeInstanceBatch}.
+     *
+     * @throws NullPointerException if {@code instance} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> readInstanceBatch(InstanceHandle instance,
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return drainSeqTyped(batchSeqInstance(false, instance, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
+    }
+
+    /**
+     * Condition-filtered {@link #takeBatch(int)}; same condition semantics as
+     * {@link #takeSerializedBatch(ReadCondition, int)}.
+     *
+     * @throws NullPointerException if {@code condition} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> takeBatch(ReadCondition condition, int maxSamples) {
+        return drainSeqTyped(batchSeqWCondition(true, condition, requirePositive(maxSamples)));
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeBatch(ReadCondition, int)}.
+     *
+     * @throws NullPointerException if {@code condition} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<Sample<T>> readBatch(ReadCondition condition, int maxSamples) {
+        return drainSeqTyped(batchSeqWCondition(false, condition, requirePositive(maxSamples)));
+    }
+
+    /**
      * Takes (removes) the next sample's raw CDR bytes, encapsulation header
      * included, without decoding it into {@code T}: the primitive a
      * type-agnostic gateway/bridge needs to forward a sample onward — e.g.
@@ -935,7 +1041,7 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * @throws IllegalArgumentException if {@code maxSamples <= 0}
      */
     public List<SerializedSample> takeSerializedBatch(int maxSamples) {
-        return nextSerializedBatch(true, maxSamples);
+        return drainSeq(batchSeq(true, requirePositive(maxSamples)));
     }
 
     /**
@@ -948,20 +1054,17 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * @throws IllegalArgumentException if {@code maxSamples <= 0}
      */
     public List<SerializedSample> readSerializedBatch(int maxSamples) {
-        return nextSerializedBatch(false, maxSamples);
+        return drainSeq(batchSeq(false, requirePositive(maxSamples)));
     }
 
-    private List<SerializedSample> nextSerializedBatch(boolean take, int maxSamples) {
-        if (maxSamples <= 0) {
-            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
-        }
+    private long batchSeq(boolean take, int maxSamples) {
         long h = handle();
         long[] seqOut = new long[1];
         int rc = take
                 ? FfiAccess.datareaderTakeSerializedBatch(h, maxSamples, seqOut)
                 : FfiAccess.datareaderReadSerializedBatch(h, maxSamples, seqOut);
         NativeKeepAlive.keepAlive(this);
-        return drainSeq(rc, seqOut[0]);
+        return checkSeq(rc, seqOut[0]);
     }
 
     /**
@@ -983,15 +1086,8 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      */
     public List<SerializedSample> takeSerializedBatch(
             int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
-        if (maxSamples <= 0) {
-            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
-        }
-        long h = handle();
-        long[] seqOut = new long[1];
-        int rc = FfiAccess.datareaderTakeSerializedBatchWStates(
-                h, maxSamples, seqOut, sampleStateMask, viewStateMask, instanceStateMask);
-        NativeKeepAlive.keepAlive(this);
-        return drainSeq(rc, seqOut[0]);
+        return drainSeq(batchSeqWStates(true, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
     }
 
     /**
@@ -1002,15 +1098,21 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      */
     public List<SerializedSample> readSerializedBatch(
             int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
-        if (maxSamples <= 0) {
-            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
-        }
+        return drainSeq(batchSeqWStates(false, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
+    }
+
+    private long batchSeqWStates(boolean take, int maxSamples,
+            int sampleStateMask, int viewStateMask, int instanceStateMask) {
         long h = handle();
         long[] seqOut = new long[1];
-        int rc = FfiAccess.datareaderReadSerializedBatchWStates(
-                h, maxSamples, seqOut, sampleStateMask, viewStateMask, instanceStateMask);
+        int rc = take
+                ? FfiAccess.datareaderTakeSerializedBatchWStates(
+                        h, maxSamples, seqOut, sampleStateMask, viewStateMask, instanceStateMask)
+                : FfiAccess.datareaderReadSerializedBatchWStates(
+                        h, maxSamples, seqOut, sampleStateMask, viewStateMask, instanceStateMask);
         NativeKeepAlive.keepAlive(this);
-        return drainSeq(rc, seqOut[0]);
+        return checkSeq(rc, seqOut[0]);
     }
 
     /**
@@ -1029,16 +1131,8 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      */
     public List<SerializedSample> takeInstanceSerializedBatch(InstanceHandle instance,
             int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
-        Objects.requireNonNull(instance, "instance");
-        if (maxSamples <= 0) {
-            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
-        }
-        long h = handle();
-        long[] seqOut = new long[1];
-        int rc = FfiAccess.datareaderTakeInstanceSerializedBatch(h, instance.bytes(), maxSamples,
-                sampleStateMask, viewStateMask, instanceStateMask, seqOut);
-        NativeKeepAlive.keepAlive(this);
-        return drainSeq(rc, seqOut[0]);
+        return drainSeq(batchSeqInstance(true, instance, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
     }
 
     /**
@@ -1050,16 +1144,22 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      */
     public List<SerializedSample> readInstanceSerializedBatch(InstanceHandle instance,
             int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return drainSeq(batchSeqInstance(false, instance, requirePositive(maxSamples),
+                sampleStateMask, viewStateMask, instanceStateMask));
+    }
+
+    private long batchSeqInstance(boolean take, InstanceHandle instance, int maxSamples,
+            int sampleStateMask, int viewStateMask, int instanceStateMask) {
         Objects.requireNonNull(instance, "instance");
-        if (maxSamples <= 0) {
-            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
-        }
         long h = handle();
         long[] seqOut = new long[1];
-        int rc = FfiAccess.datareaderReadInstanceSerializedBatch(h, instance.bytes(), maxSamples,
-                sampleStateMask, viewStateMask, instanceStateMask, seqOut);
+        int rc = take
+                ? FfiAccess.datareaderTakeInstanceSerializedBatch(h, instance.bytes(), maxSamples,
+                        sampleStateMask, viewStateMask, instanceStateMask, seqOut)
+                : FfiAccess.datareaderReadInstanceSerializedBatch(h, instance.bytes(), maxSamples,
+                        sampleStateMask, viewStateMask, instanceStateMask, seqOut);
         NativeKeepAlive.keepAlive(this);
-        return drainSeq(rc, seqOut[0]);
+        return checkSeq(rc, seqOut[0]);
     }
 
     /**
@@ -1083,17 +1183,7 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * @throws IllegalArgumentException if {@code maxSamples <= 0}
      */
     public List<SerializedSample> takeSerializedBatch(ReadCondition condition, int maxSamples) {
-        Objects.requireNonNull(condition, "condition");
-        if (maxSamples <= 0) {
-            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
-        }
-        long condH = ConditionHandleAccess.handle(condition);
-        long[] seqOut = new long[1];
-        int rc = FfiAccess.datareaderTakeSerializedBatchWReadCondition(
-                handle(), condH, maxSamples, seqOut);
-        NativeKeepAlive.keepAlive(this);
-        NativeKeepAlive.keepAlive(condition);
-        return drainSeq(rc, seqOut[0]);
+        return drainSeq(batchSeqWCondition(true, condition, requirePositive(maxSamples)));
     }
 
     /**
@@ -1104,17 +1194,34 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * @throws IllegalArgumentException if {@code maxSamples <= 0}
      */
     public List<SerializedSample> readSerializedBatch(ReadCondition condition, int maxSamples) {
+        return drainSeq(batchSeqWCondition(false, condition, requirePositive(maxSamples)));
+    }
+
+    private long batchSeqWCondition(boolean take, ReadCondition condition, int maxSamples) {
         Objects.requireNonNull(condition, "condition");
+        long condH = ConditionHandleAccess.handle(condition);
+        long[] seqOut = new long[1];
+        int rc = take
+                ? FfiAccess.datareaderTakeSerializedBatchWReadCondition(
+                        handle(), condH, maxSamples, seqOut)
+                : FfiAccess.datareaderReadSerializedBatchWReadCondition(
+                        handle(), condH, maxSamples, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(condition);
+        return checkSeq(rc, seqOut[0]);
+    }
+
+    private static int requirePositive(int maxSamples) {
         if (maxSamples <= 0) {
             throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
         }
-        long condH = ConditionHandleAccess.handle(condition);
-        long[] seqOut = new long[1];
-        int rc = FfiAccess.datareaderReadSerializedBatchWReadCondition(
-                handle(), condH, maxSamples, seqOut);
-        NativeKeepAlive.keepAlive(this);
-        NativeKeepAlive.keepAlive(condition);
-        return drainSeq(rc, seqOut[0]);
+        return maxSamples;
+    }
+
+    /** Throws on any failure but NO_DATA, whose (null) sequence drains as an empty list. */
+    private static long checkSeq(int rc, long seq) {
+        ReturnCodes.checkOrNoData(rc);
+        return seq;
     }
 
     /**
@@ -1127,20 +1234,15 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * {@code RET_OK} and {@code RET_NO_DATA} (an empty sequence on the
      * latter, still requiring the same free).
      */
-    private List<SerializedSample> drainSeq(int rc, long seq) {
-        if (!ReturnCodes.checkOrNoData(rc)) {
-            // NO_DATA: the native side still allocated an empty sequence.
-            FfiAccess.sampleSeqDelete(seq);
-            return new ArrayList<SerializedSample>();
+    private List<SerializedSample> drainSeq(long seq) {
+        List<SerializedSample> result = new ArrayList<SerializedSample>();
+        if (seq == 0L) {
+            return result;   // NO_DATA: the native side hands out no sequence.
         }
         try {
             long len = FfiAccess.sampleSeqLength(seq);
-            List<SerializedSample> result = new ArrayList<SerializedSample>((int) len);
             for (long i = 0; i < len; i++) {
-                int infoRc = FfiAccess.sampleSeqGetInfo(seq, i, addr(infoSlot));
-                NativeKeepAlive.keepAlive(infoSlot);
-                ReturnCodes.check(infoRc);
-                SampleInfo info = SampleInfo.decode(infoSlot);
+                SampleInfo info = seqInfo(seq, i);
                 byte[] b = info.validData() ? copySampleSeqData(seq, i) : new byte[0];
                 result.add(new SerializedSample(b, info));
             }
@@ -1150,8 +1252,36 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         }
     }
 
-    /** Copies sample {@code index}'s bytes out of {@code seq} into {@link #payload}, growing on BUFFER_TOO_SMALL. */
-    private byte[] copySampleSeqData(long seq, long index) {
+    /** {@link #drainSeq} decoding each sample into {@code T} the way {@link #next} does. */
+    private List<Sample<T>> drainSeqTyped(long seq) {
+        List<Sample<T>> result = new ArrayList<Sample<T>>();
+        if (seq == 0L) {
+            return result;
+        }
+        try {
+            long len = FfiAccess.sampleSeqLength(seq);
+            for (long i = 0; i < len; i++) {
+                SampleInfo info = seqInfo(seq, i);
+                if (info.validData()) {
+                    loadSampleSeqData(seq, i);
+                }
+                result.add(decodeSample(info));
+            }
+            return result;
+        } finally {
+            FfiAccess.sampleSeqDelete(seq);
+        }
+    }
+
+    private SampleInfo seqInfo(long seq, long index) {
+        int rc = FfiAccess.sampleSeqGetInfo(seq, index, addr(infoSlot));
+        NativeKeepAlive.keepAlive(infoSlot);
+        ReturnCodes.check(rc);
+        return SampleInfo.decode(infoSlot);
+    }
+
+    /** Loads sample {@code index}'s bytes into {@link #payload} (length in {@link #sizeSlot}), growing on BUFFER_TOO_SMALL. */
+    private void loadSampleSeqData(long seq, long index) {
         while (true) {
             int rc = FfiAccess.sampleSeqGetData(
                     seq, index, addr(payload), payload.capacity(), addr(sizeSlot));
@@ -1162,14 +1292,19 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
                 continue;
             }
             ReturnCodes.check(rc);
-            int n = (int) sizeSlot.getLong(0);
-            ((java.nio.Buffer) payload).position(0);
-            ((java.nio.Buffer) payload).limit(n);
-            byte[] out = new byte[n];
-            payload.get(out);
-            ((java.nio.Buffer) payload).clear();
-            return out;
+            return;
         }
+    }
+
+    private byte[] copySampleSeqData(long seq, long index) {
+        loadSampleSeqData(seq, index);
+        int n = (int) sizeSlot.getLong(0);
+        ((java.nio.Buffer) payload).position(0);
+        ((java.nio.Buffer) payload).limit(n);
+        byte[] out = new byte[n];
+        payload.get(out);
+        ((java.nio.Buffer) payload).clear();
+        return out;
     }
 
     private Sample<T> next(
@@ -1196,12 +1331,12 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
             if (!ReturnCodes.checkOrNoData(rc)) {
                 return null;   // NO_DATA: nothing in the cache.
             }
-            return decodeSample();
+            return decodeSample(SampleInfo.decode(infoSlot));
         }
     }
 
-    private Sample<T> decodeSample() {
-        SampleInfo info = SampleInfo.decode(infoSlot);
+    /** Builds a {@link Sample} from {@code info} and, when it has valid data, the bytes in {@link #payload}. */
+    private Sample<T> decodeSample(SampleInfo info) {
         if (!info.validData()) {
             return new Sample<T>(null, info);
         }

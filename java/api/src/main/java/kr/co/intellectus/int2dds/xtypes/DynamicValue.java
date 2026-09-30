@@ -541,6 +541,28 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
+     * Formats this value regardless of kind, in the core's {@code Display}
+     * form (the same text Python's {@code str()} and C#'s {@code ToString()}
+     * produce). A consumed or closed value formats as a placeholder instead of
+     * throwing, since debuggers and loggers call this freely.
+     */
+    @Override
+    public String toString() {
+        if (consumed.get()) {
+            return "DynamicValue[consumed]";
+        }
+        if (handle.isClosed()) {
+            return "DynamicValue[closed]";
+        }
+        long v = handle.value();
+        byte[][] out = new byte[1][];
+        int rc = FfiAccess.dynamicValueToString(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new String(out[0], UTF8);
+    }
+
+    /**
      * Reads this value as an {@code enum} literal, its numeric value and
      * name. Throws if it is not an enum.
      */

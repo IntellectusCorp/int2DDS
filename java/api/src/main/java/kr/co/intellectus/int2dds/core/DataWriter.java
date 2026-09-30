@@ -407,6 +407,27 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     }
 
     /**
+     * {@link #write(IDdsType)} with an explicit source timestamp instead of the
+     * current time. Same {@code timestampNanos} contract as {@link
+     * #writeSerialized(byte[], long)}.
+     *
+     * @throws NullPointerException if {@code sample} is null
+     * @throws IllegalArgumentException if {@code timestampNanos} is negative
+     */
+    public void write(T sample, long timestampNanos) {
+        Objects.requireNonNull(sample, "sample");
+        checkTimestamp(timestampNanos);
+        long h = handle();
+        try (CdrWriter w = CdrWriter.acquire(topic.extensibility(), LITTLE_ENDIAN_HOST, xcdr2)) {
+            sample.serializeCdr(w);
+            int rc = FfiAccess.datawriterWriteSerializedWTimestamp(h, w.address(), w.length(),
+                    timestampSec(timestampNanos), timestampNanosec(timestampNanos));
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        }
+    }
+
+    /**
      * Publishes {@code cdr} as-is, bypassing the CDR codec: the exact
      * pre-serialized bytes (including the encapsulation header) are sent with
      * {@code timestampNanos} as the sample's source timestamp. {@code cdr}
@@ -427,24 +448,35 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      */
     public void writeSerialized(byte[] cdr, long timestampNanos) {
         Objects.requireNonNull(cdr, "cdr");
-        if (timestampNanos < 0) {
-            throw new IllegalArgumentException(
-                    "timestampNanos must be non-negative epoch nanoseconds: " + timestampNanos);
-        }
+        checkTimestamp(timestampNanos);
         long h = handle();
-        // timestampNanos >= 0, so nanosec lands in [0, 1e9). timestamp_sec is a
-        // signed 32-bit int in the C ABI, so a timestamp at/after 2038 wraps.
-        int sec = (int) (timestampNanos / 1_000_000_000L);
-        int nanosec = (int) (timestampNanos % 1_000_000_000L);
         ByteBuffer buf = ByteBuffer.allocateDirect(cdr.length).order(ByteOrder.nativeOrder());
         buf.put(cdr);
         int rc = FfiAccess.datawriterWriteSerializedWTimestamp(
-                h, FfiAccess.directBufferAddress(buf), cdr.length, sec, nanosec);
+                h, FfiAccess.directBufferAddress(buf), cdr.length,
+                timestampSec(timestampNanos), timestampNanosec(timestampNanos));
         // Same fence as write(): h was read off this writer just above, and
         // buf's address crosses into the native call above.
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
+    }
+
+    private static void checkTimestamp(long timestampNanos) {
+        if (timestampNanos < 0) {
+            throw new IllegalArgumentException(
+                    "timestampNanos must be non-negative epoch nanoseconds: " + timestampNanos);
+        }
+    }
+
+    // timestampNanos >= 0, so nanosec lands in [0, 1e9). timestamp_sec is a
+    // signed 32-bit int in the C ABI, so a timestamp at/after 2038 wraps.
+    private static int timestampSec(long timestampNanos) {
+        return (int) (timestampNanos / 1_000_000_000L);
+    }
+
+    private static int timestampNanosec(long timestampNanos) {
+        return (int) (timestampNanos % 1_000_000_000L);
     }
 
     /**
