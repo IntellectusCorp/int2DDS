@@ -95,6 +95,15 @@ impl SubmessageHeader {
         }
     }
 
+    // 9.4.5.6 Gap Submessage
+    pub(crate) fn filtered_count_flag(&self) -> Option<bool> {
+        if self.submessage_id == SubmessageId::GAP {
+            Some(self.flags & 0x04 != 0)
+        } else {
+            None
+        }
+    }
+
     // 9.4.5.3 Data Submessage
     pub(crate) fn inline_qos_flag(&self) -> Option<bool> {
         if self.submessage_id == SubmessageId::DATA || self.submessage_id == SubmessageId::DATA_FRAG

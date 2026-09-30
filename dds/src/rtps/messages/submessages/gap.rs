@@ -51,6 +51,7 @@ pub(crate) struct Gap {
     pub gap_start: SequenceNumber,
     pub gap_list: SequenceNumberSet,
     pub group_info: Option<GroupInfo>,
+    pub filtered_count: Option<i64>,
 }
 
 impl Gap {
@@ -60,18 +61,22 @@ impl Gap {
         gap_start: SequenceNumber,
         gap_list: SequenceNumberSet,
         group_info: Option<GroupInfo>,
+        filtered_count: Option<i64>,
     ) -> Self {
-        Self { reader_id, writer_id, gap_start, gap_list, group_info }
+        Self { reader_id, writer_id, gap_start, gap_list, group_info, filtered_count }
     }
 
     pub(crate) fn octets_to_next_header(&self) -> u16 {
         let group_info_octets = if self.group_info.is_some() { GroupInfo::OCTETS } else { 0 };
+        let filtered_count_octets =
+            if self.filtered_count.is_some() { mem::size_of::<SequenceNumber>() as u16 } else { 0 };
 
         mem::size_of::<EntityId>() as u16 /* reader_id 4 */
             + mem::size_of::<EntityId>() as u16 /* writer_id 4*/
             + mem::size_of::<SequenceNumber>() as u16 /* gap_start */
             + self.gap_list.length() /* gap_list */
             + group_info_octets
+            + filtered_count_octets
     }
 
     pub(crate) fn deserialize(
@@ -121,7 +126,15 @@ impl Gap {
             group_info = Some(read_group_info);
         }
 
-        Ok(Gap { reader_id, writer_id, gap_start, gap_list, group_info })
+        let mut filtered_count = None;
+        if submessage_header.filtered_count_flag() == Some(true) {
+            let count =
+                SequenceNumber::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
+                    .map_err(map_speedy_err)?;
+            filtered_count = Some(count.to_i64());
+        }
+
+        Ok(Gap { reader_id, writer_id, gap_start, gap_list, group_info, filtered_count })
     }
 }
 
@@ -135,6 +148,10 @@ impl<C: Context> Writable<C> for Gap {
         if let Some(group_info) = &self.group_info {
             writer.write_value(&group_info.gap_start_gsn)?;
             writer.write_value(&group_info.gap_end_gsn)?;
+        }
+
+        if let Some(filtered_count) = self.filtered_count {
+            writer.write_value(&SequenceNumber::from_i64(filtered_count))?;
         }
         Ok(())
     }
@@ -153,6 +170,7 @@ mod tests {
     use speedy::Writable;
 
     const GROUP_INFO_FLAG: u8 = 0x02;
+    const FILTERED_COUNT_FLAG: u8 = 0x04;
 
     fn create_dummy_gap() -> Gap {
         Gap {
@@ -164,6 +182,7 @@ mod tests {
                 vec![SequenceNumber::new(0, 4), SequenceNumber::new(0, 6)],
             ),
             group_info: None,
+            filtered_count: None,
         }
     }
 
@@ -247,6 +266,41 @@ mod tests {
         let header = create_gap_submessage_header(GROUP_INFO_FLAG, buffer.len() as u16);
 
         assert!(Gap::deserialize(&Bytes::from(buffer), &header).is_ok());
+    }
+
+    // filteredCount sits after the group info, so the two flags have to combine in both
+    // directions and each has to be readable without the other.
+    #[test]
+    fn filtered_count_roundtrips_with_and_without_the_group_info() {
+        let cases = [(None, 0u8), (Some(create_dummy_group_info()), GROUP_INFO_FLAG)];
+
+        for (group_info, group_info_flag) in cases {
+            let mut gap = create_dummy_gap();
+            gap.group_info = group_info;
+            gap.filtered_count = Some(3);
+
+            let buffer = gap.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+            assert_eq!(buffer.len() as u16, gap.octets_to_next_header());
+            let header = create_gap_submessage_header(
+                group_info_flag | FILTERED_COUNT_FLAG,
+                buffer.len() as u16,
+            );
+            let deserialized = Gap::deserialize(&Bytes::from(buffer), &header).unwrap();
+
+            assert_eq!(deserialized, gap);
+        }
+    }
+
+    #[test]
+    fn filtered_count_is_absent_when_the_flag_is_clear() {
+        let gap = create_dummy_gap();
+
+        let buffer = gap.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        assert_eq!(buffer.len() as u16, gap.octets_to_next_header());
+        let header = create_gap_submessage_header(0, buffer.len() as u16);
+        let deserialized = Gap::deserialize(&Bytes::from(buffer), &header).unwrap();
+
+        assert_eq!(deserialized.filtered_count, None);
     }
 
     #[test]

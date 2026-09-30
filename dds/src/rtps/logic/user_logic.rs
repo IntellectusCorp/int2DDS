@@ -6742,6 +6742,7 @@ mod tests {
                 gap_start_gsn: SequenceNumber::from_i64(2),
                 gap_end_gsn: SequenceNumber::from_i64(2),
             }),
+            None,
         );
         let rtps_header = Header::new(writer_guid.prefix());
         user_logic
