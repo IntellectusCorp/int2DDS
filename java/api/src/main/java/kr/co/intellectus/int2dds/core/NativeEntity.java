@@ -88,6 +88,14 @@ abstract class NativeEntity implements AutoCloseable {
         return handle.isClosed();
     }
 
+    /**
+     * Runs once from {@link #close()}, after every child has closed and right
+     * before this entity's own native delete. Entities holding native state
+     * beside their handle -- a listener context -- release it here.
+     */
+    void beforeClose() {
+    }
+
     private void addChild(NativeEntity child) {
         synchronized (childLock) {
             children.add(new WeakReference<NativeEntity>(child));
@@ -228,6 +236,9 @@ abstract class NativeEntity implements AutoCloseable {
             throw firstFailure;
         }
 
+        if (!handle.isClosed()) {
+            beforeClose();
+        }
         int rc = handle.close();
         ReturnCodes.check(rc);
     }

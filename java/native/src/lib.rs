@@ -57,5 +57,6 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritte
     env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> JByteArray<'local> {
-    env.byte_array_from_slice(crate_version().as_bytes()).expect("allocate version byte array")
+    // On failure the pending OutOfMemoryError is thrown to the caller.
+    env.byte_array_from_slice(crate_version().as_bytes()).unwrap_or_default()
 }

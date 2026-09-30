@@ -46,9 +46,9 @@ import java.util.Objects;
  *
  * <p><b>Listener lifecycle:</b> a listener installed with {@link #setListener}
  * is held by a binding-owned native context whose pointer this writer tracks.
- * {@link NativeEntity#close()} is final and does not clear it, so a caller that
- * installed a listener must call {@code setListener(null, null)} before closing
- * to release that context; automatic teardown is not implemented yet.
+ * {@link #close()} releases it; {@code setListener(null, null)} releases it
+ * early. That context also references this writer, so a writer with a listener
+ * installed is never garbage-collected before it is closed.
  *
  * @param <T> the DDS data type this writer publishes.
  */
@@ -63,7 +63,7 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     private static final long MAX_SAMPLE_BYTES = 1 << 30;
 
     // Pointer to the binding-owned native listener context, or 0 when none is
-    // installed. Guarded by setListener's own synchronization.
+    // installed. Guarded by this writer's monitor.
     private long listenerCtx = 0L;
 
     /**
@@ -151,8 +151,9 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      *
      * <p>Any previously installed listener is cleared first, releasing its
      * native context. Callbacks fire on DDS background threads, so a listener
-     * must be thread-safe. Because {@link #close()} does not clear listeners, a
-     * caller should {@code setListener(null, null)} before closing this writer.
+     * must be thread-safe, and receive this writer as their first argument.
+     * {@link #close()} clears the listener, so an explicit clear before closing
+     * is optional.
      *
      * @throws kr.co.intellectus.int2dds.exceptions.DdsException if the native
      *     clear or install fails
@@ -167,13 +168,64 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
             ReturnCodes.check(rc);
         }
         if (listener != null) {
-            long ctx = FfiAccess.writerListenerSet(
-                    h, listener, mask == null ? StatusMask.all().bits() : mask.bits());
+            long ctx = FfiAccess.writerListenerSet(h, new BoundListener(this, listener),
+                    mask == null ? StatusMask.all().bits() : mask.bits());
             NativeKeepAlive.keepAlive(this);
             if (ctx == 0L) {
                 throw new DdsErrorException("failed to install DataWriter listener");
             }
             listenerCtx = ctx;
+        }
+    }
+
+    /**
+     * Releases the listener context before the native writer is deleted. The
+     * delete that follows is the authoritative teardown, so a failed clear is
+     * not reported here.
+     */
+    @Override
+    synchronized void beforeClose() {
+        long prev = listenerCtx;
+        if (prev != 0L) {
+            listenerCtx = 0L;
+            FfiAccess.writerListenerClear(handle(), prev);
+            NativeKeepAlive.keepAlive(this);
+        }
+    }
+
+    /**
+     * Supplies the owning writer to the user's listener: the native side has
+     * no mapping from a handle back to its Java entity and passes null.
+     */
+    private static final class BoundListener implements DataWriterListener {
+        private final DataWriter<?> writer;
+        private final DataWriterListener target;
+
+        BoundListener(DataWriter<?> writer, DataWriterListener target) {
+            this.writer = writer;
+            this.target = target;
+        }
+
+        @Override
+        public void onPublicationMatched(DataWriter<?> ignored, PublicationMatchedStatus status) {
+            target.onPublicationMatched(writer, status);
+        }
+
+        @Override
+        public void onOfferedDeadlineMissed(DataWriter<?> ignored,
+                OfferedDeadlineMissedStatus status) {
+            target.onOfferedDeadlineMissed(writer, status);
+        }
+
+        @Override
+        public void onOfferedIncompatibleQos(DataWriter<?> ignored,
+                OfferedIncompatibleQosStatus status) {
+            target.onOfferedIncompatibleQos(writer, status);
+        }
+
+        @Override
+        public void onLivelinessLost(DataWriter<?> ignored, LivelinessLostStatus status) {
+            target.onLivelinessLost(writer, status);
         }
     }
 

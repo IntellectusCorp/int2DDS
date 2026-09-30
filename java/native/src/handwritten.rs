@@ -60,9 +60,13 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritte
     qos: jni::sys::jlong,
     prefix: JByteArray<'local>,
 ) -> JObjectArray<'local> {
-    let byte_class = env.find_class("[B").expect("[B class must resolve");
-    let empty =
-        env.new_object_array(0, &byte_class, JObject::null()).expect("allocate empty array");
+    // On failure the pending Java exception is thrown to the caller.
+    let Ok(byte_class) = env.find_class("[B") else {
+        return JObjectArray::default();
+    };
+    let Ok(empty) = env.new_object_array(0, &byte_class, JObject::null()) else {
+        return JObjectArray::default();
+    };
 
     let prefix_bytes = crate::generated_support::take_bytes(&mut env, &prefix);
     let mut acc: Vec<(String, String)> = Vec::new();

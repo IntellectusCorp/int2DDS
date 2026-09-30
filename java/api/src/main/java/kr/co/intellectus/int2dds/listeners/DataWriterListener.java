@@ -14,17 +14,15 @@ import kr.co.intellectus.int2dds.status.PublicationMatchedStatus;
  * described and cleared at the native boundary and never propagates back into
  * the DDS thread.
  *
- * <p><b>v1 limitation:</b> the {@code writer} argument is always {@code null}.
- * Mapping a native handle back to its Java {@link DataWriter} entity is out of
- * scope for this branch; most listeners need only the status. Prefer extending
- * {@link DataWriterListenerBase} so future callbacks stay source-compatible.
+ * <p>Prefer extending {@link DataWriterListenerBase} so future callbacks stay
+ * source-compatible.
  */
 public interface DataWriterListener {
 
     /**
      * Invoked when the set of matched DataReaders changes.
      *
-     * @param writer always {@code null} in v1 (see the interface note)
+     * @param writer the DataWriter the listener is installed on
      * @param status the matched-reader counts at the time of the change
      */
     void onPublicationMatched(DataWriter<?> writer, PublicationMatchedStatus status);
@@ -32,7 +30,7 @@ public interface DataWriterListener {
     /**
      * Invoked when the writer misses the deadline it offered for an instance.
      *
-     * @param writer always {@code null} in v1 (see the interface note)
+     * @param writer the DataWriter the listener is installed on
      * @param status the missed-deadline counts at the time of the event
      */
     void onOfferedDeadlineMissed(DataWriter<?> writer, OfferedDeadlineMissedStatus status);
@@ -40,7 +38,7 @@ public interface DataWriterListener {
     /**
      * Invoked when the writer matches a DataReader with an incompatible QoS.
      *
-     * @param writer always {@code null} in v1 (see the interface note)
+     * @param writer the DataWriter the listener is installed on
      * @param status the incompatible-QoS counts at the time of the event
      */
     void onOfferedIncompatibleQos(DataWriter<?> writer, OfferedIncompatibleQosStatus status);
@@ -48,7 +46,7 @@ public interface DataWriterListener {
     /**
      * Invoked when the writer fails to signal its liveliness within its offered period.
      *
-     * @param writer always {@code null} in v1 (see the interface note)
+     * @param writer the DataWriter the listener is installed on
      * @param status the liveliness-lost counts at the time of the event
      */
     void onLivelinessLost(DataWriter<?> writer, LivelinessLostStatus status);

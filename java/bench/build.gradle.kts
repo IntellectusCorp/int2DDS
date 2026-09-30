@@ -27,8 +27,8 @@ tasks.register<JavaExec>("jmh") {
     mainClass.set("org.openjdk.jmh.Main")
     classpath = sourceSets["jmh"].runtimeClasspath + sourceSets["jmh"].compileClasspath
     // The native library the api module loads at class-init time.
-    environment("INT2DDS_JAVA_LIB",
-            rootProject.file("../target/release/libint2dds_java.so").absolutePath)
+    val int2ddsJavaLib: String by rootProject.extra
+    environment("INT2DDS_JAVA_LIB", int2ddsJavaLib)
 
     // WritePathBenchmark's write arms build a real participant/topic/
     // publisher/writer (WritePathBenchmark.WriteTarget) -- the same

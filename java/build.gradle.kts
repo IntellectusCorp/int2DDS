@@ -6,6 +6,18 @@ allprojects {
     group = "kr.co.intellectus.int2dds"
 }
 
+// The native library the test, example and benchmark tasks load: the one
+// `cargo build --release -p int2dds-java` produces, unless INT2DDS_JAVA_LIB names another.
+val int2ddsJavaLib by extra(
+    System.getenv("INT2DDS_JAVA_LIB") ?: file(
+        "../target/release/" + when {
+            org.gradle.internal.os.OperatingSystem.current().isWindows -> "int2dds_java.dll"
+            org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "libint2dds_java.dylib"
+            else -> "libint2dds_java.so"
+        }
+    ).absolutePath
+)
+
 subprojects {
     apply(plugin = "java")
 

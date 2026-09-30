@@ -23,18 +23,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reader.
 - `java/README.md`, documenting the binding's build, examples, and IDL workflow.
 - `gen-jni --count`, printing the size of the exported C ABI surface.
+- The `java` CI status now runs `cargo test -p int2dds-java` and the Gradle test
+  suite on Linux and Windows. Neither ran in CI before.
 
 ### Changed
 
 - `java/examples`' `HelloWorld` type is now generated from `idl/input/HelloWorld.idl`
   instead of hand-written. Verified byte-identical on the wire under both XCDR1 and
   XCDR2 before the swap.
+- Listener callbacks receive the `DataReader`/`DataWriter` they are installed on
+  instead of `null`.
+- `DataReader.close()` and `DataWriter.close()` clear an installed listener. The
+  explicit `setListener(null, null)` before closing is no longer required. While a
+  listener is installed the entity is held strongly and is not garbage-collected.
 
 ### Fixed
 
 - The JNI generator's count guards no longer hardcode the FFI surface size in five
   places and the CI symbol check in a sixth. Four of them now derive from the parsed
   surface, so adding a C ABI function requires updating exactly one constant.
+- Status callbacks were lost when the binding was loaded by an application class
+  loader (fat JAR, servlet container): the DDS thread resolved the status classes
+  through the system class loader on every callback. Classes and method IDs are now
+  resolved once, on the Java thread that installs the listener.
+- `./gradlew :bench:jmh` looked for `libint2dds_java.so` on every platform. All
+  Gradle tasks now share one platform-aware native library path.
+- Stale counts in `EXPECTED_FFI_FUNCTIONS` and `JarLayoutTest` (456 → 462, 455 → 461);
+  `NativeLoaderTest` reads the expected version from the build instead of a literal.
 
 ## [0.1.7] - 2026-09-23
 

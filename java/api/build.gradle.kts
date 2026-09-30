@@ -61,15 +61,10 @@ tasks.withType<Test>().configureEach {
     // didn't actually write to.
     dependsOn(tasks.jar)
     systemProperty("int2dds.built.jar", tasks.jar.get().archiveFile.get().asFile.absolutePath)
+    systemProperty("int2dds.version", project.version.toString())
 
-    val fromEnv = System.getenv("INT2DDS_JAVA_LIB")
-    val builtName = when {
-        org.gradle.internal.os.OperatingSystem.current().isWindows -> "int2dds_java.dll"
-        org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "libint2dds_java.dylib"
-        else -> "libint2dds_java.so"
-    }
-    val built = rootProject.file("../target/release/$builtName")
-    environment("INT2DDS_JAVA_LIB", fromEnv ?: built.absolutePath)
+    val int2ddsJavaLib: String by rootProject.extra
+    environment("INT2DDS_JAVA_LIB", int2ddsJavaLib)
 
     // Entity tests create real participants. INT2DDS_FORCE_LOOPBACK_MULTICAST
     // alone only forces the *egress* interface to 127.0.0.1 -- the receive
@@ -116,8 +111,9 @@ tasks.jar {
     manifest {
         attributes(
             "Multi-Release" to "true",
-            // JDK 24+ (JEP 472) restricts JNI; without this, loading the native
-            // library prints a warning. Applies equally to Panama.
+            // Honoured only for the JAR launched with `java -jar`. On the class
+            // path JDK 24+ still warns unless the application passes
+            // --enable-native-access=ALL-UNNAMED (see README).
             "Enable-Native-Access" to "ALL-UNNAMED",
             "Implementation-Title" to "int2dds-api",
             "Implementation-Version" to project.version.toString()

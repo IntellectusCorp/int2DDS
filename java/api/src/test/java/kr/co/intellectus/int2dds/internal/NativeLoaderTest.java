@@ -21,8 +21,8 @@ class NativeLoaderTest {
         String nativeVersion = NativeLoader.nativeVersion();
         assertTrue(nativeVersion.matches("\\d+\\.\\d+\\.\\d+.*"),
                 "expected a semver-ish version, got: " + nativeVersion);
-        // The workspace version (Cargo.toml [workspace.package]) is 0.1.1.
-        assertEquals("0.1.1", nativeVersion);
+        // Set by api/build.gradle.kts from Cargo.toml [workspace.package].
+        assertEquals(System.getProperty("int2dds.version"), nativeVersion);
     }
 
     @Test

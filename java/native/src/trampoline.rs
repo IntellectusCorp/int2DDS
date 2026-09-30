@@ -7,6 +7,9 @@
 //! listener. The JVM is cached in `crate::jvm()` at `JNI_OnLoad` (see `lib.rs`);
 //! trampolines run on threads with no `JNIEnv`, so they attach on demand.
 //!
+//! The entity argument of every callback is passed as null: `DataReader` and
+//! `DataWriter` install a wrapper listener that substitutes the Java entity.
+//!
 //! # Teardown safety — id registry, not a raw Arc pointer
 //! The core clones its `Arc<FfiDataReaderListener>` and RELEASES its lock
 //! *before* invoking the trampoline, and holds `user_context` only as an opaque
@@ -32,11 +35,12 @@ use std::collections::HashMap;
 use std::os::raw::c_void;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use jni::errors::Error as JniError;
-use jni::objects::{GlobalRef, JClass, JObject, JValue};
-use jni::sys::{jint, jlong};
+use jni::objects::{GlobalRef, JClass, JMethodID, JObject};
+use jni::signature::{Primitive, ReturnType};
+use jni::sys::{jint, jlong, jvalue};
 use jni::JNIEnv;
 
 use int2dds_ffi::listener::{Int2DdsDataReaderListener, Int2DdsDataWriterListener};
@@ -65,6 +69,218 @@ static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<ListenerCtx>>>> =
 /// Next id to hand out. Starts at 1 so 0 can mean "no listener" on the Java side.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+const READER_LISTENER: &str = "kr/co/intellectus/int2dds/listeners/DataReaderListener";
+const WRITER_LISTENER: &str = "kr/co/intellectus/int2dds/listeners/DataWriterListener";
+const READER: &str = "Lkr/co/intellectus/int2dds/core/DataReader;";
+const WRITER: &str = "Lkr/co/intellectus/int2dds/core/DataWriter;";
+const STATUS_PACKAGE: &str = "kr/co/intellectus/int2dds/status/";
+
+/// A status class and its constructor.
+struct StatusCtor {
+    class: GlobalRef,
+    ctor: JMethodID,
+}
+
+impl StatusCtor {
+    fn resolve(env: &mut JNIEnv, name: &str, sig: &str) -> Result<Self, JniError> {
+        let local = env.find_class(format!("{STATUS_PACKAGE}{name}"))?;
+        let ctor = env.get_method_id(&local, "<init>", sig)?;
+        let class = env.new_global_ref(&local)?;
+        env.delete_local_ref(local)?;
+        Ok(Self { class, ctor })
+    }
+
+    /// # Safety
+    /// `args` must match the constructor signature given to [`Self::resolve`].
+    unsafe fn construct<'local>(
+        &self,
+        env: &mut JNIEnv<'local>,
+        args: &[jvalue],
+    ) -> Result<JObject<'local>, JniError> {
+        env.new_object_unchecked(&self.class, self.ctor, args)
+    }
+}
+
+/// Classes and method IDs the trampolines call through, resolved once.
+///
+/// A `FindClass` on a natively attached DDS thread searches the system class
+/// loader, which cannot see these classes when the binding is loaded by an
+/// application class loader (a fat JAR, a servlet container). The listener set
+/// calls run on a Java thread inside `FfiHandwritten`, whose loader can, so they
+/// resolve everything here before the first callback.
+struct JniCache {
+    subscription_matched: StatusCtor,
+    sample_rejected: StatusCtor,
+    liveliness_changed: StatusCtor,
+    requested_deadline_missed: StatusCtor,
+    requested_incompatible_qos: StatusCtor,
+    sample_lost: StatusCtor,
+    publication_matched: StatusCtor,
+    offered_deadline_missed: StatusCtor,
+    offered_incompatible_qos: StatusCtor,
+    liveliness_lost: StatusCtor,
+    on_subscription_matched: JMethodID,
+    on_data_available: JMethodID,
+    on_sample_rejected: JMethodID,
+    on_liveliness_changed: JMethodID,
+    on_requested_deadline_missed: JMethodID,
+    on_requested_incompatible_qos: JMethodID,
+    on_sample_lost: JMethodID,
+    on_publication_matched: JMethodID,
+    on_offered_deadline_missed: JMethodID,
+    on_offered_incompatible_qos: JMethodID,
+    on_liveliness_lost: JMethodID,
+}
+
+static CACHE: OnceLock<JniCache> = OnceLock::new();
+
+/// A `(entity, status)` callback on `iface`.
+fn callback(
+    env: &mut JNIEnv,
+    iface: &str,
+    entity: &str,
+    name: &str,
+    status: &str,
+) -> Result<JMethodID, JniError> {
+    env.get_method_id(iface, name, format!("({entity}L{STATUS_PACKAGE}{status};)V"))
+}
+
+impl JniCache {
+    fn resolve(env: &mut JNIEnv) -> Result<Self, JniError> {
+        let (r, w) = (READER_LISTENER, WRITER_LISTENER);
+        Ok(Self {
+            subscription_matched: StatusCtor::resolve(
+                env,
+                "SubscriptionMatchedStatus",
+                "(IIII[B)V",
+            )?,
+            sample_rejected: StatusCtor::resolve(env, "SampleRejectedStatus", "(III[B)V")?,
+            liveliness_changed: StatusCtor::resolve(env, "LivelinessChangedStatus", "(IIII[B)V")?,
+            requested_deadline_missed: StatusCtor::resolve(
+                env,
+                "RequestedDeadlineMissedStatus",
+                "(II[B)V",
+            )?,
+            requested_incompatible_qos: StatusCtor::resolve(
+                env,
+                "RequestedIncompatibleQosStatus",
+                "(IIII)V",
+            )?,
+            sample_lost: StatusCtor::resolve(env, "SampleLostStatus", "(II)V")?,
+            publication_matched: StatusCtor::resolve(env, "PublicationMatchedStatus", "(IIII[B)V")?,
+            offered_deadline_missed: StatusCtor::resolve(
+                env,
+                "OfferedDeadlineMissedStatus",
+                "(II[B)V",
+            )?,
+            offered_incompatible_qos: StatusCtor::resolve(
+                env,
+                "OfferedIncompatibleQosStatus",
+                "(IIII)V",
+            )?,
+            liveliness_lost: StatusCtor::resolve(env, "LivelinessLostStatus", "(II)V")?,
+            on_subscription_matched: callback(
+                env,
+                r,
+                READER,
+                "onSubscriptionMatched",
+                "SubscriptionMatchedStatus",
+            )?,
+            on_data_available: env.get_method_id(r, "onDataAvailable", format!("({READER})V"))?,
+            on_sample_rejected: callback(
+                env,
+                r,
+                READER,
+                "onSampleRejected",
+                "SampleRejectedStatus",
+            )?,
+            on_liveliness_changed: callback(
+                env,
+                r,
+                READER,
+                "onLivelinessChanged",
+                "LivelinessChangedStatus",
+            )?,
+            on_requested_deadline_missed: callback(
+                env,
+                r,
+                READER,
+                "onRequestedDeadlineMissed",
+                "RequestedDeadlineMissedStatus",
+            )?,
+            on_requested_incompatible_qos: callback(
+                env,
+                r,
+                READER,
+                "onRequestedIncompatibleQos",
+                "RequestedIncompatibleQosStatus",
+            )?,
+            on_sample_lost: callback(env, r, READER, "onSampleLost", "SampleLostStatus")?,
+            on_publication_matched: callback(
+                env,
+                w,
+                WRITER,
+                "onPublicationMatched",
+                "PublicationMatchedStatus",
+            )?,
+            on_offered_deadline_missed: callback(
+                env,
+                w,
+                WRITER,
+                "onOfferedDeadlineMissed",
+                "OfferedDeadlineMissedStatus",
+            )?,
+            on_offered_incompatible_qos: callback(
+                env,
+                w,
+                WRITER,
+                "onOfferedIncompatibleQos",
+                "OfferedIncompatibleQosStatus",
+            )?,
+            on_liveliness_lost: callback(
+                env,
+                w,
+                WRITER,
+                "onLivelinessLost",
+                "LivelinessLostStatus",
+            )?,
+        })
+    }
+}
+
+/// Resolves [`CACHE`] on first use. Must run on a Java thread; see [`JniCache`].
+fn ensure_cache(env: &mut JNIEnv) -> Result<&'static JniCache, JniError> {
+    if let Some(cache) = CACHE.get() {
+        return Ok(cache);
+    }
+    let resolved = JniCache::resolve(env)?;
+    Ok(CACHE.get_or_init(|| resolved))
+}
+
+fn int(v: i32) -> jvalue {
+    jvalue { i: v }
+}
+
+fn obj(o: &JObject) -> jvalue {
+    jvalue { l: o.as_raw() }
+}
+
+const NULL: jvalue = jvalue { l: std::ptr::null_mut() };
+
+/// Calls a `void` listener method.
+///
+/// # Safety
+/// `method` must come from [`JniCache`] and `args` must match its signature.
+unsafe fn call_void(
+    env: &mut JNIEnv,
+    listener: &JObject,
+    method: JMethodID,
+    args: &[jvalue],
+) -> Result<(), JniError> {
+    env.call_method_unchecked(listener, method, ReturnType::Primitive(Primitive::Void), args)?;
+    Ok(())
+}
+
 /// Attaches the current (DDS background) thread to the JVM as a daemon and
 /// returns its env. Daemon attach stays for the thread's life and detaches
 /// automatically at thread exit — DDS reuses its threads, so this amortizes.
@@ -81,10 +297,10 @@ fn env_for_callback() -> Option<JNIEnv<'static>> {
 /// `marshal` is logged and swallowed the same way.
 ///
 /// `marshal` builds the Java status object (if any) and calls the listener
-/// method; it receives the attached env and the listener's `GlobalRef`.
+/// method; it receives the attached env, the resolved cache and the listener.
 fn run_trampoline<F>(user_context: *mut c_void, marshal: F)
 where
-    F: FnOnce(&mut JNIEnv<'_>, &GlobalRef) -> Result<(), JniError>,
+    F: FnOnce(&mut JNIEnv<'_>, &JniCache, &JObject<'static>) -> Result<(), JniError>,
 {
     let id = user_context as usize as u64;
     // Clone the Arc out while holding the lock: this keeps the context (and its
@@ -98,6 +314,10 @@ where
             None => return,
         }
     };
+    // Resolved by the set call that registered `ctx`.
+    let Some(cache) = CACHE.get() else {
+        return;
+    };
 
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         if let Some(mut env) = env_for_callback() {
@@ -106,7 +326,7 @@ where
             // nothing else pushes/pops a frame — without this the status
             // object (and any byte arrays it needs) leak one local ref each
             // per callback until the table overflows.
-            let _ = env.with_local_frame(8, |env| marshal(env, &ctx.listener));
+            let _ = env.with_local_frame(8, |env| marshal(env, cache, ctx.listener.as_obj()));
             // A pending Java exception is thread-wide and survives the frame
             // pop, so it is still checked here. It must never leak onto the
             // native DDS thread.
@@ -138,30 +358,19 @@ unsafe extern "C" fn tramp_on_subscription_matched(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
+    run_trampoline(user_context, |env, cache, listener| unsafe {
         let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
-        let cls = "kr/co/intellectus/int2dds/status/SubscriptionMatchedStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(IIII[B)V",
+        let jstatus = cache.subscription_matched.construct(
+            env,
             &[
-                JValue::Int(s.total_count),
-                JValue::Int(s.total_count_change),
-                JValue::Int(s.current_count),
-                JValue::Int(s.current_count_change),
-                JValue::Object(&handle),
+                int(s.total_count),
+                int(s.total_count_change),
+                int(s.current_count),
+                int(s.current_count_change),
+                obj(&handle),
             ],
         )?;
-        // v1 passes the reader as Java null: native->entity reverse mapping
-        // is out of scope for this branch.
-        env.call_method(
-            listener.as_obj(),
-            "onSubscriptionMatched",
-            "(Lkr/co/intellectus/int2dds/core/DataReader;\
-             Lkr/co/intellectus/int2dds/status/SubscriptionMatchedStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        call_void(env, listener, cache.on_subscription_matched, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -175,14 +384,8 @@ unsafe extern "C" fn tramp_on_data_available(
     _reader: *mut Int2DdsDataReader,
     user_context: *mut c_void,
 ) {
-    run_trampoline(user_context, |env, listener| {
-        env.call_method(
-            listener.as_obj(),
-            "onDataAvailable",
-            "(Lkr/co/intellectus/int2dds/core/DataReader;)V",
-            &[JValue::Object(&JObject::null())],
-        )?;
-        Ok(())
+    run_trampoline(user_context, |env, cache, listener| unsafe {
+        call_void(env, listener, cache.on_data_available, &[NULL])
     });
 }
 
@@ -201,27 +404,18 @@ unsafe extern "C" fn tramp_on_sample_rejected(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
+    run_trampoline(user_context, |env, cache, listener| unsafe {
         let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
-        let cls = "kr/co/intellectus/int2dds/status/SampleRejectedStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(III[B)V",
+        let jstatus = cache.sample_rejected.construct(
+            env,
             &[
-                JValue::Int(s.total_count),
-                JValue::Int(s.total_count_change),
-                JValue::Int(s.last_reason as i32),
-                JValue::Object(&handle),
+                int(s.total_count),
+                int(s.total_count_change),
+                int(s.last_reason as i32),
+                obj(&handle),
             ],
         )?;
-        env.call_method(
-            listener.as_obj(),
-            "onSampleRejected",
-            "(Lkr/co/intellectus/int2dds/core/DataReader;\
-             Lkr/co/intellectus/int2dds/status/SampleRejectedStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        call_void(env, listener, cache.on_sample_rejected, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -240,28 +434,19 @@ unsafe extern "C" fn tramp_on_liveliness_changed(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
+    run_trampoline(user_context, |env, cache, listener| unsafe {
         let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
-        let cls = "kr/co/intellectus/int2dds/status/LivelinessChangedStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(IIII[B)V",
+        let jstatus = cache.liveliness_changed.construct(
+            env,
             &[
-                JValue::Int(s.alive_count),
-                JValue::Int(s.not_alive_count),
-                JValue::Int(s.alive_count_change),
-                JValue::Int(s.not_alive_count_change),
-                JValue::Object(&handle),
+                int(s.alive_count),
+                int(s.not_alive_count),
+                int(s.alive_count_change),
+                int(s.not_alive_count_change),
+                obj(&handle),
             ],
         )?;
-        env.call_method(
-            listener.as_obj(),
-            "onLivelinessChanged",
-            "(Lkr/co/intellectus/int2dds/core/DataReader;\
-             Lkr/co/intellectus/int2dds/status/LivelinessChangedStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        call_void(env, listener, cache.on_liveliness_changed, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -280,26 +465,12 @@ unsafe extern "C" fn tramp_on_requested_deadline_missed(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
+    run_trampoline(user_context, |env, cache, listener| unsafe {
         let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
-        let cls = "kr/co/intellectus/int2dds/status/RequestedDeadlineMissedStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(II[B)V",
-            &[
-                JValue::Int(s.total_count),
-                JValue::Int(s.total_count_change),
-                JValue::Object(&handle),
-            ],
-        )?;
-        env.call_method(
-            listener.as_obj(),
-            "onRequestedDeadlineMissed",
-            "(Lkr/co/intellectus/int2dds/core/DataReader;\
-             Lkr/co/intellectus/int2dds/status/RequestedDeadlineMissedStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        let jstatus = cache
+            .requested_deadline_missed
+            .construct(env, &[int(s.total_count), int(s.total_count_change), obj(&handle)])?;
+        call_void(env, listener, cache.on_requested_deadline_missed, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -318,26 +489,17 @@ unsafe extern "C" fn tramp_on_requested_incompatible_qos(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
-        let cls = "kr/co/intellectus/int2dds/status/RequestedIncompatibleQosStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(IIII)V",
+    run_trampoline(user_context, |env, cache, listener| unsafe {
+        let jstatus = cache.requested_incompatible_qos.construct(
+            env,
             &[
-                JValue::Int(s.total_count),
-                JValue::Int(s.total_count_change),
-                JValue::Int(s.last_policy_id as i32),
-                JValue::Int(s.policies_count as i32),
+                int(s.total_count),
+                int(s.total_count_change),
+                int(s.last_policy_id as i32),
+                int(s.policies_count as i32),
             ],
         )?;
-        env.call_method(
-            listener.as_obj(),
-            "onRequestedIncompatibleQos",
-            "(Lkr/co/intellectus/int2dds/core/DataReader;\
-             Lkr/co/intellectus/int2dds/status/RequestedIncompatibleQosStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        call_void(env, listener, cache.on_requested_incompatible_qos, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -356,21 +518,10 @@ unsafe extern "C" fn tramp_on_sample_lost(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
-        let cls = "kr/co/intellectus/int2dds/status/SampleLostStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(II)V",
-            &[JValue::Int(s.total_count), JValue::Int(s.total_count_change)],
-        )?;
-        env.call_method(
-            listener.as_obj(),
-            "onSampleLost",
-            "(Lkr/co/intellectus/int2dds/core/DataReader;\
-             Lkr/co/intellectus/int2dds/status/SampleLostStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+    run_trampoline(user_context, |env, cache, listener| unsafe {
+        let jstatus =
+            cache.sample_lost.construct(env, &[int(s.total_count), int(s.total_count_change)])?;
+        call_void(env, listener, cache.on_sample_lost, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -384,12 +535,17 @@ unsafe extern "C" fn tramp_on_sample_lost(
 pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeReaderListenerSet<
     'local,
 >(
-    env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     reader: jlong,
     listener: JObject<'local>,
     mask: jint,
 ) -> jlong {
+    // On failure the pending NoClassDefFoundError/NoSuchMethodError is thrown
+    // to the caller.
+    if ensure_cache(&mut env).is_err() {
+        return 0;
+    }
     let global = match env.new_global_ref(listener) {
         Ok(g) => g,
         Err(_) => return 0,
@@ -473,30 +629,19 @@ unsafe extern "C" fn tramp_on_publication_matched(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
+    run_trampoline(user_context, |env, cache, listener| unsafe {
         let handle = env.byte_array_from_slice(&s.last_subscription_handle)?;
-        let cls = "kr/co/intellectus/int2dds/status/PublicationMatchedStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(IIII[B)V",
+        let jstatus = cache.publication_matched.construct(
+            env,
             &[
-                JValue::Int(s.total_count),
-                JValue::Int(s.total_count_change),
-                JValue::Int(s.current_count),
-                JValue::Int(s.current_count_change),
-                JValue::Object(&handle),
+                int(s.total_count),
+                int(s.total_count_change),
+                int(s.current_count),
+                int(s.current_count_change),
+                obj(&handle),
             ],
         )?;
-        // v1 passes the writer as Java null: native->entity reverse mapping
-        // is out of scope for this branch.
-        env.call_method(
-            listener.as_obj(),
-            "onPublicationMatched",
-            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
-             Lkr/co/intellectus/int2dds/status/PublicationMatchedStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        call_void(env, listener, cache.on_publication_matched, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -515,26 +660,12 @@ unsafe extern "C" fn tramp_on_offered_deadline_missed(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
+    run_trampoline(user_context, |env, cache, listener| unsafe {
         let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
-        let cls = "kr/co/intellectus/int2dds/status/OfferedDeadlineMissedStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(II[B)V",
-            &[
-                JValue::Int(s.total_count),
-                JValue::Int(s.total_count_change),
-                JValue::Object(&handle),
-            ],
-        )?;
-        env.call_method(
-            listener.as_obj(),
-            "onOfferedDeadlineMissed",
-            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
-             Lkr/co/intellectus/int2dds/status/OfferedDeadlineMissedStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        let jstatus = cache
+            .offered_deadline_missed
+            .construct(env, &[int(s.total_count), int(s.total_count_change), obj(&handle)])?;
+        call_void(env, listener, cache.on_offered_deadline_missed, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -553,26 +684,17 @@ unsafe extern "C" fn tramp_on_offered_incompatible_qos(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
-        let cls = "kr/co/intellectus/int2dds/status/OfferedIncompatibleQosStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(IIII)V",
+    run_trampoline(user_context, |env, cache, listener| unsafe {
+        let jstatus = cache.offered_incompatible_qos.construct(
+            env,
             &[
-                JValue::Int(s.total_count),
-                JValue::Int(s.total_count_change),
-                JValue::Int(s.last_policy_id as i32),
-                JValue::Int(s.policies_count as i32),
+                int(s.total_count),
+                int(s.total_count_change),
+                int(s.last_policy_id as i32),
+                int(s.policies_count as i32),
             ],
         )?;
-        env.call_method(
-            listener.as_obj(),
-            "onOfferedIncompatibleQos",
-            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
-             Lkr/co/intellectus/int2dds/status/OfferedIncompatibleQosStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+        call_void(env, listener, cache.on_offered_incompatible_qos, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -591,21 +713,11 @@ unsafe extern "C" fn tramp_on_liveliness_lost(
         return;
     }
     let s = &*status;
-    run_trampoline(user_context, |env, listener| {
-        let cls = "kr/co/intellectus/int2dds/status/LivelinessLostStatus";
-        let jstatus = env.new_object(
-            cls,
-            "(II)V",
-            &[JValue::Int(s.total_count), JValue::Int(s.total_count_change)],
-        )?;
-        env.call_method(
-            listener.as_obj(),
-            "onLivelinessLost",
-            "(Lkr/co/intellectus/int2dds/core/DataWriter;\
-             Lkr/co/intellectus/int2dds/status/LivelinessLostStatus;)V",
-            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-        )?;
-        Ok(())
+    run_trampoline(user_context, |env, cache, listener| unsafe {
+        let jstatus = cache
+            .liveliness_lost
+            .construct(env, &[int(s.total_count), int(s.total_count_change)])?;
+        call_void(env, listener, cache.on_liveliness_lost, &[NULL, obj(&jstatus)])
     });
 }
 
@@ -620,12 +732,17 @@ unsafe extern "C" fn tramp_on_liveliness_lost(
 pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeWriterListenerSet<
     'local,
 >(
-    env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     writer: jlong,
     listener: JObject<'local>,
     mask: jint,
 ) -> jlong {
+    // On failure the pending NoClassDefFoundError/NoSuchMethodError is thrown
+    // to the caller.
+    if ensure_cache(&mut env).is_err() {
+        return 0;
+    }
     let global = match env.new_global_ref(listener) {
         Ok(g) => g,
         Err(_) => return 0,

@@ -30,16 +30,10 @@ application {
 // INT2DDS_USE_LOOPBACK_INTERFACE gets a receive side that never has 127.0.0.1
 // in its working-IP list. The tests set both, deliberately, because they must
 // not discover each other across a subnet; an example has no such need.
-val nativeLibName = when {
-    org.gradle.internal.os.OperatingSystem.current().isWindows -> "int2dds_java.dll"
-    org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "libint2dds_java.dylib"
-    else -> "libint2dds_java.so"
-}
-val nativeLib = System.getenv("INT2DDS_JAVA_LIB")
-        ?: rootProject.file("../target/release/$nativeLibName").absolutePath
+val int2ddsJavaLib: String by rootProject.extra
 
 tasks.withType<JavaExec>().configureEach {
-    environment("INT2DDS_JAVA_LIB", nativeLib)
+    environment("INT2DDS_JAVA_LIB", int2ddsJavaLib)
 }
 
 tasks.register<JavaExec>("runPub") {

@@ -28,17 +28,26 @@ Then:
 
 ```bash
 cd java
-./gradlew build
-./gradlew test
+./gradlew build      # Windows: .\gradlew.bat build
+./gradlew test       # Windows: .\gradlew.bat test
 ```
 
 The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variable →
-bundled JAR resources → `java.library.path`. Gradle's own test and example tasks set
-`INT2DDS_JAVA_LIB` for you; set it by hand only when running outside Gradle:
+bundled JAR resources → `java.library.path`. Gradle's own test, example and benchmark
+tasks set `INT2DDS_JAVA_LIB` for you, picking the platform's file name; set it by hand
+only when running outside Gradle:
 
 ```bash
 export INT2DDS_JAVA_LIB=/abs/path/to/target/release/libint2dds_java.so
 ```
+
+```powershell
+$env:INT2DDS_JAVA_LIB = "D:\abs\path\to\target\release\int2dds_java.dll"
+```
+
+On JDK 24 and later the JVM warns when a library on the class path calls native code
+(JEP 472). Pass `--enable-native-access=ALL-UNNAMED` to `java` to acknowledge it; the
+JAR's own `Enable-Native-Access` manifest attribute only takes effect with `java -jar`.
 
 ## Running the examples
 
@@ -151,6 +160,25 @@ try (DomainParticipant participant = new DomainParticipant(0)) {
 
 `createDataReader` takes a supplier (`HelloWorld::new`) so the reader can construct
 samples without reflection.
+
+### 4. Listener instead of a WaitSet
+
+```java
+reader.setListener(new DataReaderListenerBase() {
+    @Override
+    public void onDataAvailable(DataReader<?> r) {
+        Sample<HelloWorld> sample;
+        while ((sample = reader.take()) != null) {
+            if (sample.data() != null) {
+                System.out.println(sample.data().message);
+            }
+        }
+    }
+}, StatusMask.of(StatusMask.DATA_AVAILABLE));
+```
+
+Callbacks run on DDS threads and receive the entity they are installed on. Closing the
+reader (or its participant) clears the listener.
 
 ## Using IDL code generation
 
