@@ -5,26 +5,25 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.junit.jupiter.api.Test;
 
 /**
- * De-risk test for the {@link DynamicValue} read/introspection slice: read
- * scalar and sequence fields of a populated {@link DynamicData} back out
- * through {@link DynamicData#getValue} and the new {@code DynamicValue}
- * extractors, mirroring {@link DynamicValueWriteTest}'s XML/registry setup.
- * Every {@code DynamicValue} obtained from {@code getValue}/{@code element}
- * is an independent clone, not consumed by anything here, so each is closed
- * explicitly -- proving that path too (a leak, not a double-free, if it were
- * skipped).
+ * De-risk test for the {@link DynamicValue} read/introspection slice: read scalar and sequence
+ * fields of a populated {@link DynamicData} back out through {@link DynamicData#getValue} and the
+ * new {@code DynamicValue} extractors, mirroring {@link DynamicValueWriteTest}'s XML/registry
+ * setup. Every {@code DynamicValue} obtained from {@code getValue}/{@code element} is an
+ * independent clone, not consumed by anything here, so each is closed explicitly -- proving that
+ * path too (a leak, not a double-free, if it were skipped).
  */
 class DynamicValueReadTest {
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Rec\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"i32field\" type=\"int32\"/>\n"
-            + "  <member name=\"strfield\" type=\"string\"/>\n"
-            + "  <member name=\"f64field\" type=\"float64\"/>\n"
-            + "  <member name=\"seqfield\" type=\"int32\" sequenceMaxLength=\"-1\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Rec\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"i32field\" type=\"int32\"/>\n"
+                    + "  <member name=\"strfield\" type=\"string\"/>\n"
+                    + "  <member name=\"f64field\" type=\"float64\"/>\n"
+                    + "  <member name=\"seqfield\" type=\"int32\" sequenceMaxLength=\"-1\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void getValueReadsScalarAndSequenceFieldsBackOut() {

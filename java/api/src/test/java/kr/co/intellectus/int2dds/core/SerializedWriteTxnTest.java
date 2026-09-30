@@ -13,10 +13,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Exercises the zero-copy transactional serialized-write API: {@link
- * DataWriter#prepareSerializedWrite} / {@link SerializedWriteBuffer}. Reuses
- * {@link SerializedIoTest}'s writer/reader round-trip fixture shape to get
- * real CDR bytes, then publishes them through a DDS-owned buffer instead of a
- * caller-built {@code byte[]}.
+ * DataWriter#prepareSerializedWrite} / {@link SerializedWriteBuffer}. Reuses {@link
+ * SerializedIoTest}'s writer/reader round-trip fixture shape to get real CDR bytes, then publishes
+ * them through a DDS-owned buffer instead of a caller-built {@code byte[]}.
  */
 class SerializedWriteTxnTest {
 
@@ -162,10 +161,12 @@ class SerializedWriteTxnTest {
             buf.buffer().put(new byte[] {0, 1, 0, 0});
             buf.commit();
 
-            assertThrows(IllegalStateException.class, buf::buffer,
+            assertThrows(
+                    IllegalStateException.class,
+                    buf::buffer,
                     "buffer() must be guarded once committed");
-            assertThrows(IllegalStateException.class, buf::commit,
-                    "a second commit() must be guarded");
+            assertThrows(
+                    IllegalStateException.class, buf::commit, "a second commit() must be guarded");
 
             // Idempotent no-op close after commit must not throw.
             buf.close();
@@ -181,7 +182,8 @@ class SerializedWriteTxnTest {
             DataWriter<ConformanceRecord> w = pub.createDataWriter(topic);
             // A negative timestamp would marshal a negative nanosec into the
             // native u32 field; reject it before that can happen.
-            assertThrows(IllegalArgumentException.class,
+            assertThrows(
+                    IllegalArgumentException.class,
                     () -> w.writeSerialized(new byte[] {0, 1, 0, 0}, -1L));
         }
     }

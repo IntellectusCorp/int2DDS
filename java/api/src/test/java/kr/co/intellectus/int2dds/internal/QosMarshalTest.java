@@ -3,10 +3,10 @@ package kr.co.intellectus.int2dds.internal;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
-import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import kr.co.intellectus.int2dds.qos.*;
 import java.time.Duration;
 import java.util.function.LongConsumer;
+import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
+import kr.co.intellectus.int2dds.qos.*;
 import org.junit.jupiter.api.Test;
 
 class QosMarshalTest {
@@ -26,8 +26,8 @@ class QosMarshalTest {
     void anEmptyQosAppliesNothingAndSucceeds() {
         // Every field null means "leave it to the core" — this must be a no-op,
         // not a call storm that overwrites core defaults with Java's idea of them.
-        withWriterQos(h -> assertDoesNotThrow(
-                () -> QosMarshal.applyWriterQos(h, new DataWriterQos())));
+        withWriterQos(
+                h -> assertDoesNotThrow(() -> QosMarshal.applyWriterQos(h, new DataWriterQos())));
     }
 
     @Test

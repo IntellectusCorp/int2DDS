@@ -4,9 +4,9 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 /**
- * Per-sample metadata, an immutable mirror of the core's {@code
- * Int2DdsSampleInfo} (ffi/src/types.rs). State fields carry the DDS bit masks
- * as raw ints; the 16-byte handles are copied on the way in and out.
+ * Per-sample metadata, an immutable mirror of the core's {@code Int2DdsSampleInfo}
+ * (ffi/src/types.rs). State fields carry the DDS bit masks as raw ints; the 16-byte handles are
+ * copied on the way in and out.
  */
 public final class SampleInfo {
 
@@ -27,10 +27,20 @@ public final class SampleInfo {
     private final int absoluteGenerationRank;
     private final boolean validData;
 
-    SampleInfo(int sourceTimestampSec, int sourceTimestampNanosec, int sampleState,
-            int viewState, int instanceState, byte[] instanceHandle, byte[] publicationHandle,
-            int disposedGenerationCount, int noWritersGenerationCount, int sampleRank,
-            int generationRank, int absoluteGenerationRank, boolean validData) {
+    SampleInfo(
+            int sourceTimestampSec,
+            int sourceTimestampNanosec,
+            int sampleState,
+            int viewState,
+            int instanceState,
+            byte[] instanceHandle,
+            byte[] publicationHandle,
+            int disposedGenerationCount,
+            int noWritersGenerationCount,
+            int sampleRank,
+            int generationRank,
+            int absoluteGenerationRank,
+            boolean validData) {
         this.sourceTimestampSec = sourceTimestampSec;
         this.sourceTimestampNanosec = sourceTimestampNanosec;
         this.sampleState = sampleState;
@@ -55,9 +65,19 @@ public final class SampleInfo {
             pub[i] = s.get(36 + i);
         }
         return new SampleInfo(
-                s.getInt(0), s.getInt(4), s.getInt(8), s.getInt(12), s.getInt(16),
-                inst, pub, s.getInt(52), s.getInt(56), s.getInt(60), s.getInt(64),
-                s.getInt(68), s.get(72) != 0);
+                s.getInt(0),
+                s.getInt(4),
+                s.getInt(8),
+                s.getInt(12),
+                s.getInt(16),
+                inst,
+                pub,
+                s.getInt(52),
+                s.getInt(56),
+                s.getInt(60),
+                s.getInt(64),
+                s.getInt(68),
+                s.get(72) != 0);
     }
 
     public int sourceTimestampSec() {

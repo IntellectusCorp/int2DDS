@@ -3,8 +3,8 @@ package kr.co.intellectus.int2dds.status;
 /**
  * Immutable snapshot of a DataWriter's LIVELINESS_LOST status.
  *
- * <p>Constructed from the native trampoline via the {@code (II)V}
- * constructor; the field order matches the core's {@code Int2DdsLivelinessLostStatus}.
+ * <p>Constructed from the native trampoline via the {@code (II)V} constructor; the field order
+ * matches the core's {@code Int2DdsLivelinessLostStatus}.
  */
 public final class LivelinessLostStatus {
 

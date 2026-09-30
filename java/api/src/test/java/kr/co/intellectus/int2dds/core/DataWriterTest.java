@@ -8,18 +8,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import kr.co.intellectus.int2dds.cdr.CdrReader;
 import kr.co.intellectus.int2dds.cdr.CdrWriter;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
-import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.qos.History;
+import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 
 class DataWriterTest {
@@ -33,38 +33,32 @@ class DataWriterTest {
     }
 
     /**
-     * A smoke test: create a writer and publish through it, and let JUnit's
-     * own uncaught-exception handling be the oracle for "without error." Two
-     * earlier attempts at a positive assertion here were both dead, and the
-     * second one is worth spelling out since it looked real.
+     * A smoke test: create a writer and publish through it, and let JUnit's own uncaught-exception
+     * handling be the oracle for "without error." Two earlier attempts at a positive assertion here
+     * were both dead, and the second one is worth spelling out since it looked real.
      *
      * <p>The brief's original oracle was {@code assertEquals(failedBefore,
-     * NativeCleaner.failedCount())} -- dead, per the dispatch prompt's
-     * correction: {@code failedCount()} is the reaper's delete-*attempt*
-     * counter (NativeCleaner's own Javadoc), and nothing in this test ever
-     * abandons a handle for the reaper to touch, so that assertion could not
-     * have failed regardless of what {@code write()} did.
+     * NativeCleaner.failedCount())} -- dead, per the dispatch prompt's correction: {@code
+     * failedCount()} is the reaper's delete-*attempt* counter (NativeCleaner's own Javadoc), and
+     * nothing in this test ever abandons a handle for the reaper to touch, so that assertion could
+     * not have failed regardless of what {@code write()} did.
      *
-     * <p>My own first replacement, {@code assertFalse(w.isClosed())}, was
-     * flagged in review as the same shape of dead oracle: {@code write()}
-     * never closes the writer on any path, so that assertion could not have
-     * failed either. My second replacement compared {@code
-     * NativeCleaner.deferredCount()} before and after -- the same oracle
-     * {@link #anAbandonedWriterTreeIsReapedCleanly} and {@code
-     * EntityTreeTest.anAbandonedTreeIsEventuallyFullyReleased} use for "the
-     * reaper is not left holding anything" -- but that is dead here too, for
-     * a different reason: {@code DEFERRED} moves only inside the reaper
-     * (NativeCleaner's {@code attempt()}/{@code sweepDeferred()}), and {@code
-     * p.close()} in the {@code finally} block below is synchronous, calling
-     * each handle's deleter directly and throwing out of {@code
-     * NativeEntity.close()} -&gt; {@code ReturnCodes.check} on a genuine
-     * refusal rather than ever touching {@code DEFERRED}. So either {@code
-     * p.close()} throws -- and the test already fails on that exception,
-     * never reaching a {@code deferredCount()} assertion -- or it returns
-     * normally, in which case {@code deferredCount()} is provably unmoved.
-     * That assertion could not fail either way, so it is gone; {@code
-     * assertNotEquals(0L, w.handle())} and the topic-identity check below,
-     * plus the implicit "did not throw," are this method's real oracles.
+     * <p>My own first replacement, {@code assertFalse(w.isClosed())}, was flagged in review as the
+     * same shape of dead oracle: {@code write()} never closes the writer on any path, so that
+     * assertion could not have failed either. My second replacement compared {@code
+     * NativeCleaner.deferredCount()} before and after -- the same oracle {@link
+     * #anAbandonedWriterTreeIsReapedCleanly} and {@code
+     * EntityTreeTest.anAbandonedTreeIsEventuallyFullyReleased} use for "the reaper is not left
+     * holding anything" -- but that is dead here too, for a different reason: {@code DEFERRED}
+     * moves only inside the reaper (NativeCleaner's {@code attempt()}/{@code sweepDeferred()}), and
+     * {@code p.close()} in the {@code finally} block below is synchronous, calling each handle's
+     * deleter directly and throwing out of {@code NativeEntity.close()} -&gt; {@code
+     * ReturnCodes.check} on a genuine refusal rather than ever touching {@code DEFERRED}. So either
+     * {@code p.close()} throws -- and the test already fails on that exception, never reaching a
+     * {@code deferredCount()} assertion -- or it returns normally, in which case {@code
+     * deferredCount()} is provably unmoved. That assertion could not fail either way, so it is
+     * gone; {@code assertNotEquals(0L, w.handle())} and the topic-identity check below, plus the
+     * implicit "did not throw," are this method's real oracles.
      */
     @Test
     void aWriterIsCreatedAndPublishesWithoutError() {
@@ -86,27 +80,22 @@ class DataWriterTest {
     }
 
     /**
-     * The "cheap intermediate" between "write() didn't throw" and Task 7's
-     * real end-to-end proof: none of this class's other tests can catch a
-     * wrong {@code xcdr2} flag, a wrong extensibility, a wrong endianness, or
-     * a pooled-buffer regression, since all of them only assert on {@code
-     * write()}'s absence of an exception. This drives the exact sequence
-     * {@code write()} itself performs -- {@code
-     * CdrWriter.acquire(topic.extensibility(), littleEndian, xcdr2)} then
-     * {@code sample.serializeCdr(writer)} -- independently, with the values
-     * a default-QoS writer on this topic actually resolves to ({@code
-     * littleEndian=true}, since {@code ByteOrder.nativeOrder()} is {@code
-     * LITTLE_ENDIAN} on every platform this suite runs on; {@code
-     * xcdr2=false}, confirmed at runtime for this task's report as the
-     * core's own default), and inspects the resulting bytes directly rather
-     * than trusting a return code that was never involved.
+     * The "cheap intermediate" between "write() didn't throw" and Task 7's real end-to-end proof:
+     * none of this class's other tests can catch a wrong {@code xcdr2} flag, a wrong extensibility,
+     * a wrong endianness, or a pooled-buffer regression, since all of them only assert on {@code
+     * write()}'s absence of an exception. This drives the exact sequence {@code write()} itself
+     * performs -- {@code CdrWriter.acquire(topic.extensibility(), littleEndian, xcdr2)} then {@code
+     * sample.serializeCdr(writer)} -- independently, with the values a default-QoS writer on this
+     * topic actually resolves to ({@code littleEndian=true}, since {@code ByteOrder.nativeOrder()}
+     * is {@code LITTLE_ENDIAN} on every platform this suite runs on; {@code xcdr2=false}, confirmed
+     * at runtime for this task's report as the core's own default), and inspects the resulting
+     * bytes directly rather than trusting a return code that was never involved.
      */
     @Test
     void writeEncodesTheExactBytesHandedToNative() {
         DomainParticipant p = new DomainParticipant(testDomain());
         try {
-            Topic<ConformanceRecord> t =
-                    p.createTopic("writer_encoding", new ConformanceRecord());
+            Topic<ConformanceRecord> t = p.createTopic("writer_encoding", new ConformanceRecord());
 
             ConformanceRecord sent = sample(7);
             byte[] bytes;
@@ -153,8 +142,7 @@ class DataWriterTest {
                     p.createTopic("writer_null_sample", new ConformanceRecord());
             Publisher pub = p.createPublisher();
             DataWriter<ConformanceRecord> w = pub.createDataWriter(t);
-            NullPointerException e =
-                    assertThrows(NullPointerException.class, () -> w.write(null));
+            NullPointerException e = assertThrows(NullPointerException.class, () -> w.write(null));
             assertEquals("sample", e.getMessage());
         } finally {
             p.close();
@@ -219,27 +207,22 @@ class DataWriterTest {
 
     /**
      * Replaces the brief's version, which captured {@code failedBefore =
-     * NativeCleaner.failedCount()} and asserted it unchanged at the end.
-     * That counter only moves for a delete attempt that throws or returns a
-     * non-{@code PRECONDITION_NOT_MET} code (NativeCleaner's own Javadoc);
-     * under the current NativeCleaner a refusal — exactly what an
-     * out-of-order reap of this four-handle tree produces routinely — moves
-     * {@code deferredCount()} instead, so the brief's assertion could not
-     * have failed here either. This is the same dead-oracle defect Task 5
-     * found and fixed for the three-handle participant/topic/publisher tree
-     * (see {@code EntityTreeTest.anAbandonedTreeIsEventuallyFullyReleased}),
-     * now extended by one more handle for the writer this task adds.
+     * NativeCleaner.failedCount()} and asserted it unchanged at the end. That counter only moves
+     * for a delete attempt that throws or returns a non-{@code PRECONDITION_NOT_MET} code
+     * (NativeCleaner's own Javadoc); under the current NativeCleaner a refusal — exactly what an
+     * out-of-order reap of this four-handle tree produces routinely — moves {@code deferredCount()}
+     * instead, so the brief's assertion could not have failed here either. This is the same
+     * dead-oracle defect Task 5 found and fixed for the three-handle participant/topic/publisher
+     * tree (see {@code EntityTreeTest.anAbandonedTreeIsEventuallyFullyReleased}), now extended by
+     * one more handle for the writer this task adds.
      *
-     * <p>Uses the {@code createForTest} seam on all four entity types —
-     * {@code DataWriter} gains its own here, mirroring {@code
-     * DomainParticipant}/{@code Topic}/{@code Publisher}'s existing ones —
-     * with a per-handle deleter that counts only successful releases ({@code
-     * rc == 0}), not attempts. Counting attempts would be wrong here:
-     * nothing controls which order the reaper tries this tree's four handles
-     * in, so a handle can legitimately be refused (PRECONDITION_NOT_MET) one
-     * or more times before it finally succeeds — {@code
-     * NativeCleaner.State.release()} invokes the deleter on every attempt,
-     * not only the last.
+     * <p>Uses the {@code createForTest} seam on all four entity types — {@code DataWriter} gains
+     * its own here, mirroring {@code DomainParticipant}/{@code Topic}/{@code Publisher}'s existing
+     * ones — with a per-handle deleter that counts only successful releases ({@code rc == 0}), not
+     * attempts. Counting attempts would be wrong here: nothing controls which order the reaper
+     * tries this tree's four handles in, so a handle can legitimately be refused
+     * (PRECONDITION_NOT_MET) one or more times before it finally succeeds — {@code
+     * NativeCleaner.State.release()} invokes the deleter on every attempt, not only the last.
      */
     @Test
     void anAbandonedWriterTreeIsReapedCleanly() throws InterruptedException {
@@ -252,45 +235,64 @@ class DataWriterTest {
         buildAndAbandonWriter(participantDeletes, topicDeletes, publisherDeletes, writerDeletes);
 
         awaitCondition(
-                () -> participantDeletes.get() == 1 && topicDeletes.get() == 1
-                        && publisherDeletes.get() == 1 && writerDeletes.get() == 1,
+                () ->
+                        participantDeletes.get() == 1
+                                && topicDeletes.get() == 1
+                                && publisherDeletes.get() == 1
+                                && writerDeletes.get() == 1,
                 "not all four handles in the abandoned tree released within the timeout: "
-                        + "participant=" + participantDeletes.get()
-                        + " topic=" + topicDeletes.get()
-                        + " publisher=" + publisherDeletes.get()
-                        + " writer=" + writerDeletes.get());
+                        + "participant="
+                        + participantDeletes.get()
+                        + " topic="
+                        + topicDeletes.get()
+                        + " publisher="
+                        + publisherDeletes.get()
+                        + " writer="
+                        + writerDeletes.get());
         // The per-handle counters above increment inside State.release(),
         // called before NativeCleaner's own DEFERRED/REAPED bookkeeping (see
         // EntityTreeTest's identical note) — so deferredCount() can still
         // read stale for a moment after all four counters already confirm
         // success. Poll rather than assert immediately.
-        awaitCondition(() -> NativeCleaner.deferredCount() == deferredBefore,
-                "deferredCount() never returned to its baseline of " + deferredBefore
+        awaitCondition(
+                () -> NativeCleaner.deferredCount() == deferredBefore,
+                "deferredCount() never returned to its baseline of "
+                        + deferredBefore
                         + " after the tree was abandoned; still at "
                         + NativeCleaner.deferredCount());
     }
 
-    private static void buildAndAbandonWriter(AtomicInteger participantDeletes,
-            AtomicInteger topicDeletes, AtomicInteger publisherDeletes,
+    private static void buildAndAbandonWriter(
+            AtomicInteger participantDeletes,
+            AtomicInteger topicDeletes,
+            AtomicInteger publisherDeletes,
             AtomicInteger writerDeletes) {
-        DomainParticipant p = DomainParticipant.createForTest(
-                testDomain(), countOnSuccess(participantDeletes, FfiAccess::deleteParticipant));
-        Topic<ConformanceRecord> t = Topic.createForTest(p, "writer_abandoned",
-                new ConformanceRecord(), countOnSuccess(topicDeletes, FfiAccess::deleteTopic));
-        Publisher pub = Publisher.createForTest(
-                p, countOnSuccess(publisherDeletes, FfiAccess::deletePublisher));
-        DataWriter<ConformanceRecord> w = DataWriter.createForTest(
-                pub, t, countOnSuccess(writerDeletes, FfiAccess::deleteDataWriter));
+        DomainParticipant p =
+                DomainParticipant.createForTest(
+                        testDomain(),
+                        countOnSuccess(participantDeletes, FfiAccess::deleteParticipant));
+        Topic<ConformanceRecord> t =
+                Topic.createForTest(
+                        p,
+                        "writer_abandoned",
+                        new ConformanceRecord(),
+                        countOnSuccess(topicDeletes, FfiAccess::deleteTopic));
+        Publisher pub =
+                Publisher.createForTest(
+                        p, countOnSuccess(publisherDeletes, FfiAccess::deletePublisher));
+        DataWriter<ConformanceRecord> w =
+                DataWriter.createForTest(
+                        pub, t, countOnSuccess(writerDeletes, FfiAccess::deleteDataWriter));
         assertNotEquals(0L, w.handle());
         w.write(sample(1));
         // all four go out of scope here with no close()
     }
 
     /**
-     * Wraps {@code real} so {@code counter} increments only when a delete
-     * attempt actually succeeds ({@code rc == 0}) — the same helper {@code
-     * EntityTreeTest} uses for the same reason; duplicated locally rather
-     * than shared since neither class exposes the other's private helpers.
+     * Wraps {@code real} so {@code counter} increments only when a delete attempt actually succeeds
+     * ({@code rc == 0}) — the same helper {@code EntityTreeTest} uses for the same reason;
+     * duplicated locally rather than shared since neither class exposes the other's private
+     * helpers.
      */
     private static NativeCleaner.Deleter countOnSuccess(
             AtomicInteger counter, NativeCleaner.Deleter real) {
@@ -304,11 +306,10 @@ class DataWriterTest {
     }
 
     /**
-     * Same bounded-retry shape as {@code DomainParticipantTest.awaitReaped}
-     * and {@code EntityTreeTest.awaitCondition}: never a bare sleep, since a
-     * sleep followed by an assertion passes whether or not anything
-     * happened. Duplicated locally rather than reusing either of those, the
-     * same reasoning {@code EntityTreeTest}'s own copy already states.
+     * Same bounded-retry shape as {@code DomainParticipantTest.awaitReaped} and {@code
+     * EntityTreeTest.awaitCondition}: never a bare sleep, since a sleep followed by an assertion
+     * passes whether or not anything happened. Duplicated locally rather than reusing either of
+     * those, the same reasoning {@code EntityTreeTest}'s own copy already states.
      */
     private static void awaitCondition(BooleanSupplier condition, String failureMessage)
             throws InterruptedException {

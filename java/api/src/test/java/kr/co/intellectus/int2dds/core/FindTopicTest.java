@@ -11,22 +11,20 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises {@link DomainParticipant#findTopic}: looking up an existing topic
- * by name rather than creating a new one, returning a typed {@link Topic}
- * that wraps an already-obtained handle sharing the same logical topic as the
- * one that was created.
+ * Exercises {@link DomainParticipant#findTopic}: looking up an existing topic by name rather than
+ * creating a new one, returning a typed {@link Topic} that wraps an already-obtained handle sharing
+ * the same logical topic as the one that was created.
  */
 class FindTopicTest {
 
     private static final long DATA_TIMEOUT_NANOS = 5_000_000_000L;
 
     /**
-     * Strongest test: {@code found} must refer to the very same logical
-     * topic as {@code created}, not merely report the same name/type. Proven
-     * by creating a writer on {@code found} and a reader on {@code created}
-     * (the reverse pairing of the natural one) and showing a write actually
-     * round-trips -- if {@code findTopic} had somehow minted an unrelated
-     * topic under the same name, this reader/writer pair would never match.
+     * Strongest test: {@code found} must refer to the very same logical topic as {@code created},
+     * not merely report the same name/type. Proven by creating a writer on {@code found} and a
+     * reader on {@code created} (the reverse pairing of the natural one) and showing a write
+     * actually round-trips -- if {@code findTopic} had somehow minted an unrelated topic under the
+     * same name, this reader/writer pair would never match.
      */
     @Test
     void findTopicLocatesExistingTopicUsableForRoundTrip() throws InterruptedException {
@@ -58,8 +56,10 @@ class FindTopicTest {
             }
             Thread.sleep(20);
         }
-        assertNotNull(got, "no sample within 5s -- found and created topics did not match,"
-                + " so findTopic did not resolve to the same logical topic");
+        assertNotNull(
+                got,
+                "no sample within 5s -- found and created topics did not match,"
+                        + " so findTopic did not resolve to the same logical topic");
         assertTrue(got.info().validData(), "sample should carry valid data");
         assertEquals(sent.id, got.data().id);
         assertEquals(sent.value, got.data().value);
@@ -90,11 +90,15 @@ class FindTopicTest {
         assertTrue(p.isClosed(), "a participant that used findTopic must still be closable");
     }
 
-    /** A short timeout against a name nothing ever registers must fail, not hang or silently succeed. */
+    /**
+     * A short timeout against a name nothing ever registers must fail, not hang or silently
+     * succeed.
+     */
     @Test
     void findTopicThrowsWhenNoSuchTopicExists() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
-            assertThrows(DdsException.class,
+            assertThrows(
+                    DdsException.class,
                     () -> p.findTopic("does_not_exist", new ConformanceRecord(), 100));
         }
     }

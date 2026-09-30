@@ -17,7 +17,9 @@ class PolicyTest {
         // XCDR2 and negotiate the wrong encoding.
         assertEquals(0, DataRepresentationKind.XCDR1.value());
         assertEquals(2, DataRepresentationKind.XCDR2.value());
-        assertEquals(1, DataRepresentationKind.XCDR2.ordinal(),
+        assertEquals(
+                1,
+                DataRepresentationKind.XCDR2.ordinal(),
                 "precondition: ordinal and wire value genuinely differ here");
     }
 
@@ -94,11 +96,13 @@ class PolicyTest {
 
     @Test
     void policiesCompareByValue() {
-        assertEquals(new History(HistoryKind.KEEP_LAST, 10), new History(HistoryKind.KEEP_LAST, 10));
-        assertEquals(new History(HistoryKind.KEEP_LAST, 10).hashCode(),
+        assertEquals(
+                new History(HistoryKind.KEEP_LAST, 10), new History(HistoryKind.KEEP_LAST, 10));
+        assertEquals(
+                new History(HistoryKind.KEEP_LAST, 10).hashCode(),
                 new History(HistoryKind.KEEP_LAST, 10).hashCode());
-        assertNotEquals(new History(HistoryKind.KEEP_LAST, 10),
-                new History(HistoryKind.KEEP_ALL, 10));
+        assertNotEquals(
+                new History(HistoryKind.KEEP_LAST, 10), new History(HistoryKind.KEEP_ALL, 10));
     }
 
     @Test
@@ -146,7 +150,7 @@ class PolicyTest {
         byte[] src = {1, 2, 3};
         UserData u = new UserData(src);
         src[0] = 9;
-        assertArrayEquals(new byte[] {1, 2, 3}, u.getData(),
-                "the policy must not alias the caller's array");
+        assertArrayEquals(
+                new byte[] {1, 2, 3}, u.getData(), "the policy must not alias the caller's array");
     }
 }

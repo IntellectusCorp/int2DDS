@@ -5,29 +5,28 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import kr.co.intellectus.int2dds.qos.DataRepresentationKind;
-import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import java.io.IOException;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
+import kr.co.intellectus.int2dds.qos.DataRepresentationKind;
+import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * A writer built from a QoS profile that selects XCDR2 must actually serialize
- * XCDR2, not merely advertise it over discovery.
+ * A writer built from a QoS profile that selects XCDR2 must actually serialize XCDR2, not merely
+ * advertise it over discovery.
  *
  * <p>The check is on the bytes the core hands back, taken through {@link
- * DataReader#takeSerialized()}: nothing else in this binding can see the
- * encapsulation the writer chose. A round trip cannot -- Java's own reader
- * follows whatever encapsulation id it is given ({@code CdrReader.of}), so it
- * decodes an XCDR1 payload from an XCDR2-advertised writer without complaint,
- * exactly the peer that would not.
+ * DataReader#takeSerialized()}: nothing else in this binding can see the encapsulation the writer
+ * chose. A round trip cannot -- Java's own reader follows whatever encapsulation id it is given
+ * ({@code CdrReader.of}), so it decodes an XCDR1 payload from an XCDR2-advertised writer without
+ * complaint, exactly the peer that would not.
  *
- * <p>The library name is unique to this test: profiles land in the
- * process-wide factory singleton (see {@link ProfileCreateEntitiesTest}).
+ * <p>The library name is unique to this test: profiles land in the process-wide factory singleton
+ * (see {@link ProfileCreateEntitiesTest}).
  */
 class ProfileDataRepresentationTest {
 
@@ -38,24 +37,27 @@ class ProfileDataRepresentationTest {
     // offered/requested policy, so a reader left at the XCDR1 default would
     // never match this writer and the test would time out instead of
     // reporting the encoding.
-    private static final String PROFILE_JSON = "{\n"
-            + "  \"name\": \"" + LIBRARY + "\",\n"
-            + "  \"qos_profiles\": [{\n"
-            + "    \"name\": \"Xcdr2Profile\",\n"
-            + "    \"domain_participant_qos\": {},\n"
-            + "    \"publisher_qos\": {},\n"
-            + "    \"subscriber_qos\": {},\n"
-            + "    \"topic_qos\": {},\n"
-            + "    \"datawriter_qos\": {\n"
-            + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
-            + "      \"data_representation\": { \"value\": [\"XCDR2_DATA_REPRESENTATION\"] }\n"
-            + "    },\n"
-            + "    \"datareader_qos\": {\n"
-            + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
-            + "      \"data_representation\": { \"value\": [\"XCDR2_DATA_REPRESENTATION\"] }\n"
-            + "    }\n"
-            + "  }]\n"
-            + "}\n";
+    private static final String PROFILE_JSON =
+            "{\n"
+                    + "  \"name\": \""
+                    + LIBRARY
+                    + "\",\n"
+                    + "  \"qos_profiles\": [{\n"
+                    + "    \"name\": \"Xcdr2Profile\",\n"
+                    + "    \"domain_participant_qos\": {},\n"
+                    + "    \"publisher_qos\": {},\n"
+                    + "    \"subscriber_qos\": {},\n"
+                    + "    \"topic_qos\": {},\n"
+                    + "    \"datawriter_qos\": {\n"
+                    + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
+                    + "      \"data_representation\": { \"value\": [\"XCDR2_DATA_REPRESENTATION\"] }\n"
+                    + "    },\n"
+                    + "    \"datareader_qos\": {\n"
+                    + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
+                    + "      \"data_representation\": { \"value\": [\"XCDR2_DATA_REPRESENTATION\"] }\n"
+                    + "    }\n"
+                    + "  }]\n"
+                    + "}\n";
 
     // Delimited XCDR2, what an APPENDABLE type gets. The writer serializes in
     // host order, so which of the pair to expect follows the host too.
@@ -96,7 +98,9 @@ class ProfileDataRepresentationTest {
             // Precondition, not the assertion under test: the profile really
             // did reach the native writer. Without this a failure below cannot
             // be told apart from a profile that never applied.
-            assertEquals(DataRepresentationKind.XCDR2, w.getDataRepresentation(),
+            assertEquals(
+                    DataRepresentationKind.XCDR2,
+                    w.getDataRepresentation(),
                     "the profile's data representation did not reach the native writer");
 
             ConformanceRecord sent = new ConformanceRecord();
@@ -116,7 +120,9 @@ class ProfileDataRepresentationTest {
             assertNotNull(raw, "no sample within 10s -- the XCDR2 profile pair did not match");
             assertTrue(raw.length >= 4, "sample is shorter than an encapsulation header");
 
-            assertEquals(EXPECTED_ENCAP, encapsulationId(raw),
+            assertEquals(
+                    EXPECTED_ENCAP,
+                    encapsulationId(raw),
                     "writer advertises XCDR2 but serialized "
                             + Integer.toHexString(encapsulationId(raw)));
         }

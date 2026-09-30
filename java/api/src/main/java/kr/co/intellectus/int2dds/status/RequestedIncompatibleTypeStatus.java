@@ -3,8 +3,8 @@ package kr.co.intellectus.int2dds.status;
 /**
  * Immutable snapshot of a DataReader's REQUESTED_INCOMPATIBLE_TYPE status.
  *
- * <p>Constructed from the native trampoline via the {@code (II)V}
- * constructor; the field order matches the core's {@code Int2DdsRequestedIncompatibleTypeStatus}.
+ * <p>Constructed from the native trampoline via the {@code (II)V} constructor; the field order
+ * matches the core's {@code Int2DdsRequestedIncompatibleTypeStatus}.
  */
 public final class RequestedIncompatibleTypeStatus {
 

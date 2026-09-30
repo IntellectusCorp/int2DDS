@@ -8,23 +8,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 /**
- * De-risk test for the {@link DynamicValue} write slice: build a sequence
- * value from scalars entirely off the {@code DynamicValue} API, set it into a
- * {@link DynamicData} field, and read it back through the existing indexed
- * getters -- mirroring {@code ffi/tests/xml_dynamic_complex.rs}'s
- * {@code samples} field. A clean run (no JVM crash) is itself part of what
- * this proves: {@link DynamicValue#push} and {@link
- * DynamicData#setValue} both consume the handle they are given, and getting
- * that wrong is a double-free, not merely a wrong answer.
+ * De-risk test for the {@link DynamicValue} write slice: build a sequence value from scalars
+ * entirely off the {@code DynamicValue} API, set it into a {@link DynamicData} field, and read it
+ * back through the existing indexed getters -- mirroring {@code ffi/tests/xml_dynamic_complex.rs}'s
+ * {@code samples} field. A clean run (no JVM crash) is itself part of what this proves: {@link
+ * DynamicValue#push} and {@link DynamicData#setValue} both consume the handle they are given, and
+ * getting that wrong is a double-free, not merely a wrong answer.
  */
 class DynamicValueWriteTest {
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Rec\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"vals\" type=\"int32\" sequenceMaxLength=\"-1\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Rec\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"vals\" type=\"int32\" sequenceMaxLength=\"-1\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void buildsASequenceValueAndSetsItIntoADynamicDataField() {

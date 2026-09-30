@@ -3,6 +3,9 @@ package kr.co.intellectus.int2dds.core;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.History;
@@ -11,43 +14,33 @@ import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import kr.co.intellectus.int2dds.xtypes.FieldType;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the public field-descriptor topic API ({@link
- * DomainParticipant#createTopic(String, kr.co.intellectus.int2dds.types.IDdsType, List)}):
- * declaring a field as {@link TopicFieldDescriptor#isKey()} true makes it
- * the type's instance key, so KEEP_LAST(1) keeps the latest sample of EACH
- * distinct key value rather than only the latest sample overall.
+ * Exercises the public field-descriptor topic API ({@link DomainParticipant#createTopic(String,
+ * kr.co.intellectus.int2dds.types.IDdsType, List)}): declaring a field as {@link
+ * TopicFieldDescriptor#isKey()} true makes it the type's instance key, so KEEP_LAST(1) keeps the
+ * latest sample of EACH distinct key value rather than only the latest sample overall.
  *
- * <p>A keyed topic ("id" declared as key) and a non-keyed control topic
- * (plain {@link DomainParticipant#createTopic(String,
- * kr.co.intellectus.int2dds.types.IDdsType)}) each receive the same two
- * samples (id=1, id=2) under KEEP_LAST(1). On the keyed topic the two ids
- * are separate instances, so both survive; on the control topic they
- * collapse onto the one (NIL) instance, so only the later write survives.
- * That instance-count difference is the whole point of a key field
- * descriptor, so this pins it rather than just checking the topic can be
- * created.
+ * <p>A keyed topic ("id" declared as key) and a non-keyed control topic (plain {@link
+ * DomainParticipant#createTopic(String, kr.co.intellectus.int2dds.types.IDdsType)}) each receive
+ * the same two samples (id=1, id=2) under KEEP_LAST(1). On the keyed topic the two ids are separate
+ * instances, so both survive; on the control topic they collapse onto the one (NIL) instance, so
+ * only the later write survives. That instance-count difference is the whole point of a key field
+ * descriptor, so this pins it rather than just checking the topic can be created.
  *
- * <p>The keyed pair and the control pair use SEPARATE participants (rather
- * than sharing one writer/reader participant across both), even though both
- * sides register the same DDS type name ("ConformanceRecord"). A
- * participant's type-support registration is deduped by Rust's {@code
- * type_id()} of the {@code TypeSupport} implementation, not by its field
- * descriptors/key content -- every raw-path {@code TypeSupport} is the same
- * concrete {@code RawTypeSupport} struct regardless of configuration, so a
- * plain topic created on a participant that already registered a keyed
- * "ConformanceRecord" would silently reuse that keyed registration instead
- * of getting its own unkeyed one. Separate participants give the control
- * topic its own registration namespace, so it is genuinely unkeyed.
+ * <p>The keyed pair and the control pair use SEPARATE participants (rather than sharing one
+ * writer/reader participant across both), even though both sides register the same DDS type name
+ * ("ConformanceRecord"). A participant's type-support registration is deduped by Rust's {@code
+ * type_id()} of the {@code TypeSupport} implementation, not by its field descriptors/key content --
+ * every raw-path {@code TypeSupport} is the same concrete {@code RawTypeSupport} struct regardless
+ * of configuration, so a plain topic created on a participant that already registered a keyed
+ * "ConformanceRecord" would silently reuse that keyed registration instead of getting its own
+ * unkeyed one. Separate participants give the control topic its own registration namespace, so it
+ * is genuinely unkeyed.
  *
- * <p>Two participants per side, the pattern {@code ContentFilteredTopicTest}
- * and {@code MatchedEndpointsTest} settled on: matching does not loop back
- * within a single participant.
+ * <p>Two participants per side, the pattern {@code ContentFilteredTopicTest} and {@code
+ * MatchedEndpointsTest} settled on: matching does not loop back within a single participant.
  */
 class KeyedTopicTest {
 
@@ -69,20 +62,25 @@ class KeyedTopicTest {
             // "id" is ConformanceRecord's first CDR field, so no earlier
             // field needs declaring alongside it -- same ordering rule
             // ContentFilteredTopicTest relies on.
-            List<TopicFieldDescriptor> idKeyField = Collections.singletonList(
-                    new TopicFieldDescriptor("id", FieldType.INT32, true));
+            List<TopicFieldDescriptor> idKeyField =
+                    Collections.singletonList(
+                            new TopicFieldDescriptor("id", FieldType.INT32, true));
 
-            Topic<ConformanceRecord> keyedWriterTopic = keyedWriterParticipant.createTopic(
-                    "KeyedJavaTestTopic", new ConformanceRecord(), idKeyField);
-            Topic<ConformanceRecord> keyedReaderTopic = keyedReaderParticipant.createTopic(
-                    "KeyedJavaTestTopic", new ConformanceRecord(), idKeyField);
+            Topic<ConformanceRecord> keyedWriterTopic =
+                    keyedWriterParticipant.createTopic(
+                            "KeyedJavaTestTopic", new ConformanceRecord(), idKeyField);
+            Topic<ConformanceRecord> keyedReaderTopic =
+                    keyedReaderParticipant.createTopic(
+                            "KeyedJavaTestTopic", new ConformanceRecord(), idKeyField);
 
             // Control: same type name, no field descriptors -- no declared
             // key, so both writes below land on the same (NIL) instance.
-            Topic<ConformanceRecord> controlWriterTopic = controlWriterParticipant.createTopic(
-                    "KeyedJavaTestTopicControl", new ConformanceRecord());
-            Topic<ConformanceRecord> controlReaderTopic = controlReaderParticipant.createTopic(
-                    "KeyedJavaTestTopicControl", new ConformanceRecord());
+            Topic<ConformanceRecord> controlWriterTopic =
+                    controlWriterParticipant.createTopic(
+                            "KeyedJavaTestTopicControl", new ConformanceRecord());
+            Topic<ConformanceRecord> controlReaderTopic =
+                    controlReaderParticipant.createTopic(
+                            "KeyedJavaTestTopicControl", new ConformanceRecord());
 
             Publisher keyedPub = keyedWriterParticipant.createPublisher();
             Subscriber keyedSub = keyedReaderParticipant.createSubscriber();
@@ -104,7 +102,8 @@ class KeyedTopicTest {
             DataWriter<ConformanceRecord> controlWriter =
                     controlPub.createDataWriter(controlWriterTopic, writerQos);
             DataReader<ConformanceRecord> controlReader =
-                    controlSub.createDataReader(controlReaderTopic, ConformanceRecord::new, readerQos);
+                    controlSub.createDataReader(
+                            controlReaderTopic, ConformanceRecord::new, readerQos);
 
             waitForMatchedSubscriptions(keyedWriter, 1);
             waitForMatchedSubscriptions(controlWriter, 1);
@@ -133,15 +132,26 @@ class KeyedTopicTest {
             List<Integer> keyedIds = collectIds(keyedReader, 2000L);
             List<Integer> controlIds = collectIds(controlReader, 2000L);
 
-            assertTrue(keyedIds.contains(1) && keyedIds.contains(2),
+            assertTrue(
+                    keyedIds.contains(1) && keyedIds.contains(2),
                     "keyed reader should receive both instances (id=1 and id=2): got " + keyedIds);
-            assertEquals(2, keyedIds.size(), "keyed reader should receive exactly 2 samples"
-                    + " (one per instance) under KEEP_LAST(1): got " + keyedIds);
+            assertEquals(
+                    2,
+                    keyedIds.size(),
+                    "keyed reader should receive exactly 2 samples"
+                            + " (one per instance) under KEEP_LAST(1): got "
+                            + keyedIds);
 
-            assertEquals(1, controlIds.size(), "non-keyed control reader should receive exactly"
-                    + " 1 sample under KEEP_LAST(1): got " + controlIds);
-            assertTrue(controlIds.contains(2),
-                    "non-keyed control reader should keep the latest write (id=2): got " + controlIds);
+            assertEquals(
+                    1,
+                    controlIds.size(),
+                    "non-keyed control reader should receive exactly"
+                            + " 1 sample under KEEP_LAST(1): got "
+                            + controlIds);
+            assertTrue(
+                    controlIds.contains(2),
+                    "non-keyed control reader should keep the latest write (id=2): got "
+                            + controlIds);
 
             keyedReader.setListener(null, null);
             controlReader.setListener(null, null);
@@ -158,11 +168,15 @@ class KeyedTopicTest {
             }
             Thread.sleep(50);
         }
-        assertTrue(writer.getMatchedSubscriptions().size() >= expected,
+        assertTrue(
+                writer.getMatchedSubscriptions().size() >= expected,
                 "writer should see " + expected + " matched subscriptions within 5s");
     }
 
-    /** Bounded take loop collecting every sample's {@code id} until the cache empties or budget runs out. */
+    /**
+     * Bounded take loop collecting every sample's {@code id} until the cache empties or budget runs
+     * out.
+     */
     private static List<Integer> collectIds(DataReader<ConformanceRecord> reader, long budgetMillis)
             throws InterruptedException {
         List<Integer> ids = new ArrayList<Integer>();

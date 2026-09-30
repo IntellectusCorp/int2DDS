@@ -1,5 +1,9 @@
 package kr.co.intellectus.int2dds.core;
 
+import java.nio.charset.Charset;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
@@ -7,33 +11,25 @@ import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.xtypes.DynamicDataReader;
 import kr.co.intellectus.int2dds.xtypes.DynamicDataWriter;
-import java.nio.charset.Charset;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
 
 /**
- * A whole participant tree — participant, publishers/subscribers,
- * datawriters/datareaders and topics — built declaratively from a loaded XML
- * {@code domain_participant_library} entry by {@link
+ * A whole participant tree — participant, publishers/subscribers, datawriters/datareaders and
+ * topics — built declaratively from a loaded XML {@code domain_participant_library} entry by {@link
  * DomainParticipantFactory#createParticipantFromConfig}.
  *
- * <p>The tree's structure is not otherwise exposed: its datawriters and
- * datareaders are fetched by name ({@code "publisher::writer"}, {@code
- * "subscriber::reader"}) via {@link #getDataWriter} / {@link #getDataReader}.
- * Each fetched wrapper is an owning {@link DynamicDataWriter} or {@link
- * DynamicDataReader}, cached by name so repeated lookups of the same name
- * return the same instance rather than a fresh wrapper each time.
+ * <p>The tree's structure is not otherwise exposed: its datawriters and datareaders are fetched by
+ * name ({@code "publisher::writer"}, {@code "subscriber::reader"}) via {@link #getDataWriter} /
+ * {@link #getDataReader}. Each fetched wrapper is an owning {@link DynamicDataWriter} or {@link
+ * DynamicDataReader}, cached by name so repeated lookups of the same name return the same instance
+ * rather than a fresh wrapper each time.
  *
- * <p><b>Teardown order matters.</b> The native writer/reader handles this
- * class hands out are Arc-clones of the tree's own copies, sharing one atomic
- * "deleted" flag per endpoint: closing either clone unregisters the endpoint
- * from its parent publisher/subscriber, and the shared flag makes a second
- * unregister on the other clone a safe no-op. {@link #close()} relies on
- * that: it closes every cached fetched writer/reader first — unregistering
- * them while the tree's publishers/subscribers are still alive — and only
- * then releases the tree itself. Not thread-safe, the same as every other
- * entity in this binding — see {@link NativeHandle#value()}'s own doc.
+ * <p><b>Teardown order matters.</b> The native writer/reader handles this class hands out are
+ * Arc-clones of the tree's own copies, sharing one atomic "deleted" flag per endpoint: closing
+ * either clone unregisters the endpoint from its parent publisher/subscriber, and the shared flag
+ * makes a second unregister on the other clone a safe no-op. {@link #close()} relies on that: it
+ * closes every cached fetched writer/reader first — unregistering them while the tree's
+ * publishers/subscribers are still alive — and only then releases the tree itself. Not thread-safe,
+ * the same as every other entity in this binding — see {@link NativeHandle#value()}'s own doc.
  */
 public final class ConfiguredParticipant implements AutoCloseable {
 
@@ -61,12 +57,12 @@ public final class ConfiguredParticipant implements AutoCloseable {
     }
 
     /**
-     * The datawriter named {@code "publisher::writer"} in this tree, cached
-     * so repeated calls with the same name return the same instance.
+     * The datawriter named {@code "publisher::writer"} in this tree, cached so repeated calls with
+     * the same name return the same instance.
      *
      * @throws NullPointerException if {@code name} is null
-     * @throws kr.co.intellectus.int2dds.exceptions.DdsException if no
-     *     datawriter with that name exists in the tree
+     * @throws kr.co.intellectus.int2dds.exceptions.DdsException if no datawriter with that name
+     *     exists in the tree
      */
     public DynamicDataWriter getDataWriter(String name) {
         Objects.requireNonNull(name, "name");
@@ -87,12 +83,12 @@ public final class ConfiguredParticipant implements AutoCloseable {
     }
 
     /**
-     * The datareader named {@code "subscriber::reader"} in this tree, cached
-     * so repeated calls with the same name return the same instance.
+     * The datareader named {@code "subscriber::reader"} in this tree, cached so repeated calls with
+     * the same name return the same instance.
      *
      * @throws NullPointerException if {@code name} is null
-     * @throws kr.co.intellectus.int2dds.exceptions.DdsException if no
-     *     datareader with that name exists in the tree
+     * @throws kr.co.intellectus.int2dds.exceptions.DdsException if no datareader with that name
+     *     exists in the tree
      */
     public DynamicDataReader getDataReader(String name) {
         Objects.requireNonNull(name, "name");
@@ -112,10 +108,10 @@ public final class ConfiguredParticipant implements AutoCloseable {
     }
 
     /**
-     * Closes every cached fetched writer/reader (unregistering each from its
-     * still-live parent publisher/subscriber), then releases the whole tree.
-     * See the class javadoc for why that order is the safe one. Idempotent:
-     * a second call finds nothing left to close and releases nothing again.
+     * Closes every cached fetched writer/reader (unregistering each from its still-live parent
+     * publisher/subscriber), then releases the whole tree. See the class javadoc for why that order
+     * is the safe one. Idempotent: a second call finds nothing left to close and releases nothing
+     * again.
      */
     @Override
     public void close() {

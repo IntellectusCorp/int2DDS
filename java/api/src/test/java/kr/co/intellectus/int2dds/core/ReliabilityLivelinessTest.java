@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Collections;
+import java.util.List;
 import kr.co.intellectus.int2dds.discovery.SubscriptionBuiltinTopicData;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.exceptions.DdsUnsupportedException;
@@ -12,20 +14,17 @@ import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.util.Collections;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the reliability/liveliness operations added in this branch:
- * {@code DataWriter#waitForAcknowledgments}, {@code
- * Publisher#waitForAcknowledgments}, {@code DataWriter#assertLiveliness},
- * {@code DomainParticipant#assertLiveliness} and {@code
+ * Exercises the reliability/liveliness operations added in this branch: {@code
+ * DataWriter#waitForAcknowledgments}, {@code Publisher#waitForAcknowledgments}, {@code
+ * DataWriter#assertLiveliness}, {@code DomainParticipant#assertLiveliness} and {@code
  * DataReader#waitForHistoricalData}.
  *
- * <p>Two participants, the same pattern {@code MatchedEndpointsTest} settled
- * on: matching does not loop back within a single participant, so the writer
- * and the reader each live on their own participant.
+ * <p>Two participants, the same pattern {@code MatchedEndpointsTest} settled on: matching does not
+ * loop back within a single participant, so the writer and the reader each live on their own
+ * participant.
  */
 class ReliabilityLivelinessTest {
 
@@ -74,7 +73,8 @@ class ReliabilityLivelinessTest {
             sent.label = "ack";
             w.write(sent);
 
-            assertTrue(w.waitForAcknowledgments(2000L),
+            assertTrue(
+                    w.waitForAcknowledgments(2000L),
                     "the matched reliable reader should ack within 2s");
 
             // Manual liveliness assertions must return without throwing.
@@ -82,7 +82,8 @@ class ReliabilityLivelinessTest {
             writerParticipant.assertLiveliness();
 
             // Publisher-level ack wait covers the same writer.
-            assertTrue(pub.waitForAcknowledgments(2000L),
+            assertTrue(
+                    pub.waitForAcknowledgments(2000L),
                     "publisher-level wait should also observe the ack");
 
             // waitForHistoricalData: the underlying core operation
@@ -96,8 +97,9 @@ class ReliabilityLivelinessTest {
             // Java wrapper correctly surfaces RET_UNSUPPORTED as a
             // DdsUnsupportedException (RET_TIMEOUT is its only
             // special-cased code, per its own Javadoc). See the task report.
-            DdsUnsupportedException ex = assertThrows(DdsUnsupportedException.class,
-                    () -> r.waitForHistoricalData(500L));
+            DdsUnsupportedException ex =
+                    assertThrows(
+                            DdsUnsupportedException.class, () -> r.waitForHistoricalData(500L));
             assertEquals(DdsException.RET_UNSUPPORTED, ex.getCode());
         }
     }

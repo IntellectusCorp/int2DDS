@@ -5,6 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import kr.co.intellectus.int2dds.conditions.InstanceState;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
@@ -14,28 +17,23 @@ import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import kr.co.intellectus.int2dds.xtypes.FieldType;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises instance-lifecycle management on a keyed topic
- * ({@link DataWriter#registerInstance}, {@link DataWriter#lookupInstance},
- * {@link DataWriter#disposeInstance}, {@link DataReader#lookupInstance}):
- * these all pass the full serialized sample as the "key" the core derives the
- * KeyHash from (see {@link DataWriter#write}'s own doc), and require a keyed
- * topic -- created here via {@link DomainParticipant#createTopic(String,
- * kr.co.intellectus.int2dds.types.IDdsType, List)} with "id" declared as key,
- * the same setup {@link KeyedTopicTest} uses.
+ * Exercises instance-lifecycle management on a keyed topic ({@link DataWriter#registerInstance},
+ * {@link DataWriter#lookupInstance}, {@link DataWriter#disposeInstance}, {@link
+ * DataReader#lookupInstance}): these all pass the full serialized sample as the "key" the core
+ * derives the KeyHash from (see {@link DataWriter#write}'s own doc), and require a keyed topic --
+ * created here via {@link DomainParticipant#createTopic(String,
+ * kr.co.intellectus.int2dds.types.IDdsType, List)} with "id" declared as key, the same setup {@link
+ * KeyedTopicTest} uses.
  *
- * <p>Separate participants for writer and reader, same reason as {@link
- * KeyedTopicTest}: a participant's type-support registration is deduped by
- * Rust's {@code type_id()}, not by field descriptors, so sharing a
- * participant across an unrelated keyed/unkeyed pair could silently reuse
- * the wrong registration. Not an issue for this test (only one topic name is
- * used), but writer and reader still get their own participants, matching
- * every other matched-entity test in this package.
+ * <p>Separate participants for writer and reader, same reason as {@link KeyedTopicTest}: a
+ * participant's type-support registration is deduped by Rust's {@code type_id()}, not by field
+ * descriptors, so sharing a participant across an unrelated keyed/unkeyed pair could silently reuse
+ * the wrong registration. Not an issue for this test (only one topic name is used), but writer and
+ * reader still get their own participants, matching every other matched-entity test in this
+ * package.
  */
 class InstanceManagementTest {
 
@@ -54,13 +52,16 @@ class InstanceManagementTest {
 
             // "id" is ConformanceRecord's first CDR field -- same ordering
             // rule KeyedTopicTest and ContentFilteredTopicTest rely on.
-            List<TopicFieldDescriptor> idKeyField = Collections.singletonList(
-                    new TopicFieldDescriptor("id", FieldType.INT32, true));
+            List<TopicFieldDescriptor> idKeyField =
+                    Collections.singletonList(
+                            new TopicFieldDescriptor("id", FieldType.INT32, true));
 
-            Topic<ConformanceRecord> writerTopic = writerParticipant.createTopic(
-                    "InstanceManagementJavaTestTopic", new ConformanceRecord(), idKeyField);
-            Topic<ConformanceRecord> readerTopic = readerParticipant.createTopic(
-                    "InstanceManagementJavaTestTopic", new ConformanceRecord(), idKeyField);
+            Topic<ConformanceRecord> writerTopic =
+                    writerParticipant.createTopic(
+                            "InstanceManagementJavaTestTopic", new ConformanceRecord(), idKeyField);
+            Topic<ConformanceRecord> readerTopic =
+                    readerParticipant.createTopic(
+                            "InstanceManagementJavaTestTopic", new ConformanceRecord(), idKeyField);
 
             Publisher pub = writerParticipant.createPublisher();
             Subscriber sub = readerParticipant.createSubscriber();
@@ -86,12 +87,15 @@ class InstanceManagementTest {
             InstanceHandle registered = writer.registerInstance(one);
             assertNotNull(registered);
             assertEquals(16, registered.bytes().length);
-            assertFalse(Arrays.equals(NIL_HANDLE, registered.bytes()),
+            assertFalse(
+                    Arrays.equals(NIL_HANDLE, registered.bytes()),
                     "registerInstance should return a real, non-NIL handle");
 
             // lookup_instance on the writer resolves to the same instance.
             InstanceHandle writerLookup = writer.lookupInstance(one);
-            assertEquals(registered, writerLookup,
+            assertEquals(
+                    registered,
+                    writerLookup,
                     "writer.lookupInstance should resolve to the same instance registerInstance returned");
 
             // Write the sample so the reader observes the instance ALIVE, then
@@ -99,7 +103,9 @@ class InstanceManagementTest {
             writer.write(one);
             Sample<ConformanceRecord> aliveSample = takeUntil(reader, s -> s.data() != null);
             assertNotNull(aliveSample, "reader should receive the written sample");
-            assertEquals(InstanceState.ALIVE, aliveSample.info().instanceState(),
+            assertEquals(
+                    InstanceState.ALIVE,
+                    aliveSample.info().instanceState(),
                     "instance should be ALIVE right after write()");
 
             // reader.lookupInstance(sample) matches the *full serialized
@@ -113,7 +119,9 @@ class InstanceManagementTest {
             // this asserts NIL is exactly what comes back, a real (currently
             // passing but falsifiable) check on that documented behavior.
             InstanceHandle readerLookup = reader.lookupInstance(one);
-            assertEquals(new InstanceHandle(NIL_HANDLE), readerLookup,
+            assertEquals(
+                    new InstanceHandle(NIL_HANDLE),
+                    readerLookup,
                     "reader.lookupInstance should return NIL for this core/topic combination"
                             + " -- see DataReader#lookupInstance's own doc");
 
@@ -133,10 +141,13 @@ class InstanceManagementTest {
             writer.disposeInstance(one);
             Sample<ConformanceRecord> disposedSample =
                     takeUntil(reader, s -> s.info().instanceState() != InstanceState.ALIVE);
-            assertNotNull(disposedSample,
+            assertNotNull(
+                    disposedSample,
                     "reader should observe an instance-state change within the time budget"
                             + " after disposeInstance");
-            assertEquals(InstanceState.NOT_ALIVE_DISPOSED, disposedSample.info().instanceState(),
+            assertEquals(
+                    InstanceState.NOT_ALIVE_DISPOSED,
+                    disposedSample.info().instanceState(),
                     "reader should observe NOT_ALIVE_DISPOSED after disposeInstance; got instanceState="
                             + disposedSample.info().instanceState());
 
@@ -154,13 +165,17 @@ class InstanceManagementTest {
             }
             Thread.sleep(50);
         }
-        assertTrue(writer.getMatchedSubscriptions().size() >= expected,
+        assertTrue(
+                writer.getMatchedSubscriptions().size() >= expected,
                 "writer should see " + expected + " matched subscriptions within 5s");
     }
 
-    /** Bounded take loop returning the first sample matching {@code predicate}, or null on timeout. */
+    /**
+     * Bounded take loop returning the first sample matching {@code predicate}, or null on timeout.
+     */
     private static Sample<ConformanceRecord> takeUntil(
-            DataReader<ConformanceRecord> reader, java.util.function.Predicate<Sample<ConformanceRecord>> predicate)
+            DataReader<ConformanceRecord> reader,
+            java.util.function.Predicate<Sample<ConformanceRecord>> predicate)
             throws InterruptedException {
         long deadline = System.nanoTime() + DATA_TIMEOUT_NANOS;
         while (System.nanoTime() < deadline) {

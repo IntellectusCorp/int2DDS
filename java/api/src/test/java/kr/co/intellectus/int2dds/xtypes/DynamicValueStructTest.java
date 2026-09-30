@@ -5,32 +5,31 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.junit.jupiter.api.Test;
 
 /**
- * De-risk test for {@link DynamicValue#struct} and the sequence-of-struct
- * write path: build two nested {@code Point} struct values off {@code
- * DynamicData}, push both into a sequence value built entirely off {@code
- * DynamicValue}, set that into an outer {@code Rec}'s {@code points} field,
- * and read the nested members back -- mirroring {@code
- * xml_dynamic_complex.rs}'s {@code vec2_value}/{@code points} build. A clean
- * run (no JVM crash) is itself part of what this proves: {@link
- * DynamicValue#struct} clones the source {@link DynamicData} natively rather
- * than consuming it, so the caller closing that DynamicData afterward must
- * not double-free the struct value's own handle.
+ * De-risk test for {@link DynamicValue#struct} and the sequence-of-struct write path: build two
+ * nested {@code Point} struct values off {@code DynamicData}, push both into a sequence value built
+ * entirely off {@code DynamicValue}, set that into an outer {@code Rec}'s {@code points} field, and
+ * read the nested members back -- mirroring {@code xml_dynamic_complex.rs}'s {@code
+ * vec2_value}/{@code points} build. A clean run (no JVM crash) is itself part of what this proves:
+ * {@link DynamicValue#struct} clones the source {@link DynamicData} natively rather than consuming
+ * it, so the caller closing that DynamicData afterward must not double-free the struct value's own
+ * handle.
  */
 class DynamicValueStructTest {
 
-    private static final String XML = "<types>\n"
-            + " <module name=\"n\">\n"
-            + "  <struct name=\"Point\">\n"
-            + "   <member name=\"x\" type=\"int32\"/>\n"
-            + "   <member name=\"y\" type=\"int32\"/>\n"
-            + "  </struct>\n"
-            + "  <struct name=\"Rec\">\n"
-            + "   <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "   <member name=\"points\" type=\"nonBasic\" nonBasicTypeName=\"n::Point\""
-            + " sequenceMaxLength=\"-1\"/>\n"
-            + "  </struct>\n"
-            + " </module>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <module name=\"n\">\n"
+                    + "  <struct name=\"Point\">\n"
+                    + "   <member name=\"x\" type=\"int32\"/>\n"
+                    + "   <member name=\"y\" type=\"int32\"/>\n"
+                    + "  </struct>\n"
+                    + "  <struct name=\"Rec\">\n"
+                    + "   <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "   <member name=\"points\" type=\"nonBasic\" nonBasicTypeName=\"n::Point\""
+                    + " sequenceMaxLength=\"-1\"/>\n"
+                    + "  </struct>\n"
+                    + " </module>\n"
+                    + "</types>\n";
 
     private static DynamicValue point(DynamicTypeSupport pointSupport, int x, int y) {
         // pt is owned by us and closed here -- struct() clones it natively,

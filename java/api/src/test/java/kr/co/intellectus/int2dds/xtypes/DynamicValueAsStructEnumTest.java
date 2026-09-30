@@ -5,35 +5,34 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.junit.jupiter.api.Test;
 
 /**
- * De-risk test for {@link DynamicValue#asStruct} and {@link
- * DynamicValue#asEnum}: read a struct value's fields and an enum value's
- * name/numeric back out of a {@code DynamicValue}, mirroring {@code
- * xml_dynamic_complex.rs}'s {@code mode} enum build/read (lines ~194-197,
- * ~280-297) and its nested-struct build (lines ~88-102). This is entirely
- * local (no participant/writer/reader) -- both readers work directly off a
- * {@link DynamicValue} cloned from a {@link DynamicData} field, the same way
- * {@link DynamicValueUnionTest} and {@link DynamicValueStructTest} exercise
- * their read paths.
+ * De-risk test for {@link DynamicValue#asStruct} and {@link DynamicValue#asEnum}: read a struct
+ * value's fields and an enum value's name/numeric back out of a {@code DynamicValue}, mirroring
+ * {@code xml_dynamic_complex.rs}'s {@code mode} enum build/read (lines ~194-197, ~280-297) and its
+ * nested-struct build (lines ~88-102). This is entirely local (no participant/writer/reader) --
+ * both readers work directly off a {@link DynamicValue} cloned from a {@link DynamicData} field,
+ * the same way {@link DynamicValueUnionTest} and {@link DynamicValueStructTest} exercise their read
+ * paths.
  */
 class DynamicValueAsStructEnumTest {
 
-    private static final String XML = "<types>\n"
-            + " <module name=\"n\">\n"
-            + "  <enum name=\"Mode\">\n"
-            + "   <enumerator name=\"OFF\" value=\"0\"/>\n"
-            + "   <enumerator name=\"ON\" value=\"1\"/>\n"
-            + "  </enum>\n"
-            + "  <struct name=\"Point\">\n"
-            + "   <member name=\"x\" type=\"int32\"/>\n"
-            + "   <member name=\"y\" type=\"int32\"/>\n"
-            + "  </struct>\n"
-            + "  <struct name=\"Rec\">\n"
-            + "   <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "   <member name=\"mode\" type=\"nonBasic\" nonBasicTypeName=\"n::Mode\"/>\n"
-            + "   <member name=\"point\" type=\"nonBasic\" nonBasicTypeName=\"n::Point\"/>\n"
-            + "  </struct>\n"
-            + " </module>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <module name=\"n\">\n"
+                    + "  <enum name=\"Mode\">\n"
+                    + "   <enumerator name=\"OFF\" value=\"0\"/>\n"
+                    + "   <enumerator name=\"ON\" value=\"1\"/>\n"
+                    + "  </enum>\n"
+                    + "  <struct name=\"Point\">\n"
+                    + "   <member name=\"x\" type=\"int32\"/>\n"
+                    + "   <member name=\"y\" type=\"int32\"/>\n"
+                    + "  </struct>\n"
+                    + "  <struct name=\"Rec\">\n"
+                    + "   <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "   <member name=\"mode\" type=\"nonBasic\" nonBasicTypeName=\"n::Mode\"/>\n"
+                    + "   <member name=\"point\" type=\"nonBasic\" nonBasicTypeName=\"n::Point\"/>\n"
+                    + "  </struct>\n"
+                    + " </module>\n"
+                    + "</types>\n";
 
     @Test
     void readsAnEnumFieldsNameAndNumericValue() {

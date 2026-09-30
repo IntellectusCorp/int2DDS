@@ -4,25 +4,24 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import kr.co.intellectus.int2dds.discovery.SubscriptionBuiltinTopicData;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the identity/state getters added in this branch: {@code
- * DataReader#getGuid}, {@code DataWriter#getGuid}, {@code
- * DataReader#hasData} and {@code DomainParticipant#getCurrentTime}.
+ * Exercises the identity/state getters added in this branch: {@code DataReader#getGuid}, {@code
+ * DataWriter#getGuid}, {@code DataReader#hasData} and {@code DomainParticipant#getCurrentTime}.
  *
- * <p>Two participants, the same pattern {@code ReliabilityLivelinessTest}
- * uses: matching does not loop back within a single participant, so the
- * writer and the reader each live on their own participant.
+ * <p>Two participants, the same pattern {@code ReliabilityLivelinessTest} uses: matching does not
+ * loop back within a single participant, so the writer and the reader each live on their own
+ * participant.
  */
 class EntityIdentityGettersTest {
 
@@ -57,8 +56,8 @@ class EntityIdentityGettersTest {
             assertEquals(16, readerGuid.length);
             assertFalse(isAllZero(writerGuid), "writer GUID should not be all-zero");
             assertFalse(isAllZero(readerGuid), "reader GUID should not be all-zero");
-            assertFalse(Arrays.equals(writerGuid, readerGuid),
-                    "writer and reader GUIDs should differ");
+            assertFalse(
+                    Arrays.equals(writerGuid, readerGuid), "writer and reader GUIDs should differ");
 
             // getCurrentTime: positive and monotonic non-decreasing across
             // two calls.

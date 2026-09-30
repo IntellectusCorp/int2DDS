@@ -7,9 +7,8 @@ import kr.co.intellectus.int2dds.status.OfferedIncompatibleQosStatus;
 import kr.co.intellectus.int2dds.status.PublicationMatchedStatus;
 
 /**
- * No-op {@link DataWriterListener}. Extend this and override only the callbacks
- * you need; later callbacks added to the interface land here as no-ops, so
- * subclasses stay source-compatible.
+ * No-op {@link DataWriterListener}. Extend this and override only the callbacks you need; later
+ * callbacks added to the interface land here as no-ops, so subclasses stay source-compatible.
  */
 public class DataWriterListenerBase implements DataWriterListener {
 
@@ -24,7 +23,8 @@ public class DataWriterListenerBase implements DataWriterListener {
     }
 
     @Override
-    public void onOfferedIncompatibleQos(DataWriter<?> writer, OfferedIncompatibleQosStatus status) {
+    public void onOfferedIncompatibleQos(
+            DataWriter<?> writer, OfferedIncompatibleQosStatus status) {
         // no-op
     }
 

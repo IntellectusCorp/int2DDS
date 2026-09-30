@@ -6,25 +6,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 /**
- * De-risk test for the 12 new scalar {@link DynamicValue} factories added
- * alongside {@code i32}/{@code string}/{@code sequence}: build sequences of
- * two different widths ({@code float64} and {@code boolean}) entirely off
- * the {@code DynamicValue} API, set each into a {@link DynamicData} field,
- * and read it back through the existing indexed getters -- mirroring {@link
- * DynamicValueWriteTest}. A clean run (no JVM crash) is itself part of what
- * this proves: {@link DynamicValue#push} and {@link DynamicData#setValue}
- * both consume the handle they are given, and getting that wrong is a
- * double-free, not merely a wrong answer.
+ * De-risk test for the 12 new scalar {@link DynamicValue} factories added alongside {@code
+ * i32}/{@code string}/{@code sequence}: build sequences of two different widths ({@code float64}
+ * and {@code boolean}) entirely off the {@code DynamicValue} API, set each into a {@link
+ * DynamicData} field, and read it back through the existing indexed getters -- mirroring {@link
+ * DynamicValueWriteTest}. A clean run (no JVM crash) is itself part of what this proves: {@link
+ * DynamicValue#push} and {@link DynamicData#setValue} both consume the handle they are given, and
+ * getting that wrong is a double-free, not merely a wrong answer.
  */
 class DynamicValueScalarsTest {
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Rec\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"vals\" type=\"float64\" sequenceMaxLength=\"-1\"/>\n"
-            + "  <member name=\"flags\" type=\"boolean\" sequenceMaxLength=\"-1\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Rec\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"vals\" type=\"float64\" sequenceMaxLength=\"-1\"/>\n"
+                    + "  <member name=\"flags\" type=\"boolean\" sequenceMaxLength=\"-1\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void buildsAFloat64SequenceValueAndSetsItIntoADynamicDataField() {

@@ -3,11 +3,10 @@ package kr.co.intellectus.int2dds.core;
 import java.util.Arrays;
 
 /**
- * One received sample as raw CDR bytes (encapsulation header included) paired
- * with its {@link SampleInfo} -- the state-filtered counterpart of {@link
- * Sample} for callers that want the wire bytes rather than a decoded {@code
- * T}. {@code bytes} is empty ({@code length == 0}) for an invalid-data
- * (dispose/unregister) sample, i.e. when {@link #info()}'s {@link
+ * One received sample as raw CDR bytes (encapsulation header included) paired with its {@link
+ * SampleInfo} -- the state-filtered counterpart of {@link Sample} for callers that want the wire
+ * bytes rather than a decoded {@code T}. {@code bytes} is empty ({@code length == 0}) for an
+ * invalid-data (dispose/unregister) sample, i.e. when {@link #info()}'s {@link
  * SampleInfo#validData()} is {@code false}.
  */
 public final class SerializedSample {

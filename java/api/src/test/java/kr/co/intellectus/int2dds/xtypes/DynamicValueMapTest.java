@@ -7,23 +7,23 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * De-risk test for {@link DynamicValue#map} / {@link DynamicValue#insert} /
- * {@link DynamicValue#mapKey} / {@link DynamicValue#mapValue}: build a {@code
- * map<string,int32>} value entirely off {@code DynamicValue}, set it into a
- * {@code DynamicData} field, and read the key/value pairs back -- mirroring
- * {@code xml_dynamic_complex.rs}'s {@code scores} build/read. {@link
- * DynamicValue#insert} consumes TWO handles (key and value) on success; a
- * clean run (no JVM crash) is itself part of what this proves -- a wrongly
- * consumed-on-failure or double-closed handle here would SIGSEGV.
+ * De-risk test for {@link DynamicValue#map} / {@link DynamicValue#insert} / {@link
+ * DynamicValue#mapKey} / {@link DynamicValue#mapValue}: build a {@code map<string,int32>} value
+ * entirely off {@code DynamicValue}, set it into a {@code DynamicData} field, and read the
+ * key/value pairs back -- mirroring {@code xml_dynamic_complex.rs}'s {@code scores} build/read.
+ * {@link DynamicValue#insert} consumes TWO handles (key and value) on success; a clean run (no JVM
+ * crash) is itself part of what this proves -- a wrongly consumed-on-failure or double-closed
+ * handle here would SIGSEGV.
  */
 class DynamicValueMapTest {
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Rec\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"scores\" type=\"int32\" key_type=\"string\" mapMaxLength=\"8\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Rec\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"scores\" type=\"int32\" key_type=\"string\" mapMaxLength=\"8\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void buildsAMapValueAndReadsKeyValuePairsBackOut() {

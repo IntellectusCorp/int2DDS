@@ -7,15 +7,15 @@ import kr.co.intellectus.int2dds.cdr.Extensibility;
 import org.junit.jupiter.api.Test;
 
 /**
- * Coverage for {@link TypeInfo#addWstringField}, {@link
- * TypeInfo#addSequenceOfNamedField}, and {@link TypeInfo#addArrayOfNamedField}.
+ * Coverage for {@link TypeInfo#addWstringField}, {@link TypeInfo#addSequenceOfNamedField}, and
+ * {@link TypeInfo#addArrayOfNamedField}.
  */
 class TypeInfoNamedWstringTest {
 
     /**
-     * Fully local: the wstring field's kind is readable straight off the baked
-     * {@link TypeObject}, no discovery/decode needed, so this checks the actual
-     * {@link FieldType#WSTRING} member kind, not just field presence.
+     * Fully local: the wstring field's kind is readable straight off the baked {@link TypeObject},
+     * no discovery/decode needed, so this checks the actual {@link FieldType#WSTRING} member kind,
+     * not just field presence.
      */
     @Test
     void wstringFieldRoundTripsIntoTheTypeObject() {
@@ -33,11 +33,11 @@ class TypeInfoNamedWstringTest {
     }
 
     /**
-     * The element type is resolved by name at discovery time, so this cannot fully
-     * round-trip locally (per {@link TypeInfo#addSequenceOfNamedField}'s and {@link
-     * TypeInfo#addArrayOfNamedField}'s discovery-resolution caveat). This still is a
-     * genuine can-fail assertion: a bad bridge/param order would throw here or leave
-     * the field unresolvable by name.
+     * The element type is resolved by name at discovery time, so this cannot fully round-trip
+     * locally (per {@link TypeInfo#addSequenceOfNamedField}'s and {@link
+     * TypeInfo#addArrayOfNamedField}'s discovery-resolution caveat). This still is a genuine
+     * can-fail assertion: a bad bridge/param order would throw here or leave the field unresolvable
+     * by name.
      */
     @Test
     void namedSequenceAndArrayFieldsReturnOkAndResolveByName() {

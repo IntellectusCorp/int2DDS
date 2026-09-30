@@ -11,7 +11,8 @@ import org.junit.jupiter.api.Test;
 class WaitSetTest {
     @Test
     void waitReturnsATriggeredGuardCondition() {
-        try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
+        try (WaitSet ws = new WaitSet();
+                GuardCondition gc = new GuardCondition()) {
             ws.attach(gc);
             gc.setTriggerValue(true);
             List<Condition> hit = ws.await(2000L); // already triggered -> returns immediately
@@ -22,7 +23,8 @@ class WaitSetTest {
 
     @Test
     void waitTimesOutWhenNothingTriggers() {
-        try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
+        try (WaitSet ws = new WaitSet();
+                GuardCondition gc = new GuardCondition()) {
             ws.attach(gc); // trigger stays false
             long t0 = System.nanoTime();
             List<Condition> hit = ws.await(200);
@@ -34,7 +36,8 @@ class WaitSetTest {
 
     @Test
     void awaitNanosReturnsATriggeredGuardCondition() {
-        try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
+        try (WaitSet ws = new WaitSet();
+                GuardCondition gc = new GuardCondition()) {
             ws.attach(gc);
             gc.setTriggerValue(true);
             List<Condition> hit = ws.awaitNanos(2_000_000_000L); // 2s in ns
@@ -45,7 +48,8 @@ class WaitSetTest {
 
     @Test
     void awaitNanosBlocksUntilTimeoutWhenNoTrigger() {
-        try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
+        try (WaitSet ws = new WaitSet();
+                GuardCondition gc = new GuardCondition()) {
             ws.attach(gc); // trigger stays false
             long start = System.nanoTime();
             List<Condition> hit = ws.awaitNanos(200_000_000L); // 200ms in ns
@@ -57,7 +61,8 @@ class WaitSetTest {
 
     @Test
     void attachIsIdempotent() {
-        try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
+        try (WaitSet ws = new WaitSet();
+                GuardCondition gc = new GuardCondition()) {
             ws.attach(gc);
             ws.attach(gc); // re-attaching the same instance must be a no-op
             gc.setTriggerValue(true);
@@ -78,7 +83,8 @@ class WaitSetTest {
 
     @Test
     void awaitSkipsAClosedAttachedCondition() {
-        try (WaitSet ws = new WaitSet(); GuardCondition open = new GuardCondition()) {
+        try (WaitSet ws = new WaitSet();
+                GuardCondition open = new GuardCondition()) {
             GuardCondition doomed = new GuardCondition();
             ws.attach(open);
             ws.attach(doomed);

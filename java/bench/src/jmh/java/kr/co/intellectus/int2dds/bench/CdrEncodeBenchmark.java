@@ -1,33 +1,29 @@
 package kr.co.intellectus.int2dds.bench;
 
-import kr.co.intellectus.int2dds.cdr.CdrWriter;
-import kr.co.intellectus.int2dds.cdr.Extensibility;
 import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
+import kr.co.intellectus.int2dds.cdr.CdrWriter;
+import kr.co.intellectus.int2dds.cdr.Extensibility;
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.infra.Blackhole;
 
 /**
  * Encodes a representative record and reports throughput.
  *
- * <p><b>What this measures:</b> the cost of {@code encode(...)} against the
- * cost of {@code encode(...)} plus a copy-out into a heap array and a copy-in
- * to a reusable direct staging buffer — both arms encode into the same
- * direct-backed {@link CdrWriter}, because no {@code byte[]}-backed writer
- * exists in this codebase to measure directly.
+ * <p><b>What this measures:</b> the cost of {@code encode(...)} against the cost of {@code
+ * encode(...)} plus a copy-out into a heap array and a copy-in to a reusable direct staging buffer
+ * — both arms encode into the same direct-backed {@link CdrWriter}, because no {@code
+ * byte[]}-backed writer exists in this codebase to measure directly.
  *
- * <p><b>What this does not measure:</b> a comparison of two backing stores.
- * {@code heapThenStage} is not a stand-in for a real {@code byte[]}-backed
- * writer — a real one would encode with plain array stores (cheaper than the
- * direct-buffer writes measured here) and pay a single copy into staging, not
- * an extra {@code duplicate()}/{@code asReadOnlyBuffer()}/{@code slice()} plus
- * two bulk copies. Because both arms share the identical direct-backed
- * encode and {@code heapThenStage} only ever adds work on top of it,
- * {@code heapThenStage} cannot beat {@code directBuffer} in this benchmark
- * regardless of how a genuine {@code byte[]} writer would perform. Do not
- * read a {@code directBuffer} win here as evidence that direct is faster than
- * a real {@code byte[]} design — that question is still open and needs an
- * actual {@code byte[]}-backed {@code CdrWriter} to answer.
+ * <p><b>What this does not measure:</b> a comparison of two backing stores. {@code heapThenStage}
+ * is not a stand-in for a real {@code byte[]}-backed writer — a real one would encode with plain
+ * array stores (cheaper than the direct-buffer writes measured here) and pay a single copy into
+ * staging, not an extra {@code duplicate()}/{@code asReadOnlyBuffer()}/{@code slice()} plus two
+ * bulk copies. Because both arms share the identical direct-backed encode and {@code heapThenStage}
+ * only ever adds work on top of it, {@code heapThenStage} cannot beat {@code directBuffer} in this
+ * benchmark regardless of how a genuine {@code byte[]} writer would perform. Do not read a {@code
+ * directBuffer} win here as evidence that direct is faster than a real {@code byte[]} design — that
+ * question is still open and needs an actual {@code byte[]}-backed {@code CdrWriter} to answer.
  */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)

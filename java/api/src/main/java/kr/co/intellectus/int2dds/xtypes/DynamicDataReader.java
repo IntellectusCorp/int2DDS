@@ -1,19 +1,19 @@
 package kr.co.intellectus.int2dds.xtypes;
 
 import kr.co.intellectus.int2dds.conditions.StatusCondition;
+import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.QosMarshal;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 
 /**
- * Receives {@link DynamicData} samples from a {@link DynamicTopic}. Produced
- * by {@link kr.co.intellectus.int2dds.core.Subscriber#createDynamicDataReader}.
- * NativeCleaner-managed like {@link kr.co.intellectus.int2dds.core.DataReader}.
+ * Receives {@link DynamicData} samples from a {@link DynamicTopic}. Produced by {@link
+ * kr.co.intellectus.int2dds.core.Subscriber#createDynamicDataReader}. NativeCleaner-managed like
+ * {@link kr.co.intellectus.int2dds.core.DataReader}.
  */
 public final class DynamicDataReader implements AutoCloseable {
 
@@ -30,17 +30,19 @@ public final class DynamicDataReader implements AutoCloseable {
     }
 
     /**
-     * Wraps an already-created native dynamic-datareader handle. Public, the
-     * same style as {@link DynamicData#fromHandle}, so {@link
-     * kr.co.intellectus.int2dds.core.Subscriber#createDynamicDataReader} --
-     * outside this package -- can hand back a handle produced by {@link
-     * FfiAccess#createDataReaderDynamic}.
+     * Wraps an already-created native dynamic-datareader handle. Public, the same style as {@link
+     * DynamicData#fromHandle}, so {@link
+     * kr.co.intellectus.int2dds.core.Subscriber#createDynamicDataReader} -- outside this package --
+     * can hand back a handle produced by {@link FfiAccess#createDataReaderDynamic}.
      */
     public static DynamicDataReader fromHandle(long rawHandle) {
         return new DynamicDataReader(rawHandle, null);
     }
 
-    /** {@link #fromHandle(long)}, additionally keeping {@code owner} reachable for this reader's lifetime. */
+    /**
+     * {@link #fromHandle(long)}, additionally keeping {@code owner} reachable for this reader's
+     * lifetime.
+     */
     public static DynamicDataReader fromHandle(long rawHandle, Object owner) {
         return new DynamicDataReader(rawHandle, owner);
     }
@@ -72,11 +74,10 @@ public final class DynamicDataReader implements AutoCloseable {
     }
 
     /**
-     * A fresh {@link StatusCondition} for this dynamic reader's status
-     * changes; attach it to a {@link kr.co.intellectus.int2dds.conditions.WaitSet}
-     * (e.g. enabled for {@code DATA_AVAILABLE}) to wait for data instead of
-     * polling {@link #take}. Caller-owned: close it (or let its NativeCleaner
-     * do so) when done.
+     * A fresh {@link StatusCondition} for this dynamic reader's status changes; attach it to a
+     * {@link kr.co.intellectus.int2dds.conditions.WaitSet} (e.g. enabled for {@code
+     * DATA_AVAILABLE}) to wait for data instead of polling {@link #take}. Caller-owned: close it
+     * (or let its NativeCleaner do so) when done.
      */
     public StatusCondition getStatusCondition() {
         long h = handle();
@@ -88,10 +89,9 @@ public final class DynamicDataReader implements AutoCloseable {
     }
 
     /**
-     * Reads this reader's current QoS off the native side — not the {@code
-     * DataReaderQos} it was constructed with, which this class does not
-     * retain. Policies with no native getter come back null; see {@link
-     * QosMarshal#readReaderQos}'s own doc for the full list.
+     * Reads this reader's current QoS off the native side — not the {@code DataReaderQos} it was
+     * constructed with, which this class does not retain. Policies with no native getter come back
+     * null; see {@link QosMarshal#readReaderQos}'s own doc for the full list.
      */
     public DataReaderQos getQos() {
         long h = handle();

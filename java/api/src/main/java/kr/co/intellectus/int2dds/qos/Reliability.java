@@ -6,9 +6,8 @@ import java.util.Objects;
 /**
  * Reliability QoS policy.
  *
- * <p>{@code maxBlockingTime} may be null. The C ABI setter takes a number and
- * has no way to express "unset", so a null becomes 100 ms — the same fallback
- * the C# binding uses.
+ * <p>{@code maxBlockingTime} may be null. The C ABI setter takes a number and has no way to express
+ * "unset", so a null becomes 100 ms — the same fallback the C# binding uses.
  */
 public class Reliability {
 

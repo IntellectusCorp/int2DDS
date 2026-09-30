@@ -8,23 +8,22 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * Exercises {@link ReturnCodes#readMessage(ToIntFunction)} — the buffer-growth
- * logic behind {@link ReturnCodes#lastErrorMessage()} — against a stub that
- * mimics the native contract documented in {@code ffi/src/last_error.rs}:
- * writes {@code min(bufLen - 1, full)} message bytes plus a trailing NUL, and
- * always returns the message's full pre-truncation length.
+ * Exercises {@link ReturnCodes#readMessage(ToIntFunction)} — the buffer-growth logic behind {@link
+ * ReturnCodes#lastErrorMessage()} — against a stub that mimics the native contract documented in
+ * {@code ffi/src/last_error.rs}: writes {@code min(bufLen - 1, full)} message bytes plus a trailing
+ * NUL, and always returns the message's full pre-truncation length.
  *
- * <p>The real FFI does not currently emit a message long enough to reach the
- * first-try buffer's boundary, which is exactly how the one-byte-short retry
- * buffer and the {@code >} vs {@code >=} growth check survived undetected.
- * This test drives the sizing logic directly instead of waiting for a long
- * native error.
+ * <p>The real FFI does not currently emit a message long enough to reach the first-try buffer's
+ * boundary, which is exactly how the one-byte-short retry buffer and the {@code >} vs {@code >=}
+ * growth check survived undetected. This test drives the sizing logic directly instead of waiting
+ * for a long native error.
  */
 class ReturnCodesLastErrorMessageTest {
 
-    /** A message that round-trips exactly at {@code byteLen} UTF-8 bytes,
-     *  ending in a two-byte character so a one-byte truncation would corrupt
-     *  the decode instead of merely trimming it. */
+    /**
+     * A message that round-trips exactly at {@code byteLen} UTF-8 bytes, ending in a two-byte
+     * character so a one-byte truncation would corrupt the decode instead of merely trimming it.
+     */
     private static String multiByteEndingMessage(int byteLen) {
         // 'é' (U+00E9) encodes to 2 bytes in UTF-8.
         StringBuilder sb = new StringBuilder();
@@ -34,7 +33,9 @@ class ReturnCodesLastErrorMessageTest {
         }
         sb.append('é');
         String s = sb.toString();
-        assertEquals(byteLen, s.getBytes(StandardCharsets.UTF_8).length,
+        assertEquals(
+                byteLen,
+                s.getBytes(StandardCharsets.UTF_8).length,
                 "test setup: message must be exactly byteLen bytes");
         return s;
     }
@@ -48,9 +49,10 @@ class ReturnCodesLastErrorMessageTest {
         return sb.toString();
     }
 
-    /** Stub matching the {@code int2dds_last_error_message} contract: writes
-     *  as much of {@code full} plus a NUL as fits, always returns the full
-     *  pre-truncation byte length. */
+    /**
+     * Stub matching the {@code int2dds_last_error_message} contract: writes as much of {@code full}
+     * plus a NUL as fits, always returns the full pre-truncation byte length.
+     */
     private static ToIntFunction<byte[]> nativeStub(byte[] full) {
         return buf -> {
             int maxBytes = buf.length - 1; // native reserves the last byte for NUL

@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-
 import org.junit.jupiter.api.Test;
 
 class CdrAggregateRoundTripTest {
@@ -60,14 +59,14 @@ class CdrAggregateRoundTripTest {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, true)) {
             int t = w.dheaderBegin();
             w.writeI32(1);
-            w.writeI32(999);   // the "unknown" member
+            w.writeI32(999); // the "unknown" member
             w.dheaderFinalize(t);
-            w.writeI32(42);    // something after the aggregate
+            w.writeI32(42); // something after the aggregate
 
             CdrReader r = CdrReader.of(w.toBytes());
             CdrReader.Dheader d = r.readDheader();
             assertEquals(1, r.readI32());
-            r.readDheaderEnd(d);          // skip the rest without decoding it
+            r.readDheaderEnd(d); // skip the rest without decoding it
             assertEquals(42, r.readI32());
         }
     }
@@ -170,19 +169,21 @@ class CdrAggregateRoundTripTest {
     void dheaderWithNegativeObjectSizeThrows() {
         // Hand-build a DHEADER with negative objectSize.
         ByteBuffer buf = ByteBuffer.allocate(16);
-        buf.put((byte) 0x00);           // encapsulation ID high byte
-        buf.put((byte) 0x07);           // encapsulation ID low byte (CDR2 LE)
-        buf.put((byte) 0x00);           // options
-        buf.put((byte) 0x00);           // options
+        buf.put((byte) 0x00); // encapsulation ID high byte
+        buf.put((byte) 0x07); // encapsulation ID low byte (CDR2 LE)
+        buf.put((byte) 0x00); // options
+        buf.put((byte) 0x00); // options
         // Now data in little-endian
         buf.order(ByteOrder.LITTLE_ENDIAN);
-        buf.putInt(-1);                 // negative objectSize
-        buf.putInt(0);                  // padding/data
+        buf.putInt(-1); // negative objectSize
+        buf.putInt(0); // padding/data
         buf.flip();
 
         CdrReader r = CdrReader.of(buf);
         CdrReader.Dheader d = r.readDheader();
-        assertThrows(CdrUnderflowException.class, () -> r.readDheaderEnd(d),
+        assertThrows(
+                CdrUnderflowException.class,
+                () -> r.readDheaderEnd(d),
                 "Negative objectSize should throw, not move position backward");
     }
 
@@ -190,18 +191,20 @@ class CdrAggregateRoundTripTest {
     void dheaderWithLargeObjectSizeThrows() {
         // Hand-build a DHEADER with objectSize near Integer.MAX_VALUE.
         ByteBuffer buf = ByteBuffer.allocate(16);
-        buf.put((byte) 0x00);           // encapsulation ID high byte
-        buf.put((byte) 0x07);           // encapsulation ID low byte (CDR2 LE)
-        buf.put((byte) 0x00);           // options
-        buf.put((byte) 0x00);           // options
+        buf.put((byte) 0x00); // encapsulation ID high byte
+        buf.put((byte) 0x07); // encapsulation ID low byte (CDR2 LE)
+        buf.put((byte) 0x00); // options
+        buf.put((byte) 0x00); // options
         buf.order(ByteOrder.LITTLE_ENDIAN);
-        buf.putInt(Integer.MAX_VALUE);  // huge objectSize
+        buf.putInt(Integer.MAX_VALUE); // huge objectSize
         buf.putInt(0);
         buf.flip();
 
         CdrReader r = CdrReader.of(buf);
         CdrReader.Dheader d = r.readDheader();
-        assertThrows(CdrUnderflowException.class, () -> r.readDheaderEnd(d),
+        assertThrows(
+                CdrUnderflowException.class,
+                () -> r.readDheaderEnd(d),
                 "Large objectSize causing overflow should throw");
     }
 
@@ -209,18 +212,20 @@ class CdrAggregateRoundTripTest {
     void emheaderWithLargeNextintThrows() {
         // Hand-build an EMHEADER with LC 4 and a NEXTINT that would overflow.
         ByteBuffer buf = ByteBuffer.allocate(16);
-        buf.put((byte) 0x00);           // encapsulation ID high byte
-        buf.put((byte) 0x07);           // encapsulation ID low byte (CDR2 LE)
-        buf.put((byte) 0x00);           // options
-        buf.put((byte) 0x00);           // options
+        buf.put((byte) 0x00); // encapsulation ID high byte
+        buf.put((byte) 0x07); // encapsulation ID low byte (CDR2 LE)
+        buf.put((byte) 0x00); // options
+        buf.put((byte) 0x00); // options
         buf.order(ByteOrder.LITTLE_ENDIAN);
         // EMHEADER: memberId=1, LC=4, mustUnderstand=0
-        buf.putInt(0x40000001);         // LC 4 in bits [30:28]
-        buf.putInt(0x7FFFFFFF);         // NEXTINT: huge, exceeds buffer
+        buf.putInt(0x40000001); // LC 4 in bits [30:28]
+        buf.putInt(0x7FFFFFFF); // NEXTINT: huge, exceeds buffer
         buf.flip();
 
         CdrReader r = CdrReader.of(buf);
-        assertThrows(CdrUnderflowException.class, () -> r.readEmheader(),
+        assertThrows(
+                CdrUnderflowException.class,
+                () -> r.readEmheader(),
                 "NEXTINT overflow should throw, not wrap and pass");
     }
 
@@ -229,18 +234,18 @@ class CdrAggregateRoundTripTest {
         // Hand-build EMHEADER with LC 6 and a small element count.
         // LC 6: length = 4 + 4 * nextInt, NEXTINT is peeked (not consumed).
         ByteBuffer buf = ByteBuffer.allocate(32);
-        buf.put((byte) 0x00);           // encapsulation ID high byte
-        buf.put((byte) 0x07);           // encapsulation ID low byte (CDR2 LE)
-        buf.put((byte) 0x00);           // options
-        buf.put((byte) 0x00);           // options
+        buf.put((byte) 0x00); // encapsulation ID high byte
+        buf.put((byte) 0x07); // encapsulation ID low byte (CDR2 LE)
+        buf.put((byte) 0x00); // options
+        buf.put((byte) 0x00); // options
         buf.order(ByteOrder.LITTLE_ENDIAN);
         // EMHEADER: memberId=1, LC=6, mustUnderstand=0
         // LC=6 is bits [30:28] = 110 = 6
-        buf.putInt(0x60000001);         // LC 6
-        buf.putInt(2);                  // nextInt: 2 elements (4 + 4*2 = 12 bytes data)
-        buf.putInt(10);                 // element 1
-        buf.putInt(20);                 // element 2
-        buf.putInt(0);                  // padding
+        buf.putInt(0x60000001); // LC 6
+        buf.putInt(2); // nextInt: 2 elements (4 + 4*2 = 12 bytes data)
+        buf.putInt(10); // element 1
+        buf.putInt(20); // element 2
+        buf.putInt(0); // padding
         buf.flip();
 
         CdrReader r = CdrReader.of(buf);
@@ -250,7 +255,9 @@ class CdrAggregateRoundTripTest {
 
         assertEquals(1, e.memberId);
         assertEquals(4 + 4 * 2, e.dataLength, "Length should be 4 + 4*2");
-        assertEquals(posBeforeRead + 4, posAfterRead,
+        assertEquals(
+                posBeforeRead + 4,
+                posAfterRead,
                 "Position should only advance past header, not past the peeked NEXTINT");
     }
 
@@ -259,17 +266,17 @@ class CdrAggregateRoundTripTest {
         // Hand-build EMHEADER with LC 7 and a small element count.
         // LC 7: length = 4 + 8 * nextInt, NEXTINT is peeked.
         ByteBuffer buf = ByteBuffer.allocate(36);
-        buf.put((byte) 0x00);           // encapsulation ID high byte
-        buf.put((byte) 0x07);           // encapsulation ID low byte (CDR2 LE)
-        buf.put((byte) 0x00);           // options
-        buf.put((byte) 0x00);           // options
+        buf.put((byte) 0x00); // encapsulation ID high byte
+        buf.put((byte) 0x07); // encapsulation ID low byte (CDR2 LE)
+        buf.put((byte) 0x00); // options
+        buf.put((byte) 0x00); // options
         buf.order(ByteOrder.LITTLE_ENDIAN);
         // EMHEADER: memberId=2, LC=7, mustUnderstand=0
         // LC=7 is bits [30:28] = 111 = 7
-        buf.putInt(0x70000002);         // LC 7
-        buf.putInt(2);                  // nextInt: 2 elements (4 + 8*2 = 20 bytes data)
-        buf.putLong(100L);              // element 1
-        buf.putLong(200L);              // element 2
+        buf.putInt(0x70000002); // LC 7
+        buf.putInt(2); // nextInt: 2 elements (4 + 8*2 = 20 bytes data)
+        buf.putLong(100L); // element 1
+        buf.putLong(200L); // element 2
         buf.flip();
 
         CdrReader r = CdrReader.of(buf);
@@ -279,7 +286,9 @@ class CdrAggregateRoundTripTest {
 
         assertEquals(2, e.memberId);
         assertEquals(4 + 8 * 2, e.dataLength, "Length should be 4 + 8*2");
-        assertEquals(posBeforeRead + 4, posAfterRead,
+        assertEquals(
+                posBeforeRead + 4,
+                posAfterRead,
                 "Position should only advance past header, not past the peeked NEXTINT");
     }
 
@@ -288,16 +297,16 @@ class CdrAggregateRoundTripTest {
         // Hand-build EMHEADER with LC 5.
         // LC 5: length is the NEXTINT value itself, peeked.
         ByteBuffer buf = ByteBuffer.allocate(20);
-        buf.put((byte) 0x00);           // encapsulation ID high byte
-        buf.put((byte) 0x07);           // encapsulation ID low byte (CDR2 LE)
-        buf.put((byte) 0x00);           // options
-        buf.put((byte) 0x00);           // options
+        buf.put((byte) 0x00); // encapsulation ID high byte
+        buf.put((byte) 0x07); // encapsulation ID low byte (CDR2 LE)
+        buf.put((byte) 0x00); // options
+        buf.put((byte) 0x00); // options
         buf.order(ByteOrder.LITTLE_ENDIAN);
         // EMHEADER: memberId=5, LC=5, mustUnderstand=0
         // LC=5 is bits [30:28] = 101 = 5
-        buf.putInt(0x50000005);         // LC 5
-        buf.putInt(8);                  // nextInt: data length is 8 bytes
-        buf.putLong(42L);               // the actual data
+        buf.putInt(0x50000005); // LC 5
+        buf.putInt(8); // nextInt: data length is 8 bytes
+        buf.putLong(42L); // the actual data
         buf.flip();
 
         CdrReader r = CdrReader.of(buf);
@@ -307,7 +316,9 @@ class CdrAggregateRoundTripTest {
 
         assertEquals(5, e.memberId);
         assertEquals(8, e.dataLength, "Length should be the NEXTINT value");
-        assertEquals(posBeforeRead + 4, posAfterRead,
+        assertEquals(
+                posBeforeRead + 4,
+                posAfterRead,
                 "Position should only advance past header, not past the peeked NEXTINT");
     }
 
@@ -315,20 +326,22 @@ class CdrAggregateRoundTripTest {
     void plCdrExtendedFormWithNegativeLengthThrows() {
         // Hand-build extended PL_CDR header with negative length.
         ByteBuffer buf = ByteBuffer.allocate(20);
-        buf.put((byte) 0x00);           // encapsulation ID high byte
-        buf.put((byte) 0x03);           // encapsulation ID low byte (PL_CDR LE)
-        buf.put((byte) 0x00);           // options
-        buf.put((byte) 0x00);           // options
+        buf.put((byte) 0x00); // encapsulation ID high byte
+        buf.put((byte) 0x03); // encapsulation ID low byte (PL_CDR LE)
+        buf.put((byte) 0x00); // options
+        buf.put((byte) 0x00); // options
         buf.order(ByteOrder.LITTLE_ENDIAN);
         // PID=0x3F01 (extended form), length placeholder
-        buf.putShort((short) 0x3F01);   // PID: extended form
-        buf.putShort((short) 0);        // length: not used for extended form
-        buf.putInt(42);                 // fullId
-        buf.putInt(-1);                 // fullLen: negative!
+        buf.putShort((short) 0x3F01); // PID: extended form
+        buf.putShort((short) 0); // length: not used for extended form
+        buf.putInt(42); // fullId
+        buf.putInt(-1); // fullLen: negative!
         buf.flip();
 
         CdrReader r = CdrReader.of(buf);
-        assertThrows(CdrUnderflowException.class, () -> r.readParameterHeader(),
+        assertThrows(
+                CdrUnderflowException.class,
+                () -> r.readParameterHeader(),
                 "Negative length in extended form should throw");
     }
 }

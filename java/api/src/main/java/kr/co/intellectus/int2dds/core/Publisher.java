@@ -1,5 +1,7 @@
 package kr.co.intellectus.int2dds.core;
 
+import java.nio.charset.Charset;
+import java.util.Objects;
 import kr.co.intellectus.int2dds.conditions.StatusCondition;
 import kr.co.intellectus.int2dds.exceptions.DdsErrorException;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
@@ -15,16 +17,13 @@ import kr.co.intellectus.int2dds.types.IDdsType;
 import kr.co.intellectus.int2dds.xtypes.DynamicDataWriter;
 import kr.co.intellectus.int2dds.xtypes.DynamicTopic;
 import kr.co.intellectus.int2dds.xtypes.DynamicTypeSupport;
-import java.nio.charset.Charset;
-import java.util.Objects;
 
 /**
  * Groups DataWriters for coordinated publication.
  *
- * <p>Created through {@link DomainParticipant#createPublisher}, which
- * registers this instance in the participant's weak child list — matching
- * the C# reference binding's shape, where {@code Publisher}'s constructor
- * (csharp/src/Int2Dds/Core/Publisher.cs:26) is internal to the assembly
+ * <p>Created through {@link DomainParticipant#createPublisher}, which registers this instance in
+ * the participant's weak child list — matching the C# reference binding's shape, where {@code
+ * Publisher}'s constructor (csharp/src/Int2Dds/Core/Publisher.cs:26) is internal to the assembly
  * rather than public; this one is package-private for the same reason.
  */
 public final class Publisher extends NativeEntity {
@@ -33,41 +32,44 @@ public final class Publisher extends NativeEntity {
 
     /**
      * @param qos may be null for the core's default Publisher QoS; {@link
-     *     DomainParticipant#createPublisher(PublisherQos)} is responsible
-     *     for rejecting an explicit null before reaching here.
+     *     DomainParticipant#createPublisher(PublisherQos)} is responsible for rejecting an explicit
+     *     null before reaching here.
      */
     Publisher(DomainParticipant participant, PublisherQos qos) {
-        super(Objects.requireNonNull(participant, "participant"), create(participant, qos),
+        super(
+                Objects.requireNonNull(participant, "participant"),
+                create(participant, qos),
                 FfiAccess::deletePublisher);
     }
 
     /**
      * Package-private profile-create path, reached only through {@link
-     * DomainParticipant#createPublisher(String)}: a normal publisher whose
-     * QoS comes from the named profile at {@code profilePath} (a {@code
-     * "LibraryName::ProfileName"} path previously loaded via {@link
-     * DomainParticipantFactory#loadProfiles}), released the same way as the
-     * default-QoS path ({@code FfiAccess::deletePublisher}).
+     * DomainParticipant#createPublisher(String)}: a normal publisher whose QoS comes from the named
+     * profile at {@code profilePath} (a {@code "LibraryName::ProfileName"} path previously loaded
+     * via {@link DomainParticipantFactory#loadProfiles}), released the same way as the default-QoS
+     * path ({@code FfiAccess::deletePublisher}).
      */
     Publisher(DomainParticipant participant, String profilePath) {
-        super(Objects.requireNonNull(participant, "participant"),
+        super(
+                Objects.requireNonNull(participant, "participant"),
                 createWithProfile(participant, Objects.requireNonNull(profilePath, "profilePath")),
                 FfiAccess::deletePublisher);
     }
 
     private Publisher(DomainParticipant participant, NativeCleaner.Deleter deleter) {
-        super(Objects.requireNonNull(participant, "participant"), create(participant, null),
+        super(
+                Objects.requireNonNull(participant, "participant"),
+                create(participant, null),
                 deleter);
     }
 
     /**
      * Package-private construction seam, the same pattern as {@link
-     * DomainParticipant#createForTest} and {@link Topic#createForTest}: the
-     * same default-QoS creation path as the public factory, but with an
-     * explicit deleter in place of the fixed {@code FfiAccess::deletePublisher},
-     * for tests that need to observe exactly how many times the deleter is
-     * actually invoked. A test-supplied deleter should still delegate to the
-     * real delete.
+     * DomainParticipant#createForTest} and {@link Topic#createForTest}: the same default-QoS
+     * creation path as the public factory, but with an explicit deleter in place of the fixed
+     * {@code FfiAccess::deletePublisher}, for tests that need to observe exactly how many times the
+     * deleter is actually invoked. A test-supplied deleter should still delegate to the real
+     * delete.
      */
     static Publisher createForTest(DomainParticipant participant, NativeCleaner.Deleter deleter) {
         return new Publisher(participant, deleter);
@@ -94,21 +96,23 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * Creates a datawriter for {@code topic} with QoS from the named profile
-     * at {@code profilePath} (a {@code "LibraryName::ProfileName"} path).
-     * The profile must already be loaded via {@link
+     * Creates a datawriter for {@code topic} with QoS from the named profile at {@code profilePath}
+     * (a {@code "LibraryName::ProfileName"} path). The profile must already be loaded via {@link
      * DomainParticipantFactory#loadProfiles}.
      */
     public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic, String profilePath) {
-        return new DataWriter<T>(this, Objects.requireNonNull(topic, "topic"),
+        return new DataWriter<T>(
+                this,
+                Objects.requireNonNull(topic, "topic"),
                 Objects.requireNonNull(profilePath, "profilePath"));
     }
 
     /**
-     * Creates a datawriter for {@code topic}, backed by {@code support} (an
-     * XTypes dynamic type support), with the core's default QoS.
+     * Creates a datawriter for {@code topic}, backed by {@code support} (an XTypes dynamic type
+     * support), with the core's default QoS.
      */
-    public DynamicDataWriter createDynamicDataWriter(DynamicTopic topic, DynamicTypeSupport support) {
+    public DynamicDataWriter createDynamicDataWriter(
+            DynamicTopic topic, DynamicTypeSupport support) {
         Objects.requireNonNull(topic, "topic");
         Objects.requireNonNull(support, "support");
         long p = handle();
@@ -127,12 +131,12 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * Creates a datawriter for {@code topic}, backed by {@code support} (an
-     * XTypes dynamic type support), with an explicit QoS.
+     * Creates a datawriter for {@code topic}, backed by {@code support} (an XTypes dynamic type
+     * support), with an explicit QoS.
      *
-     * <p>Builds a native {@link DataWriterQos} handle, applies {@code qos}'s
-     * policies onto it, and destroys it again once the create call returns —
-     * the same shape as {@link DataWriter}'s own QoS-taking constructor path.
+     * <p>Builds a native {@link DataWriterQos} handle, applies {@code qos}'s policies onto it, and
+     * destroys it again once the create call returns — the same shape as {@link DataWriter}'s own
+     * QoS-taking constructor path.
      */
     public DynamicDataWriter createDynamicDataWriter(
             DynamicTopic topic, DynamicTypeSupport support, DataWriterQos qos) {
@@ -163,14 +167,12 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * Applies {@code qos} to this publisher at runtime. Reads this
-     * publisher's current QoS into a native handle, applies {@code qos}'s
-     * non-null policies onto it (a null policy keeps its current value),
-     * and destroys it again once the native {@code set_qos} call returns —
-     * success or failure, thrown or not, the same build-apply-destroy shape
-     * {@link #create} uses for the create path. The core rejects a change to
-     * {@code Presentation} once this publisher is enabled, surfaced here
-     * through {@link ReturnCodes#check}; {@code Partition}, {@code
+     * Applies {@code qos} to this publisher at runtime. Reads this publisher's current QoS into a
+     * native handle, applies {@code qos}'s non-null policies onto it (a null policy keeps its
+     * current value), and destroys it again once the native {@code set_qos} call returns — success
+     * or failure, thrown or not, the same build-apply-destroy shape {@link #create} uses for the
+     * create path. The core rejects a change to {@code Presentation} once this publisher is
+     * enabled, surfaced here through {@link ReturnCodes#check}; {@code Partition}, {@code
      * GroupData} and {@code EntityFactory} remain mutable.
      *
      * @throws NullPointerException if {@code qos} is null
@@ -194,9 +196,9 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * Deletes every datawriter created through this publisher. Their Java
-     * wrappers are closed first, so none outlives its native writer; the
-     * native call then removes any writer the tree does not track.
+     * Deletes every datawriter created through this publisher. Their Java wrappers are closed
+     * first, so none outlives its native writer; the native call then removes any writer the tree
+     * does not track.
      */
     public void deleteContainedEntities() {
         closeChildren();
@@ -206,10 +208,9 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * Blocks until every matched reliable {@link DataReader} of every writer
-     * belonging to this publisher has acknowledged all samples sent so far,
-     * or {@code timeoutMillis} elapses. Returns {@code true} if
-     * acknowledgment completed, {@code false} if the timeout expired first.
+     * Blocks until every matched reliable {@link DataReader} of every writer belonging to this
+     * publisher has acknowledged all samples sent so far, or {@code timeoutMillis} elapses. Returns
+     * {@code true} if acknowledgment completed, {@code false} if the timeout expired first.
      */
     public boolean waitForAcknowledgments(long timeoutMillis) {
         int rc = FfiAccess.publisherWaitForAcknowledgments(handle(), timeoutMillis);
@@ -222,8 +223,8 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * A fresh StatusCondition for this publisher's status changes; attach it
-     * to a WaitSet to wait on status transitions.
+     * A fresh StatusCondition for this publisher's status changes; attach it to a WaitSet to wait
+     * on status transitions.
      */
     public StatusCondition getStatusCondition() {
         long h = handle();
@@ -235,9 +236,8 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * The set of statuses that have changed since last read (per DDS, reading
-     * a status via its getter or here clears it). Attach a StatusCondition to
-     * a WaitSet to block on these.
+     * The set of statuses that have changed since last read (per DDS, reading a status via its
+     * getter or here clears it). Attach a StatusCondition to a WaitSet to block on these.
      */
     public StatusMask getStatusChanges() {
         int[] out = new int[1];
@@ -248,12 +248,11 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
-     * Resolves the create argument and, when {@code qos} is supplied, builds
-     * a native QoS handle, applies the policies onto it, and destroys it
-     * again once the create call returns — success or failure, thrown or
-     * not, the same shape as {@link Topic#create}. {@code qos == null}
-     * passes {@code 0L}, engaging the same core-side default resolution as
-     * an explicit {@link PublisherQos} with every policy left null.
+     * Resolves the create argument and, when {@code qos} is supplied, builds a native QoS handle,
+     * applies the policies onto it, and destroys it again once the create call returns — success or
+     * failure, thrown or not, the same shape as {@link Topic#create}. {@code qos == null} passes
+     * {@code 0L}, engaging the same core-side default resolution as an explicit {@link
+     * PublisherQos} with every policy left null.
      */
     private static long create(DomainParticipant participant, PublisherQos qos) {
         if (qos == null) {
@@ -291,8 +290,9 @@ public final class Publisher extends NativeEntity {
     /** The profile-create path, the same keep-alive/check shape as {@link #createNative}. */
     private static long createWithProfile(DomainParticipant participant, String profilePath) {
         long[] handleOut = new long[1];
-        int rc = FfiAccess.createPublisherWithProfile(
-                participant.handle(), profilePath.getBytes(UTF8), handleOut);
+        int rc =
+                FfiAccess.createPublisherWithProfile(
+                        participant.handle(), profilePath.getBytes(UTF8), handleOut);
         NativeKeepAlive.keepAlive(participant);
         ReturnCodes.check(rc);
         return handleOut[0];

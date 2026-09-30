@@ -53,8 +53,7 @@ class FfiSmokeTest {
     }
 
     @Test
-    void textWrittenByTheFfiReachesTheCallersByteArray()
-            throws UnsupportedEncodingException {
+    void textWrittenByTheFfiReachesTheCallersByteArray() throws UnsupportedEncodingException {
         // The strongest check in this file. A `*mut c_char` parameter looks
         // identical to the in direction, so a forwarder that only copies Java ->
         // native compiles, runs, returns success, and hands back an untouched
@@ -69,8 +68,9 @@ class FfiSmokeTest {
         try {
             byte[] text = new byte[64];
             ByteBuffer lenOut = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-            int rc = FfiAccess.dynamicValueToString(
-                    value, text, text.length, FfiAccess.directBufferAddress(lenOut));
+            int rc =
+                    FfiAccess.dynamicValueToString(
+                            value, text, text.length, FfiAccess.directBufferAddress(lenOut));
             assertEquals(0, rc, "to_string must succeed");
 
             int len = (int) lenOut.getLong(0);

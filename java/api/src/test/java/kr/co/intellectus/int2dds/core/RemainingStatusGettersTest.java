@@ -20,24 +20,21 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the 8 remaining pull-based status getters added in this branch:
- * {@code DataReader#getLivelinessChangedStatus/getRequestedDeadlineMissedStatus/
- * getRequestedIncompatibleQosStatus/getSampleLostStatus/getSampleRejectedStatus}
- * and {@code DataWriter#getLivelinessLostStatus/getOfferedDeadlineMissedStatus/
- * getOfferedIncompatibleQosStatus}. Same two-participant matching pattern as
- * {@code MatchedStatusTest}: matching does not loop back within a single
- * participant, so the writer and the reader each live on their own
- * participant.
+ * Exercises the 8 remaining pull-based status getters added in this branch: {@code
+ * DataReader#getLivelinessChangedStatus/getRequestedDeadlineMissedStatus/
+ * getRequestedIncompatibleQosStatus/getSampleLostStatus/getSampleRejectedStatus} and {@code
+ * DataWriter#getLivelinessLostStatus/getOfferedDeadlineMissedStatus/
+ * getOfferedIncompatibleQosStatus}. Same two-participant matching pattern as {@code
+ * MatchedStatusTest}: matching does not loop back within a single participant, so the writer and
+ * the reader each live on their own participant.
  *
- * <p>Only {@code getLivelinessChangedStatus} fires under normal healthy
- * pub/sub -- a matched writer becoming alive is exactly what a successful
- * match produces. The other 7 statuses (missed deadlines, incompatible QoS,
- * lost/rejected samples, lost liveliness) require fault conditions this test
- * does not simulate, so for those this test only proves the getter marshals
- * a real, non-garbage struct off the native side: default/zero counts and,
- * where the type carries one, a 16-byte handle, without throwing. A wrong
- * struct size or field offset would either crash or surface non-zero noise
- * here, so this is a real (if narrowly scoped) check on the marshaling, not
+ * <p>Only {@code getLivelinessChangedStatus} fires under normal healthy pub/sub -- a matched writer
+ * becoming alive is exactly what a successful match produces. The other 7 statuses (missed
+ * deadlines, incompatible QoS, lost/rejected samples, lost liveliness) require fault conditions
+ * this test does not simulate, so for those this test only proves the getter marshals a real,
+ * non-garbage struct off the native side: default/zero counts and, where the type carries one, a
+ * 16-byte handle, without throwing. A wrong struct size or field offset would either crash or
+ * surface non-zero noise here, so this is a real (if narrowly scoped) check on the marshaling, not
  * a full event simulation.
  */
 class RemainingStatusGettersTest {
@@ -50,15 +47,17 @@ class RemainingStatusGettersTest {
     void livelinessChangedStatusReportsAliveWriterAfterMatch() throws InterruptedException {
         try (DomainParticipant writerParticipant = new DomainParticipant(testDomain());
                 DomainParticipant readerParticipant = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> writerTopic = writerParticipant.createTopic(
-                    "RemainingStatusGettersTopic", new ConformanceRecord());
+            Topic<ConformanceRecord> writerTopic =
+                    writerParticipant.createTopic(
+                            "RemainingStatusGettersTopic", new ConformanceRecord());
             Publisher pub = writerParticipant.createPublisher();
             DataWriterQos writerQos = new DataWriterQos();
             writerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
             DataWriter<ConformanceRecord> w = pub.createDataWriter(writerTopic, writerQos);
 
-            Topic<ConformanceRecord> readerTopic = readerParticipant.createTopic(
-                    "RemainingStatusGettersTopic", new ConformanceRecord());
+            Topic<ConformanceRecord> readerTopic =
+                    readerParticipant.createTopic(
+                            "RemainingStatusGettersTopic", new ConformanceRecord());
             Subscriber sub = readerParticipant.createSubscriber();
             DataReaderQos readerQos = new DataReaderQos();
             readerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
@@ -86,8 +85,8 @@ class RemainingStatusGettersTest {
                 Thread.sleep(50);
                 status = r.getLivelinessChangedStatus();
             }
-            assertTrue(status.aliveCount() >= 1,
-                    "aliveCount should count the matched, alive writer");
+            assertTrue(
+                    status.aliveCount() >= 1, "aliveCount should count the matched, alive writer");
             assertTrue(status.notAliveCount() >= 0, "notAliveCount must be non-negative");
         }
     }
@@ -98,8 +97,7 @@ class RemainingStatusGettersTest {
             Topic<ConformanceRecord> topic =
                     p.createTopic("RequestedDeadlineMissedTopic", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> r =
-                    sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> r = sub.createDataReader(topic, ConformanceRecord::new);
 
             RequestedDeadlineMissedStatus status = r.getRequestedDeadlineMissedStatus();
             assertNotNull(status);
@@ -115,15 +113,15 @@ class RemainingStatusGettersTest {
             Topic<ConformanceRecord> topic =
                     p.createTopic("RequestedIncompatibleQosTopic", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> r =
-                    sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> r = sub.createDataReader(topic, ConformanceRecord::new);
 
             RequestedIncompatibleQosStatus status = r.getRequestedIncompatibleQosStatus();
             assertNotNull(status);
             assertEquals(0, status.totalCount());
             assertEquals(0, status.totalCountChange());
             assertEquals(0, status.policiesCount());
-            assertTrue(status.lastPolicyId() >= 0 && status.lastPolicyId() <= 25,
+            assertTrue(
+                    status.lastPolicyId() >= 0 && status.lastPolicyId() <= 25,
                     "lastPolicyId must be a valid Int2DdsQosPolicyId value");
         }
     }
@@ -134,8 +132,7 @@ class RemainingStatusGettersTest {
             Topic<ConformanceRecord> topic =
                     p.createTopic("SampleLostTopic", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> r =
-                    sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> r = sub.createDataReader(topic, ConformanceRecord::new);
 
             SampleLostStatus status = r.getSampleLostStatus();
             assertNotNull(status);
@@ -150,8 +147,7 @@ class RemainingStatusGettersTest {
             Topic<ConformanceRecord> topic =
                     p.createTopic("SampleRejectedTopic", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> r =
-                    sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> r = sub.createDataReader(topic, ConformanceRecord::new);
 
             SampleRejectedStatus status = r.getSampleRejectedStatus();
             assertNotNull(status);
@@ -206,7 +202,8 @@ class RemainingStatusGettersTest {
             assertEquals(0, status.totalCount());
             assertEquals(0, status.totalCountChange());
             assertEquals(0, status.policiesCount());
-            assertTrue(status.lastPolicyId() >= 0 && status.lastPolicyId() <= 25,
+            assertTrue(
+                    status.lastPolicyId() >= 0 && status.lastPolicyId() <= 25,
                     "lastPolicyId must be a valid Int2DdsQosPolicyId value");
         }
     }

@@ -10,9 +10,9 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@link DataWriter#getDataRepresentation()} reports a valid wire encoding and
- * agrees with the same value read back through {@link DataWriter#getQos()} —
- * two independent native paths that must not disagree.
+ * {@link DataWriter#getDataRepresentation()} reports a valid wire encoding and agrees with the same
+ * value read back through {@link DataWriter#getQos()} — two independent native paths that must not
+ * disagree.
  */
 class WriterDataRepresentationTest {
 

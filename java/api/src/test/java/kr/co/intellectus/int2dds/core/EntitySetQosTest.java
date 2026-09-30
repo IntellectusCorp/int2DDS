@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.time.Duration;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.Deadline;
@@ -15,33 +16,26 @@ import kr.co.intellectus.int2dds.qos.PublisherQos;
 import kr.co.intellectus.int2dds.qos.SubscriberQos;
 import kr.co.intellectus.int2dds.qos.TopicQos;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the runtime {@code setQos} plumbing added to all six entity
- * types.
+ * Exercises the runtime {@code setQos} plumbing added to all six entity types.
  *
- * <p>{@code Deadline} is the round-trip oracle on {@link DataWriter}, {@link
- * DataReader} (and the change attempted on {@link Topic}): unlike {@code
- * LatencyBudget} and {@code TransportPriority}, which this core's own {@code
- * check_unsupported_policies} rejects outright for any non-default value
- * (dds/src/dcps/publication/qos/mod.rs, subscription/qos/mod.rs,
- * topic/qos/mod.rs -- confirmed the hard way: an earlier version of this test
- * used {@code LatencyBudget} and failed with {@code DdsUnsupportedException}),
- * {@code Deadline} is both supported and absent from every one of those
- * types' {@code check_immutable_change} lists, so a non-default value is
- * accepted at create time and a further change is accepted after the entity
- * is enabled. Publisher and Subscriber use {@code Partition} (supported,
- * outside {@code Presentation}, their one immutable policy); DomainParticipant
- * uses {@code Property}, since {@code UserData} is that type's one
+ * <p>{@code Deadline} is the round-trip oracle on {@link DataWriter}, {@link DataReader} (and the
+ * change attempted on {@link Topic}): unlike {@code LatencyBudget} and {@code TransportPriority},
+ * which this core's own {@code check_unsupported_policies} rejects outright for any non-default
+ * value (dds/src/dcps/publication/qos/mod.rs, subscription/qos/mod.rs, topic/qos/mod.rs --
+ * confirmed the hard way: an earlier version of this test used {@code LatencyBudget} and failed
+ * with {@code DdsUnsupportedException}), {@code Deadline} is both supported and absent from every
+ * one of those types' {@code check_immutable_change} lists, so a non-default value is accepted at
+ * create time and a further change is accepted after the entity is enabled. Publisher and
+ * Subscriber use {@code Partition} (supported, outside {@code Presentation}, their one immutable
+ * policy); DomainParticipant uses {@code Property}, since {@code UserData} is that type's one
  * unsupported policy (dds/src/dcps/domain/qos/mod.rs).
  *
- * <p>Publisher, Subscriber, DomainParticipant and Topic have no {@code
- * getQos()} yet, so those are treated as a can-fail round trip through the
- * absence of a thrown exception, which {@link
- * kr.co.intellectus.int2dds.internal.ReturnCodes#check} would raise on any
- * non-OK status.
+ * <p>Publisher, Subscriber, DomainParticipant and Topic have no {@code getQos()} yet, so those are
+ * treated as a can-fail round trip through the absence of a thrown exception, which {@link
+ * kr.co.intellectus.int2dds.internal.ReturnCodes#check} would raise on any non-OK status.
  */
 class EntitySetQosTest {
 

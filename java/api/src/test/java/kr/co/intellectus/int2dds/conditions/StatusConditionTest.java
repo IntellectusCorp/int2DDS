@@ -1,7 +1,7 @@
 package kr.co.intellectus.int2dds.conditions;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import kr.co.intellectus.int2dds.core.DataReader;
 import kr.co.intellectus.int2dds.core.DomainParticipant;
@@ -22,9 +22,11 @@ class StatusConditionTest {
     @Test
     void enabledStatusesRoundTripsThroughSetAndGet() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> topic = p.createTopic("StatusCondMask", new ConformanceRecord());
+            Topic<ConformanceRecord> topic =
+                    p.createTopic("StatusCondMask", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> reader = sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> reader =
+                    sub.createDataReader(topic, ConformanceRecord::new);
 
             try (StatusCondition sc = reader.getStatusCondition()) {
                 int mask = StatusMask.DATA_AVAILABLE | StatusMask.SUBSCRIPTION_MATCHED;
@@ -40,17 +42,21 @@ class StatusConditionTest {
         // (generic condition_get_trigger_value) accessor here would segfault
         // reading a thin StatusCondition handle as a fat Arc<dyn Condition>.
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> topic = p.createTopic("StatusCondAttach", new ConformanceRecord());
+            Topic<ConformanceRecord> topic =
+                    p.createTopic("StatusCondAttach", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> reader = sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> reader =
+                    sub.createDataReader(topic, ConformanceRecord::new);
 
-            try (WaitSet ws = new WaitSet(); StatusCondition sc = reader.getStatusCondition()) {
+            try (WaitSet ws = new WaitSet();
+                    StatusCondition sc = reader.getStatusCondition()) {
                 sc.setEnabledStatuses(StatusMask.of(StatusMask.SUBSCRIPTION_MATCHED));
-                assertDoesNotThrow(() -> {
-                    ws.attach(sc);
-                    sc.triggerValue(); // type-correct accessor; must not segfault
-                    ws.detach(sc);
-                });
+                assertDoesNotThrow(
+                        () -> {
+                            ws.attach(sc);
+                            sc.triggerValue(); // type-correct accessor; must not segfault
+                            ws.detach(sc);
+                        });
             }
         }
     }

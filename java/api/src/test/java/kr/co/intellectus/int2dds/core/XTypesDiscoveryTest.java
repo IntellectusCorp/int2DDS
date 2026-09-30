@@ -5,6 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Collections;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.exceptions.DdsTimeoutException;
 import kr.co.intellectus.int2dds.xtypes.DynamicData;
@@ -12,37 +17,30 @@ import kr.co.intellectus.int2dds.xtypes.DynamicDataWriter;
 import kr.co.intellectus.int2dds.xtypes.DynamicTopic;
 import kr.co.intellectus.int2dds.xtypes.DynamicTypeSupport;
 import kr.co.intellectus.int2dds.xtypes.TypeObject;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Collections;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the two XTypes type-discovery operations added on top of the
- * dynamic write path: {@link DomainParticipantFactory#getDynamicTypeSupport}
- * (a factory-singleton lookup for a type loaded via {@link
- * DomainParticipantFactory#loadProfiles}) and {@link
- * DomainParticipant#waitForTypeObject} (blocks for a remote type's
- * TypeObject to be discovered).
+ * Exercises the two XTypes type-discovery operations added on top of the dynamic write path: {@link
+ * DomainParticipantFactory#getDynamicTypeSupport} (a factory-singleton lookup for a type loaded via
+ * {@link DomainParticipantFactory#loadProfiles}) and {@link DomainParticipant#waitForTypeObject}
+ * (blocks for a remote type's TypeObject to be discovered).
  *
- * <p>Type/library names are unique to this test ({@code XTD} prefix) to
- * avoid colliding with any other test's profiles or types in the same
- * process-wide factory singleton, the same convention {@code
- * ConfiguredParticipantTest} uses.
+ * <p>Type/library names are unique to this test ({@code XTD} prefix) to avoid colliding with any
+ * other test's profiles or types in the same process-wide factory singleton, the same convention
+ * {@code ConfiguredParticipantTest} uses.
  */
 class XTypesDiscoveryTest {
 
-    private static final String TYPES_XML = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-            + "<dds>\n"
-            + "  <types>\n"
-            + "    <struct name=\"XTDSimpleData\" extensibility=\"final\">\n"
-            + "      <member name=\"id\" type=\"int32\" key=\"true\"/>\n"
-            + "      <member name=\"value\" type=\"int32\"/>\n"
-            + "    </struct>\n"
-            + "  </types>\n"
-            + "</dds>\n";
+    private static final String TYPES_XML =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    + "<dds>\n"
+                    + "  <types>\n"
+                    + "    <struct name=\"XTDSimpleData\" extensibility=\"final\">\n"
+                    + "      <member name=\"id\" type=\"int32\" key=\"true\"/>\n"
+                    + "      <member name=\"value\" type=\"int32\"/>\n"
+                    + "    </struct>\n"
+                    + "  </types>\n"
+                    + "</dds>\n";
 
     private static Path writeTypesFile() throws IOException {
         Path path = Files.createTempFile("xtypes-discovery-", ".xml");
@@ -73,8 +71,11 @@ class XTypesDiscoveryTest {
         }
 
         // Negative: an unloaded type name throws rather than returning null.
-        assertThrows(DdsException.class,
-                () -> DomainParticipantFactory.getInstance().getDynamicTypeSupport("XTDNoSuchType"));
+        assertThrows(
+                DdsException.class,
+                () ->
+                        DomainParticipantFactory.getInstance()
+                                .getDynamicTypeSupport("XTDNoSuchType"));
     }
 
     @Test
@@ -82,7 +83,8 @@ class XTypesDiscoveryTest {
         try (DomainParticipant participant = new DomainParticipant(testDomain())) {
             // A timeout must surface as DdsTimeoutException, the same type
             // findTopic's timeout throws -- not a bare DdsException.
-            assertThrows(DdsTimeoutException.class,
+            assertThrows(
+                    DdsTimeoutException.class,
                     () -> participant.waitForTypeObject("XTDNoSuchTopic", 200));
         }
     }

@@ -47,9 +47,7 @@ class CdrWriterPrimitiveTest {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
             w.writeBool(true);
             w.writeI32(0x01020304);
-            assertArrayEquals(
-                    new byte[] {1, 0, 0, 0, 0x04, 0x03, 0x02, 0x01},
-                    payload(w));
+            assertArrayEquals(new byte[] {1, 0, 0, 0, 0x04, 0x03, 0x02, 0x01}, payload(w));
         }
     }
 
@@ -114,11 +112,11 @@ class CdrWriterPrimitiveTest {
     @Test
     void floatsAreWrittenAsTheirIeeeBits() {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
-            w.writeF32(1.0f);   // 0x3F800000
+            w.writeF32(1.0f); // 0x3F800000
             assertArrayEquals(new byte[] {0x00, 0x00, (byte) 0x80, 0x3F}, payload(w));
         }
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
-            w.writeF64(1.0d);   // 0x3FF0000000000000
+            w.writeF64(1.0d); // 0x3FF0000000000000
             byte[] p = payload(w);
             assertEquals(8, p.length);
             assertEquals((byte) 0xF0, p[6]);

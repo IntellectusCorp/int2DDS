@@ -8,10 +8,9 @@ import kr.co.intellectus.int2dds.exceptions.DdsException;
 import org.junit.jupiter.api.Test;
 
 /**
- * De-risk test for the dynamic write path (no networking): loads a runtime
- * type from XML, builds a {@link DynamicData} instance from it, and exercises
- * every scalar setter. Also proves a bad field path fails loudly instead of
- * silently, which the read path's tests never have to check.
+ * De-risk test for the dynamic write path (no networking): loads a runtime type from XML, builds a
+ * {@link DynamicData} instance from it, and exercises every scalar setter. Also proves a bad field
+ * path fails loudly instead of silently, which the read path's tests never have to check.
  */
 class DynamicWriteTest {
 
@@ -20,15 +19,16 @@ class DynamicWriteTest {
     // ReturnCodes.check still throws a generic DdsException carrying this code.
     private static final int RET_DYNAMIC_FIELD_NOT_FOUND = 200;
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Telemetry\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"temperature\" type=\"float32\"/>\n"
-            + "  <member name=\"active\" type=\"boolean\"/>\n"
-            + "  <member name=\"label\" type=\"string\"/>\n"
-            + "  <member name=\"count\" type=\"int64\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Telemetry\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"temperature\" type=\"float32\"/>\n"
+                    + "  <member name=\"active\" type=\"boolean\"/>\n"
+                    + "  <member name=\"label\" type=\"string\"/>\n"
+                    + "  <member name=\"count\" type=\"int64\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void buildsAndSetsEveryFieldFromAnXmlLoadedType() {

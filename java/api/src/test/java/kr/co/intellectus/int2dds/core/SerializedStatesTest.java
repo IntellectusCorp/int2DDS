@@ -15,12 +15,10 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the state-filtered serialized reads {@link
- * DataReader#takeSerialized(int, int, int)} / {@link
- * DataReader#readSerialized(int, int, int)} -- the raw-CDR-plus-{@link
- * SampleInfo} counterpart of the no-arg (NOT_READ-only) serialized pair in
- * {@link SerializedIoTest}, capable of retrieving samples in states the
- * no-arg/typed take()/read() cannot reach.
+ * Exercises the state-filtered serialized reads {@link DataReader#takeSerialized(int, int, int)} /
+ * {@link DataReader#readSerialized(int, int, int)} -- the raw-CDR-plus-{@link SampleInfo}
+ * counterpart of the no-arg (NOT_READ-only) serialized pair in {@link SerializedIoTest}, capable of
+ * retrieving samples in states the no-arg/typed take()/read() cannot reach.
  */
 class SerializedStatesTest {
 
@@ -53,19 +51,23 @@ class SerializedStatesTest {
                 Thread.sleep(20);
             }
             assertNotNull(s, "no serialized sample within 5s -- discovery or receive path");
-            assertTrue(s.bytes().length > 0, "takeSerialized(states) should return non-empty CDR bytes");
+            assertTrue(
+                    s.bytes().length > 0,
+                    "takeSerialized(states) should return non-empty CDR bytes");
             assertTrue(s.info().validData(), "sample should carry valid data");
-            assertEquals(16, s.info().instanceHandle().length, "instanceHandle should be a 16-byte handle");
+            assertEquals(
+                    16,
+                    s.info().instanceHandle().length,
+                    "instanceHandle should be a 16-byte handle");
 
             r.setListener(null, null);
         }
     }
 
     /**
-     * The unique capability: {@code readSerialized} marks a sample READ
-     * without removing it; a state-filtered {@code takeSerialized} with
-     * {@code SampleState.READ} then retrieves that same already-READ sample
-     * -- something the no-arg (NOT_READ-only) {@code takeSerialized()} cannot
+     * The unique capability: {@code readSerialized} marks a sample READ without removing it; a
+     * state-filtered {@code takeSerialized} with {@code SampleState.READ} then retrieves that same
+     * already-READ sample -- something the no-arg (NOT_READ-only) {@code takeSerialized()} cannot
      * do, since it only ever matches a NOT_READ sample.
      */
     @Test
@@ -104,14 +106,21 @@ class SerializedStatesTest {
             pollUntil(r::hasData);
             assertTrue(r.hasData(), "sample should have arrived");
 
-            SerializedSample firstRead = r.readSerialized(SampleState.ANY, ViewState.ANY, InstanceState.ANY);
+            SerializedSample firstRead =
+                    r.readSerialized(SampleState.ANY, ViewState.ANY, InstanceState.ANY);
             assertNotNull(firstRead, "readSerialized(states) should see the just-arrived sample");
             assertTrue(firstRead.bytes().length > 0);
-            assertTrue(r.hasData(), "readSerialized(states) must not remove the sample from the cache");
+            assertTrue(
+                    r.hasData(),
+                    "readSerialized(states) must not remove the sample from the cache");
 
-            SerializedSample again = r.takeSerialized(SampleState.READ, ViewState.ANY, InstanceState.ANY);
-            assertNotNull(again, "READ-filtered takeSerialized should retrieve the already-READ sample");
-            assertArrayEquals(firstRead.bytes(), again.bytes(),
+            SerializedSample again =
+                    r.takeSerialized(SampleState.READ, ViewState.ANY, InstanceState.ANY);
+            assertNotNull(
+                    again, "READ-filtered takeSerialized should retrieve the already-READ sample");
+            assertArrayEquals(
+                    firstRead.bytes(),
+                    again.bytes(),
                     "the READ-filtered take should return the exact bytes the earlier read saw");
             assertFalse(r.hasData(), "the READ-filtered take should have removed the sample");
 
@@ -154,7 +163,8 @@ class SerializedStatesTest {
             pollUntil(r::hasData);
             assertTrue(r.hasData(), "sample should have arrived, still NOT_READ");
 
-            SerializedSample none = r.takeSerialized(SampleState.READ, ViewState.ANY, InstanceState.ANY);
+            SerializedSample none =
+                    r.takeSerialized(SampleState.READ, ViewState.ANY, InstanceState.ANY);
             assertNull(none, "no READ sample is present yet -- mask matches nothing");
             assertTrue(r.hasData(), "the unmatched NOT_READ sample should remain in the cache");
 

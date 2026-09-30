@@ -3,24 +3,19 @@ package kr.co.intellectus.int2dds.core;
 import java.util.Arrays;
 
 /**
- * A DDS instance handle: a 16-byte, core-assigned key identifying one
- * instance of a keyed topic.
+ * A DDS instance handle: a 16-byte, core-assigned key identifying one instance of a keyed topic.
  *
- * <p>A value type: two handles are equal exactly when their 16 bytes are
- * equal, regardless of identity. {@code bytes} is copied on the way in and
- * out, the same defensive-copy convention {@link
- * kr.co.intellectus.int2dds.qos.UserData} uses for its own byte array, so a
- * later mutation of the caller's array cannot change a handle already
- * constructed, and a caller mutating a returned array cannot change this
- * instance.
+ * <p>A value type: two handles are equal exactly when their 16 bytes are equal, regardless of
+ * identity. {@code bytes} is copied on the way in and out, the same defensive-copy convention
+ * {@link kr.co.intellectus.int2dds.qos.UserData} uses for its own byte array, so a later mutation
+ * of the caller's array cannot change a handle already constructed, and a caller mutating a
+ * returned array cannot change this instance.
  *
- * <p>Not used by the write path in this branch — {@link DataWriter#write}
- * always passes a null key, since keys for keyed topics are derived by the
- * core from field descriptors registered at topic creation, which this
- * branch does not do. It is part of the C# reference binding's Core surface
- * ({@code csharp/src/Int2Dds/Core/InstanceHandle.cs}) and the read branch
- * needs it, so it is added here alongside the rest of Core rather than
- * deferred to that later task.
+ * <p>Not used by the write path in this branch — {@link DataWriter#write} always passes a null key,
+ * since keys for keyed topics are derived by the core from field descriptors registered at topic
+ * creation, which this branch does not do. It is part of the C# reference binding's Core surface
+ * ({@code csharp/src/Int2Dds/Core/InstanceHandle.cs}) and the read branch needs it, so it is added
+ * here alongside the rest of Core rather than deferred to that later task.
  */
 public final class InstanceHandle {
 
@@ -29,8 +24,8 @@ public final class InstanceHandle {
     private final byte[] bytes;
 
     /**
-     * @param bytes exactly 16 bytes; copied, so later mutation of the
-     *     caller's array does not affect this instance.
+     * @param bytes exactly 16 bytes; copied, so later mutation of the caller's array does not
+     *     affect this instance.
      * @throws IllegalArgumentException if {@code bytes.length != 16}
      */
     public InstanceHandle(byte[] bytes) {

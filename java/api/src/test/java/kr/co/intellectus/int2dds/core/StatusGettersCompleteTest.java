@@ -15,22 +15,17 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the last 3 status getters completing the pull-based status
- * surface: {@code Topic#getInconsistentTopicStatus},
- * {@code DataReader#getRequestedIncompatibleTypeStatus} and
- * {@code DataWriter#getOfferedIncompatibleTypeStatus}. Same two-participant
- * matching pattern as {@code MatchedStatusTest} and {@code
- * RemainingStatusGettersTest}: matching does not loop back within a single
- * participant, so the writer and the reader each live on their own
- * participant.
+ * Exercises the last 3 status getters completing the pull-based status surface: {@code
+ * Topic#getInconsistentTopicStatus}, {@code DataReader#getRequestedIncompatibleTypeStatus} and
+ * {@code DataWriter#getOfferedIncompatibleTypeStatus}. Same two-participant matching pattern as
+ * {@code MatchedStatusTest} and {@code RemainingStatusGettersTest}: matching does not loop back
+ * within a single participant, so the writer and the reader each live on their own participant.
  *
- * <p>None of these 3 statuses fire under normal healthy pub/sub -- an
- * inconsistent topic or an incompatible type requires a type or topic
- * mismatch this test does not simulate. So this test only proves each
- * getter marshals a real, non-garbage 8-byte {@code
- * {i32 total_count; i32 total_count_change;}} struct off the native side --
- * zero counts, no crash. A wrong struct size or field offset would either
- * crash or surface non-zero noise here, so this is a real (if narrowly
+ * <p>None of these 3 statuses fire under normal healthy pub/sub -- an inconsistent topic or an
+ * incompatible type requires a type or topic mismatch this test does not simulate. So this test
+ * only proves each getter marshals a real, non-garbage 8-byte {@code {i32 total_count; i32
+ * total_count_change;}} struct off the native side -- zero counts, no crash. A wrong struct size or
+ * field offset would either crash or surface non-zero noise here, so this is a real (if narrowly
  * scoped) check on the marshaling, not a full event simulation.
  */
 class StatusGettersCompleteTest {
@@ -44,15 +39,17 @@ class StatusGettersCompleteTest {
             throws InterruptedException {
         try (DomainParticipant writerParticipant = new DomainParticipant(testDomain());
                 DomainParticipant readerParticipant = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> writerTopic = writerParticipant.createTopic(
-                    "StatusGettersCompleteTopic", new ConformanceRecord());
+            Topic<ConformanceRecord> writerTopic =
+                    writerParticipant.createTopic(
+                            "StatusGettersCompleteTopic", new ConformanceRecord());
             Publisher pub = writerParticipant.createPublisher();
             DataWriterQos writerQos = new DataWriterQos();
             writerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
             DataWriter<ConformanceRecord> w = pub.createDataWriter(writerTopic, writerQos);
 
-            Topic<ConformanceRecord> readerTopic = readerParticipant.createTopic(
-                    "StatusGettersCompleteTopic", new ConformanceRecord());
+            Topic<ConformanceRecord> readerTopic =
+                    readerParticipant.createTopic(
+                            "StatusGettersCompleteTopic", new ConformanceRecord());
             Subscriber sub = readerParticipant.createSubscriber();
             DataReaderQos readerQos = new DataReaderQos();
             readerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));

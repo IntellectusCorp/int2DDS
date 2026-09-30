@@ -1,14 +1,15 @@
 package kr.co.intellectus.int2dds.exceptions;
 
-/** Base exception for DDS operations. Unchecked: DDS return codes accompany
- *  nearly every call, and a checked type would put {@code throws} on the whole
- *  public API. */
+/**
+ * Base exception for DDS operations. Unchecked: DDS return codes accompany nearly every call, and a
+ * checked type would put {@code throws} on the whole public API.
+ */
 public class DdsException extends RuntimeException {
     private static final long serialVersionUID = 1L;
 
     /**
-     * The {@code Int2DdsRet} values, transcribed from {@code ffi/src/error.rs} —
-     * the single source of truth for this mapping.
+     * The {@code Int2DdsRet} values, transcribed from {@code ffi/src/error.rs} — the single source
+     * of truth for this mapping.
      */
     public static final int RET_OK = 0;
 

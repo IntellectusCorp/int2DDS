@@ -3,35 +3,32 @@ package kr.co.intellectus.int2dds.core;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import kr.co.intellectus.int2dds.exceptions.DdsBufferTooSmallException;
-import kr.co.intellectus.int2dds.exceptions.DdsException;
-import kr.co.intellectus.int2dds.exceptions.DdsNullPointerException;
-import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import kr.co.intellectus.int2dds.exceptions.DdsBufferTooSmallException;
+import kr.co.intellectus.int2dds.exceptions.DdsException;
+import kr.co.intellectus.int2dds.exceptions.DdsNullPointerException;
+import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises {@link NativeEntity#close()}'s child cascade directly, with fake
- * in-process handles and deleters — no real native calls, no network.
+ * Exercises {@link NativeEntity#close()}'s child cascade directly, with fake in-process handles and
+ * deleters — no real native calls, no network.
  *
- * <p>{@code DomainParticipant}, this branch's only public {@code
- * NativeEntity} subclass, is always a root and never has children, so
- * nothing in {@code DomainParticipantTest} touches this logic at all; Topic,
- * Publisher and DataWriter (Tasks 5-7) will be the first real exercise of
- * it. This file is what actually proves the cascade correct before that,
- * rather than leaving it argued only in {@link NativeEntity}'s own Javadoc.
+ * <p>{@code DomainParticipant}, this branch's only public {@code NativeEntity} subclass, is always
+ * a root and never has children, so nothing in {@code DomainParticipantTest} touches this logic at
+ * all; Topic, Publisher and DataWriter (Tasks 5-7) will be the first real exercise of it. This file
+ * is what actually proves the cascade correct before that, rather than leaving it argued only in
+ * {@link NativeEntity}'s own Javadoc.
  *
- * <p>Every test cleans up every entity it creates to an actual, successful
- * close before returning — a fake entity is registered with the real,
- * shared {@link NativeCleaner} just like any other (that registration is
- * unconditional, in {@code NativeEntity}'s constructor), so one left
- * abandoned in a permanently-failing state would be retried by the reaper
- * forever in the background, inflating {@code failedCount()}/{@code
- * deferredCount()} for every later test in the module — the same hygiene
- * {@code NativeCleanerTest} already applies to its own fake resources.
+ * <p>Every test cleans up every entity it creates to an actual, successful close before returning —
+ * a fake entity is registered with the real, shared {@link NativeCleaner} just like any other (that
+ * registration is unconditional, in {@code NativeEntity}'s constructor), so one left abandoned in a
+ * permanently-failing state would be retried by the reaper forever in the background, inflating
+ * {@code failedCount()}/{@code deferredCount()} for every later test in the module — the same
+ * hygiene {@code NativeCleanerTest} already applies to its own fake resources.
  */
 class NativeEntityTest {
 
@@ -100,18 +97,24 @@ class NativeEntityTest {
         AtomicBoolean publisherClosed = new AtomicBoolean(false);
         List<String> order = new ArrayList<String>();
         FakeEntity parent = new FakeEntity(null, 0x700L, recording(order, "parent"));
-        new FakeEntity(parent, 0x701L, h -> {
-            publisherClosed.set(true);
-            order.add("publisher");
-            return 0;
-        });
-        new FakeEntity(parent, 0x702L, h -> {
-            if (!publisherClosed.get()) {
-                return DdsException.RET_PRECONDITION_NOT_MET;
-            }
-            order.add("topic");
-            return 0;
-        });
+        new FakeEntity(
+                parent,
+                0x701L,
+                h -> {
+                    publisherClosed.set(true);
+                    order.add("publisher");
+                    return 0;
+                });
+        new FakeEntity(
+                parent,
+                0x702L,
+                h -> {
+                    if (!publisherClosed.get()) {
+                        return DdsException.RET_PRECONDITION_NOT_MET;
+                    }
+                    order.add("topic");
+                    return 0;
+                });
 
         parent.close();
 
@@ -124,13 +127,16 @@ class NativeEntityTest {
         AtomicBoolean childBShouldFail = new AtomicBoolean(true);
         FakeEntity parent = new FakeEntity(null, 0x300L, recording(attempted, "parent"));
         new FakeEntity(parent, 0x301L, recording(attempted, "childA"));
-        new FakeEntity(parent, 0x302L, h -> {
-            attempted.add("childB");
-            if (childBShouldFail.get()) {
-                throw new IllegalStateException("boom");
-            }
-            return 0;
-        });
+        new FakeEntity(
+                parent,
+                0x302L,
+                h -> {
+                    attempted.add("childB");
+                    if (childBShouldFail.get()) {
+                        throw new IllegalStateException("boom");
+                    }
+                    return 0;
+                });
         new FakeEntity(parent, 0x303L, recording(attempted, "childC"));
 
         assertThrows(RuntimeException.class, parent::close);
@@ -152,7 +158,9 @@ class NativeEntityTest {
         childBShouldFail.set(false);
         attempted.clear();
         parent.close();
-        assertEquals(Arrays.asList("childB", "parent"), attempted,
+        assertEquals(
+                Arrays.asList("childB", "parent"),
+                attempted,
                 "only the still-registered failed child needs a retry; "
                         + "the parent follows once it's the only thing left");
     }
@@ -172,15 +180,16 @@ class NativeEntityTest {
         AtomicBoolean aShouldFail = new AtomicBoolean(true);
         AtomicBoolean bShouldFail = new AtomicBoolean(true);
         FakeEntity parent = new FakeEntity(null, 0x400L, h -> 0);
-        new FakeEntity(parent, 0x401L,
-                h -> aShouldFail.get() ? DdsException.RET_NULL_POINTER : 0);
-        new FakeEntity(parent, 0x402L,
-                h -> bShouldFail.get() ? DdsException.RET_BUFFER_TOO_SMALL : 0);
+        new FakeEntity(parent, 0x401L, h -> aShouldFail.get() ? DdsException.RET_NULL_POINTER : 0);
+        new FakeEntity(
+                parent, 0x402L, h -> bShouldFail.get() ? DdsException.RET_BUFFER_TOO_SMALL : 0);
 
         // Reverse order means the child added second (B) is attempted, and
         // fails, first.
         RuntimeException thrown = assertThrows(RuntimeException.class, parent::close);
-        assertEquals(DdsBufferTooSmallException.class, thrown.getClass(),
+        assertEquals(
+                DdsBufferTooSmallException.class,
+                thrown.getClass(),
                 "the first failure encountered is the one thrown");
         assertEquals(1, thrown.getSuppressed().length);
         assertEquals(DdsNullPointerException.class, thrown.getSuppressed()[0].getClass());
@@ -199,23 +208,35 @@ class NativeEntityTest {
         List<String> childAttempts = new ArrayList<String>();
 
         FakeEntity parent = new FakeEntity(null, 0x500L, recording(parentAttempts, "parent"));
-        new FakeEntity(parent, 0x501L, h -> {
-            childAttempts.add("child");
-            if (childShouldFail.get()) {
-                throw new IllegalStateException("still blocked");
-            }
-            return 0;
-        });
+        new FakeEntity(
+                parent,
+                0x501L,
+                h -> {
+                    childAttempts.add("child");
+                    if (childShouldFail.get()) {
+                        throw new IllegalStateException("still blocked");
+                    }
+                    return 0;
+                });
 
         assertThrows(RuntimeException.class, parent::close);
         assertEquals(1, childAttempts.size());
-        assertEquals(0, parentAttempts.size(), "a live child means the parent delete is never attempted");
+        assertEquals(
+                0,
+                parentAttempts.size(),
+                "a live child means the parent delete is never attempted");
 
         // Let the child succeed this time, and retry.
         childShouldFail.set(false);
         parent.close();
-        assertEquals(2, childAttempts.size(), "the failed child is still registered, so the retry reaches it");
-        assertEquals(1, parentAttempts.size(), "now that no child remains, the parent's own delete runs");
+        assertEquals(
+                2,
+                childAttempts.size(),
+                "the failed child is still registered, so the retry reaches it");
+        assertEquals(
+                1,
+                parentAttempts.size(),
+                "now that no child remains, the parent's own delete runs");
 
         // A further close() is a no-op: NativeHandle.close() is idempotent,
         // and no children remain registered to re-attempt.

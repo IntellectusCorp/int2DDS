@@ -14,10 +14,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Exercises {@code DataWriter#getPublicationMatchedStatus} and {@code
- * DataReader#getSubscriptionMatchedStatus}, added in this branch. Same
- * two-participant pattern {@code MatchedEndpointsTest} and {@code
- * ReliabilityLivelinessTest} use: matching does not loop back within a
- * single participant, so the writer and the reader each live on their own
+ * DataReader#getSubscriptionMatchedStatus}, added in this branch. Same two-participant pattern
+ * {@code MatchedEndpointsTest} and {@code ReliabilityLivelinessTest} use: matching does not loop
+ * back within a single participant, so the writer and the reader each live on their own
  * participant.
  */
 class MatchedStatusTest {
@@ -73,14 +72,16 @@ class MatchedStatusTest {
 
             PublicationMatchedStatus pubStatus = w.getPublicationMatchedStatus();
             assertTrue(pubStatus.totalCount() >= 1, "totalCount should count the matched reader");
-            assertTrue(pubStatus.currentCount() >= 1, "currentCount should count the matched reader");
+            assertTrue(
+                    pubStatus.currentCount() >= 1, "currentCount should count the matched reader");
             byte[] lastSubscriptionHandle = pubStatus.lastSubscriptionHandle();
             assertTrue(lastSubscriptionHandle.length == 16, "handle must be 16 bytes");
             assertFalse(isAllZero(lastSubscriptionHandle), "handle should not be all-zero");
 
             SubscriptionMatchedStatus subStatus = r.getSubscriptionMatchedStatus();
             assertTrue(subStatus.totalCount() >= 1, "totalCount should count the matched writer");
-            assertTrue(subStatus.currentCount() >= 1, "currentCount should count the matched writer");
+            assertTrue(
+                    subStatus.currentCount() >= 1, "currentCount should count the matched writer");
             byte[] lastPublicationHandle = subStatus.lastPublicationHandle();
             assertTrue(lastPublicationHandle.length == 16, "handle must be 16 bytes");
             assertFalse(isAllZero(lastPublicationHandle), "handle should not be all-zero");

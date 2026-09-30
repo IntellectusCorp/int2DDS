@@ -6,55 +6,56 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import kr.co.intellectus.int2dds.exceptions.DdsException;
-import kr.co.intellectus.int2dds.qos.DataWriterQos;
-import kr.co.intellectus.int2dds.qos.HistoryKind;
-import kr.co.intellectus.int2dds.qos.ReliabilityKind;
-import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
+import kr.co.intellectus.int2dds.exceptions.DdsException;
+import kr.co.intellectus.int2dds.qos.DataWriterQos;
+import kr.co.intellectus.int2dds.qos.HistoryKind;
+import kr.co.intellectus.int2dds.qos.ReliabilityKind;
+import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
  * Exercises the whole QoS-profile creation family end to end: {@link
- * DomainParticipantFactory#loadProfiles} loads a JSON profile file into the
- * process-wide factory singleton, then a participant, topic, publisher,
- * subscriber, datawriter and datareader are all built from the same named
- * profile -- {@code "JavaTestLib_ProfileEntities::TreeProfile"} -- and the
- * resulting tree is proven to actually communicate, not merely to have been
- * constructed without an exception.
+ * DomainParticipantFactory#loadProfiles} loads a JSON profile file into the process-wide factory
+ * singleton, then a participant, topic, publisher, subscriber, datawriter and datareader are all
+ * built from the same named profile -- {@code "JavaTestLib_ProfileEntities::TreeProfile"} -- and
+ * the resulting tree is proven to actually communicate, not merely to have been constructed without
+ * an exception.
  *
- * <p>The library name is unique to this test to avoid colliding with any
- * other test's profiles in the same factory singleton (see {@link
- * QosProfileTest} for the sibling test that covers the writer/reader-only
- * profile paths this one builds on).
+ * <p>The library name is unique to this test to avoid colliding with any other test's profiles in
+ * the same factory singleton (see {@link QosProfileTest} for the sibling test that covers the
+ * writer/reader-only profile paths this one builds on).
  */
 class ProfileCreateEntitiesTest {
 
     private static final String LIBRARY = "JavaTestLib_ProfileEntities";
     private static final String PROFILE = LIBRARY + "::TreeProfile";
 
-    private static final String PROFILE_JSON = "{\n"
-            + "  \"name\": \"" + LIBRARY + "\",\n"
-            + "  \"qos_profiles\": [{\n"
-            + "    \"name\": \"TreeProfile\",\n"
-            + "    \"domain_participant_qos\": {},\n"
-            + "    \"publisher_qos\": {},\n"
-            + "    \"subscriber_qos\": {},\n"
-            + "    \"topic_qos\": { \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" } },\n"
-            + "    \"datawriter_qos\": {\n"
-            + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
-            + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
-            + "    },\n"
-            + "    \"datareader_qos\": {\n"
-            + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
-            + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
-            + "    }\n"
-            + "  }]\n"
-            + "}\n";
+    private static final String PROFILE_JSON =
+            "{\n"
+                    + "  \"name\": \""
+                    + LIBRARY
+                    + "\",\n"
+                    + "  \"qos_profiles\": [{\n"
+                    + "    \"name\": \"TreeProfile\",\n"
+                    + "    \"domain_participant_qos\": {},\n"
+                    + "    \"publisher_qos\": {},\n"
+                    + "    \"subscriber_qos\": {},\n"
+                    + "    \"topic_qos\": { \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" } },\n"
+                    + "    \"datawriter_qos\": {\n"
+                    + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
+                    + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
+                    + "    },\n"
+                    + "    \"datareader_qos\": {\n"
+                    + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
+                    + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
+                    + "    }\n"
+                    + "  }]\n"
+                    + "}\n";
 
     // domain_participant_qos/publisher_qos/subscriber_qos are present here as
     // empty objects only because the core's profile resolver requires the
@@ -75,8 +76,11 @@ class ProfileCreateEntitiesTest {
 
     /** Takes one sample if available, polling until {@code deadlineNanos}. */
     private static Sample<ConformanceRecord> takeWithin(
-            DataReader<ConformanceRecord> reader, DataWriter<ConformanceRecord> writer,
-            ConformanceRecord sample, long deadlineNanos) throws InterruptedException {
+            DataReader<ConformanceRecord> reader,
+            DataWriter<ConformanceRecord> writer,
+            ConformanceRecord sample,
+            long deadlineNanos)
+            throws InterruptedException {
         Sample<ConformanceRecord> got = null;
         while (System.nanoTime() < deadlineNanos && got == null) {
             writer.write(sample);
@@ -96,12 +100,14 @@ class ProfileCreateEntitiesTest {
 
         try (DomainParticipant p = new DomainParticipant(testDomain(), PROFILE)) {
             Topic<ConformanceRecord> topic =
-                    p.createTopic("profile_create_entities_topic", new ConformanceRecord(), PROFILE);
+                    p.createTopic(
+                            "profile_create_entities_topic", new ConformanceRecord(), PROFILE);
             Publisher pub = p.createPublisher(PROFILE);
             Subscriber sub = p.createSubscriber(PROFILE);
 
             DataWriter<ConformanceRecord> w = pub.createDataWriter(topic, PROFILE);
-            DataReader<ConformanceRecord> r = sub.createDataReader(topic, ConformanceRecord::new, PROFILE);
+            DataReader<ConformanceRecord> r =
+                    sub.createDataReader(topic, ConformanceRecord::new, PROFILE);
 
             // Writer QoS is readable off the native side; participant/pub/sub/
             // topic QoS have no getters in this core, so the profile's effect
@@ -118,7 +124,8 @@ class ProfileCreateEntitiesTest {
 
             Sample<ConformanceRecord> got =
                     takeWithin(r, w, sent, System.nanoTime() + 10_000_000_000L);
-            assertNotNull(got, "no sample within 10s -- the profile-created tree did not communicate");
+            assertNotNull(
+                    got, "no sample within 10s -- the profile-created tree did not communicate");
             assertTrue(got.info().validData(), "sample should carry valid data");
             assertEquals(sent.id, got.data().id);
             assertEquals(sent.value, got.data().value);
@@ -132,7 +139,8 @@ class ProfileCreateEntitiesTest {
         DomainParticipantFactory.getInstance()
                 .loadProfiles(Collections.singletonList(profilePath.toString()));
 
-        assertThrows(DdsException.class,
+        assertThrows(
+                DdsException.class,
                 () -> new DomainParticipant(testDomain(), LIBRARY + "::NoSuchProfile"));
     }
 
@@ -143,8 +151,7 @@ class ProfileCreateEntitiesTest {
                 .loadProfiles(Collections.singletonList(profilePath.toString()));
 
         try (DomainParticipant p = new DomainParticipant(testDomain(), PROFILE)) {
-            assertThrows(DdsException.class,
-                    () -> p.createPublisher(LIBRARY + "::NoSuchProfile"));
+            assertThrows(DdsException.class, () -> p.createPublisher(LIBRARY + "::NoSuchProfile"));
         }
     }
 }

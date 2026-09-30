@@ -3,8 +3,8 @@ package kr.co.intellectus.int2dds.status;
 /**
  * Immutable snapshot of a DataReader's SAMPLE_LOST status.
  *
- * <p>Constructed from the native trampoline via the {@code (II)V}
- * constructor; the field order matches the core's {@code Int2DdsSampleLostStatus}.
+ * <p>Constructed from the native trampoline via the {@code (II)V} constructor; the field order
+ * matches the core's {@code Int2DdsSampleLostStatus}.
  */
 public final class SampleLostStatus {
 

@@ -10,14 +10,12 @@ import kr.co.intellectus.int2dds.core.Subscriber;
 import org.junit.jupiter.api.Test;
 
 /**
- * End-to-end round trip through the Java xtypes dynamic write/read path:
- * loads an XML-defined type on two participants, publishes a {@link
- * DynamicData} sample from one and takes it back on the other, and verifies
- * every field survived. The Java mirror of {@code ffi/tests/xml_dynamic.rs}.
+ * End-to-end round trip through the Java xtypes dynamic write/read path: loads an XML-defined type
+ * on two participants, publishes a {@link DynamicData} sample from one and takes it back on the
+ * other, and verifies every field survived. The Java mirror of {@code ffi/tests/xml_dynamic.rs}.
  *
- * <p>Two participants, the same pattern {@code MatchedEndpointsTest} and
- * {@code DiscoveryTest} settled on: matching does not appear to loop back
- * within a single participant.
+ * <p>Two participants, the same pattern {@code MatchedEndpointsTest} and {@code DiscoveryTest}
+ * settled on: matching does not appear to loop back within a single participant.
  */
 class DynamicPubSubTest {
 
@@ -27,15 +25,16 @@ class DynamicPubSubTest {
         return Integer.parseInt(System.getProperty("int2dds.test.domain", "137"));
     }
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Telemetry\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"temperature\" type=\"float32\"/>\n"
-            + "  <member name=\"active\" type=\"boolean\"/>\n"
-            + "  <member name=\"label\" type=\"string\"/>\n"
-            + "  <member name=\"count\" type=\"int64\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Telemetry\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"temperature\" type=\"float32\"/>\n"
+                    + "  <member name=\"active\" type=\"boolean\"/>\n"
+                    + "  <member name=\"label\" type=\"string\"/>\n"
+                    + "  <member name=\"count\" type=\"int64\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void xmlDynamicPubSubRoundTrip() throws InterruptedException {

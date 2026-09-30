@@ -2,6 +2,8 @@ package kr.co.intellectus.int2dds.discovery;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Collections;
+import java.util.List;
 import kr.co.intellectus.int2dds.core.DataReader;
 import kr.co.intellectus.int2dds.core.DataWriter;
 import kr.co.intellectus.int2dds.core.DomainParticipant;
@@ -9,8 +11,6 @@ import kr.co.intellectus.int2dds.core.Publisher;
 import kr.co.intellectus.int2dds.core.Subscriber;
 import kr.co.intellectus.int2dds.core.Topic;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.util.Collections;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class DiscoveryTest {
@@ -22,17 +22,15 @@ class DiscoveryTest {
     }
 
     /**
-     * End-to-end proof that {@code takeDiscoveredPublications} actually sees a
-     * real writer through SPDP/SEDP, not just an empty list. Discovery is
-     * asynchronous, so this polls on a bounded budget rather than asserting
-     * immediately after the writer is created.
+     * End-to-end proof that {@code takeDiscoveredPublications} actually sees a real writer through
+     * SPDP/SEDP, not just an empty list. Discovery is asynchronous, so this polls on a bounded
+     * budget rather than asserting immediately after the writer is created.
      *
-     * <p>Uses two participants in the same domain: a first attempt reading
-     * back on the writer's own participant never observed its own publication
-     * within the bounded wait (this core's builtin publication reader does
-     * not appear to loop local announcements back to the announcing
-     * participant itself), so the writer lives on one participant and the
-     * discovering side is a second, separate participant.
+     * <p>Uses two participants in the same domain: a first attempt reading back on the writer's own
+     * participant never observed its own publication within the bounded wait (this core's builtin
+     * publication reader does not appear to loop local announcements back to the announcing
+     * participant itself), so the writer lives on one participant and the discovering side is a
+     * second, separate participant.
      */
     @Test
     void takeDiscoveredPublicationsSeesAWriter() throws InterruptedException {
@@ -59,11 +57,9 @@ class DiscoveryTest {
     }
 
     /**
-     * Mirrors {@link #takeDiscoveredPublicationsSeesAWriter()} for the
-     * subscription side: a reader lives on one participant, and a second,
-     * separate participant in the same domain polls
-     * {@code takeDiscoveredSubscriptions} for its {@code
-     * SubscriptionBuiltinTopicData}.
+     * Mirrors {@link #takeDiscoveredPublicationsSeesAWriter()} for the subscription side: a reader
+     * lives on one participant, and a second, separate participant in the same domain polls {@code
+     * takeDiscoveredSubscriptions} for its {@code SubscriptionBuiltinTopicData}.
      */
     @Test
     void takeDiscoveredSubscriptionsSeesAReader() throws InterruptedException {
@@ -90,14 +86,12 @@ class DiscoveryTest {
     }
 
     /**
-     * Proof that {@code getDiscoveredParticipants} works with two live
-     * participants -- i.e. capacity &gt;= 2 on the underlying {@code
-     * int2dds_participant_get_discovered_participants} call. Before the JNI
-     * codegen fix, the generated shim allocated a fixed 16-byte stack buffer
-     * regardless of the requested capacity, so a call that actually needed to
-     * copy back more than one 16-byte handle would have overflowed that stack
-     * buffer. Two participants in the same domain is the minimal case that
-     * exercises capacity &gt;= 2 without crashing.
+     * Proof that {@code getDiscoveredParticipants} works with two live participants -- i.e.
+     * capacity &gt;= 2 on the underlying {@code int2dds_participant_get_discovered_participants}
+     * call. Before the JNI codegen fix, the generated shim allocated a fixed 16-byte stack buffer
+     * regardless of the requested capacity, so a call that actually needed to copy back more than
+     * one 16-byte handle would have overflowed that stack buffer. Two participants in the same
+     * domain is the minimal case that exercises capacity &gt;= 2 without crashing.
      */
     @Test
     void getDiscoveredParticipantsSeesAnotherParticipant() throws InterruptedException {
@@ -112,7 +106,8 @@ class DiscoveryTest {
                 }
                 Thread.sleep(50);
             }
-            assertTrue(!found.isEmpty(), "should discover at least one remote participant within 5s");
+            assertTrue(
+                    !found.isEmpty(), "should discover at least one remote participant within 5s");
         }
     }
 }

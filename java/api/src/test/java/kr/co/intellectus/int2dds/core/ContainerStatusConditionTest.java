@@ -9,11 +9,10 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Covers {@code getStatusCondition()} on the four container entity types
- * (Publisher, Subscriber, DomainParticipant, Topic) that mirror {@link
- * DataReader#getStatusCondition} and {@link DataWriter#getStatusCondition}.
- * Each case attaches the returned condition to a real {@link WaitSet} and
- * detaches it again -- a bad handle would throw or segfault on attach.
+ * Covers {@code getStatusCondition()} on the four container entity types (Publisher, Subscriber,
+ * DomainParticipant, Topic) that mirror {@link DataReader#getStatusCondition} and {@link
+ * DataWriter#getStatusCondition}. Each case attaches the returned condition to a real {@link
+ * WaitSet} and detaches it again -- a bad handle would throw or segfault on attach.
  */
 class ContainerStatusConditionTest {
 
@@ -21,14 +20,16 @@ class ContainerStatusConditionTest {
     void publisherStatusConditionAttachesToWaitSet() {
         try (DomainParticipant p = new DomainParticipant(DomainParticipantTest.testDomain())) {
             Publisher pub = p.createPublisher();
-            assertDoesNotThrow(() -> {
-                try (WaitSet ws = new WaitSet(); StatusCondition sc = pub.getStatusCondition()) {
-                    assertNotNull(sc);
-                    ws.attach(sc);
-                    ws.await(100L);
-                    ws.detach(sc);
-                }
-            });
+            assertDoesNotThrow(
+                    () -> {
+                        try (WaitSet ws = new WaitSet();
+                                StatusCondition sc = pub.getStatusCondition()) {
+                            assertNotNull(sc);
+                            ws.attach(sc);
+                            ws.await(100L);
+                            ws.detach(sc);
+                        }
+                    });
         }
     }
 
@@ -36,28 +37,32 @@ class ContainerStatusConditionTest {
     void subscriberStatusConditionAttachesToWaitSet() {
         try (DomainParticipant p = new DomainParticipant(DomainParticipantTest.testDomain())) {
             Subscriber sub = p.createSubscriber();
-            assertDoesNotThrow(() -> {
-                try (WaitSet ws = new WaitSet(); StatusCondition sc = sub.getStatusCondition()) {
-                    assertNotNull(sc);
-                    ws.attach(sc);
-                    ws.await(100L);
-                    ws.detach(sc);
-                }
-            });
+            assertDoesNotThrow(
+                    () -> {
+                        try (WaitSet ws = new WaitSet();
+                                StatusCondition sc = sub.getStatusCondition()) {
+                            assertNotNull(sc);
+                            ws.attach(sc);
+                            ws.await(100L);
+                            ws.detach(sc);
+                        }
+                    });
         }
     }
 
     @Test
     void participantStatusConditionAttachesToWaitSet() {
         try (DomainParticipant p = new DomainParticipant(DomainParticipantTest.testDomain())) {
-            assertDoesNotThrow(() -> {
-                try (WaitSet ws = new WaitSet(); StatusCondition sc = p.getStatusCondition()) {
-                    assertNotNull(sc);
-                    ws.attach(sc);
-                    ws.await(100L);
-                    ws.detach(sc);
-                }
-            });
+            assertDoesNotThrow(
+                    () -> {
+                        try (WaitSet ws = new WaitSet();
+                                StatusCondition sc = p.getStatusCondition()) {
+                            assertNotNull(sc);
+                            ws.attach(sc);
+                            ws.await(100L);
+                            ws.detach(sc);
+                        }
+                    });
         }
     }
 
@@ -66,14 +71,16 @@ class ContainerStatusConditionTest {
         try (DomainParticipant p = new DomainParticipant(DomainParticipantTest.testDomain())) {
             Topic<ConformanceRecord> topic =
                     p.createTopic("ContainerStatusConditionTopic", new ConformanceRecord());
-            assertDoesNotThrow(() -> {
-                try (WaitSet ws = new WaitSet(); StatusCondition sc = topic.getStatusCondition()) {
-                    assertNotNull(sc);
-                    ws.attach(sc);
-                    ws.await(100L);
-                    ws.detach(sc);
-                }
-            });
+            assertDoesNotThrow(
+                    () -> {
+                        try (WaitSet ws = new WaitSet();
+                                StatusCondition sc = topic.getStatusCondition()) {
+                            assertNotNull(sc);
+                            ws.attach(sc);
+                            ws.await(100L);
+                            ws.detach(sc);
+                        }
+                    });
         }
     }
 }

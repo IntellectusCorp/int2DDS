@@ -3,9 +3,9 @@ package kr.co.intellectus.int2dds.internal;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+import java.time.Duration;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.qos.*;
-import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 class QosRoundTripTest {
@@ -58,8 +58,7 @@ class QosRoundTripTest {
         assertEquals(Duration.ofSeconds(5), back.getDeadline().getPeriod());
         assertEquals(LivelinessKind.MANUAL_BY_PARTICIPANT, back.getLiveliness().getKind());
         assertEquals(Duration.ofSeconds(9), back.getLiveliness().getLeaseDuration());
-        assertEquals(
-                false, back.getWriterDataLifecycle().isAutodisposeUnregisteredInstances());
+        assertEquals(false, back.getWriterDataLifecycle().isAutodisposeUnregisteredInstances());
         assertEquals(4096, back.getDataFrag());
     }
 

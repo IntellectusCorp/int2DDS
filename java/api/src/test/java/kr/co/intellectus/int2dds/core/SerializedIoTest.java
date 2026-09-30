@@ -11,20 +11,19 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the type-agnostic serialized I/O pair {@link
- * DataWriter#writeSerialized} / {@link DataReader#takeSerialized} / {@link
- * DataReader#readSerialized} -- the primitives a DDS gateway/bridge needs to
- * forward samples without knowing the compiled type.
+ * Exercises the type-agnostic serialized I/O pair {@link DataWriter#writeSerialized} / {@link
+ * DataReader#takeSerialized} / {@link DataReader#readSerialized} -- the primitives a DDS
+ * gateway/bridge needs to forward samples without knowing the compiled type.
  */
 class SerializedIoTest {
 
     private static final long DATA_TIMEOUT_NANOS = 5_000_000_000L;
 
     /**
-     * Strongest test: proves both directions at once. {@code r1.takeSerialized()}
-     * off a normally-written sample must emit correct CDR, and {@code
-     * w2.writeSerialized} must accept those exact bytes and have them decode
-     * back through the ordinary typed path to an equal sample.
+     * Strongest test: proves both directions at once. {@code r1.takeSerialized()} off a
+     * normally-written sample must emit correct CDR, and {@code w2.writeSerialized} must accept
+     * those exact bytes and have them decode back through the ordinary typed path to an equal
+     * sample.
      */
     @Test
     void writeSerializedAndTakeSerializedRoundTripThroughTypedDecode() throws InterruptedException {

@@ -1,27 +1,24 @@
 package kr.co.intellectus.int2dds.core;
 
+import java.nio.charset.Charset;
+import java.util.Objects;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.types.IDdsType;
-import java.nio.charset.Charset;
-import java.util.Objects;
 
 /**
- * A SQL-92-like filtered view of a {@link Topic}: a reader created on this
- * (through {@link Subscriber#createDataReader(ContentFilteredTopic,
- * java.util.function.Supplier)}) only receives samples for which the filter
- * expression evaluates true.
+ * A SQL-92-like filtered view of a {@link Topic}: a reader created on this (through {@link
+ * Subscriber#createDataReader(ContentFilteredTopic, java.util.function.Supplier)}) only receives
+ * samples for which the filter expression evaluates true.
  *
- * <p>Created through {@link DomainParticipant#createContentFilteredTopic},
- * which registers this instance in the participant's weak child list -- the
- * same shape as {@link Topic}, whose own doc explains why that constructor is
- * package-private rather than public.
+ * <p>Created through {@link DomainParticipant#createContentFilteredTopic}, which registers this
+ * instance in the participant's weak child list -- the same shape as {@link Topic}, whose own doc
+ * explains why that constructor is package-private rather than public.
  *
- * <p>Holds its related {@link Topic} strongly, purely to keep it reachable:
- * the native ContentFilteredTopic references the related topic by handle, so
- * nothing here may let it become phantom-reachable (and be reaped) while this
- * still exists.
+ * <p>Holds its related {@link Topic} strongly, purely to keep it reachable: the native
+ * ContentFilteredTopic references the related topic by handle, so nothing here may let it become
+ * phantom-reachable (and be reaped) while this still exists.
  *
  * @param <T> the DDS data type carried by {@link #relatedTopic()}.
  */
@@ -32,12 +29,20 @@ public final class ContentFilteredTopic<T extends IDdsType> extends NativeEntity
     private final String name;
     private final Topic<T> relatedTopic;
 
-    ContentFilteredTopic(DomainParticipant participant, String name, Topic<T> relatedTopic,
-            String filterExpression, String[] params) {
-        super(Objects.requireNonNull(participant, "participant"),
-                create(participant, Objects.requireNonNull(name, "name"),
+    ContentFilteredTopic(
+            DomainParticipant participant,
+            String name,
+            Topic<T> relatedTopic,
+            String filterExpression,
+            String[] params) {
+        super(
+                Objects.requireNonNull(participant, "participant"),
+                create(
+                        participant,
+                        Objects.requireNonNull(name, "name"),
                         Objects.requireNonNull(relatedTopic, "relatedTopic"),
-                        Objects.requireNonNull(filterExpression, "filterExpression"), params),
+                        Objects.requireNonNull(filterExpression, "filterExpression"),
+                        params),
                 FfiAccess::deleteContentFilteredTopic);
         this.name = name;
         this.relatedTopic = relatedTopic;
@@ -57,8 +62,9 @@ public final class ContentFilteredTopic<T extends IDdsType> extends NativeEntity
     public void setFilterExpression(String expr, String... params) {
         Objects.requireNonNull(expr, "expr");
         byte[][] paramBytes = utf8All(params);
-        int rc = FfiAccess.contentFilteredTopicSetFilterExpression(
-                handle(), utf8(expr), paramBytes, paramBytes.length);
+        int rc =
+                FfiAccess.contentFilteredTopicSetFilterExpression(
+                        handle(), utf8(expr), paramBytes, paramBytes.length);
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
     }
@@ -66,8 +72,9 @@ public final class ContentFilteredTopic<T extends IDdsType> extends NativeEntity
     /** Replaces the filter's positional parameters, keeping its expression unchanged. */
     public void setExpressionParameters(String... params) {
         byte[][] paramBytes = utf8All(params);
-        int rc = FfiAccess.contentFilteredTopicSetExpressionParameters(
-                handle(), paramBytes, paramBytes.length);
+        int rc =
+                FfiAccess.contentFilteredTopicSetExpressionParameters(
+                        handle(), paramBytes, paramBytes.length);
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
     }
@@ -79,16 +86,27 @@ public final class ContentFilteredTopic<T extends IDdsType> extends NativeEntity
         ReturnCodes.check(rc);
     }
 
-    private static <T extends IDdsType> long create(DomainParticipant participant, String name,
-            Topic<T> relatedTopic, String filterExpression, String[] params) {
+    private static <T extends IDdsType> long create(
+            DomainParticipant participant,
+            String name,
+            Topic<T> relatedTopic,
+            String filterExpression,
+            String[] params) {
         byte[] nameBytes = utf8(name);
         byte[] filterBytes = utf8(filterExpression);
         byte[][] paramBytes = utf8All(params);
         long participantHandle = participant.handle();
         long relatedHandle = relatedTopic.handle();
         long[] handleOut = new long[1];
-        int rc = FfiAccess.createContentFilteredTopic(participantHandle, nameBytes, relatedHandle,
-                filterBytes, paramBytes, paramBytes.length, handleOut);
+        int rc =
+                FfiAccess.createContentFilteredTopic(
+                        participantHandle,
+                        nameBytes,
+                        relatedHandle,
+                        filterBytes,
+                        paramBytes,
+                        paramBytes.length,
+                        handleOut);
         // participantHandle/relatedHandle are bare longs read moments before the
         // native call that consumes them; keep participant and relatedTopic
         // reachable across it -- see NativeKeepAlive's own doc for the full

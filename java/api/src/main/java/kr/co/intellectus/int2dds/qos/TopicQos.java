@@ -5,8 +5,7 @@ import java.util.Objects;
 /**
  * Topic QoS.
  *
- * <p>Every field is nullable and defaults to null, meaning "leave it to the
- * core".
+ * <p>Every field is nullable and defaults to null, meaning "leave it to the core".
  */
 public class TopicQos {
 

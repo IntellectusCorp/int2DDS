@@ -14,13 +14,11 @@ import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import org.junit.jupiter.api.Test;
 
 /**
- * Same round trip as {@link DynamicPubSubTest}, but the dynamic writer and
- * reader are created with an explicit RELIABLE {@link DataWriterQos} /
- * {@link DataReaderQos} instead of the core default, proving {@link
- * Publisher#createDynamicDataWriter(DynamicTopic, DynamicTypeSupport,
- * DataWriterQos)} and {@link Subscriber#createDynamicDataReader(DynamicTopic,
- * DynamicTypeSupport, DataReaderQos)} actually apply the QoS on the native
- * side rather than silently ignoring it.
+ * Same round trip as {@link DynamicPubSubTest}, but the dynamic writer and reader are created with
+ * an explicit RELIABLE {@link DataWriterQos} / {@link DataReaderQos} instead of the core default,
+ * proving {@link Publisher#createDynamicDataWriter(DynamicTopic, DynamicTypeSupport,
+ * DataWriterQos)} and {@link Subscriber#createDynamicDataReader(DynamicTopic, DynamicTypeSupport,
+ * DataReaderQos)} actually apply the QoS on the native side rather than silently ignoring it.
  */
 class DynamicQosTest {
 
@@ -29,15 +27,16 @@ class DynamicQosTest {
         return Integer.parseInt(System.getProperty("int2dds.test.domain", "137"));
     }
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Telemetry\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"temperature\" type=\"float32\"/>\n"
-            + "  <member name=\"active\" type=\"boolean\"/>\n"
-            + "  <member name=\"label\" type=\"string\"/>\n"
-            + "  <member name=\"count\" type=\"int64\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Telemetry\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"temperature\" type=\"float32\"/>\n"
+                    + "  <member name=\"active\" type=\"boolean\"/>\n"
+                    + "  <member name=\"label\" type=\"string\"/>\n"
+                    + "  <member name=\"count\" type=\"int64\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void reliableDynamicPubSubRoundTrip() throws InterruptedException {
@@ -163,10 +162,9 @@ class DynamicQosTest {
     }
 
     /**
-     * {@link DynamicDataWriter#getQos} / {@link DynamicDataReader#getQos}
-     * read back the RELIABLE reliability the entities were created with,
-     * proving the dynamic-entity QoS story round-trips both ways (set at
-     * creation, read back after). No matching/pub-sub needed for this.
+     * {@link DynamicDataWriter#getQos} / {@link DynamicDataReader#getQos} read back the RELIABLE
+     * reliability the entities were created with, proving the dynamic-entity QoS story round-trips
+     * both ways (set at creation, read back after). No matching/pub-sub needed for this.
      */
     @Test
     void getQosReturnsReliabilityFromCreation() {
@@ -192,13 +190,15 @@ class DynamicQosTest {
             readerRegistry.loadString(XML);
             readerSupport = readerRegistry.getTypeSupport("Telemetry");
 
-            writerTopic = writerParticipant.createDynamicTopic("TelemetryQosGetTopic", writerSupport);
+            writerTopic =
+                    writerParticipant.createDynamicTopic("TelemetryQosGetTopic", writerSupport);
             publisher = writerParticipant.createPublisher();
             DataWriterQos writerQos = new DataWriterQos();
             writerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
             writer = publisher.createDynamicDataWriter(writerTopic, writerSupport, writerQos);
 
-            readerTopic = readerParticipant.createDynamicTopic("TelemetryQosGetTopic", readerSupport);
+            readerTopic =
+                    readerParticipant.createDynamicTopic("TelemetryQosGetTopic", readerSupport);
             subscriber = readerParticipant.createSubscriber();
             DataReaderQos readerQos = new DataReaderQos();
             readerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));

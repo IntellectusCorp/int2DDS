@@ -6,9 +6,8 @@ import java.util.Objects;
 /**
  * Latency budget QoS policy.
  *
- * <p>{@code duration} may be null. The C ABI setter takes a number and has no
- * way to express "unset", so a null becomes {@code 0} — the same fallback the
- * C# binding uses.
+ * <p>{@code duration} may be null. The C ABI setter takes a number and has no way to express
+ * "unset", so a null becomes {@code 0} — the same fallback the C# binding uses.
  */
 public class LatencyBudget {
 

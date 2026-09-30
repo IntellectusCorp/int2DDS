@@ -16,7 +16,8 @@ import static java.lang.foreign.ValueLayout.*;
  * are UTF-8 {@code byte[]}, never {@code String}.
  */
 public final class Ffi {
-    private Ffi() {}
+    private Ffi() {
+    }
 
     // NativeLoader.load() must run before LOOKUP is built below: it
     // System.loads libint2dds_java.so into this classloader, which is
@@ -31,17 +32,20 @@ public final class Ffi {
 
     private static MethodHandle dc(String name, FunctionDescriptor d) {
         return LINKER.downcallHandle(LOOKUP.find(name).orElseThrow(
-            () -> new UnsatisfiedLinkError("int2DDS C ABI symbol not found: " + name)), d);
+                () -> new UnsatisfiedLinkError("int2DDS C ABI symbol not found: " + name)), d);
     }
 
     /** Native base address of a direct ByteBuffer, or 0 if not direct. */
     static long directBufferAddress(java.nio.ByteBuffer buf) {
-        if (buf == null || !buf.isDirect()) return 0L;
-        // ofBuffer starts at the buffer's position; JNI's GetDirectBufferAddress does not.
+        if (buf == null || !buf.isDirect())
+            return 0L;
+        // ofBuffer starts at the buffer's position; JNI's GetDirectBufferAddress does
+        // not.
         return MemorySegment.ofBuffer(buf).address() - buf.position();
     }
 
-    private static final MethodHandle MH_int2dds_clear_last_error = dc("int2dds_clear_last_error", FunctionDescriptor.ofVoid());
+    private static final MethodHandle MH_int2dds_clear_last_error = dc("int2dds_clear_last_error",
+            FunctionDescriptor.ofVoid());
 
     static void int2dds_clear_last_error() {
         try {
@@ -51,7 +55,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_condition_delete = dc("int2dds_condition_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_condition_delete = dc("int2dds_condition_delete",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_condition_delete(long condition) {
         try {
@@ -61,7 +66,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_condition_get_trigger_value = dc("int2dds_condition_get_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_condition_get_trigger_value = dc("int2dds_condition_get_trigger_value",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_condition_get_trigger_value(long condition, long triggered_out) {
         try {
@@ -71,7 +77,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_condition_seq_delete = dc("int2dds_condition_seq_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_condition_seq_delete = dc("int2dds_condition_seq_delete",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_condition_seq_delete(long seq) {
         try {
@@ -81,7 +88,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_condition_seq_get = dc("int2dds_condition_seq_get", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_condition_seq_get = dc("int2dds_condition_seq_get",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_condition_seq_get(long seq, long index, long condition_out) {
         try {
@@ -91,7 +99,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_condition_seq_length = dc("int2dds_condition_seq_length", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_condition_seq_length = dc("int2dds_condition_seq_length",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_condition_seq_length(long seq, long count_out) {
         try {
@@ -101,7 +110,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_configured_participant_destroy = dc("int2dds_configured_participant_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_configured_participant_destroy = dc(
+            "int2dds_configured_participant_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_configured_participant_destroy(long configured) {
         try {
@@ -111,31 +121,40 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_configured_participant_get_datareader = dc("int2dds_configured_participant_get_datareader", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_configured_participant_get_datareader = dc(
+            "int2dds_configured_participant_get_datareader",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_configured_participant_get_datareader(long configured, byte[] name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
             return (int) MH_int2dds_configured_participant_get_datareader.invokeExact(configured, __ffi_seg_name, out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_configured_participant_get_datareader", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_configured_participant_get_datareader",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_configured_participant_get_datawriter = dc("int2dds_configured_participant_get_datawriter", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_configured_participant_get_datawriter = dc(
+            "int2dds_configured_participant_get_datawriter",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_configured_participant_get_datawriter(long configured, byte[] name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
             return (int) MH_int2dds_configured_participant_get_datawriter.invokeExact(configured, __ffi_seg_name, out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_configured_participant_get_datawriter", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_configured_participant_get_datawriter",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_contentfilteredtopic_set_enabled = dc("int2dds_contentfilteredtopic_set_enabled", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
+    private static final MethodHandle MH_int2dds_contentfilteredtopic_set_enabled = dc(
+            "int2dds_contentfilteredtopic_set_enabled", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
 
     static int int2dds_contentfilteredtopic_set_enabled(long cft, boolean enabled) {
         try {
@@ -145,9 +164,12 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_contentfilteredtopic_set_expression_parameters = dc("int2dds_contentfilteredtopic_set_expression_parameters", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_contentfilteredtopic_set_expression_parameters = dc(
+            "int2dds_contentfilteredtopic_set_expression_parameters",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
-    static int int2dds_contentfilteredtopic_set_expression_parameters(long cft, byte[][] expression_parameters, long expression_parameters_count) {
+    static int int2dds_contentfilteredtopic_set_expression_parameters(long cft, byte[][] expression_parameters,
+            long expression_parameters_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_expression_parameters;
             if (expression_parameters == null || expression_parameters.length == 0) {
@@ -160,24 +182,35 @@ public final class Ffi {
                     if (__ffi_elem_expression_parameters == null) {
                         __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(1);
                     } else {
-                        __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(__ffi_elem_expression_parameters.length + 1);
-                        MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters, JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
+                        __ffi_elemSeg_expression_parameters = __ffi_arena
+                                .allocate(__ffi_elem_expression_parameters.length + 1);
+                        MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters,
+                                JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
                     }
-                    __ffi_seg_expression_parameters.setAtIndex(ADDRESS, __ffi_i_expression_parameters, __ffi_elemSeg_expression_parameters);
+                    __ffi_seg_expression_parameters.setAtIndex(ADDRESS, __ffi_i_expression_parameters,
+                            __ffi_elemSeg_expression_parameters);
                 }
             }
-            return (int) MH_int2dds_contentfilteredtopic_set_expression_parameters.invokeExact(cft, __ffi_seg_expression_parameters, expression_parameters_count);
+            return (int) MH_int2dds_contentfilteredtopic_set_expression_parameters.invokeExact(cft,
+                    __ffi_seg_expression_parameters, expression_parameters_count);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_contentfilteredtopic_set_expression_parameters", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_contentfilteredtopic_set_expression_parameters",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_contentfilteredtopic_set_filter_expression = dc("int2dds_contentfilteredtopic_set_filter_expression", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_contentfilteredtopic_set_filter_expression = dc(
+            "int2dds_contentfilteredtopic_set_filter_expression",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 
-    static int int2dds_contentfilteredtopic_set_filter_expression(long cft, byte[] filter_expression, byte[][] expression_parameters, long expression_parameters_count) {
+    static int int2dds_contentfilteredtopic_set_filter_expression(long cft, byte[] filter_expression,
+            byte[][] expression_parameters, long expression_parameters_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_filter_expression = (filter_expression == null) ? MemorySegment.NULL : __ffi_arena.allocate(filter_expression.length + 1);
-            if (filter_expression != null) MemorySegment.copy(filter_expression, 0, __ffi_seg_filter_expression, JAVA_BYTE, 0, filter_expression.length);
+            MemorySegment __ffi_seg_filter_expression = (filter_expression == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(filter_expression.length + 1);
+            if (filter_expression != null)
+                MemorySegment.copy(filter_expression, 0, __ffi_seg_filter_expression, JAVA_BYTE, 0,
+                        filter_expression.length);
             MemorySegment __ffi_seg_expression_parameters;
             if (expression_parameters == null || expression_parameters.length == 0) {
                 __ffi_seg_expression_parameters = MemorySegment.NULL;
@@ -189,26 +222,38 @@ public final class Ffi {
                     if (__ffi_elem_expression_parameters == null) {
                         __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(1);
                     } else {
-                        __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(__ffi_elem_expression_parameters.length + 1);
-                        MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters, JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
+                        __ffi_elemSeg_expression_parameters = __ffi_arena
+                                .allocate(__ffi_elem_expression_parameters.length + 1);
+                        MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters,
+                                JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
                     }
-                    __ffi_seg_expression_parameters.setAtIndex(ADDRESS, __ffi_i_expression_parameters, __ffi_elemSeg_expression_parameters);
+                    __ffi_seg_expression_parameters.setAtIndex(ADDRESS, __ffi_i_expression_parameters,
+                            __ffi_elemSeg_expression_parameters);
                 }
             }
-            return (int) MH_int2dds_contentfilteredtopic_set_filter_expression.invokeExact(cft, __ffi_seg_filter_expression, __ffi_seg_expression_parameters, expression_parameters_count);
+            return (int) MH_int2dds_contentfilteredtopic_set_filter_expression.invokeExact(cft,
+                    __ffi_seg_filter_expression, __ffi_seg_expression_parameters, expression_parameters_count);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_contentfilteredtopic_set_filter_expression", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_contentfilteredtopic_set_filter_expression",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_contentfilteredtopic = dc("int2dds_create_contentfilteredtopic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_contentfilteredtopic = dc("int2dds_create_contentfilteredtopic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_create_contentfilteredtopic(long participant, byte[] topic_name, long related_topic, byte[] filter_expression, byte[][] expression_parameters, long expression_parameters_count, long cft_out) {
+    static int int2dds_create_contentfilteredtopic(long participant, byte[] topic_name, long related_topic,
+            byte[] filter_expression, byte[][] expression_parameters, long expression_parameters_count, long cft_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            MemorySegment __ffi_seg_filter_expression = (filter_expression == null) ? MemorySegment.NULL : __ffi_arena.allocate(filter_expression.length + 1);
-            if (filter_expression != null) MemorySegment.copy(filter_expression, 0, __ffi_seg_filter_expression, JAVA_BYTE, 0, filter_expression.length);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            MemorySegment __ffi_seg_filter_expression = (filter_expression == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(filter_expression.length + 1);
+            if (filter_expression != null)
+                MemorySegment.copy(filter_expression, 0, __ffi_seg_filter_expression, JAVA_BYTE, 0,
+                        filter_expression.length);
             MemorySegment __ffi_seg_expression_parameters;
             if (expression_parameters == null || expression_parameters.length == 0) {
                 __ffi_seg_expression_parameters = MemorySegment.NULL;
@@ -220,21 +265,28 @@ public final class Ffi {
                     if (__ffi_elem_expression_parameters == null) {
                         __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(1);
                     } else {
-                        __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(__ffi_elem_expression_parameters.length + 1);
-                        MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters, JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
+                        __ffi_elemSeg_expression_parameters = __ffi_arena
+                                .allocate(__ffi_elem_expression_parameters.length + 1);
+                        MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters,
+                                JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
                     }
-                    __ffi_seg_expression_parameters.setAtIndex(ADDRESS, __ffi_i_expression_parameters, __ffi_elemSeg_expression_parameters);
+                    __ffi_seg_expression_parameters.setAtIndex(ADDRESS, __ffi_i_expression_parameters,
+                            __ffi_elemSeg_expression_parameters);
                 }
             }
-            return (int) MH_int2dds_create_contentfilteredtopic.invokeExact(participant, __ffi_seg_topic_name, related_topic, __ffi_seg_filter_expression, __ffi_seg_expression_parameters, expression_parameters_count, cft_out);
+            return (int) MH_int2dds_create_contentfilteredtopic.invokeExact(participant, __ffi_seg_topic_name,
+                    related_topic, __ffi_seg_filter_expression, __ffi_seg_expression_parameters,
+                    expression_parameters_count, cft_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_contentfilteredtopic", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_datareader = dc("int2dds_create_datareader", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_datareader = dc("int2dds_create_datareader",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_create_datareader(long subscriber, long topic, long qos, long listener, int mask, long reader_out) {
+    static int int2dds_create_datareader(long subscriber, long topic, long qos, long listener, int mask,
+            long reader_out) {
         try {
             return (int) MH_int2dds_create_datareader.invokeExact(subscriber, topic, qos, listener, mask, reader_out);
         } catch (Throwable __ffi_thrown) {
@@ -242,9 +294,11 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_datareader_cft = dc("int2dds_create_datareader_cft", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_datareader_cft = dc("int2dds_create_datareader_cft",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_create_datareader_cft(long subscriber, long cft, long qos, long listener, int mask, long reader_out) {
+    static int int2dds_create_datareader_cft(long subscriber, long cft, long qos, long listener, int mask,
+            long reader_out) {
         try {
             return (int) MH_int2dds_create_datareader_cft.invokeExact(subscriber, cft, qos, listener, mask, reader_out);
         } catch (Throwable __ffi_thrown) {
@@ -252,7 +306,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_datareader_dynamic = dc("int2dds_create_datareader_dynamic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_datareader_dynamic = dc("int2dds_create_datareader_dynamic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_create_datareader_dynamic(long subscriber, long topic, long type_support, long qos, long out) {
         try {
@@ -262,21 +317,29 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_datareader_with_profile = dc("int2dds_create_datareader_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_datareader_with_profile = dc(
+            "int2dds_create_datareader_with_profile",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_create_datareader_with_profile(long subscriber, long topic, byte[] qos_path, long listener, int mask, long reader_out) {
+    static int int2dds_create_datareader_with_profile(long subscriber, long topic, byte[] qos_path, long listener,
+            int mask, long reader_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(qos_path.length + 1);
-            if (qos_path != null) MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
-            return (int) MH_int2dds_create_datareader_with_profile.invokeExact(subscriber, topic, __ffi_seg_qos_path, listener, mask, reader_out);
+            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(qos_path.length + 1);
+            if (qos_path != null)
+                MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
+            return (int) MH_int2dds_create_datareader_with_profile.invokeExact(subscriber, topic, __ffi_seg_qos_path,
+                    listener, mask, reader_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_datareader_with_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_datawriter = dc("int2dds_create_datawriter", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_datawriter = dc("int2dds_create_datawriter",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_create_datawriter(long publisher, long topic, long qos, long listener, int mask, long writer_out) {
+    static int int2dds_create_datawriter(long publisher, long topic, long qos, long listener, int mask,
+            long writer_out) {
         try {
             return (int) MH_int2dds_create_datawriter.invokeExact(publisher, topic, qos, listener, mask, writer_out);
         } catch (Throwable __ffi_thrown) {
@@ -284,7 +347,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_datawriter_dynamic = dc("int2dds_create_datawriter_dynamic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_datawriter_dynamic = dc("int2dds_create_datawriter_dynamic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_create_datawriter_dynamic(long publisher, long topic, long type_support, long qos, long out) {
         try {
@@ -294,19 +358,26 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_datawriter_with_profile = dc("int2dds_create_datawriter_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_datawriter_with_profile = dc(
+            "int2dds_create_datawriter_with_profile",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_create_datawriter_with_profile(long publisher, long topic, byte[] qos_path, long listener, int mask, long writer_out) {
+    static int int2dds_create_datawriter_with_profile(long publisher, long topic, byte[] qos_path, long listener,
+            int mask, long writer_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(qos_path.length + 1);
-            if (qos_path != null) MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
-            return (int) MH_int2dds_create_datawriter_with_profile.invokeExact(publisher, topic, __ffi_seg_qos_path, listener, mask, writer_out);
+            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(qos_path.length + 1);
+            if (qos_path != null)
+                MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
+            return (int) MH_int2dds_create_datawriter_with_profile.invokeExact(publisher, topic, __ffi_seg_qos_path,
+                    listener, mask, writer_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_datawriter_with_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_participant = dc("int2dds_create_participant", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_participant = dc("int2dds_create_participant",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_create_participant(long _factory, int domain_id, long qos, long participant_out) {
         try {
@@ -316,31 +387,40 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_participant_from_config = dc("int2dds_create_participant_from_config", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_participant_from_config = dc(
+            "int2dds_create_participant_from_config", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_create_participant_from_config(long _factory, byte[] path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_path = (path == null) ? MemorySegment.NULL : __ffi_arena.allocate(path.length + 1);
-            if (path != null) MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
+            if (path != null)
+                MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
             return (int) MH_int2dds_create_participant_from_config.invokeExact(_factory, __ffi_seg_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_participant_from_config", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_participant_with_profile = dc("int2dds_create_participant_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_participant_with_profile = dc(
+            "int2dds_create_participant_with_profile",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, ADDRESS, JAVA_LONG));
 
-    static int int2dds_create_participant_with_profile(long _factory, int domain_id, byte[] qos_path, long participant_out) {
+    static int int2dds_create_participant_with_profile(long _factory, int domain_id, byte[] qos_path,
+            long participant_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(qos_path.length + 1);
-            if (qos_path != null) MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
-            return (int) MH_int2dds_create_participant_with_profile.invokeExact(_factory, domain_id, __ffi_seg_qos_path, participant_out);
+            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(qos_path.length + 1);
+            if (qos_path != null)
+                MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
+            return (int) MH_int2dds_create_participant_with_profile.invokeExact(_factory, domain_id, __ffi_seg_qos_path,
+                    participant_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_participant_with_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_publisher = dc("int2dds_create_publisher", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_publisher = dc("int2dds_create_publisher",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_create_publisher(long participant, long qos, long publisher_out) {
         try {
@@ -350,19 +430,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_publisher_with_profile = dc("int2dds_create_publisher_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_publisher_with_profile = dc(
+            "int2dds_create_publisher_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_create_publisher_with_profile(long participant, byte[] qos_path, long publisher_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(qos_path.length + 1);
-            if (qos_path != null) MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
-            return (int) MH_int2dds_create_publisher_with_profile.invokeExact(participant, __ffi_seg_qos_path, publisher_out);
+            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(qos_path.length + 1);
+            if (qos_path != null)
+                MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
+            return (int) MH_int2dds_create_publisher_with_profile.invokeExact(participant, __ffi_seg_qos_path,
+                    publisher_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_publisher_with_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_subscriber = dc("int2dds_create_subscriber", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_subscriber = dc("int2dds_create_subscriber",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_create_subscriber(long participant, long qos, long subscriber_out) {
         try {
@@ -372,52 +457,76 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_subscriber_with_profile = dc("int2dds_create_subscriber_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_subscriber_with_profile = dc(
+            "int2dds_create_subscriber_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_create_subscriber_with_profile(long participant, byte[] qos_path, long subscriber_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(qos_path.length + 1);
-            if (qos_path != null) MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
-            return (int) MH_int2dds_create_subscriber_with_profile.invokeExact(participant, __ffi_seg_qos_path, subscriber_out);
+            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(qos_path.length + 1);
+            if (qos_path != null)
+                MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
+            return (int) MH_int2dds_create_subscriber_with_profile.invokeExact(participant, __ffi_seg_qos_path,
+                    subscriber_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_subscriber_with_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_topic = dc("int2dds_create_topic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_topic = dc("int2dds_create_topic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_create_topic(long participant, byte[] topic_name, byte[] dds_type_name, int extensibility, long qos, long topic_out) {
+    static int int2dds_create_topic(long participant, byte[] topic_name, byte[] dds_type_name, int extensibility,
+            long qos, long topic_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(dds_type_name.length + 1);
-            if (dds_type_name != null) MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
-            return (int) MH_int2dds_create_topic.invokeExact(participant, __ffi_seg_topic_name, __ffi_seg_dds_type_name, extensibility, qos, topic_out);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(dds_type_name.length + 1);
+            if (dds_type_name != null)
+                MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
+            return (int) MH_int2dds_create_topic.invokeExact(participant, __ffi_seg_topic_name, __ffi_seg_dds_type_name,
+                    extensibility, qos, topic_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_topic", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_topic_dynamic = dc("int2dds_create_topic_dynamic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_topic_dynamic = dc("int2dds_create_topic_dynamic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_create_topic_dynamic(long participant, byte[] topic_name, long type_support, long qos, long out) {
+    static int int2dds_create_topic_dynamic(long participant, byte[] topic_name, long type_support, long qos,
+            long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            return (int) MH_int2dds_create_topic_dynamic.invokeExact(participant, __ffi_seg_topic_name, type_support, qos, out);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            return (int) MH_int2dds_create_topic_dynamic.invokeExact(participant, __ffi_seg_topic_name, type_support,
+                    qos, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_topic_dynamic", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_topic_with_field_descriptors = dc("int2dds_create_topic_with_field_descriptors", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_topic_with_field_descriptors = dc(
+            "int2dds_create_topic_with_field_descriptors", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS,
+                    JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_create_topic_with_field_descriptors(long participant, byte[] topic_name, byte[] dds_type_name, int extensibility, long qos, byte[][] field_names, long field_types, long field_is_key, long field_count, long topic_out) {
+    static int int2dds_create_topic_with_field_descriptors(long participant, byte[] topic_name, byte[] dds_type_name,
+            int extensibility, long qos, byte[][] field_names, long field_types, long field_is_key, long field_count,
+            long topic_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(dds_type_name.length + 1);
-            if (dds_type_name != null) MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(dds_type_name.length + 1);
+            if (dds_type_name != null)
+                MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
             MemorySegment __ffi_seg_field_names;
             if (field_names == null || field_names.length == 0) {
                 __ffi_seg_field_names = MemorySegment.NULL;
@@ -430,65 +539,97 @@ public final class Ffi {
                         __ffi_elemSeg_field_names = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_field_names = __ffi_arena.allocate(__ffi_elem_field_names.length + 1);
-                        MemorySegment.copy(__ffi_elem_field_names, 0, __ffi_elemSeg_field_names, JAVA_BYTE, 0, __ffi_elem_field_names.length);
+                        MemorySegment.copy(__ffi_elem_field_names, 0, __ffi_elemSeg_field_names, JAVA_BYTE, 0,
+                                __ffi_elem_field_names.length);
                     }
                     __ffi_seg_field_names.setAtIndex(ADDRESS, __ffi_i_field_names, __ffi_elemSeg_field_names);
                 }
             }
-            return (int) MH_int2dds_create_topic_with_field_descriptors.invokeExact(participant, __ffi_seg_topic_name, __ffi_seg_dds_type_name, extensibility, qos, __ffi_seg_field_names, field_types, field_is_key, field_count, topic_out);
+            return (int) MH_int2dds_create_topic_with_field_descriptors.invokeExact(participant, __ffi_seg_topic_name,
+                    __ffi_seg_dds_type_name, extensibility, qos, __ffi_seg_field_names, field_types, field_is_key,
+                    field_count, topic_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_topic_with_field_descriptors", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_topic_with_profile = dc("int2dds_create_topic_with_profile", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_topic_with_profile = dc("int2dds_create_topic_with_profile",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, JAVA_LONG));
 
-    static int int2dds_create_topic_with_profile(long participant, byte[] topic_name, byte[] dds_type_name, int extensibility, byte[] qos_path, long topic_out) {
+    static int int2dds_create_topic_with_profile(long participant, byte[] topic_name, byte[] dds_type_name,
+            int extensibility, byte[] qos_path, long topic_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(dds_type_name.length + 1);
-            if (dds_type_name != null) MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
-            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(qos_path.length + 1);
-            if (qos_path != null) MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
-            return (int) MH_int2dds_create_topic_with_profile.invokeExact(participant, __ffi_seg_topic_name, __ffi_seg_dds_type_name, extensibility, __ffi_seg_qos_path, topic_out);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(dds_type_name.length + 1);
+            if (dds_type_name != null)
+                MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
+            MemorySegment __ffi_seg_qos_path = (qos_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(qos_path.length + 1);
+            if (qos_path != null)
+                MemorySegment.copy(qos_path, 0, __ffi_seg_qos_path, JAVA_BYTE, 0, qos_path.length);
+            return (int) MH_int2dds_create_topic_with_profile.invokeExact(participant, __ffi_seg_topic_name,
+                    __ffi_seg_dds_type_name, extensibility, __ffi_seg_qos_path, topic_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_topic_with_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_topic_with_type_info = dc("int2dds_create_topic_with_type_info", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_topic_with_type_info = dc("int2dds_create_topic_with_type_info",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_create_topic_with_type_info(long participant, byte[] topic_name, long type_info, long qos, long topic_out) {
+    static int int2dds_create_topic_with_type_info(long participant, byte[] topic_name, long type_info, long qos,
+            long topic_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            return (int) MH_int2dds_create_topic_with_type_info.invokeExact(participant, __ffi_seg_topic_name, type_info, qos, topic_out);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            return (int) MH_int2dds_create_topic_with_type_info.invokeExact(participant, __ffi_seg_topic_name,
+                    type_info, qos, topic_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_topic_with_type_info", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_create_topic_with_type_object = dc("int2dds_create_topic_with_type_object", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_create_topic_with_type_object = dc(
+            "int2dds_create_topic_with_type_object",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_create_topic_with_type_object(long participant, byte[] topic_name, byte[] type_name, long type_obj, long qos, long out) {
+    static int int2dds_create_topic_with_type_object(long participant, byte[] topic_name, byte[] type_name,
+            long type_obj, long qos, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
-            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
-            return (int) MH_int2dds_create_topic_with_type_object.invokeExact(participant, __ffi_seg_topic_name, __ffi_seg_type_name, type_obj, qos, out);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null)
+                MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            return (int) MH_int2dds_create_topic_with_type_object.invokeExact(participant, __ffi_seg_topic_name,
+                    __ffi_seg_type_name, type_obj, qos, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_create_topic_with_type_object", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_create_querycondition = dc("int2dds_datareader_create_querycondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_create_querycondition = dc(
+            "int2dds_datareader_create_querycondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT,
+                    JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_create_querycondition(long reader, int sample_state_mask, int view_state_mask, int instance_state_mask, byte[] query_expression, byte[][] query_parameters, long query_parameters_count, long condition_out) {
+    static int int2dds_datareader_create_querycondition(long reader, int sample_state_mask, int view_state_mask,
+            int instance_state_mask, byte[] query_expression, byte[][] query_parameters, long query_parameters_count,
+            long condition_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_query_expression = (query_expression == null) ? MemorySegment.NULL : __ffi_arena.allocate(query_expression.length + 1);
-            if (query_expression != null) MemorySegment.copy(query_expression, 0, __ffi_seg_query_expression, JAVA_BYTE, 0, query_expression.length);
+            MemorySegment __ffi_seg_query_expression = (query_expression == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(query_expression.length + 1);
+            if (query_expression != null)
+                MemorySegment.copy(query_expression, 0, __ffi_seg_query_expression, JAVA_BYTE, 0,
+                        query_expression.length);
             MemorySegment __ffi_seg_query_parameters;
             if (query_parameters == null || query_parameters.length == 0) {
                 __ffi_seg_query_parameters = MemorySegment.NULL;
@@ -501,53 +642,68 @@ public final class Ffi {
                         __ffi_elemSeg_query_parameters = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_query_parameters = __ffi_arena.allocate(__ffi_elem_query_parameters.length + 1);
-                        MemorySegment.copy(__ffi_elem_query_parameters, 0, __ffi_elemSeg_query_parameters, JAVA_BYTE, 0, __ffi_elem_query_parameters.length);
+                        MemorySegment.copy(__ffi_elem_query_parameters, 0, __ffi_elemSeg_query_parameters, JAVA_BYTE, 0,
+                                __ffi_elem_query_parameters.length);
                     }
-                    __ffi_seg_query_parameters.setAtIndex(ADDRESS, __ffi_i_query_parameters, __ffi_elemSeg_query_parameters);
+                    __ffi_seg_query_parameters.setAtIndex(ADDRESS, __ffi_i_query_parameters,
+                            __ffi_elemSeg_query_parameters);
                 }
             }
-            return (int) MH_int2dds_datareader_create_querycondition.invokeExact(reader, sample_state_mask, view_state_mask, instance_state_mask, __ffi_seg_query_expression, __ffi_seg_query_parameters, query_parameters_count, condition_out);
+            return (int) MH_int2dds_datareader_create_querycondition.invokeExact(reader, sample_state_mask,
+                    view_state_mask, instance_state_mask, __ffi_seg_query_expression, __ffi_seg_query_parameters,
+                    query_parameters_count, condition_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_create_querycondition", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_create_readcondition = dc("int2dds_datareader_create_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_create_readcondition = dc(
+            "int2dds_datareader_create_readcondition",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_datareader_create_readcondition(long reader, int sample_state_mask, int view_state_mask, int instance_state_mask, long condition_out) {
+    static int int2dds_datareader_create_readcondition(long reader, int sample_state_mask, int view_state_mask,
+            int instance_state_mask, long condition_out) {
         try {
-            return (int) MH_int2dds_datareader_create_readcondition.invokeExact(reader, sample_state_mask, view_state_mask, instance_state_mask, condition_out);
+            return (int) MH_int2dds_datareader_create_readcondition.invokeExact(reader, sample_state_mask,
+                    view_state_mask, instance_state_mask, condition_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_create_readcondition", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_guid = dc("int2dds_datareader_get_guid", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_datareader_get_guid = dc("int2dds_datareader_get_guid",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_datareader_get_guid(long reader, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_datareader_get_guid.invokeExact(reader, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
+            if (guid_out != null)
+                MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_get_guid", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_key_value = dc("int2dds_datareader_get_key_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_key_value = dc("int2dds_datareader_get_key_value",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_get_key_value(long reader, byte[] handle, long key_buf, long key_capacity, long key_size_out) {
+    static int int2dds_datareader_get_key_value(long reader, byte[] handle, long key_buf, long key_capacity,
+            long key_size_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
-            return (int) MH_int2dds_datareader_get_key_value.invokeExact(reader, __ffi_seg_handle, key_buf, key_capacity, key_size_out);
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datareader_get_key_value.invokeExact(reader, __ffi_seg_handle, key_buf,
+                    key_capacity, key_size_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_get_key_value", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_listener = dc("int2dds_datareader_get_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_listener = dc("int2dds_datareader_get_listener",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_listener(long reader, long listener_out) {
         try {
@@ -557,43 +713,58 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_liveliness_changed_status = dc("int2dds_datareader_get_liveliness_changed_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_liveliness_changed_status = dc(
+            "int2dds_datareader_get_liveliness_changed_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_liveliness_changed_status(long reader, long status_out) {
         try {
             return (int) MH_int2dds_datareader_get_liveliness_changed_status.invokeExact(reader, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_liveliness_changed_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_liveliness_changed_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_matched_publication_data = dc("int2dds_datareader_get_matched_publication_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_matched_publication_data = dc(
+            "int2dds_datareader_get_matched_publication_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_datareader_get_matched_publication_data(long reader, byte[] handle, long data_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
-            return (int) MH_int2dds_datareader_get_matched_publication_data.invokeExact(reader, __ffi_seg_handle, data_out);
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datareader_get_matched_publication_data.invokeExact(reader, __ffi_seg_handle,
+                    data_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_matched_publication_data", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_matched_publication_data",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_matched_publications = dc("int2dds_datareader_get_matched_publications", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_matched_publications = dc(
+            "int2dds_datareader_get_matched_publications",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_get_matched_publications(long reader, byte[] handles_out, long capacity, long count_out) {
+    static int int2dds_datareader_get_matched_publications(long reader, byte[] handles_out, long capacity,
+            long count_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handles_out.length);
-            long __ffi_cap_handles_out = (handles_out == null) ? 0L : Math.min(capacity, (long) (handles_out.length / 16));
-            int __ffi_ret = (int) MH_int2dds_datareader_get_matched_publications.invokeExact(reader, __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
-            if (handles_out != null) MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
+            MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(handles_out.length);
+            long __ffi_cap_handles_out = (handles_out == null) ? 0L
+                    : Math.min(capacity, (long) (handles_out.length / 16));
+            int __ffi_ret = (int) MH_int2dds_datareader_get_matched_publications.invokeExact(reader,
+                    __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
+            if (handles_out != null)
+                MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_get_matched_publications", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_qos = dc("int2dds_datareader_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_qos = dc("int2dds_datareader_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_qos(long reader, long qos_out) {
         try {
@@ -603,37 +774,47 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_requested_deadline_missed_status = dc("int2dds_datareader_get_requested_deadline_missed_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_requested_deadline_missed_status = dc(
+            "int2dds_datareader_get_requested_deadline_missed_status",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_requested_deadline_missed_status(long reader, long status_out) {
         try {
             return (int) MH_int2dds_datareader_get_requested_deadline_missed_status.invokeExact(reader, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_requested_deadline_missed_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_requested_deadline_missed_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_requested_incompatible_qos_status = dc("int2dds_datareader_get_requested_incompatible_qos_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_requested_incompatible_qos_status = dc(
+            "int2dds_datareader_get_requested_incompatible_qos_status",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_requested_incompatible_qos_status(long reader, long status_out) {
         try {
             return (int) MH_int2dds_datareader_get_requested_incompatible_qos_status.invokeExact(reader, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_requested_incompatible_qos_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_requested_incompatible_qos_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_requested_incompatible_type_status = dc("int2dds_datareader_get_requested_incompatible_type_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_requested_incompatible_type_status = dc(
+            "int2dds_datareader_get_requested_incompatible_type_status",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_requested_incompatible_type_status(long reader, long status_out) {
         try {
             return (int) MH_int2dds_datareader_get_requested_incompatible_type_status.invokeExact(reader, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_requested_incompatible_type_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_requested_incompatible_type_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_sample_lost_status = dc("int2dds_datareader_get_sample_lost_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_sample_lost_status = dc(
+            "int2dds_datareader_get_sample_lost_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_sample_lost_status(long reader, long status_out) {
         try {
@@ -643,17 +824,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_sample_rejected_status = dc("int2dds_datareader_get_sample_rejected_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_sample_rejected_status = dc(
+            "int2dds_datareader_get_sample_rejected_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_sample_rejected_status(long reader, long status_out) {
         try {
             return (int) MH_int2dds_datareader_get_sample_rejected_status.invokeExact(reader, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_sample_rejected_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_sample_rejected_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_status_changes = dc("int2dds_datareader_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_status_changes = dc(
+            "int2dds_datareader_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_status_changes(long reader, long mask_out) {
         try {
@@ -663,7 +847,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_statuscondition = dc("int2dds_datareader_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_statuscondition = dc(
+            "int2dds_datareader_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_statuscondition(long reader, long condition_out) {
         try {
@@ -673,17 +858,21 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_get_subscription_matched_status = dc("int2dds_datareader_get_subscription_matched_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_get_subscription_matched_status = dc(
+            "int2dds_datareader_get_subscription_matched_status",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_get_subscription_matched_status(long reader, long status_out) {
         try {
             return (int) MH_int2dds_datareader_get_subscription_matched_status.invokeExact(reader, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_subscription_matched_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_get_subscription_matched_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_has_data = dc("int2dds_datareader_has_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_has_data = dc("int2dds_datareader_has_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_has_data(long reader, long has_data_out) {
         try {
@@ -693,20 +882,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_lookup_instance = dc("int2dds_datareader_lookup_instance", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_datareader_lookup_instance = dc("int2dds_datareader_lookup_instance",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
 
     static int int2dds_datareader_lookup_instance(long reader, long key, long key_len, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_datareader_lookup_instance.invokeExact(reader, key, key_len, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_datareader_lookup_instance.invokeExact(reader, key, key_len,
+                    __ffi_seg_handle_out);
+            if (handle_out != null)
+                MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_lookup_instance", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_create_default = dc("int2dds_datareader_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_create_default = dc(
+            "int2dds_datareader_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_qos_create_default(long qos_out) {
         try {
@@ -716,7 +909,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_destroy = dc("int2dds_datareader_qos_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_destroy = dc("int2dds_datareader_qos_destroy",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_qos_destroy(long qos) {
         try {
@@ -726,17 +920,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_data_representation = dc("int2dds_datareader_qos_get_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_data_representation = dc(
+            "int2dds_datareader_qos_get_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_data_representation(long qos, long kind_out) {
         try {
             return (int) MH_int2dds_datareader_qos_get_data_representation.invokeExact(qos, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_get_data_representation", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_get_data_representation",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_deadline = dc("int2dds_datareader_qos_get_deadline", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_deadline = dc("int2dds_datareader_qos_get_deadline",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_deadline(long qos, long period_ns_out) {
         try {
@@ -746,7 +943,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_destination_order = dc("int2dds_datareader_qos_get_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_destination_order = dc(
+            "int2dds_datareader_qos_get_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_destination_order(long qos, long kind_out) {
         try {
@@ -756,7 +954,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_durability = dc("int2dds_datareader_qos_get_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_durability = dc(
+            "int2dds_datareader_qos_get_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_durability(long qos, long kind_out) {
         try {
@@ -766,7 +965,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_history = dc("int2dds_datareader_qos_get_history", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_history = dc("int2dds_datareader_qos_get_history",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_history(long qos, long kind_out, long depth_out) {
         try {
@@ -776,7 +976,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_latency_budget = dc("int2dds_datareader_qos_get_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_latency_budget = dc(
+            "int2dds_datareader_qos_get_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_latency_budget(long qos, long duration_ns_out) {
         try {
@@ -786,17 +987,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_lifespan_reference = dc("int2dds_datareader_qos_get_lifespan_reference", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_lifespan_reference = dc(
+            "int2dds_datareader_qos_get_lifespan_reference", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_lifespan_reference(long qos, long kind_out) {
         try {
             return (int) MH_int2dds_datareader_qos_get_lifespan_reference.invokeExact(qos, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_get_lifespan_reference", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_get_lifespan_reference",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_liveliness = dc("int2dds_datareader_qos_get_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_liveliness = dc(
+            "int2dds_datareader_qos_get_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_liveliness(long qos, long kind_out, long lease_duration_ns_out) {
         try {
@@ -806,7 +1010,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_ownership = dc("int2dds_datareader_qos_get_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_ownership = dc(
+            "int2dds_datareader_qos_get_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_ownership(long qos, long kind_out) {
         try {
@@ -816,17 +1021,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_reader_data_lifecycle = dc("int2dds_datareader_qos_get_reader_data_lifecycle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_reader_data_lifecycle = dc(
+            "int2dds_datareader_qos_get_reader_data_lifecycle",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_qos_get_reader_data_lifecycle(long qos, long autopurge_nowriter_ns_out, long autopurge_disposed_ns_out) {
+    static int int2dds_datareader_qos_get_reader_data_lifecycle(long qos, long autopurge_nowriter_ns_out,
+            long autopurge_disposed_ns_out) {
         try {
-            return (int) MH_int2dds_datareader_qos_get_reader_data_lifecycle.invokeExact(qos, autopurge_nowriter_ns_out, autopurge_disposed_ns_out);
+            return (int) MH_int2dds_datareader_qos_get_reader_data_lifecycle.invokeExact(qos, autopurge_nowriter_ns_out,
+                    autopurge_disposed_ns_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_get_reader_data_lifecycle", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_get_reader_data_lifecycle",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_reliability = dc("int2dds_datareader_qos_get_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_reliability = dc(
+            "int2dds_datareader_qos_get_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_reliability(long qos, long kind_out, long max_blocking_time_ns_out) {
         try {
@@ -836,17 +1047,22 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_resource_limits = dc("int2dds_datareader_qos_get_resource_limits", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_resource_limits = dc(
+            "int2dds_datareader_qos_get_resource_limits",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_qos_get_resource_limits(long qos, long max_samples_out, long max_instances_out, long max_per_instance_out) {
+    static int int2dds_datareader_qos_get_resource_limits(long qos, long max_samples_out, long max_instances_out,
+            long max_per_instance_out) {
         try {
-            return (int) MH_int2dds_datareader_qos_get_resource_limits.invokeExact(qos, max_samples_out, max_instances_out, max_per_instance_out);
+            return (int) MH_int2dds_datareader_qos_get_resource_limits.invokeExact(qos, max_samples_out,
+                    max_instances_out, max_per_instance_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_get_resource_limits", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_get_time_based_filter = dc("int2dds_datareader_qos_get_time_based_filter", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_get_time_based_filter = dc(
+            "int2dds_datareader_qos_get_time_based_filter", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_get_time_based_filter(long qos, long min_separation_ns_out) {
         try {
@@ -856,17 +1072,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_data_representation = dc("int2dds_datareader_qos_set_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_data_representation = dc(
+            "int2dds_datareader_qos_set_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datareader_qos_set_data_representation(long qos, int kind) {
         try {
             return (int) MH_int2dds_datareader_qos_set_data_representation.invokeExact(qos, kind);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_set_data_representation", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_set_data_representation",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_deadline = dc("int2dds_datareader_qos_set_deadline", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_deadline = dc("int2dds_datareader_qos_set_deadline",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_set_deadline(long qos, long period_ns) {
         try {
@@ -876,7 +1095,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_destination_order = dc("int2dds_datareader_qos_set_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_destination_order = dc(
+            "int2dds_datareader_qos_set_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datareader_qos_set_destination_order(long qos, int kind) {
         try {
@@ -886,7 +1106,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_durability = dc("int2dds_datareader_qos_set_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_durability = dc(
+            "int2dds_datareader_qos_set_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datareader_qos_set_durability(long qos, int kind) {
         try {
@@ -896,7 +1117,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_history = dc("int2dds_datareader_qos_set_history", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_history = dc("int2dds_datareader_qos_set_history",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
 
     static int int2dds_datareader_qos_set_history(long qos, int kind, int depth) {
         try {
@@ -906,7 +1128,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_latency_budget = dc("int2dds_datareader_qos_set_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_latency_budget = dc(
+            "int2dds_datareader_qos_set_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_set_latency_budget(long qos, long duration_ns) {
         try {
@@ -916,17 +1139,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_lifespan_reference = dc("int2dds_datareader_qos_set_lifespan_reference", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_lifespan_reference = dc(
+            "int2dds_datareader_qos_set_lifespan_reference", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datareader_qos_set_lifespan_reference(long qos, int kind) {
         try {
             return (int) MH_int2dds_datareader_qos_set_lifespan_reference.invokeExact(qos, kind);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_set_lifespan_reference", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_set_lifespan_reference",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_liveliness = dc("int2dds_datareader_qos_set_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_liveliness = dc(
+            "int2dds_datareader_qos_set_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_qos_set_liveliness(long qos, int kind, long lease_duration_ns) {
         try {
@@ -936,7 +1162,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_ownership = dc("int2dds_datareader_qos_set_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_ownership = dc(
+            "int2dds_datareader_qos_set_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datareader_qos_set_ownership(long qos, int kind) {
         try {
@@ -946,17 +1173,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_reader_data_lifecycle = dc("int2dds_datareader_qos_set_reader_data_lifecycle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_reader_data_lifecycle = dc(
+            "int2dds_datareader_qos_set_reader_data_lifecycle",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_qos_set_reader_data_lifecycle(long qos, long autopurge_nowriter_ns, long autopurge_disposed_ns) {
+    static int int2dds_datareader_qos_set_reader_data_lifecycle(long qos, long autopurge_nowriter_ns,
+            long autopurge_disposed_ns) {
         try {
-            return (int) MH_int2dds_datareader_qos_set_reader_data_lifecycle.invokeExact(qos, autopurge_nowriter_ns, autopurge_disposed_ns);
+            return (int) MH_int2dds_datareader_qos_set_reader_data_lifecycle.invokeExact(qos, autopurge_nowriter_ns,
+                    autopurge_disposed_ns);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_set_reader_data_lifecycle", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_set_reader_data_lifecycle",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_reliability = dc("int2dds_datareader_qos_set_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_reliability = dc(
+            "int2dds_datareader_qos_set_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_qos_set_reliability(long qos, int kind, long max_blocking_time_ns) {
         try {
@@ -966,17 +1199,22 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_resource_limits = dc("int2dds_datareader_qos_set_resource_limits", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_resource_limits = dc(
+            "int2dds_datareader_qos_set_resource_limits",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_datareader_qos_set_resource_limits(long qos, int max_samples, int max_instances, int max_per_instance) {
+    static int int2dds_datareader_qos_set_resource_limits(long qos, int max_samples, int max_instances,
+            int max_per_instance) {
         try {
-            return (int) MH_int2dds_datareader_qos_set_resource_limits.invokeExact(qos, max_samples, max_instances, max_per_instance);
+            return (int) MH_int2dds_datareader_qos_set_resource_limits.invokeExact(qos, max_samples, max_instances,
+                    max_per_instance);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_qos_set_resource_limits", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_time_based_filter = dc("int2dds_datareader_qos_set_time_based_filter", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_time_based_filter = dc(
+            "int2dds_datareader_qos_set_time_based_filter", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_set_time_based_filter(long qos, long minimum_separation_ns) {
         try {
@@ -986,7 +1224,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_qos_set_user_data = dc("int2dds_datareader_qos_set_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_qos_set_user_data = dc(
+            "int2dds_datareader_qos_set_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_qos_set_user_data(long qos, long data, long data_len) {
         try {
@@ -996,29 +1235,40 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_read_instance_serialized_batch = dc("int2dds_datareader_read_instance_serialized_batch", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_read_instance_serialized_batch = dc(
+            "int2dds_datareader_read_instance_serialized_batch",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_datareader_read_instance_serialized_batch(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
+    static int int2dds_datareader_read_instance_serialized_batch(long reader, byte[] handle, int max_samples,
+            int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
-            return (int) MH_int2dds_datareader_read_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datareader_read_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle,
+                    max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_instance_serialized_batch", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_instance_serialized_batch",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_read_serialized = dc("int2dds_datareader_read_serialized", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_read_serialized = dc("int2dds_datareader_read_serialized",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_read_serialized(long reader, long buffer, long buffer_capacity, long actual_size_out, long valid_data_out) {
+    static int int2dds_datareader_read_serialized(long reader, long buffer, long buffer_capacity, long actual_size_out,
+            long valid_data_out) {
         try {
-            return (int) MH_int2dds_datareader_read_serialized.invokeExact(reader, buffer, buffer_capacity, actual_size_out, valid_data_out);
+            return (int) MH_int2dds_datareader_read_serialized.invokeExact(reader, buffer, buffer_capacity,
+                    actual_size_out, valid_data_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_read_serialized", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_read_serialized_batch = dc("int2dds_datareader_read_serialized_batch", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_read_serialized_batch = dc(
+            "int2dds_datareader_read_serialized_batch",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_read_serialized_batch(long reader, int max_samples, long seq_out) {
         try {
@@ -1028,47 +1278,66 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_read_serialized_batch_w_readcondition = dc("int2dds_datareader_read_serialized_batch_w_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_read_serialized_batch_w_readcondition = dc(
+            "int2dds_datareader_read_serialized_batch_w_readcondition",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_datareader_read_serialized_batch_w_readcondition(long reader, long condition, int max_samples, long seq_out) {
+    static int int2dds_datareader_read_serialized_batch_w_readcondition(long reader, long condition, int max_samples,
+            long seq_out) {
         try {
-            return (int) MH_int2dds_datareader_read_serialized_batch_w_readcondition.invokeExact(reader, condition, max_samples, seq_out);
+            return (int) MH_int2dds_datareader_read_serialized_batch_w_readcondition.invokeExact(reader, condition,
+                    max_samples, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_serialized_batch_w_readcondition", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_serialized_batch_w_readcondition",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_read_serialized_batch_w_states = dc("int2dds_datareader_read_serialized_batch_w_states", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_read_serialized_batch_w_states = dc(
+            "int2dds_datareader_read_serialized_batch_w_states",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_datareader_read_serialized_batch_w_states(long reader, int max_samples, long seq_out, int sample_state_mask, int view_state_mask, int instance_state_mask) {
+    static int int2dds_datareader_read_serialized_batch_w_states(long reader, int max_samples, long seq_out,
+            int sample_state_mask, int view_state_mask, int instance_state_mask) {
         try {
-            return (int) MH_int2dds_datareader_read_serialized_batch_w_states.invokeExact(reader, max_samples, seq_out, sample_state_mask, view_state_mask, instance_state_mask);
+            return (int) MH_int2dds_datareader_read_serialized_batch_w_states.invokeExact(reader, max_samples, seq_out,
+                    sample_state_mask, view_state_mask, instance_state_mask);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_serialized_batch_w_states", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_serialized_batch_w_states",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_read_serialized_w_info = dc("int2dds_datareader_read_serialized_w_info", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_read_serialized_w_info = dc(
+            "int2dds_datareader_read_serialized_w_info",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_read_serialized_w_info(long reader, long buffer, long buffer_capacity, long actual_size_out, long info_out) {
+    static int int2dds_datareader_read_serialized_w_info(long reader, long buffer, long buffer_capacity,
+            long actual_size_out, long info_out) {
         try {
-            return (int) MH_int2dds_datareader_read_serialized_w_info.invokeExact(reader, buffer, buffer_capacity, actual_size_out, info_out);
+            return (int) MH_int2dds_datareader_read_serialized_w_info.invokeExact(reader, buffer, buffer_capacity,
+                    actual_size_out, info_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_read_serialized_w_info", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_read_serialized_w_states = dc("int2dds_datareader_read_serialized_w_states", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_read_serialized_w_states = dc(
+            "int2dds_datareader_read_serialized_w_states", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG,
+                    JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_datareader_read_serialized_w_states(long reader, long buffer, long buffer_capacity, long actual_size_out, long info_out, int sample_state_mask, int view_state_mask, int instance_state_mask) {
+    static int int2dds_datareader_read_serialized_w_states(long reader, long buffer, long buffer_capacity,
+            long actual_size_out, long info_out, int sample_state_mask, int view_state_mask, int instance_state_mask) {
         try {
-            return (int) MH_int2dds_datareader_read_serialized_w_states.invokeExact(reader, buffer, buffer_capacity, actual_size_out, info_out, sample_state_mask, view_state_mask, instance_state_mask);
+            return (int) MH_int2dds_datareader_read_serialized_w_states.invokeExact(reader, buffer, buffer_capacity,
+                    actual_size_out, info_out, sample_state_mask, view_state_mask, instance_state_mask);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_read_serialized_w_states", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_return_serialized_loan = dc("int2dds_datareader_return_serialized_loan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_return_serialized_loan = dc(
+            "int2dds_datareader_return_serialized_loan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_return_serialized_loan(long loan) {
         try {
@@ -1078,7 +1347,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_set_listener = dc("int2dds_datareader_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_set_listener = dc("int2dds_datareader_set_listener",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datareader_set_listener(long reader, long listener, int mask) {
         try {
@@ -1088,7 +1358,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_set_qos = dc("int2dds_datareader_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_set_qos = dc("int2dds_datareader_set_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_set_qos(long reader, long qos) {
         try {
@@ -1098,29 +1369,40 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_instance_serialized_batch = dc("int2dds_datareader_take_instance_serialized_batch", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_take_instance_serialized_batch = dc(
+            "int2dds_datareader_take_instance_serialized_batch",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_datareader_take_instance_serialized_batch(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
+    static int int2dds_datareader_take_instance_serialized_batch(long reader, byte[] handle, int max_samples,
+            int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
-            return (int) MH_int2dds_datareader_take_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datareader_take_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle,
+                    max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_instance_serialized_batch", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_instance_serialized_batch",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_serialized = dc("int2dds_datareader_take_serialized", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_take_serialized = dc("int2dds_datareader_take_serialized",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_take_serialized(long reader, long buffer, long buffer_capacity, long actual_size_out, long valid_data_out) {
+    static int int2dds_datareader_take_serialized(long reader, long buffer, long buffer_capacity, long actual_size_out,
+            long valid_data_out) {
         try {
-            return (int) MH_int2dds_datareader_take_serialized.invokeExact(reader, buffer, buffer_capacity, actual_size_out, valid_data_out);
+            return (int) MH_int2dds_datareader_take_serialized.invokeExact(reader, buffer, buffer_capacity,
+                    actual_size_out, valid_data_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_serialized_batch = dc("int2dds_datareader_take_serialized_batch", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_take_serialized_batch = dc(
+            "int2dds_datareader_take_serialized_batch",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_take_serialized_batch(long reader, int max_samples, long seq_out) {
         try {
@@ -1130,57 +1412,80 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_serialized_batch_w_readcondition = dc("int2dds_datareader_take_serialized_batch_w_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_take_serialized_batch_w_readcondition = dc(
+            "int2dds_datareader_take_serialized_batch_w_readcondition",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_datareader_take_serialized_batch_w_readcondition(long reader, long condition, int max_samples, long seq_out) {
+    static int int2dds_datareader_take_serialized_batch_w_readcondition(long reader, long condition, int max_samples,
+            long seq_out) {
         try {
-            return (int) MH_int2dds_datareader_take_serialized_batch_w_readcondition.invokeExact(reader, condition, max_samples, seq_out);
+            return (int) MH_int2dds_datareader_take_serialized_batch_w_readcondition.invokeExact(reader, condition,
+                    max_samples, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_batch_w_readcondition", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_batch_w_readcondition",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_serialized_batch_w_states = dc("int2dds_datareader_take_serialized_batch_w_states", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_take_serialized_batch_w_states = dc(
+            "int2dds_datareader_take_serialized_batch_w_states",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_datareader_take_serialized_batch_w_states(long reader, int max_samples, long seq_out, int sample_state_mask, int view_state_mask, int instance_state_mask) {
+    static int int2dds_datareader_take_serialized_batch_w_states(long reader, int max_samples, long seq_out,
+            int sample_state_mask, int view_state_mask, int instance_state_mask) {
         try {
-            return (int) MH_int2dds_datareader_take_serialized_batch_w_states.invokeExact(reader, max_samples, seq_out, sample_state_mask, view_state_mask, instance_state_mask);
+            return (int) MH_int2dds_datareader_take_serialized_batch_w_states.invokeExact(reader, max_samples, seq_out,
+                    sample_state_mask, view_state_mask, instance_state_mask);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_batch_w_states", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_batch_w_states",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_serialized_loaned = dc("int2dds_datareader_take_serialized_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_take_serialized_loaned = dc(
+            "int2dds_datareader_take_serialized_loaned",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_take_serialized_loaned(long reader, long data_out, long actual_size_out, long valid_data_out, long loan_out) {
+    static int int2dds_datareader_take_serialized_loaned(long reader, long data_out, long actual_size_out,
+            long valid_data_out, long loan_out) {
         try {
-            return (int) MH_int2dds_datareader_take_serialized_loaned.invokeExact(reader, data_out, actual_size_out, valid_data_out, loan_out);
+            return (int) MH_int2dds_datareader_take_serialized_loaned.invokeExact(reader, data_out, actual_size_out,
+                    valid_data_out, loan_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_loaned", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_serialized_w_info = dc("int2dds_datareader_take_serialized_w_info", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_take_serialized_w_info = dc(
+            "int2dds_datareader_take_serialized_w_info",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datareader_take_serialized_w_info(long reader, long buffer, long buffer_capacity, long actual_size_out, long info_out) {
+    static int int2dds_datareader_take_serialized_w_info(long reader, long buffer, long buffer_capacity,
+            long actual_size_out, long info_out) {
         try {
-            return (int) MH_int2dds_datareader_take_serialized_w_info.invokeExact(reader, buffer, buffer_capacity, actual_size_out, info_out);
+            return (int) MH_int2dds_datareader_take_serialized_w_info.invokeExact(reader, buffer, buffer_capacity,
+                    actual_size_out, info_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_w_info", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_take_serialized_w_states = dc("int2dds_datareader_take_serialized_w_states", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datareader_take_serialized_w_states = dc(
+            "int2dds_datareader_take_serialized_w_states", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG,
+                    JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_datareader_take_serialized_w_states(long reader, long buffer, long buffer_capacity, long actual_size_out, long info_out, int sample_state_mask, int view_state_mask, int instance_state_mask) {
+    static int int2dds_datareader_take_serialized_w_states(long reader, long buffer, long buffer_capacity,
+            long actual_size_out, long info_out, int sample_state_mask, int view_state_mask, int instance_state_mask) {
         try {
-            return (int) MH_int2dds_datareader_take_serialized_w_states.invokeExact(reader, buffer, buffer_capacity, actual_size_out, info_out, sample_state_mask, view_state_mask, instance_state_mask);
+            return (int) MH_int2dds_datareader_take_serialized_w_states.invokeExact(reader, buffer, buffer_capacity,
+                    actual_size_out, info_out, sample_state_mask, view_state_mask, instance_state_mask);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_w_states", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datareader_wait_for_historical_data = dc("int2dds_datareader_wait_for_historical_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datareader_wait_for_historical_data = dc(
+            "int2dds_datareader_wait_for_historical_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datareader_wait_for_historical_data(long reader, long timeout_ms) {
         try {
@@ -1190,7 +1495,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_abort_serialized_write = dc("int2dds_datawriter_abort_serialized_write", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_abort_serialized_write = dc(
+            "int2dds_datawriter_abort_serialized_write", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datawriter_abort_serialized_write(long loan) {
         try {
@@ -1200,7 +1506,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_assert_liveliness = dc("int2dds_datawriter_assert_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_assert_liveliness = dc(
+            "int2dds_datawriter_assert_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datawriter_assert_liveliness(long writer) {
         try {
@@ -1210,7 +1517,9 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_commit_serialized_write = dc("int2dds_datawriter_commit_serialized_write", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_commit_serialized_write = dc(
+            "int2dds_datawriter_commit_serialized_write",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_commit_serialized_write(long writer, long loan, long actual_size) {
         try {
@@ -1220,7 +1529,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_data_representation = dc("int2dds_datawriter_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_data_representation = dc(
+            "int2dds_datawriter_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datawriter_data_representation(long writer) {
         try {
@@ -1230,44 +1540,53 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_dispose = dc("int2dds_datawriter_dispose", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_datawriter_dispose = dc("int2dds_datawriter_dispose",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
 
     static int int2dds_datawriter_dispose(long writer, long key, long key_len, byte[] handle) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datawriter_dispose.invokeExact(writer, key, key_len, __ffi_seg_handle);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_dispose", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_guid = dc("int2dds_datawriter_get_guid", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_datawriter_get_guid = dc("int2dds_datawriter_get_guid",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_datawriter_get_guid(long writer, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_datawriter_get_guid.invokeExact(writer, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
+            if (guid_out != null)
+                MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_guid", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_key_value = dc("int2dds_datawriter_get_key_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_key_value = dc("int2dds_datawriter_get_key_value",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datawriter_get_key_value(long writer, byte[] handle, long key_buf, long key_capacity, long key_size_out) {
+    static int int2dds_datawriter_get_key_value(long writer, byte[] handle, long key_buf, long key_capacity,
+            long key_size_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
-            return (int) MH_int2dds_datawriter_get_key_value.invokeExact(writer, __ffi_seg_handle, key_buf, key_capacity, key_size_out);
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datawriter_get_key_value.invokeExact(writer, __ffi_seg_handle, key_buf,
+                    key_capacity, key_size_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_key_value", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_listener = dc("int2dds_datawriter_get_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_listener = dc("int2dds_datawriter_get_listener",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_listener(long writer, long listener_out) {
         try {
@@ -1277,83 +1596,109 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_liveliness_lost_status = dc("int2dds_datawriter_get_liveliness_lost_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_liveliness_lost_status = dc(
+            "int2dds_datawriter_get_liveliness_lost_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_liveliness_lost_status(long writer, long status_out) {
         try {
             return (int) MH_int2dds_datawriter_get_liveliness_lost_status.invokeExact(writer, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_liveliness_lost_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_liveliness_lost_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_matched_subscription_data = dc("int2dds_datawriter_get_matched_subscription_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_matched_subscription_data = dc(
+            "int2dds_datawriter_get_matched_subscription_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_datawriter_get_matched_subscription_data(long writer, byte[] handle, long data_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
-            return (int) MH_int2dds_datawriter_get_matched_subscription_data.invokeExact(writer, __ffi_seg_handle, data_out);
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datawriter_get_matched_subscription_data.invokeExact(writer, __ffi_seg_handle,
+                    data_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_matched_subscription_data", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_matched_subscription_data",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_matched_subscriptions = dc("int2dds_datawriter_get_matched_subscriptions", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_matched_subscriptions = dc(
+            "int2dds_datawriter_get_matched_subscriptions",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datawriter_get_matched_subscriptions(long writer, byte[] handles_out, long capacity, long count_out) {
+    static int int2dds_datawriter_get_matched_subscriptions(long writer, byte[] handles_out, long capacity,
+            long count_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handles_out.length);
-            long __ffi_cap_handles_out = (handles_out == null) ? 0L : Math.min(capacity, (long) (handles_out.length / 16));
-            int __ffi_ret = (int) MH_int2dds_datawriter_get_matched_subscriptions.invokeExact(writer, __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
-            if (handles_out != null) MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
+            MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(handles_out.length);
+            long __ffi_cap_handles_out = (handles_out == null) ? 0L
+                    : Math.min(capacity, (long) (handles_out.length / 16));
+            int __ffi_ret = (int) MH_int2dds_datawriter_get_matched_subscriptions.invokeExact(writer,
+                    __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
+            if (handles_out != null)
+                MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_matched_subscriptions", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_offered_deadline_missed_status = dc("int2dds_datawriter_get_offered_deadline_missed_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_offered_deadline_missed_status = dc(
+            "int2dds_datawriter_get_offered_deadline_missed_status",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_offered_deadline_missed_status(long writer, long status_out) {
         try {
             return (int) MH_int2dds_datawriter_get_offered_deadline_missed_status.invokeExact(writer, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_offered_deadline_missed_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_offered_deadline_missed_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_offered_incompatible_qos_status = dc("int2dds_datawriter_get_offered_incompatible_qos_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_offered_incompatible_qos_status = dc(
+            "int2dds_datawriter_get_offered_incompatible_qos_status",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_offered_incompatible_qos_status(long writer, long status_out) {
         try {
             return (int) MH_int2dds_datawriter_get_offered_incompatible_qos_status.invokeExact(writer, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_offered_incompatible_qos_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_offered_incompatible_qos_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_offered_incompatible_type_status = dc("int2dds_datawriter_get_offered_incompatible_type_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_offered_incompatible_type_status = dc(
+            "int2dds_datawriter_get_offered_incompatible_type_status",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_offered_incompatible_type_status(long writer, long status_out) {
         try {
             return (int) MH_int2dds_datawriter_get_offered_incompatible_type_status.invokeExact(writer, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_offered_incompatible_type_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_offered_incompatible_type_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_publication_matched_status = dc("int2dds_datawriter_get_publication_matched_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_publication_matched_status = dc(
+            "int2dds_datawriter_get_publication_matched_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_publication_matched_status(long writer, long status_out) {
         try {
             return (int) MH_int2dds_datawriter_get_publication_matched_status.invokeExact(writer, status_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_publication_matched_status", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_publication_matched_status",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_qos = dc("int2dds_datawriter_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_qos = dc("int2dds_datawriter_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_qos(long writer, long qos_out) {
         try {
@@ -1363,7 +1708,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_status_changes = dc("int2dds_datawriter_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_status_changes = dc(
+            "int2dds_datawriter_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_status_changes(long writer, long mask_out) {
         try {
@@ -1373,7 +1719,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_get_statuscondition = dc("int2dds_datawriter_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_get_statuscondition = dc(
+            "int2dds_datawriter_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_get_statuscondition(long writer, long condition_out) {
         try {
@@ -1383,30 +1730,38 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_lookup_instance = dc("int2dds_datawriter_lookup_instance", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_datawriter_lookup_instance = dc("int2dds_datawriter_lookup_instance",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
 
     static int int2dds_datawriter_lookup_instance(long writer, long key, long key_len, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_datawriter_lookup_instance.invokeExact(writer, key, key_len, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_datawriter_lookup_instance.invokeExact(writer, key, key_len,
+                    __ffi_seg_handle_out);
+            if (handle_out != null)
+                MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_lookup_instance", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_prepare_serialized_write = dc("int2dds_datawriter_prepare_serialized_write", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_prepare_serialized_write = dc(
+            "int2dds_datawriter_prepare_serialized_write",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datawriter_prepare_serialized_write(long writer, long capacity, long data_out, long capacity_out, long loan_out) {
+    static int int2dds_datawriter_prepare_serialized_write(long writer, long capacity, long data_out, long capacity_out,
+            long loan_out) {
         try {
-            return (int) MH_int2dds_datawriter_prepare_serialized_write.invokeExact(writer, capacity, data_out, capacity_out, loan_out);
+            return (int) MH_int2dds_datawriter_prepare_serialized_write.invokeExact(writer, capacity, data_out,
+                    capacity_out, loan_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_prepare_serialized_write", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_create_default = dc("int2dds_datawriter_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_create_default = dc(
+            "int2dds_datawriter_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datawriter_qos_create_default(long qos_out) {
         try {
@@ -1416,7 +1771,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_destroy = dc("int2dds_datawriter_qos_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_destroy = dc("int2dds_datawriter_qos_destroy",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datawriter_qos_destroy(long qos) {
         try {
@@ -1426,7 +1782,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_data_frag = dc("int2dds_datawriter_qos_get_data_frag", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_data_frag = dc(
+            "int2dds_datawriter_qos_get_data_frag", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_data_frag(long qos, long value_out) {
         try {
@@ -1436,17 +1793,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_data_representation = dc("int2dds_datawriter_qos_get_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_data_representation = dc(
+            "int2dds_datawriter_qos_get_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_data_representation(long qos, long kind_out) {
         try {
             return (int) MH_int2dds_datawriter_qos_get_data_representation.invokeExact(qos, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_data_representation", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_data_representation",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_deadline = dc("int2dds_datawriter_qos_get_deadline", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_deadline = dc("int2dds_datawriter_qos_get_deadline",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_deadline(long qos, long period_ns_out) {
         try {
@@ -1456,7 +1816,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_destination_order = dc("int2dds_datawriter_qos_get_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_destination_order = dc(
+            "int2dds_datawriter_qos_get_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_destination_order(long qos, long kind_out) {
         try {
@@ -1466,7 +1827,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_durability = dc("int2dds_datawriter_qos_get_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_durability = dc(
+            "int2dds_datawriter_qos_get_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_durability(long qos, long kind_out) {
         try {
@@ -1476,7 +1838,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_history = dc("int2dds_datawriter_qos_get_history", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_history = dc("int2dds_datawriter_qos_get_history",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_history(long qos, long kind_out, long depth_out) {
         try {
@@ -1486,7 +1849,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_latency_budget = dc("int2dds_datawriter_qos_get_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_latency_budget = dc(
+            "int2dds_datawriter_qos_get_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_latency_budget(long qos, long duration_ns_out) {
         try {
@@ -1496,7 +1860,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_lifespan = dc("int2dds_datawriter_qos_get_lifespan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_lifespan = dc("int2dds_datawriter_qos_get_lifespan",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_lifespan(long qos, long duration_ns_out) {
         try {
@@ -1506,7 +1871,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_liveliness = dc("int2dds_datawriter_qos_get_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_liveliness = dc(
+            "int2dds_datawriter_qos_get_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_liveliness(long qos, long kind_out, long lease_duration_ns_out) {
         try {
@@ -1516,7 +1882,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_ownership = dc("int2dds_datawriter_qos_get_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_ownership = dc(
+            "int2dds_datawriter_qos_get_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_ownership(long qos, long kind_out) {
         try {
@@ -1526,17 +1893,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_ownership_strength = dc("int2dds_datawriter_qos_get_ownership_strength", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_ownership_strength = dc(
+            "int2dds_datawriter_qos_get_ownership_strength", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_ownership_strength(long qos, long value_out) {
         try {
             return (int) MH_int2dds_datawriter_qos_get_ownership_strength.invokeExact(qos, value_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_ownership_strength", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_ownership_strength",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_reliability = dc("int2dds_datawriter_qos_get_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_reliability = dc(
+            "int2dds_datawriter_qos_get_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_reliability(long qos, long kind_out, long max_blocking_time_ns_out) {
         try {
@@ -1546,37 +1916,46 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_resource_limits = dc("int2dds_datawriter_qos_get_resource_limits", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_resource_limits = dc(
+            "int2dds_datawriter_qos_get_resource_limits",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_datawriter_qos_get_resource_limits(long qos, long max_samples_out, long max_instances_out, long max_per_instance_out) {
+    static int int2dds_datawriter_qos_get_resource_limits(long qos, long max_samples_out, long max_instances_out,
+            long max_per_instance_out) {
         try {
-            return (int) MH_int2dds_datawriter_qos_get_resource_limits.invokeExact(qos, max_samples_out, max_instances_out, max_per_instance_out);
+            return (int) MH_int2dds_datawriter_qos_get_resource_limits.invokeExact(qos, max_samples_out,
+                    max_instances_out, max_per_instance_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_resource_limits", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_transport_priority = dc("int2dds_datawriter_qos_get_transport_priority", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_transport_priority = dc(
+            "int2dds_datawriter_qos_get_transport_priority", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_transport_priority(long qos, long value_out) {
         try {
             return (int) MH_int2dds_datawriter_qos_get_transport_priority.invokeExact(qos, value_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_transport_priority", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_transport_priority",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_get_writer_data_lifecycle = dc("int2dds_datawriter_qos_get_writer_data_lifecycle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_get_writer_data_lifecycle = dc(
+            "int2dds_datawriter_qos_get_writer_data_lifecycle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_get_writer_data_lifecycle(long qos, long autodispose_out) {
         try {
             return (int) MH_int2dds_datawriter_qos_get_writer_data_lifecycle.invokeExact(qos, autodispose_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_writer_data_lifecycle", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_get_writer_data_lifecycle",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_data_frag = dc("int2dds_datawriter_qos_set_data_frag", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_data_frag = dc(
+            "int2dds_datawriter_qos_set_data_frag", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_data_frag(long qos, int value) {
         try {
@@ -1586,17 +1965,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_data_representation = dc("int2dds_datawriter_qos_set_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_data_representation = dc(
+            "int2dds_datawriter_qos_set_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_data_representation(long qos, int kind) {
         try {
             return (int) MH_int2dds_datawriter_qos_set_data_representation.invokeExact(qos, kind);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_data_representation", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_data_representation",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_deadline = dc("int2dds_datawriter_qos_set_deadline", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_deadline = dc("int2dds_datawriter_qos_set_deadline",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_set_deadline(long qos, long period_ns) {
         try {
@@ -1606,7 +1988,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_destination_order = dc("int2dds_datawriter_qos_set_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_destination_order = dc(
+            "int2dds_datawriter_qos_set_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_destination_order(long qos, int kind) {
         try {
@@ -1616,7 +1999,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_durability = dc("int2dds_datawriter_qos_set_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_durability = dc(
+            "int2dds_datawriter_qos_set_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_durability(long qos, int kind) {
         try {
@@ -1626,7 +2010,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_history = dc("int2dds_datawriter_qos_set_history", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_history = dc("int2dds_datawriter_qos_set_history",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_history(long qos, int kind, int depth) {
         try {
@@ -1636,7 +2021,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_latency_budget = dc("int2dds_datawriter_qos_set_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_latency_budget = dc(
+            "int2dds_datawriter_qos_set_latency_budget", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_set_latency_budget(long qos, long duration_ns) {
         try {
@@ -1646,7 +2032,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_lifespan = dc("int2dds_datawriter_qos_set_lifespan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_lifespan = dc("int2dds_datawriter_qos_set_lifespan",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_set_lifespan(long qos, long duration_ns) {
         try {
@@ -1656,7 +2043,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_liveliness = dc("int2dds_datawriter_qos_set_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_liveliness = dc(
+            "int2dds_datawriter_qos_set_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datawriter_qos_set_liveliness(long qos, int kind, long lease_duration_ns) {
         try {
@@ -1666,7 +2054,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_ownership = dc("int2dds_datawriter_qos_set_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_ownership = dc(
+            "int2dds_datawriter_qos_set_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_ownership(long qos, int kind) {
         try {
@@ -1676,17 +2065,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_ownership_strength = dc("int2dds_datawriter_qos_set_ownership_strength", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_ownership_strength = dc(
+            "int2dds_datawriter_qos_set_ownership_strength", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_ownership_strength(long qos, int value) {
         try {
             return (int) MH_int2dds_datawriter_qos_set_ownership_strength.invokeExact(qos, value);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_ownership_strength", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_ownership_strength",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_reliability = dc("int2dds_datawriter_qos_set_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_reliability = dc(
+            "int2dds_datawriter_qos_set_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datawriter_qos_set_reliability(long qos, int kind, long max_blocking_time_ns) {
         try {
@@ -1696,27 +2088,34 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_resource_limits = dc("int2dds_datawriter_qos_set_resource_limits", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_resource_limits = dc(
+            "int2dds_datawriter_qos_set_resource_limits",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_datawriter_qos_set_resource_limits(long qos, int max_samples, int max_instances, int max_per_instance) {
+    static int int2dds_datawriter_qos_set_resource_limits(long qos, int max_samples, int max_instances,
+            int max_per_instance) {
         try {
-            return (int) MH_int2dds_datawriter_qos_set_resource_limits.invokeExact(qos, max_samples, max_instances, max_per_instance);
+            return (int) MH_int2dds_datawriter_qos_set_resource_limits.invokeExact(qos, max_samples, max_instances,
+                    max_per_instance);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_resource_limits", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_transport_priority = dc("int2dds_datawriter_qos_set_transport_priority", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_transport_priority = dc(
+            "int2dds_datawriter_qos_set_transport_priority", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_qos_set_transport_priority(long qos, int priority) {
         try {
             return (int) MH_int2dds_datawriter_qos_set_transport_priority.invokeExact(qos, priority);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_transport_priority", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_transport_priority",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_user_data = dc("int2dds_datawriter_qos_set_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_user_data = dc(
+            "int2dds_datawriter_qos_set_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_qos_set_user_data(long qos, long data, long data_len) {
         try {
@@ -1726,30 +2125,38 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_qos_set_writer_data_lifecycle = dc("int2dds_datawriter_qos_set_writer_data_lifecycle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
+    private static final MethodHandle MH_int2dds_datawriter_qos_set_writer_data_lifecycle = dc(
+            "int2dds_datawriter_qos_set_writer_data_lifecycle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
 
     static int int2dds_datawriter_qos_set_writer_data_lifecycle(long qos, boolean autodispose) {
         try {
-            return (int) MH_int2dds_datawriter_qos_set_writer_data_lifecycle.invokeExact(qos, (byte) (autodispose ? 1 : 0));
+            return (int) MH_int2dds_datawriter_qos_set_writer_data_lifecycle.invokeExact(qos,
+                    (byte) (autodispose ? 1 : 0));
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_writer_data_lifecycle", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_qos_set_writer_data_lifecycle",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_register_instance = dc("int2dds_datawriter_register_instance", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_datawriter_register_instance = dc(
+            "int2dds_datawriter_register_instance",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
 
     static int int2dds_datawriter_register_instance(long writer, long key, long key_len, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_datawriter_register_instance.invokeExact(writer, key, key_len, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_datawriter_register_instance.invokeExact(writer, key, key_len,
+                    __ffi_seg_handle_out);
+            if (handle_out != null)
+                MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_register_instance", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_set_listener = dc("int2dds_datawriter_set_listener", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_set_listener = dc("int2dds_datawriter_set_listener",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
 
     static int int2dds_datawriter_set_listener(long writer, long listener, int mask) {
         try {
@@ -1759,7 +2166,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_set_qos = dc("int2dds_datawriter_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_set_qos = dc("int2dds_datawriter_set_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_set_qos(long writer, long qos) {
         try {
@@ -1769,19 +2177,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_unregister_instance = dc("int2dds_datawriter_unregister_instance", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_datawriter_unregister_instance = dc(
+            "int2dds_datawriter_unregister_instance",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS));
 
     static int int2dds_datawriter_unregister_instance(long writer, long key, long key_len, byte[] handle) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datawriter_unregister_instance.invokeExact(writer, key, key_len, __ffi_seg_handle);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_unregister_instance", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_wait_for_acknowledgments = dc("int2dds_datawriter_wait_for_acknowledgments", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_wait_for_acknowledgments = dc(
+            "int2dds_datawriter_wait_for_acknowledgments", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_wait_for_acknowledgments(long writer, long timeout_ms) {
         try {
@@ -1791,7 +2203,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_write_serialized = dc("int2dds_datawriter_write_serialized", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_datawriter_write_serialized = dc("int2dds_datawriter_write_serialized",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_datawriter_write_serialized(long writer, long data, long data_len) {
         try {
@@ -1801,17 +2214,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_datawriter_write_serialized_w_timestamp = dc("int2dds_datawriter_write_serialized_w_timestamp", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_datawriter_write_serialized_w_timestamp = dc(
+            "int2dds_datawriter_write_serialized_w_timestamp",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
 
-    static int int2dds_datawriter_write_serialized_w_timestamp(long writer, long data, long data_len, int timestamp_sec, int timestamp_nanosec) {
+    static int int2dds_datawriter_write_serialized_w_timestamp(long writer, long data, long data_len, int timestamp_sec,
+            int timestamp_nanosec) {
         try {
-            return (int) MH_int2dds_datawriter_write_serialized_w_timestamp.invokeExact(writer, data, data_len, timestamp_sec, timestamp_nanosec);
+            return (int) MH_int2dds_datawriter_write_serialized_w_timestamp.invokeExact(writer, data, data_len,
+                    timestamp_sec, timestamp_nanosec);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_datawriter_write_serialized_w_timestamp", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_datawriter_write_serialized_w_timestamp",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_default_data_representation = dc("int2dds_default_data_representation", FunctionDescriptor.of(JAVA_INT));
+    private static final MethodHandle MH_int2dds_default_data_representation = dc("int2dds_default_data_representation",
+            FunctionDescriptor.of(JAVA_INT));
 
     static int int2dds_default_data_representation() {
         try {
@@ -1821,7 +2240,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_default_extensibility = dc("int2dds_default_extensibility", FunctionDescriptor.of(JAVA_INT));
+    private static final MethodHandle MH_int2dds_default_extensibility = dc("int2dds_default_extensibility",
+            FunctionDescriptor.of(JAVA_INT));
 
     static int int2dds_default_extensibility() {
         try {
@@ -1831,7 +2251,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_delete_contentfilteredtopic = dc("int2dds_delete_contentfilteredtopic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_delete_contentfilteredtopic = dc("int2dds_delete_contentfilteredtopic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_delete_contentfilteredtopic(long cft) {
         try {
@@ -1841,7 +2262,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_delete_datareader = dc("int2dds_delete_datareader", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_delete_datareader = dc("int2dds_delete_datareader",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_delete_datareader(long reader) {
         try {
@@ -1851,7 +2273,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_delete_datawriter = dc("int2dds_delete_datawriter", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_delete_datawriter = dc("int2dds_delete_datawriter",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_delete_datawriter(long writer) {
         try {
@@ -1861,7 +2284,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_delete_participant = dc("int2dds_delete_participant", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_delete_participant = dc("int2dds_delete_participant",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_delete_participant(long participant) {
         try {
@@ -1871,7 +2295,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_delete_publisher = dc("int2dds_delete_publisher", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_delete_publisher = dc("int2dds_delete_publisher",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_delete_publisher(long publisher) {
         try {
@@ -1881,7 +2306,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_delete_subscriber = dc("int2dds_delete_subscriber", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_delete_subscriber = dc("int2dds_delete_subscriber",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_delete_subscriber(long subscriber) {
         try {
@@ -1891,7 +2317,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_delete_topic = dc("int2dds_delete_topic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_delete_topic = dc("int2dds_delete_topic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_delete_topic(long topic) {
         try {
@@ -1901,7 +2328,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_domain_participant_factory_finalize = dc("int2dds_domain_participant_factory_finalize", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_domain_participant_factory_finalize = dc(
+            "int2dds_domain_participant_factory_finalize", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_domain_participant_factory_finalize(long factory) {
         try {
@@ -1911,27 +2339,35 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_domain_participant_factory_get_default_participant_qos = dc("int2dds_domain_participant_factory_get_default_participant_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_domain_participant_factory_get_default_participant_qos = dc(
+            "int2dds_domain_participant_factory_get_default_participant_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_domain_participant_factory_get_default_participant_qos(long _factory, long qos_out) {
         try {
-            return (int) MH_int2dds_domain_participant_factory_get_default_participant_qos.invokeExact(_factory, qos_out);
+            return (int) MH_int2dds_domain_participant_factory_get_default_participant_qos.invokeExact(_factory,
+                    qos_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_domain_participant_factory_get_default_participant_qos", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_domain_participant_factory_get_default_participant_qos",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_domain_participant_factory_get_instance = dc("int2dds_domain_participant_factory_get_instance", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_domain_participant_factory_get_instance = dc(
+            "int2dds_domain_participant_factory_get_instance", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_domain_participant_factory_get_instance(long factory_out) {
         try {
             return (int) MH_int2dds_domain_participant_factory_get_instance.invokeExact(factory_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_domain_participant_factory_get_instance", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_domain_participant_factory_get_instance",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_domain_participant_factory_get_qos = dc("int2dds_domain_participant_factory_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_domain_participant_factory_get_qos = dc(
+            "int2dds_domain_participant_factory_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_domain_participant_factory_get_qos(long _factory, long autoenable_out) {
         try {
@@ -1941,37 +2377,49 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_domain_participant_factory_lookup_participant = dc("int2dds_domain_participant_factory_lookup_participant", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_domain_participant_factory_lookup_participant = dc(
+            "int2dds_domain_participant_factory_lookup_participant",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_domain_participant_factory_lookup_participant(long _factory, int domain_id, long participant_out) {
+    static int int2dds_domain_participant_factory_lookup_participant(long _factory, int domain_id,
+            long participant_out) {
         try {
-            return (int) MH_int2dds_domain_participant_factory_lookup_participant.invokeExact(_factory, domain_id, participant_out);
+            return (int) MH_int2dds_domain_participant_factory_lookup_participant.invokeExact(_factory, domain_id,
+                    participant_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_domain_participant_factory_lookup_participant", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_domain_participant_factory_lookup_participant",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_domain_participant_factory_set_default_participant_qos = dc("int2dds_domain_participant_factory_set_default_participant_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_domain_participant_factory_set_default_participant_qos = dc(
+            "int2dds_domain_participant_factory_set_default_participant_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_domain_participant_factory_set_default_participant_qos(long _factory, long qos) {
         try {
             return (int) MH_int2dds_domain_participant_factory_set_default_participant_qos.invokeExact(_factory, qos);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_domain_participant_factory_set_default_participant_qos", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_domain_participant_factory_set_default_participant_qos",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_domain_participant_factory_set_qos = dc("int2dds_domain_participant_factory_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
+    private static final MethodHandle MH_int2dds_domain_participant_factory_set_qos = dc(
+            "int2dds_domain_participant_factory_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
 
     static int int2dds_domain_participant_factory_set_qos(long _factory, boolean autoenable_created_entities) {
         try {
-            return (int) MH_int2dds_domain_participant_factory_set_qos.invokeExact(_factory, (byte) (autoenable_created_entities ? 1 : 0));
+            return (int) MH_int2dds_domain_participant_factory_set_qos.invokeExact(_factory,
+                    (byte) (autoenable_created_entities ? 1 : 0));
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_domain_participant_factory_set_qos", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_create = dc("int2dds_dynamic_data_create", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_create = dc("int2dds_dynamic_data_create",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_data_create(long type_support, long out) {
         try {
@@ -1981,7 +2429,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_destroy = dc("int2dds_dynamic_data_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_destroy = dc("int2dds_dynamic_data_destroy",
+            FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_dynamic_data_destroy(long d) {
         try {
@@ -1991,7 +2440,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_from_sample = dc("int2dds_dynamic_data_from_sample", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_from_sample = dc("int2dds_dynamic_data_from_sample",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_data_from_sample(long participant, long bytes, long len, long type_obj, long out) {
         try {
@@ -2001,372 +2451,468 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_bool = dc("int2dds_dynamic_data_get_bool", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_bool = dc("int2dds_dynamic_data_get_bool",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_bool(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_bool.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_bool", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_char8 = dc("int2dds_dynamic_data_get_char8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_char8 = dc("int2dds_dynamic_data_get_char8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_char8(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_char8.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_char8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_f32 = dc("int2dds_dynamic_data_get_f32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_f32 = dc("int2dds_dynamic_data_get_f32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_f32(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_f32.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_f32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_f64 = dc("int2dds_dynamic_data_get_f64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_f64 = dc("int2dds_dynamic_data_get_f64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_f64(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_f64.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_f64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_i16 = dc("int2dds_dynamic_data_get_i16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_i16 = dc("int2dds_dynamic_data_get_i16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_i16(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_i16.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_i16", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_i32 = dc("int2dds_dynamic_data_get_i32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_i32 = dc("int2dds_dynamic_data_get_i32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_i32(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_i32.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_i32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_i64 = dc("int2dds_dynamic_data_get_i64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_i64 = dc("int2dds_dynamic_data_get_i64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_i64(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_i64.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_i64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_i8 = dc("int2dds_dynamic_data_get_i8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_i8 = dc("int2dds_dynamic_data_get_i8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_i8(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_i8.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_i8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_len = dc("int2dds_dynamic_data_get_len", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_len = dc("int2dds_dynamic_data_get_len",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_len(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_len.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_len", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_member = dc("int2dds_dynamic_data_get_member", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_member = dc("int2dds_dynamic_data_get_member",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_member(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_member.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_member", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_string = dc("int2dds_dynamic_data_get_string", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_string = dc("int2dds_dynamic_data_get_string",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_dynamic_data_get_string(long data, byte[] field_path, byte[] out_buf, long buf_cap, long out_len) {
+    static int int2dds_dynamic_data_get_string(long data, byte[] field_path, byte[] out_buf, long buf_cap,
+            long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
-            MemorySegment __ffi_seg_out_buf = (out_buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(out_buf.length);
-            int __ffi_ret = (int) MH_int2dds_dynamic_data_get_string.invokeExact(data, __ffi_seg_field_path, __ffi_seg_out_buf, buf_cap, out_len);
-            if (out_buf != null) MemorySegment.copy(__ffi_seg_out_buf, JAVA_BYTE, 0, out_buf, 0, out_buf.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_out_buf = (out_buf == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(out_buf.length);
+            int __ffi_ret = (int) MH_int2dds_dynamic_data_get_string.invokeExact(data, __ffi_seg_field_path,
+                    __ffi_seg_out_buf, buf_cap, out_len);
+            if (out_buf != null)
+                MemorySegment.copy(__ffi_seg_out_buf, JAVA_BYTE, 0, out_buf, 0, out_buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_string", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_u16 = dc("int2dds_dynamic_data_get_u16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_u16 = dc("int2dds_dynamic_data_get_u16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_u16(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_u16.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_u16", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_u32 = dc("int2dds_dynamic_data_get_u32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_u32 = dc("int2dds_dynamic_data_get_u32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_u32(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_u32.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_u32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_u64 = dc("int2dds_dynamic_data_get_u64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_u64 = dc("int2dds_dynamic_data_get_u64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_u64(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_u64.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_u64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_u8 = dc("int2dds_dynamic_data_get_u8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_u8 = dc("int2dds_dynamic_data_get_u8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_u8(long data, byte[] field_path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_path.length + 1);
-            if (field_path != null) MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
+            MemorySegment __ffi_seg_field_path = (field_path == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_path.length + 1);
+            if (field_path != null)
+                MemorySegment.copy(field_path, 0, __ffi_seg_field_path, JAVA_BYTE, 0, field_path.length);
             return (int) MH_int2dds_dynamic_data_get_u8.invokeExact(data, __ffi_seg_field_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_u8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_get_value = dc("int2dds_dynamic_data_get_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_get_value = dc("int2dds_dynamic_data_get_value",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_get_value(long data, byte[] path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_path = (path == null) ? MemorySegment.NULL : __ffi_arena.allocate(path.length + 1);
-            if (path != null) MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
+            if (path != null)
+                MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
             return (int) MH_int2dds_dynamic_data_get_value.invokeExact(data, __ffi_seg_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_get_value", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_bool = dc("int2dds_dynamic_data_set_bool", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_BYTE));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_bool = dc("int2dds_dynamic_data_set_bool",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_BYTE));
 
     static int int2dds_dynamic_data_set_bool(long data, byte[] field, boolean value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_bool.invokeExact(data, __ffi_seg_field, (byte) (value ? 1 : 0));
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_bool", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_char8 = dc("int2dds_dynamic_data_set_char8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_char8 = dc("int2dds_dynamic_data_set_char8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_dynamic_data_set_char8(long data, byte[] field, int value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_char8.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_char8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_f32 = dc("int2dds_dynamic_data_set_f32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_FLOAT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_f32 = dc("int2dds_dynamic_data_set_f32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_FLOAT));
 
     static int int2dds_dynamic_data_set_f32(long data, byte[] field, float value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_f32.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_f32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_f64 = dc("int2dds_dynamic_data_set_f64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_DOUBLE));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_f64 = dc("int2dds_dynamic_data_set_f64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_DOUBLE));
 
     static int int2dds_dynamic_data_set_f64(long data, byte[] field, double value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_f64.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_f64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_i16 = dc("int2dds_dynamic_data_set_i16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_i16 = dc("int2dds_dynamic_data_set_i16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_dynamic_data_set_i16(long data, byte[] field, int value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_i16.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_i16", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_i32 = dc("int2dds_dynamic_data_set_i32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_i32 = dc("int2dds_dynamic_data_set_i32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_dynamic_data_set_i32(long data, byte[] field, int value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_i32.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_i32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_i64 = dc("int2dds_dynamic_data_set_i64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_i64 = dc("int2dds_dynamic_data_set_i64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_set_i64(long data, byte[] field, long value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_i64.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_i64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_i8 = dc("int2dds_dynamic_data_set_i8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_i8 = dc("int2dds_dynamic_data_set_i8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_dynamic_data_set_i8(long data, byte[] field, int value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_i8.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_i8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_string = dc("int2dds_dynamic_data_set_string", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_string = dc("int2dds_dynamic_data_set_string",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS));
 
     static int int2dds_dynamic_data_set_string(long data, byte[] field, byte[] value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
-            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL : __ffi_arena.allocate(value.length + 1);
-            if (value != null) MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(value.length + 1);
+            if (value != null)
+                MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
             return (int) MH_int2dds_dynamic_data_set_string.invokeExact(data, __ffi_seg_field, __ffi_seg_value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_string", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_u16 = dc("int2dds_dynamic_data_set_u16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_u16 = dc("int2dds_dynamic_data_set_u16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_dynamic_data_set_u16(long data, byte[] field, int value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_u16.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_u16", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_u32 = dc("int2dds_dynamic_data_set_u32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_u32 = dc("int2dds_dynamic_data_set_u32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_dynamic_data_set_u32(long data, byte[] field, int value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_u32.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_u32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_u64 = dc("int2dds_dynamic_data_set_u64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_u64 = dc("int2dds_dynamic_data_set_u64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_set_u64(long data, byte[] field, long value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_u64.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_u64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_u8 = dc("int2dds_dynamic_data_set_u8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_u8 = dc("int2dds_dynamic_data_set_u8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_dynamic_data_set_u8(long data, byte[] field, int value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_u8.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_u8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_data_set_value = dc("int2dds_dynamic_data_set_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_data_set_value = dc("int2dds_dynamic_data_set_value",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_data_set_value(long data, byte[] field, long value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL : __ffi_arena.allocate(field.length + 1);
-            if (field != null) MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
+            MemorySegment __ffi_seg_field = (field == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field.length + 1);
+            if (field != null)
+                MemorySegment.copy(field, 0, __ffi_seg_field, JAVA_BYTE, 0, field.length);
             return (int) MH_int2dds_dynamic_data_set_value.invokeExact(data, __ffi_seg_field, value);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_data_set_value", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_reader_destroy = dc("int2dds_dynamic_reader_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_reader_destroy = dc("int2dds_dynamic_reader_destroy",
+            FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_dynamic_reader_destroy(long r) {
         try {
@@ -2376,7 +2922,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_reader_get_qos = dc("int2dds_dynamic_reader_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_reader_get_qos = dc("int2dds_dynamic_reader_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_reader_get_qos(long reader, long qos_out) {
         try {
@@ -2386,7 +2933,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_reader_get_statuscondition = dc("int2dds_dynamic_reader_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_reader_get_statuscondition = dc(
+            "int2dds_dynamic_reader_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_reader_get_statuscondition(long reader, long condition_out) {
         try {
@@ -2396,17 +2944,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_reader_subscription_matched_count = dc("int2dds_dynamic_reader_subscription_matched_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_reader_subscription_matched_count = dc(
+            "int2dds_dynamic_reader_subscription_matched_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_reader_subscription_matched_count(long reader, long out) {
         try {
             return (int) MH_int2dds_dynamic_reader_subscription_matched_count.invokeExact(reader, out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_dynamic_reader_subscription_matched_count", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_dynamic_reader_subscription_matched_count",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_reader_take = dc("int2dds_dynamic_reader_take", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_reader_take = dc("int2dds_dynamic_reader_take",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_reader_take(long reader, long out_data, long out_info) {
         try {
@@ -2416,178 +2967,228 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_bool = dc("int2dds_dynamic_sample_get_bool", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_bool = dc("int2dds_dynamic_sample_get_bool",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_bool(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_dynamic_sample_get_bool.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_dynamic_sample_get_bool.invokeExact(bytes, len, type_obj, __ffi_seg_field_name,
+                    out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_bool", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_byte = dc("int2dds_dynamic_sample_get_byte", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_byte = dc("int2dds_dynamic_sample_get_byte",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_byte(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_dynamic_sample_get_byte.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_dynamic_sample_get_byte.invokeExact(bytes, len, type_obj, __ffi_seg_field_name,
+                    out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_byte", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_char8 = dc("int2dds_dynamic_sample_get_char8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_char8 = dc("int2dds_dynamic_sample_get_char8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_char8(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_dynamic_sample_get_char8.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_dynamic_sample_get_char8.invokeExact(bytes, len, type_obj, __ffi_seg_field_name,
+                    out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_char8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_f32 = dc("int2dds_dynamic_sample_get_f32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_f32 = dc("int2dds_dynamic_sample_get_f32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_f32(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_f32.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_f32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_f64 = dc("int2dds_dynamic_sample_get_f64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_f64 = dc("int2dds_dynamic_sample_get_f64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_f64(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_f64.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_f64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_i16 = dc("int2dds_dynamic_sample_get_i16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_i16 = dc("int2dds_dynamic_sample_get_i16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_i16(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_i16.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_i16", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_i32 = dc("int2dds_dynamic_sample_get_i32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_i32 = dc("int2dds_dynamic_sample_get_i32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_i32(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_i32.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_i32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_i64 = dc("int2dds_dynamic_sample_get_i64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_i64 = dc("int2dds_dynamic_sample_get_i64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_i64(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_i64.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_i64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_i8 = dc("int2dds_dynamic_sample_get_i8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_i8 = dc("int2dds_dynamic_sample_get_i8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_i8(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_i8.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_i8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_string = dc("int2dds_dynamic_sample_get_string", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_string = dc("int2dds_dynamic_sample_get_string",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_dynamic_sample_get_string(long bytes, long len, long type_obj, byte[] field_name, byte[] out_buf, long buf_cap, long out_len) {
+    static int int2dds_dynamic_sample_get_string(long bytes, long len, long type_obj, byte[] field_name, byte[] out_buf,
+            long buf_cap, long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            MemorySegment __ffi_seg_out_buf = (out_buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(out_buf.length);
-            int __ffi_ret = (int) MH_int2dds_dynamic_sample_get_string.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, __ffi_seg_out_buf, buf_cap, out_len);
-            if (out_buf != null) MemorySegment.copy(__ffi_seg_out_buf, JAVA_BYTE, 0, out_buf, 0, out_buf.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_out_buf = (out_buf == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(out_buf.length);
+            int __ffi_ret = (int) MH_int2dds_dynamic_sample_get_string.invokeExact(bytes, len, type_obj,
+                    __ffi_seg_field_name, __ffi_seg_out_buf, buf_cap, out_len);
+            if (out_buf != null)
+                MemorySegment.copy(__ffi_seg_out_buf, JAVA_BYTE, 0, out_buf, 0, out_buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_string", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_u16 = dc("int2dds_dynamic_sample_get_u16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_u16 = dc("int2dds_dynamic_sample_get_u16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_u16(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_u16.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_u16", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_u32 = dc("int2dds_dynamic_sample_get_u32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_u32 = dc("int2dds_dynamic_sample_get_u32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_u32(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_u32.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_u32", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_u64 = dc("int2dds_dynamic_sample_get_u64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_u64 = dc("int2dds_dynamic_sample_get_u64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_u64(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_u64.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_u64", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_sample_get_u8 = dc("int2dds_dynamic_sample_get_u8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_sample_get_u8 = dc("int2dds_dynamic_sample_get_u8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_sample_get_u8(long bytes, long len, long type_obj, byte[] field_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_dynamic_sample_get_u8.invokeExact(bytes, len, type_obj, __ffi_seg_field_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_sample_get_u8", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_type_support_destroy = dc("int2dds_dynamic_type_support_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_type_support_destroy = dc(
+            "int2dds_dynamic_type_support_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_dynamic_type_support_destroy(long s) {
         try {
@@ -2597,7 +3198,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_array = dc("int2dds_dynamic_value_array", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_array = dc("int2dds_dynamic_value_array",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_array(long out) {
         try {
@@ -2607,7 +3209,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_bitmask = dc("int2dds_dynamic_value_as_bitmask", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_bitmask = dc("int2dds_dynamic_value_as_bitmask",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_bitmask(long value, long out) {
         try {
@@ -2617,7 +3220,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_bitset = dc("int2dds_dynamic_value_as_bitset", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_bitset = dc("int2dds_dynamic_value_as_bitset",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_bitset(long value, long out) {
         try {
@@ -2627,7 +3231,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_bool = dc("int2dds_dynamic_value_as_bool", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_bool = dc("int2dds_dynamic_value_as_bool",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_bool(long value, long out) {
         try {
@@ -2637,7 +3242,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_char8 = dc("int2dds_dynamic_value_as_char8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_char8 = dc("int2dds_dynamic_value_as_char8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_char8(long value, long out) {
         try {
@@ -2647,20 +3253,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_enum = dc("int2dds_dynamic_value_as_enum", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_enum = dc("int2dds_dynamic_value_as_enum",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_enum(long value, byte[] buf, long buf_len, long out_len, long out_value) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_buf = (buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(buf.length);
-            int __ffi_ret = (int) MH_int2dds_dynamic_value_as_enum.invokeExact(value, __ffi_seg_buf, buf_len, out_len, out_value);
-            if (buf != null) MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
+            int __ffi_ret = (int) MH_int2dds_dynamic_value_as_enum.invokeExact(value, __ffi_seg_buf, buf_len, out_len,
+                    out_value);
+            if (buf != null)
+                MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_value_as_enum", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_f32 = dc("int2dds_dynamic_value_as_f32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_f32 = dc("int2dds_dynamic_value_as_f32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_f32(long value, long out) {
         try {
@@ -2670,7 +3280,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_f64 = dc("int2dds_dynamic_value_as_f64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_f64 = dc("int2dds_dynamic_value_as_f64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_f64(long value, long out) {
         try {
@@ -2680,7 +3291,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_i16 = dc("int2dds_dynamic_value_as_i16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_i16 = dc("int2dds_dynamic_value_as_i16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_i16(long value, long out) {
         try {
@@ -2690,7 +3302,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_i32 = dc("int2dds_dynamic_value_as_i32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_i32 = dc("int2dds_dynamic_value_as_i32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_i32(long value, long out) {
         try {
@@ -2700,7 +3313,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_i64 = dc("int2dds_dynamic_value_as_i64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_i64 = dc("int2dds_dynamic_value_as_i64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_i64(long value, long out) {
         try {
@@ -2710,7 +3324,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_i8 = dc("int2dds_dynamic_value_as_i8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_i8 = dc("int2dds_dynamic_value_as_i8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_i8(long value, long out) {
         try {
@@ -2720,20 +3335,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_string = dc("int2dds_dynamic_value_as_string", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_string = dc("int2dds_dynamic_value_as_string",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_string(long value, byte[] buf, long buf_len, long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_buf = (buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(buf.length);
-            int __ffi_ret = (int) MH_int2dds_dynamic_value_as_string.invokeExact(value, __ffi_seg_buf, buf_len, out_len);
-            if (buf != null) MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
+            int __ffi_ret = (int) MH_int2dds_dynamic_value_as_string.invokeExact(value, __ffi_seg_buf, buf_len,
+                    out_len);
+            if (buf != null)
+                MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_value_as_string", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_struct = dc("int2dds_dynamic_value_as_struct", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_struct = dc("int2dds_dynamic_value_as_struct",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_struct(long value, long out) {
         try {
@@ -2743,7 +3362,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_u16 = dc("int2dds_dynamic_value_as_u16", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_u16 = dc("int2dds_dynamic_value_as_u16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_u16(long value, long out) {
         try {
@@ -2753,7 +3373,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_u32 = dc("int2dds_dynamic_value_as_u32", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_u32 = dc("int2dds_dynamic_value_as_u32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_u32(long value, long out) {
         try {
@@ -2763,7 +3384,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_u64 = dc("int2dds_dynamic_value_as_u64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_u64 = dc("int2dds_dynamic_value_as_u64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_u64(long value, long out) {
         try {
@@ -2773,7 +3395,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_as_u8 = dc("int2dds_dynamic_value_as_u8", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_as_u8 = dc("int2dds_dynamic_value_as_u8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_as_u8(long value, long out) {
         try {
@@ -2783,7 +3406,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_bitmask = dc("int2dds_dynamic_value_bitmask", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_bitmask = dc("int2dds_dynamic_value_bitmask",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_bitmask(long value, long out) {
         try {
@@ -2793,7 +3417,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_bitset = dc("int2dds_dynamic_value_bitset", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_bitset = dc("int2dds_dynamic_value_bitset",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_bitset(long value, long out) {
         try {
@@ -2803,7 +3428,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_bool = dc("int2dds_dynamic_value_bool", FunctionDescriptor.of(JAVA_INT, JAVA_BYTE, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_bool = dc("int2dds_dynamic_value_bool",
+            FunctionDescriptor.of(JAVA_INT, JAVA_BYTE, JAVA_LONG));
 
     static int int2dds_dynamic_value_bool(boolean value, long out) {
         try {
@@ -2813,7 +3439,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_byte = dc("int2dds_dynamic_value_byte", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_byte = dc("int2dds_dynamic_value_byte",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_byte(int value, long out) {
         try {
@@ -2823,7 +3450,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_char8 = dc("int2dds_dynamic_value_char8", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_char8 = dc("int2dds_dynamic_value_char8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_char8(int value, long out) {
         try {
@@ -2833,7 +3461,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_destroy = dc("int2dds_dynamic_value_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_destroy = dc("int2dds_dynamic_value_destroy",
+            FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_dynamic_value_destroy(long value) {
         try {
@@ -2843,7 +3472,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_element = dc("int2dds_dynamic_value_element", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_element = dc("int2dds_dynamic_value_element",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_element(long value, long index, long out) {
         try {
@@ -2853,19 +3483,22 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_enum = dc("int2dds_dynamic_value_enum", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_enum = dc("int2dds_dynamic_value_enum",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_enum(byte[] name, int value, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
             return (int) MH_int2dds_dynamic_value_enum.invokeExact(__ffi_seg_name, value, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_value_enum", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_f32 = dc("int2dds_dynamic_value_f32", FunctionDescriptor.of(JAVA_INT, JAVA_FLOAT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_f32 = dc("int2dds_dynamic_value_f32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_FLOAT, JAVA_LONG));
 
     static int int2dds_dynamic_value_f32(float value, long out) {
         try {
@@ -2875,7 +3508,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_f64 = dc("int2dds_dynamic_value_f64", FunctionDescriptor.of(JAVA_INT, JAVA_DOUBLE, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_f64 = dc("int2dds_dynamic_value_f64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_DOUBLE, JAVA_LONG));
 
     static int int2dds_dynamic_value_f64(double value, long out) {
         try {
@@ -2885,7 +3519,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_i16 = dc("int2dds_dynamic_value_i16", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_i16 = dc("int2dds_dynamic_value_i16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_i16(int value, long out) {
         try {
@@ -2895,7 +3530,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_i32 = dc("int2dds_dynamic_value_i32", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_i32 = dc("int2dds_dynamic_value_i32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_i32(int value, long out) {
         try {
@@ -2905,7 +3541,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_i64 = dc("int2dds_dynamic_value_i64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_i64 = dc("int2dds_dynamic_value_i64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_i64(long value, long out) {
         try {
@@ -2915,7 +3552,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_i8 = dc("int2dds_dynamic_value_i8", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_i8 = dc("int2dds_dynamic_value_i8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_i8(int value, long out) {
         try {
@@ -2925,7 +3563,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_kind = dc("int2dds_dynamic_value_kind", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_kind = dc("int2dds_dynamic_value_kind",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_kind(long value, long out) {
         try {
@@ -2935,7 +3574,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_len = dc("int2dds_dynamic_value_len", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_len = dc("int2dds_dynamic_value_len",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_len(long value, long out) {
         try {
@@ -2945,7 +3585,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_map = dc("int2dds_dynamic_value_map", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_map = dc("int2dds_dynamic_value_map",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_map(long out) {
         try {
@@ -2955,7 +3596,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_map_insert = dc("int2dds_dynamic_value_map_insert", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_map_insert = dc("int2dds_dynamic_value_map_insert",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_map_insert(long map, long key, long value) {
         try {
@@ -2965,7 +3607,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_map_key = dc("int2dds_dynamic_value_map_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_map_key = dc("int2dds_dynamic_value_map_key",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_map_key(long value, long index, long out) {
         try {
@@ -2975,7 +3618,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_map_value = dc("int2dds_dynamic_value_map_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_map_value = dc("int2dds_dynamic_value_map_value",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_map_value(long value, long index, long out) {
         try {
@@ -2985,7 +3629,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_push = dc("int2dds_dynamic_value_push", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_push = dc("int2dds_dynamic_value_push",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_push(long collection, long element) {
         try {
@@ -2995,7 +3640,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_sequence = dc("int2dds_dynamic_value_sequence", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_sequence = dc("int2dds_dynamic_value_sequence",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_sequence(long out) {
         try {
@@ -3005,19 +3651,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_string = dc("int2dds_dynamic_value_string", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_string = dc("int2dds_dynamic_value_string",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_value_string(byte[] value, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL : __ffi_arena.allocate(value.length + 1);
-            if (value != null) MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
+            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(value.length + 1);
+            if (value != null)
+                MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
             return (int) MH_int2dds_dynamic_value_string.invokeExact(__ffi_seg_value, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_value_string", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_struct = dc("int2dds_dynamic_value_struct", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_struct = dc("int2dds_dynamic_value_struct",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_struct(long data, long out) {
         try {
@@ -3027,20 +3677,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_to_string = dc("int2dds_dynamic_value_to_string", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_to_string = dc("int2dds_dynamic_value_to_string",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_to_string(long value, byte[] buf, long buf_len, long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_buf = (buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(buf.length);
-            int __ffi_ret = (int) MH_int2dds_dynamic_value_to_string.invokeExact(value, __ffi_seg_buf, buf_len, out_len);
-            if (buf != null) MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
+            int __ffi_ret = (int) MH_int2dds_dynamic_value_to_string.invokeExact(value, __ffi_seg_buf, buf_len,
+                    out_len);
+            if (buf != null)
+                MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_value_to_string", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_u16 = dc("int2dds_dynamic_value_u16", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_u16 = dc("int2dds_dynamic_value_u16",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_u16(int value, long out) {
         try {
@@ -3050,7 +3704,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_u32 = dc("int2dds_dynamic_value_u32", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_u32 = dc("int2dds_dynamic_value_u32",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_u32(int value, long out) {
         try {
@@ -3060,7 +3715,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_u64 = dc("int2dds_dynamic_value_u64", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_u64 = dc("int2dds_dynamic_value_u64",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_u64(long value, long out) {
         try {
@@ -3070,7 +3726,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_u8 = dc("int2dds_dynamic_value_u8", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_u8 = dc("int2dds_dynamic_value_u8",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_dynamic_value_u8(int value, long out) {
         try {
@@ -3080,7 +3737,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_union = dc("int2dds_dynamic_value_union", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_union = dc("int2dds_dynamic_value_union",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_union(long discriminator, long value, long out) {
         try {
@@ -3090,7 +3748,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_union_discriminator = dc("int2dds_dynamic_value_union_discriminator", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_union_discriminator = dc(
+            "int2dds_dynamic_value_union_discriminator", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_union_discriminator(long value, long out) {
         try {
@@ -3100,7 +3759,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_union_value = dc("int2dds_dynamic_value_union_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_union_value = dc("int2dds_dynamic_value_union_value",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_value_union_value(long value, long out) {
         try {
@@ -3110,19 +3770,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_value_wstring = dc("int2dds_dynamic_value_wstring", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_value_wstring = dc("int2dds_dynamic_value_wstring",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
 
     static int int2dds_dynamic_value_wstring(byte[] value, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL : __ffi_arena.allocate(value.length + 1);
-            if (value != null) MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
+            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(value.length + 1);
+            if (value != null)
+                MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
             return (int) MH_int2dds_dynamic_value_wstring.invokeExact(__ffi_seg_value, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_dynamic_value_wstring", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_writer_destroy = dc("int2dds_dynamic_writer_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_writer_destroy = dc("int2dds_dynamic_writer_destroy",
+            FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_dynamic_writer_destroy(long w) {
         try {
@@ -3132,7 +3796,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_writer_get_qos = dc("int2dds_dynamic_writer_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_writer_get_qos = dc("int2dds_dynamic_writer_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_writer_get_qos(long writer, long qos_out) {
         try {
@@ -3142,17 +3807,20 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_writer_publication_matched_count = dc("int2dds_dynamic_writer_publication_matched_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_writer_publication_matched_count = dc(
+            "int2dds_dynamic_writer_publication_matched_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_writer_publication_matched_count(long writer, long out) {
         try {
             return (int) MH_int2dds_dynamic_writer_publication_matched_count.invokeExact(writer, out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_dynamic_writer_publication_matched_count", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_dynamic_writer_publication_matched_count",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_dynamic_writer_write = dc("int2dds_dynamic_writer_write", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_dynamic_writer_write = dc("int2dds_dynamic_writer_write",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_writer_write(long writer, long data) {
         try {
@@ -3162,7 +3830,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_env_get_multicast_ttl = dc("int2dds_env_get_multicast_ttl", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_env_get_multicast_ttl = dc("int2dds_env_get_multicast_ttl",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_env_get_multicast_ttl(long ttl_out, long has_value_out) {
         try {
@@ -3172,19 +3841,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_env_set_default_qos_profile = dc("int2dds_env_set_default_qos_profile", FunctionDescriptor.of(JAVA_INT, ADDRESS));
+    private static final MethodHandle MH_int2dds_env_set_default_qos_profile = dc("int2dds_env_set_default_qos_profile",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS));
 
     static int int2dds_env_set_default_qos_profile(byte[] profile) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_profile = (profile == null) ? MemorySegment.NULL : __ffi_arena.allocate(profile.length + 1);
-            if (profile != null) MemorySegment.copy(profile, 0, __ffi_seg_profile, JAVA_BYTE, 0, profile.length);
+            MemorySegment __ffi_seg_profile = (profile == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(profile.length + 1);
+            if (profile != null)
+                MemorySegment.copy(profile, 0, __ffi_seg_profile, JAVA_BYTE, 0, profile.length);
             return (int) MH_int2dds_env_set_default_qos_profile.invokeExact(__ffi_seg_profile);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_env_set_default_qos_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_env_set_multicast_ttl = dc("int2dds_env_set_multicast_ttl", FunctionDescriptor.of(JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_env_set_multicast_ttl = dc("int2dds_env_set_multicast_ttl",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT));
 
     static int int2dds_env_set_multicast_ttl(int ttl) {
         try {
@@ -3194,31 +3867,37 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_env_set_qos_profile = dc("int2dds_env_set_qos_profile", FunctionDescriptor.of(JAVA_INT, ADDRESS));
+    private static final MethodHandle MH_int2dds_env_set_qos_profile = dc("int2dds_env_set_qos_profile",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS));
 
     static int int2dds_env_set_qos_profile(byte[] path) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_path = (path == null) ? MemorySegment.NULL : __ffi_arena.allocate(path.length + 1);
-            if (path != null) MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
+            if (path != null)
+                MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
             return (int) MH_int2dds_env_set_qos_profile.invokeExact(__ffi_seg_path);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_env_set_qos_profile", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_get_dynamic_type_support = dc("int2dds_get_dynamic_type_support", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_get_dynamic_type_support = dc("int2dds_get_dynamic_type_support",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
 
     static int int2dds_get_dynamic_type_support(byte[] type_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
-            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null)
+                MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
             return (int) MH_int2dds_get_dynamic_type_support.invokeExact(__ffi_seg_type_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_get_dynamic_type_support", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_guardcondition_delete = dc("int2dds_guardcondition_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_guardcondition_delete = dc("int2dds_guardcondition_delete",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_guardcondition_delete(long condition) {
         try {
@@ -3228,7 +3907,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_guardcondition_get_trigger_value = dc("int2dds_guardcondition_get_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_guardcondition_get_trigger_value = dc(
+            "int2dds_guardcondition_get_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_guardcondition_get_trigger_value(long condition, long value_out) {
         try {
@@ -3238,7 +3918,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_guardcondition_new = dc("int2dds_guardcondition_new", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_guardcondition_new = dc("int2dds_guardcondition_new",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_guardcondition_new(long condition_out) {
         try {
@@ -3248,7 +3929,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_guardcondition_set_trigger_value = dc("int2dds_guardcondition_set_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
+    private static final MethodHandle MH_int2dds_guardcondition_set_trigger_value = dc(
+            "int2dds_guardcondition_set_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_BYTE));
 
     static int int2dds_guardcondition_set_trigger_value(long condition, boolean value) {
         try {
@@ -3258,20 +3940,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_last_error_message = dc("int2dds_last_error_message", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_last_error_message = dc("int2dds_last_error_message",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
 
     static int int2dds_last_error_message(byte[] buf, int buf_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_buf = (buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(buf.length);
             int __ffi_ret = (int) MH_int2dds_last_error_message.invokeExact(__ffi_seg_buf, buf_len);
-            if (buf != null) MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
+            if (buf != null)
+                MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_last_error_message", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_load_profiles = dc("int2dds_load_profiles", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_load_profiles = dc("int2dds_load_profiles",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
 
     static int int2dds_load_profiles(byte[][] paths, long count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
@@ -3287,7 +3972,8 @@ public final class Ffi {
                         __ffi_elemSeg_paths = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_paths = __ffi_arena.allocate(__ffi_elem_paths.length + 1);
-                        MemorySegment.copy(__ffi_elem_paths, 0, __ffi_elemSeg_paths, JAVA_BYTE, 0, __ffi_elem_paths.length);
+                        MemorySegment.copy(__ffi_elem_paths, 0, __ffi_elemSeg_paths, JAVA_BYTE, 0,
+                                __ffi_elem_paths.length);
                     }
                     __ffi_seg_paths.setAtIndex(ADDRESS, __ffi_i_paths, __ffi_elemSeg_paths);
                 }
@@ -3298,7 +3984,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_assert_liveliness = dc("int2dds_participant_assert_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_assert_liveliness = dc(
+            "int2dds_participant_assert_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_participant_assert_liveliness(long participant) {
         try {
@@ -3308,76 +3995,98 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_builtin_topic_data_destroy = dc("int2dds_participant_builtin_topic_data_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_builtin_topic_data_destroy = dc(
+            "int2dds_participant_builtin_topic_data_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_participant_builtin_topic_data_destroy(long data) {
         try {
             return (int) MH_int2dds_participant_builtin_topic_data_destroy.invokeExact(data);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_builtin_topic_data_destroy", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_builtin_topic_data_destroy",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_builtin_topic_data_get_key = dc("int2dds_participant_builtin_topic_data_get_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_participant_builtin_topic_data_get_key = dc(
+            "int2dds_participant_builtin_topic_data_get_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_participant_builtin_topic_data_get_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
-            int __ffi_ret = (int) MH_int2dds_participant_builtin_topic_data_get_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
+            int __ffi_ret = (int) MH_int2dds_participant_builtin_topic_data_get_key.invokeExact(data,
+                    __ffi_seg_key_out);
+            if (key_out != null)
+                MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_builtin_topic_data_get_key", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_builtin_topic_data_get_key",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_builtin_topic_data_get_user_data = dc("int2dds_participant_builtin_topic_data_get_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_builtin_topic_data_get_user_data = dc(
+            "int2dds_participant_builtin_topic_data_get_user_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_builtin_topic_data_get_user_data(long data, long buf, long capacity, long size_out) {
         try {
-            return (int) MH_int2dds_participant_builtin_topic_data_get_user_data.invokeExact(data, buf, capacity, size_out);
+            return (int) MH_int2dds_participant_builtin_topic_data_get_user_data.invokeExact(data, buf, capacity,
+                    size_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_builtin_topic_data_get_user_data", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_builtin_topic_data_get_user_data",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_contains_entity = dc("int2dds_participant_contains_entity", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_contains_entity = dc("int2dds_participant_contains_entity",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_participant_contains_entity(long participant, byte[] handle, long result_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_participant_contains_entity.invokeExact(participant, __ffi_seg_handle, result_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_contains_entity", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_delete_contained_entities = dc("int2dds_participant_delete_contained_entities", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_delete_contained_entities = dc(
+            "int2dds_participant_delete_contained_entities", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_participant_delete_contained_entities(long participant) {
         try {
             return (int) MH_int2dds_participant_delete_contained_entities.invokeExact(participant);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_delete_contained_entities", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_delete_contained_entities",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_find_topic = dc("int2dds_participant_find_topic", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_find_topic = dc("int2dds_participant_find_topic",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_participant_find_topic(long participant, byte[] topic_name, byte[] dds_type_name, int timeout_ms, long topic_out) {
+    static int int2dds_participant_find_topic(long participant, byte[] topic_name, byte[] dds_type_name, int timeout_ms,
+            long topic_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(dds_type_name.length + 1);
-            if (dds_type_name != null) MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
-            return (int) MH_int2dds_participant_find_topic.invokeExact(participant, __ffi_seg_topic_name, __ffi_seg_dds_type_name, timeout_ms, topic_out);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(dds_type_name.length + 1);
+            if (dds_type_name != null)
+                MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
+            return (int) MH_int2dds_participant_find_topic.invokeExact(participant, __ffi_seg_topic_name,
+                    __ffi_seg_dds_type_name, timeout_ms, topic_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_find_topic", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_builtin_subscriber = dc("int2dds_participant_get_builtin_subscriber", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_builtin_subscriber = dc(
+            "int2dds_participant_get_builtin_subscriber", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_get_builtin_subscriber(long participant, long out) {
         try {
@@ -3387,7 +4096,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_current_time = dc("int2dds_participant_get_current_time", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_current_time = dc(
+            "int2dds_participant_get_current_time", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_get_current_time(long participant, long sec_out, long nanosec_out) {
         try {
@@ -3397,33 +4107,47 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_discovered_participant_data = dc("int2dds_participant_get_discovered_participant_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_discovered_participant_data = dc(
+            "int2dds_participant_get_discovered_participant_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_participant_get_discovered_participant_data(long participant, byte[] handle, long data_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
-            return (int) MH_int2dds_participant_get_discovered_participant_data.invokeExact(participant, __ffi_seg_handle, data_out);
+            if (handle != null)
+                MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_participant_get_discovered_participant_data.invokeExact(participant,
+                    __ffi_seg_handle, data_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_get_discovered_participant_data", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_get_discovered_participant_data",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_discovered_participants = dc("int2dds_participant_get_discovered_participants", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_discovered_participants = dc(
+            "int2dds_participant_get_discovered_participants",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_participant_get_discovered_participants(long participant, byte[] handles_out, long capacity, long count_out) {
+    static int int2dds_participant_get_discovered_participants(long participant, byte[] handles_out, long capacity,
+            long count_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handles_out.length);
-            long __ffi_cap_handles_out = (handles_out == null) ? 0L : Math.min(capacity, (long) (handles_out.length / 16));
-            int __ffi_ret = (int) MH_int2dds_participant_get_discovered_participants.invokeExact(participant, __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
-            if (handles_out != null) MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
+            MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(handles_out.length);
+            long __ffi_cap_handles_out = (handles_out == null) ? 0L
+                    : Math.min(capacity, (long) (handles_out.length / 16));
+            int __ffi_ret = (int) MH_int2dds_participant_get_discovered_participants.invokeExact(participant,
+                    __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
+            if (handles_out != null)
+                MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_get_discovered_participants", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_get_discovered_participants",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_domain_id = dc("int2dds_participant_get_domain_id", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_domain_id = dc("int2dds_participant_get_domain_id",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_get_domain_id(long participant, long domain_id_out) {
         try {
@@ -3433,7 +4157,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_qos = dc("int2dds_participant_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_qos = dc("int2dds_participant_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_get_qos(long participant, long qos_out) {
         try {
@@ -3443,7 +4168,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_status_changes = dc("int2dds_participant_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_status_changes = dc(
+            "int2dds_participant_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_get_status_changes(long participant, long mask_out) {
         try {
@@ -3453,7 +4179,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_get_statuscondition = dc("int2dds_participant_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_get_statuscondition = dc(
+            "int2dds_participant_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_get_statuscondition(long participant, long condition_out) {
         try {
@@ -3463,33 +4190,45 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_add_binary_property = dc("int2dds_participant_qos_add_binary_property", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_BYTE));
+    private static final MethodHandle MH_int2dds_participant_qos_add_binary_property = dc(
+            "int2dds_participant_qos_add_binary_property",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_BYTE));
 
-    static int int2dds_participant_qos_add_binary_property(long qos, byte[] name, long data, long data_len, boolean propagate) {
+    static int int2dds_participant_qos_add_binary_property(long qos, byte[] name, long data, long data_len,
+            boolean propagate) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
-            return (int) MH_int2dds_participant_qos_add_binary_property.invokeExact(qos, __ffi_seg_name, data, data_len, (byte) (propagate ? 1 : 0));
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            return (int) MH_int2dds_participant_qos_add_binary_property.invokeExact(qos, __ffi_seg_name, data, data_len,
+                    (byte) (propagate ? 1 : 0));
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_qos_add_binary_property", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_add_property = dc("int2dds_participant_qos_add_property", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_BYTE));
+    private static final MethodHandle MH_int2dds_participant_qos_add_property = dc(
+            "int2dds_participant_qos_add_property",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_BYTE));
 
     static int int2dds_participant_qos_add_property(long qos, byte[] name, byte[] value, boolean propagate) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
-            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL : __ffi_arena.allocate(value.length + 1);
-            if (value != null) MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
-            return (int) MH_int2dds_participant_qos_add_property.invokeExact(qos, __ffi_seg_name, __ffi_seg_value, (byte) (propagate ? 1 : 0));
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            MemorySegment __ffi_seg_value = (value == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(value.length + 1);
+            if (value != null)
+                MemorySegment.copy(value, 0, __ffi_seg_value, JAVA_BYTE, 0, value.length);
+            return (int) MH_int2dds_participant_qos_add_property.invokeExact(qos, __ffi_seg_name, __ffi_seg_value,
+                    (byte) (propagate ? 1 : 0));
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_qos_add_property", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_create_default = dc("int2dds_participant_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_qos_create_default = dc(
+            "int2dds_participant_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_participant_qos_create_default(long qos_out) {
         try {
@@ -3499,7 +4238,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_destroy = dc("int2dds_participant_qos_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_qos_destroy = dc("int2dds_participant_qos_destroy",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_participant_qos_destroy(long qos) {
         try {
@@ -3509,34 +4249,44 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_find_property = dc("int2dds_participant_qos_find_property", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_qos_find_property = dc(
+            "int2dds_participant_qos_find_property",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_participant_qos_find_property(long qos, byte[] name, byte[] out_buf, long out_cap, long out_len) {
+    static int int2dds_participant_qos_find_property(long qos, byte[] name, byte[] out_buf, long out_cap,
+            long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
-            MemorySegment __ffi_seg_out_buf = (out_buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(out_buf.length);
-            int __ffi_ret = (int) MH_int2dds_participant_qos_find_property.invokeExact(qos, __ffi_seg_name, __ffi_seg_out_buf, out_cap, out_len);
-            if (out_buf != null) MemorySegment.copy(__ffi_seg_out_buf, JAVA_BYTE, 0, out_buf, 0, out_buf.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            MemorySegment __ffi_seg_out_buf = (out_buf == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(out_buf.length);
+            int __ffi_ret = (int) MH_int2dds_participant_qos_find_property.invokeExact(qos, __ffi_seg_name,
+                    __ffi_seg_out_buf, out_cap, out_len);
+            if (out_buf != null)
+                MemorySegment.copy(__ffi_seg_out_buf, JAVA_BYTE, 0, out_buf, 0, out_buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_qos_find_property", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_remove_property = dc("int2dds_participant_qos_remove_property", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_participant_qos_remove_property = dc(
+            "int2dds_participant_qos_remove_property", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_participant_qos_remove_property(long qos, byte[] name) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
             return (int) MH_int2dds_participant_qos_remove_property.invokeExact(qos, __ffi_seg_name);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_qos_remove_property", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_set_multicast_ttl = dc("int2dds_participant_qos_set_multicast_ttl", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_participant_qos_set_multicast_ttl = dc(
+            "int2dds_participant_qos_set_multicast_ttl", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_participant_qos_set_multicast_ttl(long qos, int ttl) {
         try {
@@ -3546,7 +4296,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_qos_set_user_data = dc("int2dds_participant_qos_set_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_qos_set_user_data = dc(
+            "int2dds_participant_qos_set_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_qos_set_user_data(long qos, long data, long data_len) {
         try {
@@ -3556,7 +4307,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_set_qos = dc("int2dds_participant_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_set_qos = dc("int2dds_participant_set_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_participant_set_qos(long participant, long qos) {
         try {
@@ -3566,264 +4318,367 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_take_discovered_publications_snapshot = dc("int2dds_participant_take_discovered_publications_snapshot", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_take_discovered_publications_snapshot = dc(
+            "int2dds_participant_take_discovered_publications_snapshot",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_participant_take_discovered_publications_snapshot(long participant, int timeout_ms, long seq_out) {
+    static int int2dds_participant_take_discovered_publications_snapshot(long participant, int timeout_ms,
+            long seq_out) {
         try {
-            return (int) MH_int2dds_participant_take_discovered_publications_snapshot.invokeExact(participant, timeout_ms, seq_out);
+            return (int) MH_int2dds_participant_take_discovered_publications_snapshot.invokeExact(participant,
+                    timeout_ms, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_take_discovered_publications_snapshot", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_take_discovered_publications_snapshot",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_take_discovered_publications_snapshot_filtered = dc("int2dds_participant_take_discovered_publications_snapshot_filtered", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_take_discovered_publications_snapshot_filtered = dc(
+            "int2dds_participant_take_discovered_publications_snapshot_filtered",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_participant_take_discovered_publications_snapshot_filtered(long participant, int timeout_ms, int instance_state_mask, long seq_out) {
+    static int int2dds_participant_take_discovered_publications_snapshot_filtered(long participant, int timeout_ms,
+            int instance_state_mask, long seq_out) {
         try {
-            return (int) MH_int2dds_participant_take_discovered_publications_snapshot_filtered.invokeExact(participant, timeout_ms, instance_state_mask, seq_out);
+            return (int) MH_int2dds_participant_take_discovered_publications_snapshot_filtered.invokeExact(participant,
+                    timeout_ms, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_take_discovered_publications_snapshot_filtered", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_participant_take_discovered_publications_snapshot_filtered",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_take_discovered_subscriptions_snapshot = dc("int2dds_participant_take_discovered_subscriptions_snapshot", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_take_discovered_subscriptions_snapshot = dc(
+            "int2dds_participant_take_discovered_subscriptions_snapshot",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_participant_take_discovered_subscriptions_snapshot(long participant, int timeout_ms, long seq_out) {
+    static int int2dds_participant_take_discovered_subscriptions_snapshot(long participant, int timeout_ms,
+            long seq_out) {
         try {
-            return (int) MH_int2dds_participant_take_discovered_subscriptions_snapshot.invokeExact(participant, timeout_ms, seq_out);
+            return (int) MH_int2dds_participant_take_discovered_subscriptions_snapshot.invokeExact(participant,
+                    timeout_ms, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_take_discovered_subscriptions_snapshot", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_participant_take_discovered_subscriptions_snapshot",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_take_discovered_subscriptions_snapshot_filtered = dc("int2dds_participant_take_discovered_subscriptions_snapshot_filtered", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_take_discovered_subscriptions_snapshot_filtered = dc(
+            "int2dds_participant_take_discovered_subscriptions_snapshot_filtered",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_participant_take_discovered_subscriptions_snapshot_filtered(long participant, int timeout_ms, int instance_state_mask, long seq_out) {
+    static int int2dds_participant_take_discovered_subscriptions_snapshot_filtered(long participant, int timeout_ms,
+            int instance_state_mask, long seq_out) {
         try {
-            return (int) MH_int2dds_participant_take_discovered_subscriptions_snapshot_filtered.invokeExact(participant, timeout_ms, instance_state_mask, seq_out);
+            return (int) MH_int2dds_participant_take_discovered_subscriptions_snapshot_filtered.invokeExact(participant,
+                    timeout_ms, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_participant_take_discovered_subscriptions_snapshot_filtered", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_participant_take_discovered_subscriptions_snapshot_filtered",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_participant_wait_for_type_object = dc("int2dds_participant_wait_for_type_object", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_participant_wait_for_type_object = dc(
+            "int2dds_participant_wait_for_type_object",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_participant_wait_for_type_object(long participant, byte[] topic_name, int timeout_ms, long type_obj_out, byte[] type_name_buf, long type_name_buf_len, long out_len) {
+    static int int2dds_participant_wait_for_type_object(long participant, byte[] topic_name, int timeout_ms,
+            long type_obj_out, byte[] type_name_buf, long type_name_buf_len, long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name.length + 1);
-            if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
-            MemorySegment __ffi_seg_type_name_buf = (type_name_buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name_buf.length);
-            int __ffi_ret = (int) MH_int2dds_participant_wait_for_type_object.invokeExact(participant, __ffi_seg_topic_name, timeout_ms, type_obj_out, __ffi_seg_type_name_buf, type_name_buf_len, out_len);
-            if (type_name_buf != null) MemorySegment.copy(__ffi_seg_type_name_buf, JAVA_BYTE, 0, type_name_buf, 0, type_name_buf.length);
+            MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name.length + 1);
+            if (topic_name != null)
+                MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, JAVA_BYTE, 0, topic_name.length);
+            MemorySegment __ffi_seg_type_name_buf = (type_name_buf == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name_buf.length);
+            int __ffi_ret = (int) MH_int2dds_participant_wait_for_type_object.invokeExact(participant,
+                    __ffi_seg_topic_name, timeout_ms, type_obj_out, __ffi_seg_type_name_buf, type_name_buf_len,
+                    out_len);
+            if (type_name_buf != null)
+                MemorySegment.copy(__ffi_seg_type_name_buf, JAVA_BYTE, 0, type_name_buf, 0, type_name_buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_wait_for_type_object", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_destroy = dc("int2dds_publication_builtin_topic_data_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_destroy = dc(
+            "int2dds_publication_builtin_topic_data_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_destroy(long data) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_destroy.invokeExact(data);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_destroy", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_destroy",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_deadline = dc("int2dds_publication_builtin_topic_data_get_deadline", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_deadline = dc(
+            "int2dds_publication_builtin_topic_data_get_deadline",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_get_deadline(long data, long sec_out, long nanosec_out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_get_deadline.invokeExact(data, sec_out, nanosec_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_deadline", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_deadline",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_durability_kind = dc("int2dds_publication_builtin_topic_data_get_durability_kind", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_durability_kind = dc(
+            "int2dds_publication_builtin_topic_data_get_durability_kind",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_get_durability_kind(long data, long kind_out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_get_durability_kind.invokeExact(data, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_durability_kind", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_durability_kind",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_endpoint_guid = dc("int2dds_publication_builtin_topic_data_get_endpoint_guid", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_endpoint_guid = dc(
+            "int2dds_publication_builtin_topic_data_get_endpoint_guid",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_publication_builtin_topic_data_get_endpoint_guid(long data, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_endpoint_guid.invokeExact(data, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_endpoint_guid.invokeExact(data,
+                    __ffi_seg_guid_out);
+            if (guid_out != null)
+                MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_endpoint_guid", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_endpoint_guid",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_key = dc("int2dds_publication_builtin_topic_data_get_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_key = dc(
+            "int2dds_publication_builtin_topic_data_get_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_publication_builtin_topic_data_get_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
-            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
+            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_key.invokeExact(data,
+                    __ffi_seg_key_out);
+            if (key_out != null)
+                MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_key", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_key",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_lifespan = dc("int2dds_publication_builtin_topic_data_get_lifespan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_lifespan = dc(
+            "int2dds_publication_builtin_topic_data_get_lifespan",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_get_lifespan(long data, long sec_out, long nanosec_out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_get_lifespan.invokeExact(data, sec_out, nanosec_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_lifespan", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_lifespan",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_liveliness_kind = dc("int2dds_publication_builtin_topic_data_get_liveliness_kind", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_liveliness_kind = dc(
+            "int2dds_publication_builtin_topic_data_get_liveliness_kind",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_get_liveliness_kind(long data, long kind_out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_get_liveliness_kind.invokeExact(data, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_liveliness_kind", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_liveliness_kind",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_liveliness_lease_duration = dc("int2dds_publication_builtin_topic_data_get_liveliness_lease_duration", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_liveliness_lease_duration = dc(
+            "int2dds_publication_builtin_topic_data_get_liveliness_lease_duration",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(long data, long sec_out, long nanosec_out) {
+    static int int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(long data, long sec_out,
+            long nanosec_out) {
         try {
-            return (int) MH_int2dds_publication_builtin_topic_data_get_liveliness_lease_duration.invokeExact(data, sec_out, nanosec_out);
+            return (int) MH_int2dds_publication_builtin_topic_data_get_liveliness_lease_duration.invokeExact(data,
+                    sec_out, nanosec_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_liveliness_lease_duration", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_publication_builtin_topic_data_get_liveliness_lease_duration",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_participant_key = dc("int2dds_publication_builtin_topic_data_get_participant_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_participant_key = dc(
+            "int2dds_publication_builtin_topic_data_get_participant_key",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_publication_builtin_topic_data_get_participant_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
-            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_participant_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
+            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_participant_key.invokeExact(data,
+                    __ffi_seg_key_out);
+            if (key_out != null)
+                MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_participant_key", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_participant_key",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_reliability_kind = dc("int2dds_publication_builtin_topic_data_get_reliability_kind", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_reliability_kind = dc(
+            "int2dds_publication_builtin_topic_data_get_reliability_kind",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_get_reliability_kind(long data, long kind_out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_get_reliability_kind.invokeExact(data, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_reliability_kind", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_reliability_kind",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_topic_name = dc("int2dds_publication_builtin_topic_data_get_topic_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_topic_name = dc(
+            "int2dds_publication_builtin_topic_data_get_topic_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_publication_builtin_topic_data_get_topic_name(long data, long buf, long capacity, long size_out) {
+    static int int2dds_publication_builtin_topic_data_get_topic_name(long data, long buf, long capacity,
+            long size_out) {
         try {
-            return (int) MH_int2dds_publication_builtin_topic_data_get_topic_name.invokeExact(data, buf, capacity, size_out);
+            return (int) MH_int2dds_publication_builtin_topic_data_get_topic_name.invokeExact(data, buf, capacity,
+                    size_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_topic_name", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_topic_name",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_type_name = dc("int2dds_publication_builtin_topic_data_get_type_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_type_name = dc(
+            "int2dds_publication_builtin_topic_data_get_type_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_get_type_name(long data, long buf, long capacity, long size_out) {
         try {
-            return (int) MH_int2dds_publication_builtin_topic_data_get_type_name.invokeExact(data, buf, capacity, size_out);
+            return (int) MH_int2dds_publication_builtin_topic_data_get_type_name.invokeExact(data, buf, capacity,
+                    size_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_type_name", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_type_name",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_user_data = dc("int2dds_publication_builtin_topic_data_get_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_get_user_data = dc(
+            "int2dds_publication_builtin_topic_data_get_user_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_get_user_data(long data, long buf, long capacity, long size_out) {
         try {
-            return (int) MH_int2dds_publication_builtin_topic_data_get_user_data.invokeExact(data, buf, capacity, size_out);
+            return (int) MH_int2dds_publication_builtin_topic_data_get_user_data.invokeExact(data, buf, capacity,
+                    size_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_user_data", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_user_data",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_delete = dc("int2dds_publication_builtin_topic_data_seq_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_delete = dc(
+            "int2dds_publication_builtin_topic_data_seq_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_seq_delete(long seq) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_seq_delete.invokeExact(seq);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_delete", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_delete",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_get = dc("int2dds_publication_builtin_topic_data_seq_get", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_get = dc(
+            "int2dds_publication_builtin_topic_data_seq_get",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_seq_get(long seq, long index, long data_out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_seq_get.invokeExact(seq, index, data_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_get", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_get",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_get_instance_handle = dc("int2dds_publication_builtin_topic_data_seq_get_instance_handle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_get_instance_handle = dc(
+            "int2dds_publication_builtin_topic_data_seq_get_instance_handle",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS));
 
     static int int2dds_publication_builtin_topic_data_seq_get_instance_handle(long seq, long index, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_seq_get_instance_handle.invokeExact(seq, index, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_seq_get_instance_handle.invokeExact(seq,
+                    index, __ffi_seg_handle_out);
+            if (handle_out != null)
+                MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_get_instance_handle", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_publication_builtin_topic_data_seq_get_instance_handle",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_get_instance_state = dc("int2dds_publication_builtin_topic_data_seq_get_instance_state", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_get_instance_state = dc(
+            "int2dds_publication_builtin_topic_data_seq_get_instance_state",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_publication_builtin_topic_data_seq_get_instance_state(long seq, long index, long instance_state_out) {
+    static int int2dds_publication_builtin_topic_data_seq_get_instance_state(long seq, long index,
+            long instance_state_out) {
         try {
-            return (int) MH_int2dds_publication_builtin_topic_data_seq_get_instance_state.invokeExact(seq, index, instance_state_out);
+            return (int) MH_int2dds_publication_builtin_topic_data_seq_get_instance_state.invokeExact(seq, index,
+                    instance_state_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_get_instance_state", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_publication_builtin_topic_data_seq_get_instance_state", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_length = dc("int2dds_publication_builtin_topic_data_seq_length", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_seq_length = dc(
+            "int2dds_publication_builtin_topic_data_seq_length", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_seq_length(long seq, long count_out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_seq_length.invokeExact(seq, count_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_length", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_length",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_take_type_object = dc("int2dds_publication_builtin_topic_data_take_type_object", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publication_builtin_topic_data_take_type_object = dc(
+            "int2dds_publication_builtin_topic_data_take_type_object",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publication_builtin_topic_data_take_type_object(long data, long out) {
         try {
             return (int) MH_int2dds_publication_builtin_topic_data_take_type_object.invokeExact(data, out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_take_type_object", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_take_type_object",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_delete_contained_entities = dc("int2dds_publisher_delete_contained_entities", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_delete_contained_entities = dc(
+            "int2dds_publisher_delete_contained_entities", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_publisher_delete_contained_entities(long publisher) {
         try {
@@ -3833,20 +4688,23 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_get_instance_handle = dc("int2dds_publisher_get_instance_handle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_publisher_get_instance_handle = dc(
+            "int2dds_publisher_get_instance_handle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_publisher_get_instance_handle(long publisher, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_publisher_get_instance_handle.invokeExact(publisher, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
+            if (handle_out != null)
+                MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_publisher_get_instance_handle", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_get_qos = dc("int2dds_publisher_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_get_qos = dc("int2dds_publisher_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publisher_get_qos(long publisher, long qos_out) {
         try {
@@ -3856,7 +4714,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_get_status_changes = dc("int2dds_publisher_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_get_status_changes = dc(
+            "int2dds_publisher_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publisher_get_status_changes(long publisher, long mask_out) {
         try {
@@ -3866,7 +4725,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_get_statuscondition = dc("int2dds_publisher_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_get_statuscondition = dc(
+            "int2dds_publisher_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publisher_get_statuscondition(long publisher, long condition_out) {
         try {
@@ -3876,7 +4736,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_qos_create_default = dc("int2dds_publisher_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_qos_create_default = dc(
+            "int2dds_publisher_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_publisher_qos_create_default(long qos_out) {
         try {
@@ -3886,7 +4747,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_qos_destroy = dc("int2dds_publisher_qos_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_qos_destroy = dc("int2dds_publisher_qos_destroy",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_publisher_qos_destroy(long qos) {
         try {
@@ -3896,7 +4758,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_qos_set_partition = dc("int2dds_publisher_qos_set_partition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_qos_set_partition = dc("int2dds_publisher_qos_set_partition",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_publisher_qos_set_partition(long qos, byte[][] partitions, long partition_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
@@ -3912,7 +4775,8 @@ public final class Ffi {
                         __ffi_elemSeg_partitions = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_partitions = __ffi_arena.allocate(__ffi_elem_partitions.length + 1);
-                        MemorySegment.copy(__ffi_elem_partitions, 0, __ffi_elemSeg_partitions, JAVA_BYTE, 0, __ffi_elem_partitions.length);
+                        MemorySegment.copy(__ffi_elem_partitions, 0, __ffi_elemSeg_partitions, JAVA_BYTE, 0,
+                                __ffi_elem_partitions.length);
                     }
                     __ffi_seg_partitions.setAtIndex(ADDRESS, __ffi_i_partitions, __ffi_elemSeg_partitions);
                 }
@@ -3923,7 +4787,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_set_qos = dc("int2dds_publisher_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_set_qos = dc("int2dds_publisher_set_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publisher_set_qos(long publisher, long qos) {
         try {
@@ -3933,7 +4798,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_publisher_wait_for_acknowledgments = dc("int2dds_publisher_wait_for_acknowledgments", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_publisher_wait_for_acknowledgments = dc(
+            "int2dds_publisher_wait_for_acknowledgments", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_publisher_wait_for_acknowledgments(long publisher, long timeout_ms) {
         try {
@@ -3943,9 +4809,12 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_querycondition_set_query_parameters = dc("int2dds_querycondition_set_query_parameters", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_querycondition_set_query_parameters = dc(
+            "int2dds_querycondition_set_query_parameters",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
-    static int int2dds_querycondition_set_query_parameters(long condition, byte[][] query_parameters, long query_parameters_count) {
+    static int int2dds_querycondition_set_query_parameters(long condition, byte[][] query_parameters,
+            long query_parameters_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_query_parameters;
             if (query_parameters == null || query_parameters.length == 0) {
@@ -3959,18 +4828,22 @@ public final class Ffi {
                         __ffi_elemSeg_query_parameters = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_query_parameters = __ffi_arena.allocate(__ffi_elem_query_parameters.length + 1);
-                        MemorySegment.copy(__ffi_elem_query_parameters, 0, __ffi_elemSeg_query_parameters, JAVA_BYTE, 0, __ffi_elem_query_parameters.length);
+                        MemorySegment.copy(__ffi_elem_query_parameters, 0, __ffi_elemSeg_query_parameters, JAVA_BYTE, 0,
+                                __ffi_elem_query_parameters.length);
                     }
-                    __ffi_seg_query_parameters.setAtIndex(ADDRESS, __ffi_i_query_parameters, __ffi_elemSeg_query_parameters);
+                    __ffi_seg_query_parameters.setAtIndex(ADDRESS, __ffi_i_query_parameters,
+                            __ffi_elemSeg_query_parameters);
                 }
             }
-            return (int) MH_int2dds_querycondition_set_query_parameters.invokeExact(condition, __ffi_seg_query_parameters, query_parameters_count);
+            return (int) MH_int2dds_querycondition_set_query_parameters.invokeExact(condition,
+                    __ffi_seg_query_parameters, query_parameters_count);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_querycondition_set_query_parameters", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_readcondition_delete = dc("int2dds_readcondition_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_readcondition_delete = dc("int2dds_readcondition_delete",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_readcondition_delete(long condition) {
         try {
@@ -3980,7 +4853,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_readcondition_get_trigger_value = dc("int2dds_readcondition_get_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_readcondition_get_trigger_value = dc(
+            "int2dds_readcondition_get_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_readcondition_get_trigger_value(long condition, long value_out) {
         try {
@@ -3990,7 +4864,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_sample_seq_delete = dc("int2dds_sample_seq_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_sample_seq_delete = dc("int2dds_sample_seq_delete",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_sample_seq_delete(long seq) {
         try {
@@ -4000,17 +4875,21 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_sample_seq_get_data = dc("int2dds_sample_seq_get_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_sample_seq_get_data = dc("int2dds_sample_seq_get_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_sample_seq_get_data(long seq, long index, long buffer, long buffer_capacity, long actual_size_out) {
+    static int int2dds_sample_seq_get_data(long seq, long index, long buffer, long buffer_capacity,
+            long actual_size_out) {
         try {
-            return (int) MH_int2dds_sample_seq_get_data.invokeExact(seq, index, buffer, buffer_capacity, actual_size_out);
+            return (int) MH_int2dds_sample_seq_get_data.invokeExact(seq, index, buffer, buffer_capacity,
+                    actual_size_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_sample_seq_get_data", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_sample_seq_get_info = dc("int2dds_sample_seq_get_info", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_sample_seq_get_info = dc("int2dds_sample_seq_get_info",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_sample_seq_get_info(long seq, long index, long info_out) {
         try {
@@ -4020,7 +4899,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_sample_seq_length = dc("int2dds_sample_seq_length", FunctionDescriptor.of(JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_sample_seq_length = dc("int2dds_sample_seq_length",
+            FunctionDescriptor.of(JAVA_LONG, JAVA_LONG));
 
     static long int2dds_sample_seq_length(long seq) {
         try {
@@ -4030,7 +4910,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_statuscondition_delete = dc("int2dds_statuscondition_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_statuscondition_delete = dc("int2dds_statuscondition_delete",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_statuscondition_delete(long condition) {
         try {
@@ -4040,7 +4921,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_statuscondition_get_enabled_statuses = dc("int2dds_statuscondition_get_enabled_statuses", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_statuscondition_get_enabled_statuses = dc(
+            "int2dds_statuscondition_get_enabled_statuses", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_statuscondition_get_enabled_statuses(long condition, long mask_out) {
         try {
@@ -4050,7 +4932,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_statuscondition_get_trigger_value = dc("int2dds_statuscondition_get_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_statuscondition_get_trigger_value = dc(
+            "int2dds_statuscondition_get_trigger_value", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_statuscondition_get_trigger_value(long condition, long value_out) {
         try {
@@ -4060,7 +4943,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_statuscondition_set_enabled_statuses = dc("int2dds_statuscondition_set_enabled_statuses", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_statuscondition_set_enabled_statuses = dc(
+            "int2dds_statuscondition_set_enabled_statuses", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_statuscondition_set_enabled_statuses(long condition, int mask) {
         try {
@@ -4070,7 +4954,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_delete_contained_entities = dc("int2dds_subscriber_delete_contained_entities", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_delete_contained_entities = dc(
+            "int2dds_subscriber_delete_contained_entities", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_subscriber_delete_contained_entities(long subscriber) {
         try {
@@ -4080,20 +4965,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_get_instance_handle = dc("int2dds_subscriber_get_instance_handle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_subscriber_get_instance_handle = dc(
+            "int2dds_subscriber_get_instance_handle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_subscriber_get_instance_handle(long subscriber, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_subscriber_get_instance_handle.invokeExact(subscriber, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_subscriber_get_instance_handle.invokeExact(subscriber,
+                    __ffi_seg_handle_out);
+            if (handle_out != null)
+                MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscriber_get_instance_handle", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_get_qos = dc("int2dds_subscriber_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_get_qos = dc("int2dds_subscriber_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscriber_get_qos(long subscriber, long qos_out) {
         try {
@@ -4103,7 +4992,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_get_status_changes = dc("int2dds_subscriber_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_get_status_changes = dc(
+            "int2dds_subscriber_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscriber_get_status_changes(long subscriber, long mask_out) {
         try {
@@ -4113,7 +5003,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_get_statuscondition = dc("int2dds_subscriber_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_get_statuscondition = dc(
+            "int2dds_subscriber_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscriber_get_statuscondition(long subscriber, long condition_out) {
         try {
@@ -4123,7 +5014,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_qos_create_default = dc("int2dds_subscriber_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_qos_create_default = dc(
+            "int2dds_subscriber_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_subscriber_qos_create_default(long qos_out) {
         try {
@@ -4133,7 +5025,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_qos_destroy = dc("int2dds_subscriber_qos_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_qos_destroy = dc("int2dds_subscriber_qos_destroy",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_subscriber_qos_destroy(long qos) {
         try {
@@ -4143,7 +5036,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_qos_set_partition = dc("int2dds_subscriber_qos_set_partition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_qos_set_partition = dc(
+            "int2dds_subscriber_qos_set_partition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_subscriber_qos_set_partition(long qos, byte[][] partitions, long partition_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
@@ -4159,18 +5053,21 @@ public final class Ffi {
                         __ffi_elemSeg_partitions = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_partitions = __ffi_arena.allocate(__ffi_elem_partitions.length + 1);
-                        MemorySegment.copy(__ffi_elem_partitions, 0, __ffi_elemSeg_partitions, JAVA_BYTE, 0, __ffi_elem_partitions.length);
+                        MemorySegment.copy(__ffi_elem_partitions, 0, __ffi_elemSeg_partitions, JAVA_BYTE, 0,
+                                __ffi_elem_partitions.length);
                     }
                     __ffi_seg_partitions.setAtIndex(ADDRESS, __ffi_i_partitions, __ffi_elemSeg_partitions);
                 }
             }
-            return (int) MH_int2dds_subscriber_qos_set_partition.invokeExact(qos, __ffi_seg_partitions, partition_count);
+            return (int) MH_int2dds_subscriber_qos_set_partition.invokeExact(qos, __ffi_seg_partitions,
+                    partition_count);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscriber_qos_set_partition", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_set_qos = dc("int2dds_subscriber_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_set_qos = dc("int2dds_subscriber_set_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscriber_set_qos(long subscriber, long qos) {
         try {
@@ -4180,201 +5077,280 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscriber_take_publication_data = dc("int2dds_subscriber_take_publication_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscriber_take_publication_data = dc(
+            "int2dds_subscriber_take_publication_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_LONG));
 
-    static int int2dds_subscriber_take_publication_data(long builtin_sub, byte[] topic_name_filter, int timeout_ms, long out) {
+    static int int2dds_subscriber_take_publication_data(long builtin_sub, byte[] topic_name_filter, int timeout_ms,
+            long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_topic_name_filter = (topic_name_filter == null) ? MemorySegment.NULL : __ffi_arena.allocate(topic_name_filter.length + 1);
-            if (topic_name_filter != null) MemorySegment.copy(topic_name_filter, 0, __ffi_seg_topic_name_filter, JAVA_BYTE, 0, topic_name_filter.length);
-            return (int) MH_int2dds_subscriber_take_publication_data.invokeExact(builtin_sub, __ffi_seg_topic_name_filter, timeout_ms, out);
+            MemorySegment __ffi_seg_topic_name_filter = (topic_name_filter == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(topic_name_filter.length + 1);
+            if (topic_name_filter != null)
+                MemorySegment.copy(topic_name_filter, 0, __ffi_seg_topic_name_filter, JAVA_BYTE, 0,
+                        topic_name_filter.length);
+            return (int) MH_int2dds_subscriber_take_publication_data.invokeExact(builtin_sub,
+                    __ffi_seg_topic_name_filter, timeout_ms, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscriber_take_publication_data", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_destroy = dc("int2dds_subscription_builtin_topic_data_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_destroy = dc(
+            "int2dds_subscription_builtin_topic_data_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_destroy(long data) {
         try {
             return (int) MH_int2dds_subscription_builtin_topic_data_destroy.invokeExact(data);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_destroy", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_destroy",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_deadline = dc("int2dds_subscription_builtin_topic_data_get_deadline", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_deadline = dc(
+            "int2dds_subscription_builtin_topic_data_get_deadline",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_get_deadline(long data, long sec_out, long nanosec_out) {
         try {
-            return (int) MH_int2dds_subscription_builtin_topic_data_get_deadline.invokeExact(data, sec_out, nanosec_out);
+            return (int) MH_int2dds_subscription_builtin_topic_data_get_deadline.invokeExact(data, sec_out,
+                    nanosec_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_deadline", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_deadline",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_durability_kind = dc("int2dds_subscription_builtin_topic_data_get_durability_kind", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_durability_kind = dc(
+            "int2dds_subscription_builtin_topic_data_get_durability_kind",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_get_durability_kind(long data, long kind_out) {
         try {
             return (int) MH_int2dds_subscription_builtin_topic_data_get_durability_kind.invokeExact(data, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_durability_kind", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_durability_kind",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_endpoint_guid = dc("int2dds_subscription_builtin_topic_data_get_endpoint_guid", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_endpoint_guid = dc(
+            "int2dds_subscription_builtin_topic_data_get_endpoint_guid",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_subscription_builtin_topic_data_get_endpoint_guid(long data, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_endpoint_guid.invokeExact(data, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_endpoint_guid.invokeExact(data,
+                    __ffi_seg_guid_out);
+            if (guid_out != null)
+                MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_endpoint_guid", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_endpoint_guid",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_key = dc("int2dds_subscription_builtin_topic_data_get_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_key = dc(
+            "int2dds_subscription_builtin_topic_data_get_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_subscription_builtin_topic_data_get_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
-            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
+            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_key.invokeExact(data,
+                    __ffi_seg_key_out);
+            if (key_out != null)
+                MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_key", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_key",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_liveliness_kind = dc("int2dds_subscription_builtin_topic_data_get_liveliness_kind", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_liveliness_kind = dc(
+            "int2dds_subscription_builtin_topic_data_get_liveliness_kind",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_get_liveliness_kind(long data, long kind_out) {
         try {
             return (int) MH_int2dds_subscription_builtin_topic_data_get_liveliness_kind.invokeExact(data, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_liveliness_kind", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_liveliness_kind",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration = dc("int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration = dc(
+            "int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(long data, long sec_out, long nanosec_out) {
+    static int int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(long data, long sec_out,
+            long nanosec_out) {
         try {
-            return (int) MH_int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration.invokeExact(data, sec_out, nanosec_out);
+            return (int) MH_int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration.invokeExact(data,
+                    sec_out, nanosec_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_participant_key = dc("int2dds_subscription_builtin_topic_data_get_participant_key", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_participant_key = dc(
+            "int2dds_subscription_builtin_topic_data_get_participant_key",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_subscription_builtin_topic_data_get_participant_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
-            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_participant_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
+            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_participant_key.invokeExact(data,
+                    __ffi_seg_key_out);
+            if (key_out != null)
+                MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_participant_key", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_participant_key",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_reliability_kind = dc("int2dds_subscription_builtin_topic_data_get_reliability_kind", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_reliability_kind = dc(
+            "int2dds_subscription_builtin_topic_data_get_reliability_kind",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_get_reliability_kind(long data, long kind_out) {
         try {
             return (int) MH_int2dds_subscription_builtin_topic_data_get_reliability_kind.invokeExact(data, kind_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_reliability_kind", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_subscription_builtin_topic_data_get_reliability_kind", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_topic_name = dc("int2dds_subscription_builtin_topic_data_get_topic_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_topic_name = dc(
+            "int2dds_subscription_builtin_topic_data_get_topic_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_subscription_builtin_topic_data_get_topic_name(long data, long buf, long capacity, long size_out) {
+    static int int2dds_subscription_builtin_topic_data_get_topic_name(long data, long buf, long capacity,
+            long size_out) {
         try {
-            return (int) MH_int2dds_subscription_builtin_topic_data_get_topic_name.invokeExact(data, buf, capacity, size_out);
+            return (int) MH_int2dds_subscription_builtin_topic_data_get_topic_name.invokeExact(data, buf, capacity,
+                    size_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_topic_name", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_topic_name",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_type_name = dc("int2dds_subscription_builtin_topic_data_get_type_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_type_name = dc(
+            "int2dds_subscription_builtin_topic_data_get_type_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_subscription_builtin_topic_data_get_type_name(long data, long buf, long capacity, long size_out) {
+    static int int2dds_subscription_builtin_topic_data_get_type_name(long data, long buf, long capacity,
+            long size_out) {
         try {
-            return (int) MH_int2dds_subscription_builtin_topic_data_get_type_name.invokeExact(data, buf, capacity, size_out);
+            return (int) MH_int2dds_subscription_builtin_topic_data_get_type_name.invokeExact(data, buf, capacity,
+                    size_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_type_name", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_type_name",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_user_data = dc("int2dds_subscription_builtin_topic_data_get_user_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_get_user_data = dc(
+            "int2dds_subscription_builtin_topic_data_get_user_data",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_subscription_builtin_topic_data_get_user_data(long data, long buf, long capacity, long size_out) {
+    static int int2dds_subscription_builtin_topic_data_get_user_data(long data, long buf, long capacity,
+            long size_out) {
         try {
-            return (int) MH_int2dds_subscription_builtin_topic_data_get_user_data.invokeExact(data, buf, capacity, size_out);
+            return (int) MH_int2dds_subscription_builtin_topic_data_get_user_data.invokeExact(data, buf, capacity,
+                    size_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_user_data", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_user_data",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_delete = dc("int2dds_subscription_builtin_topic_data_seq_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_delete = dc(
+            "int2dds_subscription_builtin_topic_data_seq_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_seq_delete(long seq) {
         try {
             return (int) MH_int2dds_subscription_builtin_topic_data_seq_delete.invokeExact(seq);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_delete", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_delete",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_get = dc("int2dds_subscription_builtin_topic_data_seq_get", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_get = dc(
+            "int2dds_subscription_builtin_topic_data_seq_get",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_seq_get(long seq, long index, long data_out) {
         try {
             return (int) MH_int2dds_subscription_builtin_topic_data_seq_get.invokeExact(seq, index, data_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_get", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_get",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_get_instance_handle = dc("int2dds_subscription_builtin_topic_data_seq_get_instance_handle", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_get_instance_handle = dc(
+            "int2dds_subscription_builtin_topic_data_seq_get_instance_handle",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS));
 
-    static int int2dds_subscription_builtin_topic_data_seq_get_instance_handle(long seq, long index, byte[] handle_out) {
+    static int int2dds_subscription_builtin_topic_data_seq_get_instance_handle(long seq, long index,
+            byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
-            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_seq_get_instance_handle.invokeExact(seq, index, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
+            int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_seq_get_instance_handle.invokeExact(seq,
+                    index, __ffi_seg_handle_out);
+            if (handle_out != null)
+                MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_get_instance_handle", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_get_instance_handle",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_get_instance_state = dc("int2dds_subscription_builtin_topic_data_seq_get_instance_state", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_get_instance_state = dc(
+            "int2dds_subscription_builtin_topic_data_seq_get_instance_state",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
-    static int int2dds_subscription_builtin_topic_data_seq_get_instance_state(long seq, long index, long instance_state_out) {
+    static int int2dds_subscription_builtin_topic_data_seq_get_instance_state(long seq, long index,
+            long instance_state_out) {
         try {
-            return (int) MH_int2dds_subscription_builtin_topic_data_seq_get_instance_state.invokeExact(seq, index, instance_state_out);
+            return (int) MH_int2dds_subscription_builtin_topic_data_seq_get_instance_state.invokeExact(seq, index,
+                    instance_state_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_get_instance_state", __ffi_thrown);
+            throw new AssertionError(
+                    "FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_get_instance_state",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_length = dc("int2dds_subscription_builtin_topic_data_seq_length", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_subscription_builtin_topic_data_seq_length = dc(
+            "int2dds_subscription_builtin_topic_data_seq_length",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_subscription_builtin_topic_data_seq_length(long seq, long count_out) {
         try {
             return (int) MH_int2dds_subscription_builtin_topic_data_seq_length.invokeExact(seq, count_out);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_length", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_length",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_get_inconsistent_topic_status = dc("int2dds_topic_get_inconsistent_topic_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_get_inconsistent_topic_status = dc(
+            "int2dds_topic_get_inconsistent_topic_status", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_topic_get_inconsistent_topic_status(long topic, long status_out) {
         try {
@@ -4384,20 +5360,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_get_name = dc("int2dds_topic_get_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_get_name = dc("int2dds_topic_get_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_topic_get_name(long topic, byte[] name_out, long name_size) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_name_out = (name_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(name_out.length);
+            MemorySegment __ffi_seg_name_out = (name_out == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(name_out.length);
             int __ffi_ret = (int) MH_int2dds_topic_get_name.invokeExact(topic, __ffi_seg_name_out, name_size);
-            if (name_out != null) MemorySegment.copy(__ffi_seg_name_out, JAVA_BYTE, 0, name_out, 0, name_out.length);
+            if (name_out != null)
+                MemorySegment.copy(__ffi_seg_name_out, JAVA_BYTE, 0, name_out, 0, name_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_topic_get_name", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_get_qos = dc("int2dds_topic_get_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_get_qos = dc("int2dds_topic_get_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_topic_get_qos(long topic, long qos_out) {
         try {
@@ -4407,7 +5387,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_get_status_changes = dc("int2dds_topic_get_status_changes", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_get_status_changes = dc("int2dds_topic_get_status_changes",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_topic_get_status_changes(long topic, long mask_out) {
         try {
@@ -4417,7 +5398,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_get_statuscondition = dc("int2dds_topic_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_get_statuscondition = dc("int2dds_topic_get_statuscondition",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_topic_get_statuscondition(long topic, long condition_out) {
         try {
@@ -4427,20 +5409,25 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_get_type_name = dc("int2dds_topic_get_type_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_get_type_name = dc("int2dds_topic_get_type_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_topic_get_type_name(long topic, byte[] type_name_out, long type_name_size) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_type_name_out = (type_name_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name_out.length);
-            int __ffi_ret = (int) MH_int2dds_topic_get_type_name.invokeExact(topic, __ffi_seg_type_name_out, type_name_size);
-            if (type_name_out != null) MemorySegment.copy(__ffi_seg_type_name_out, JAVA_BYTE, 0, type_name_out, 0, type_name_out.length);
+            MemorySegment __ffi_seg_type_name_out = (type_name_out == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name_out.length);
+            int __ffi_ret = (int) MH_int2dds_topic_get_type_name.invokeExact(topic, __ffi_seg_type_name_out,
+                    type_name_size);
+            if (type_name_out != null)
+                MemorySegment.copy(__ffi_seg_type_name_out, JAVA_BYTE, 0, type_name_out, 0, type_name_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_topic_get_type_name", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_create_default = dc("int2dds_topic_qos_create_default", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_qos_create_default = dc("int2dds_topic_qos_create_default",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_topic_qos_create_default(long qos_out) {
         try {
@@ -4450,7 +5437,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_destroy = dc("int2dds_topic_qos_destroy", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_qos_destroy = dc("int2dds_topic_qos_destroy",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_topic_qos_destroy(long qos) {
         try {
@@ -4460,7 +5448,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_data_representation = dc("int2dds_topic_qos_set_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_topic_qos_set_data_representation = dc(
+            "int2dds_topic_qos_set_data_representation", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_topic_qos_set_data_representation(long qos, int kind) {
         try {
@@ -4470,7 +5459,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_deadline = dc("int2dds_topic_qos_set_deadline", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_qos_set_deadline = dc("int2dds_topic_qos_set_deadline",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_topic_qos_set_deadline(long qos, long period_ns) {
         try {
@@ -4480,7 +5470,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_destination_order = dc("int2dds_topic_qos_set_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_topic_qos_set_destination_order = dc(
+            "int2dds_topic_qos_set_destination_order", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_topic_qos_set_destination_order(long qos, int kind) {
         try {
@@ -4490,7 +5481,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_durability = dc("int2dds_topic_qos_set_durability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_topic_qos_set_durability = dc("int2dds_topic_qos_set_durability",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_topic_qos_set_durability(long qos, int kind) {
         try {
@@ -4500,7 +5492,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_history = dc("int2dds_topic_qos_set_history", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_topic_qos_set_history = dc("int2dds_topic_qos_set_history",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
 
     static int int2dds_topic_qos_set_history(long qos, int kind, int depth) {
         try {
@@ -4510,7 +5503,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_lifespan = dc("int2dds_topic_qos_set_lifespan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_qos_set_lifespan = dc("int2dds_topic_qos_set_lifespan",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_topic_qos_set_lifespan(long qos, long duration_ns) {
         try {
@@ -4520,7 +5514,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_liveliness = dc("int2dds_topic_qos_set_liveliness", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_qos_set_liveliness = dc("int2dds_topic_qos_set_liveliness",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_topic_qos_set_liveliness(long qos, int kind, long lease_duration_ns) {
         try {
@@ -4530,7 +5525,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_ownership = dc("int2dds_topic_qos_set_ownership", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_topic_qos_set_ownership = dc("int2dds_topic_qos_set_ownership",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_topic_qos_set_ownership(long qos, int kind) {
         try {
@@ -4540,7 +5536,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_reliability = dc("int2dds_topic_qos_set_reliability", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_qos_set_reliability = dc("int2dds_topic_qos_set_reliability",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_topic_qos_set_reliability(long qos, int kind, long max_blocking_time_ns) {
         try {
@@ -4550,17 +5547,22 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_resource_limits = dc("int2dds_topic_qos_set_resource_limits", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_topic_qos_set_resource_limits = dc(
+            "int2dds_topic_qos_set_resource_limits",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_topic_qos_set_resource_limits(long qos, int max_samples, int max_instances, int max_per_instance) {
+    static int int2dds_topic_qos_set_resource_limits(long qos, int max_samples, int max_instances,
+            int max_per_instance) {
         try {
-            return (int) MH_int2dds_topic_qos_set_resource_limits.invokeExact(qos, max_samples, max_instances, max_per_instance);
+            return (int) MH_int2dds_topic_qos_set_resource_limits.invokeExact(qos, max_samples, max_instances,
+                    max_per_instance);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_topic_qos_set_resource_limits", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_qos_set_transport_priority = dc("int2dds_topic_qos_set_transport_priority", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_topic_qos_set_transport_priority = dc(
+            "int2dds_topic_qos_set_transport_priority", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT));
 
     static int int2dds_topic_qos_set_transport_priority(long qos, int priority) {
         try {
@@ -4570,7 +5572,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_topic_set_qos = dc("int2dds_topic_set_qos", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_topic_set_qos = dc("int2dds_topic_set_qos",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_topic_set_qos(long topic, long qos) {
         try {
@@ -4580,277 +5583,386 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_array_field = dc("int2dds_type_info_add_array_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_array_field = dc("int2dds_type_info_add_array_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_type_info_add_array_field(long type_info, byte[] field_name, int element_type, int array_size, int flags) {
+    static int int2dds_type_info_add_array_field(long type_info, byte[] field_name, int element_type, int array_size,
+            int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_array_field.invokeExact(type_info, __ffi_seg_field_name, element_type, array_size, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_array_field.invokeExact(type_info, __ffi_seg_field_name, element_type,
+                    array_size, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_array_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_array_of_named_field = dc("int2dds_type_info_add_array_of_named_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_array_of_named_field = dc(
+            "int2dds_type_info_add_array_of_named_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT));
 
-    static int int2dds_type_info_add_array_of_named_field(long type_info, byte[] field_name, byte[] element_hash_name, int array_size, int flags) {
+    static int int2dds_type_info_add_array_of_named_field(long type_info, byte[] field_name, byte[] element_hash_name,
+            int array_size, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            MemorySegment __ffi_seg_element_hash_name = (element_hash_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(element_hash_name.length + 1);
-            if (element_hash_name != null) MemorySegment.copy(element_hash_name, 0, __ffi_seg_element_hash_name, JAVA_BYTE, 0, element_hash_name.length);
-            return (int) MH_int2dds_type_info_add_array_of_named_field.invokeExact(type_info, __ffi_seg_field_name, __ffi_seg_element_hash_name, array_size, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_element_hash_name = (element_hash_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(element_hash_name.length + 1);
+            if (element_hash_name != null)
+                MemorySegment.copy(element_hash_name, 0, __ffi_seg_element_hash_name, JAVA_BYTE, 0,
+                        element_hash_name.length);
+            return (int) MH_int2dds_type_info_add_array_of_named_field.invokeExact(type_info, __ffi_seg_field_name,
+                    __ffi_seg_element_hash_name, array_size, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_array_of_named_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_array_of_nested_field = dc("int2dds_type_info_add_array_of_nested_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_array_of_nested_field = dc(
+            "int2dds_type_info_add_array_of_nested_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_INT));
 
-    static int int2dds_type_info_add_array_of_nested_field(long type_info, byte[] field_name, long element_type_info, int array_size, int flags) {
+    static int int2dds_type_info_add_array_of_nested_field(long type_info, byte[] field_name, long element_type_info,
+            int array_size, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_array_of_nested_field.invokeExact(type_info, __ffi_seg_field_name, element_type_info, array_size, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_array_of_nested_field.invokeExact(type_info, __ffi_seg_field_name,
+                    element_type_info, array_size, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_array_of_nested_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_bitfield = dc("int2dds_type_info_add_bitfield", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_bitfield = dc("int2dds_type_info_add_bitfield",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
 
     static int int2dds_type_info_add_bitfield(long type_info, byte[] field_name, int bitcount, int holder_type) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_bitfield.invokeExact(type_info, __ffi_seg_field_name, bitcount, holder_type);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_bitfield.invokeExact(type_info, __ffi_seg_field_name, bitcount,
+                    holder_type);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_bitfield", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_bitmask_flag = dc("int2dds_type_info_add_bitmask_flag", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_bitmask_flag = dc("int2dds_type_info_add_bitmask_flag",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_type_info_add_bitmask_flag(long type_info, byte[] flag_name, int position) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_flag_name = (flag_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(flag_name.length + 1);
-            if (flag_name != null) MemorySegment.copy(flag_name, 0, __ffi_seg_flag_name, JAVA_BYTE, 0, flag_name.length);
+            MemorySegment __ffi_seg_flag_name = (flag_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(flag_name.length + 1);
+            if (flag_name != null)
+                MemorySegment.copy(flag_name, 0, __ffi_seg_flag_name, JAVA_BYTE, 0, flag_name.length);
             return (int) MH_int2dds_type_info_add_bitmask_flag.invokeExact(type_info, __ffi_seg_flag_name, position);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_bitmask_flag", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_enum_literal = dc("int2dds_type_info_add_enum_literal", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_enum_literal = dc("int2dds_type_info_add_enum_literal",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
 
     static int int2dds_type_info_add_enum_literal(long type_info, byte[] literal_name, int value, int is_default) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_literal_name = (literal_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(literal_name.length + 1);
-            if (literal_name != null) MemorySegment.copy(literal_name, 0, __ffi_seg_literal_name, JAVA_BYTE, 0, literal_name.length);
-            return (int) MH_int2dds_type_info_add_enum_literal.invokeExact(type_info, __ffi_seg_literal_name, value, is_default);
+            MemorySegment __ffi_seg_literal_name = (literal_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(literal_name.length + 1);
+            if (literal_name != null)
+                MemorySegment.copy(literal_name, 0, __ffi_seg_literal_name, JAVA_BYTE, 0, literal_name.length);
+            return (int) MH_int2dds_type_info_add_enum_literal.invokeExact(type_info, __ffi_seg_literal_name, value,
+                    is_default);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_enum_literal", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_field = dc("int2dds_type_info_add_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_field = dc("int2dds_type_info_add_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
 
     static int int2dds_type_info_add_field(long type_info, byte[] field_name, int field_type, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
             return (int) MH_int2dds_type_info_add_field.invokeExact(type_info, __ffi_seg_field_name, field_type, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_map_field = dc("int2dds_type_info_add_map_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_map_field = dc("int2dds_type_info_add_map_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT,
+                    JAVA_INT));
 
-    static int int2dds_type_info_add_map_field(long type_info, byte[] field_name, int key_type, int key_bound, int value_type, int value_bound, int bound, int flags) {
+    static int int2dds_type_info_add_map_field(long type_info, byte[] field_name, int key_type, int key_bound,
+            int value_type, int value_bound, int bound, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_map_field.invokeExact(type_info, __ffi_seg_field_name, key_type, key_bound, value_type, value_bound, bound, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_map_field.invokeExact(type_info, __ffi_seg_field_name, key_type,
+                    key_bound, value_type, value_bound, bound, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_map_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_map_of_nested_field = dc("int2dds_type_info_add_map_of_nested_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_map_of_nested_field = dc(
+            "int2dds_type_info_add_map_of_nested_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT));
 
-    static int int2dds_type_info_add_map_of_nested_field(long type_info, byte[] field_name, int key_type, int key_bound, long value_type_info, int bound, int flags) {
+    static int int2dds_type_info_add_map_of_nested_field(long type_info, byte[] field_name, int key_type, int key_bound,
+            long value_type_info, int bound, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_map_of_nested_field.invokeExact(type_info, __ffi_seg_field_name, key_type, key_bound, value_type_info, bound, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_map_of_nested_field.invokeExact(type_info, __ffi_seg_field_name,
+                    key_type, key_bound, value_type_info, bound, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_map_of_nested_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_named_type_field = dc("int2dds_type_info_add_named_type_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_named_type_field = dc(
+            "int2dds_type_info_add_named_type_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT));
 
-    static int int2dds_type_info_add_named_type_field(long type_info, byte[] field_name, byte[] type_hash_name, int flags) {
+    static int int2dds_type_info_add_named_type_field(long type_info, byte[] field_name, byte[] type_hash_name,
+            int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            MemorySegment __ffi_seg_type_hash_name = (type_hash_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_hash_name.length + 1);
-            if (type_hash_name != null) MemorySegment.copy(type_hash_name, 0, __ffi_seg_type_hash_name, JAVA_BYTE, 0, type_hash_name.length);
-            return (int) MH_int2dds_type_info_add_named_type_field.invokeExact(type_info, __ffi_seg_field_name, __ffi_seg_type_hash_name, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_type_hash_name = (type_hash_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_hash_name.length + 1);
+            if (type_hash_name != null)
+                MemorySegment.copy(type_hash_name, 0, __ffi_seg_type_hash_name, JAVA_BYTE, 0, type_hash_name.length);
+            return (int) MH_int2dds_type_info_add_named_type_field.invokeExact(type_info, __ffi_seg_field_name,
+                    __ffi_seg_type_hash_name, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_named_type_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_nested_field = dc("int2dds_type_info_add_nested_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_nested_field = dc("int2dds_type_info_add_nested_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT));
 
     static int int2dds_type_info_add_nested_field(long type_info, byte[] field_name, long nested_type_info, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_nested_field.invokeExact(type_info, __ffi_seg_field_name, nested_type_info, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_nested_field.invokeExact(type_info, __ffi_seg_field_name,
+                    nested_type_info, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_nested_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_sequence_field = dc("int2dds_type_info_add_sequence_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_sequence_field = dc(
+            "int2dds_type_info_add_sequence_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 
-    static int int2dds_type_info_add_sequence_field(long type_info, byte[] field_name, int element_type, int bound, int flags) {
+    static int int2dds_type_info_add_sequence_field(long type_info, byte[] field_name, int element_type, int bound,
+            int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_sequence_field.invokeExact(type_info, __ffi_seg_field_name, element_type, bound, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_sequence_field.invokeExact(type_info, __ffi_seg_field_name,
+                    element_type, bound, flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_sequence_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_sequence_of_named_field = dc("int2dds_type_info_add_sequence_of_named_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_sequence_of_named_field = dc(
+            "int2dds_type_info_add_sequence_of_named_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT));
 
-    static int int2dds_type_info_add_sequence_of_named_field(long type_info, byte[] field_name, byte[] element_hash_name, int bound, int flags) {
+    static int int2dds_type_info_add_sequence_of_named_field(long type_info, byte[] field_name,
+            byte[] element_hash_name, int bound, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            MemorySegment __ffi_seg_element_hash_name = (element_hash_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(element_hash_name.length + 1);
-            if (element_hash_name != null) MemorySegment.copy(element_hash_name, 0, __ffi_seg_element_hash_name, JAVA_BYTE, 0, element_hash_name.length);
-            return (int) MH_int2dds_type_info_add_sequence_of_named_field.invokeExact(type_info, __ffi_seg_field_name, __ffi_seg_element_hash_name, bound, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            MemorySegment __ffi_seg_element_hash_name = (element_hash_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(element_hash_name.length + 1);
+            if (element_hash_name != null)
+                MemorySegment.copy(element_hash_name, 0, __ffi_seg_element_hash_name, JAVA_BYTE, 0,
+                        element_hash_name.length);
+            return (int) MH_int2dds_type_info_add_sequence_of_named_field.invokeExact(type_info, __ffi_seg_field_name,
+                    __ffi_seg_element_hash_name, bound, flags);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_sequence_of_named_field", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_sequence_of_named_field",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_sequence_of_nested_field = dc("int2dds_type_info_add_sequence_of_nested_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_sequence_of_nested_field = dc(
+            "int2dds_type_info_add_sequence_of_nested_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_INT));
 
-    static int int2dds_type_info_add_sequence_of_nested_field(long type_info, byte[] field_name, long element_type_info, int bound, int flags) {
+    static int int2dds_type_info_add_sequence_of_nested_field(long type_info, byte[] field_name, long element_type_info,
+            int bound, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_sequence_of_nested_field.invokeExact(type_info, __ffi_seg_field_name, element_type_info, bound, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_sequence_of_nested_field.invokeExact(type_info, __ffi_seg_field_name,
+                    element_type_info, bound, flags);
         } catch (Throwable __ffi_thrown) {
-            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_sequence_of_nested_field", __ffi_thrown);
+            throw new AssertionError("FFM downcall failed: int2dds_type_info_add_sequence_of_nested_field",
+                    __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_string_field = dc("int2dds_type_info_add_string_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_string_field = dc("int2dds_type_info_add_string_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
 
     static int int2dds_type_info_add_string_field(long type_info, byte[] field_name, int bound, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_string_field.invokeExact(type_info, __ffi_seg_field_name, bound, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_string_field.invokeExact(type_info, __ffi_seg_field_name, bound,
+                    flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_string_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_union_label = dc("int2dds_type_info_add_union_label", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_union_label = dc("int2dds_type_info_add_union_label",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT));
 
     static int int2dds_type_info_add_union_label(long type_info, byte[] member_name, int label) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_member_name = (member_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(member_name.length + 1);
-            if (member_name != null) MemorySegment.copy(member_name, 0, __ffi_seg_member_name, JAVA_BYTE, 0, member_name.length);
+            MemorySegment __ffi_seg_member_name = (member_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(member_name.length + 1);
+            if (member_name != null)
+                MemorySegment.copy(member_name, 0, __ffi_seg_member_name, JAVA_BYTE, 0, member_name.length);
             return (int) MH_int2dds_type_info_add_union_label.invokeExact(type_info, __ffi_seg_member_name, label);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_union_label", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_add_wstring_field = dc("int2dds_type_info_add_wstring_field", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
+    private static final MethodHandle MH_int2dds_type_info_add_wstring_field = dc("int2dds_type_info_add_wstring_field",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT));
 
     static int int2dds_type_info_add_wstring_field(long type_info, byte[] field_name, int bound, int flags) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(field_name.length + 1);
-            if (field_name != null) MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
-            return (int) MH_int2dds_type_info_add_wstring_field.invokeExact(type_info, __ffi_seg_field_name, bound, flags);
+            MemorySegment __ffi_seg_field_name = (field_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(field_name.length + 1);
+            if (field_name != null)
+                MemorySegment.copy(field_name, 0, __ffi_seg_field_name, JAVA_BYTE, 0, field_name.length);
+            return (int) MH_int2dds_type_info_add_wstring_field.invokeExact(type_info, __ffi_seg_field_name, bound,
+                    flags);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_add_wstring_field", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_create = dc("int2dds_type_info_create", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_info_create = dc("int2dds_type_info_create",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
 
     static int int2dds_type_info_create(byte[] type_name, int extensibility, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
-            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null)
+                MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
             return (int) MH_int2dds_type_info_create.invokeExact(__ffi_seg_type_name, extensibility, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_create", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_create_bitmask = dc("int2dds_type_info_create_bitmask", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_info_create_bitmask = dc("int2dds_type_info_create_bitmask",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
 
     static int int2dds_type_info_create_bitmask(byte[] type_name, int bit_bound, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
-            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null)
+                MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
             return (int) MH_int2dds_type_info_create_bitmask.invokeExact(__ffi_seg_type_name, bit_bound, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_create_bitmask", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_create_bitset = dc("int2dds_type_info_create_bitset", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_info_create_bitset = dc("int2dds_type_info_create_bitset",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
 
     static int int2dds_type_info_create_bitset(byte[] type_name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
-            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null)
+                MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
             return (int) MH_int2dds_type_info_create_bitset.invokeExact(__ffi_seg_type_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_create_bitset", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_create_enum = dc("int2dds_type_info_create_enum", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_info_create_enum = dc("int2dds_type_info_create_enum",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG));
 
     static int int2dds_type_info_create_enum(byte[] type_name, int bit_bound, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
-            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null)
+                MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
             return (int) MH_int2dds_type_info_create_enum.invokeExact(__ffi_seg_type_name, bit_bound, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_create_enum", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_create_union = dc("int2dds_type_info_create_union", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_info_create_union = dc("int2dds_type_info_create_union",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_type_info_create_union(byte[] type_name, int extensibility, int discriminator_type, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(type_name.length + 1);
-            if (type_name != null) MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
-            return (int) MH_int2dds_type_info_create_union.invokeExact(__ffi_seg_type_name, extensibility, discriminator_type, out);
+            MemorySegment __ffi_seg_type_name = (type_name == null) ? MemorySegment.NULL
+                    : __ffi_arena.allocate(type_name.length + 1);
+            if (type_name != null)
+                MemorySegment.copy(type_name, 0, __ffi_seg_type_name, JAVA_BYTE, 0, type_name.length);
+            return (int) MH_int2dds_type_info_create_union.invokeExact(__ffi_seg_type_name, extensibility,
+                    discriminator_type, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_info_create_union", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_destroy = dc("int2dds_type_info_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_info_destroy = dc("int2dds_type_info_destroy",
+            FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_type_info_destroy(long type_info) {
         try {
@@ -4860,7 +5972,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_info_to_type_object = dc("int2dds_type_info_to_type_object", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_info_to_type_object = dc("int2dds_type_info_to_type_object",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_type_info_to_type_object(long type_info, long out) {
         try {
@@ -4870,7 +5983,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_object_destroy = dc("int2dds_type_object_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_object_destroy = dc("int2dds_type_object_destroy",
+            FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_type_object_destroy(long t) {
         try {
@@ -4880,7 +5994,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_object_extensibility = dc("int2dds_type_object_extensibility", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_object_extensibility = dc("int2dds_type_object_extensibility",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_type_object_extensibility(long t, long out) {
         try {
@@ -4890,19 +6005,22 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_object_find_member = dc("int2dds_type_object_find_member", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_object_find_member = dc("int2dds_type_object_find_member",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_type_object_find_member(long t, byte[] name, long index_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
             return (int) MH_int2dds_type_object_find_member.invokeExact(t, __ffi_seg_name, index_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_object_find_member", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_object_member_count = dc("int2dds_type_object_member_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_object_member_count = dc("int2dds_type_object_member_count",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_type_object_member_count(long t, long out) {
         try {
@@ -4912,7 +6030,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_object_member_info = dc("int2dds_type_object_member_info", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_object_member_info = dc("int2dds_type_object_member_info",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
 
     static int int2dds_type_object_member_info(long t, int index, long out) {
         try {
@@ -4922,20 +6041,24 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_type_object_member_name = dc("int2dds_type_object_member_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_type_object_member_name = dc("int2dds_type_object_member_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_type_object_member_name(long t, int index, byte[] buf, long buf_len, long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_buf = (buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(buf.length);
-            int __ffi_ret = (int) MH_int2dds_type_object_member_name.invokeExact(t, index, __ffi_seg_buf, buf_len, out_len);
-            if (buf != null) MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
+            int __ffi_ret = (int) MH_int2dds_type_object_member_name.invokeExact(t, index, __ffi_seg_buf, buf_len,
+                    out_len);
+            if (buf != null)
+                MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_object_member_name", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_attach_guardcondition = dc("int2dds_waitset_attach_guardcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_attach_guardcondition = dc(
+            "int2dds_waitset_attach_guardcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_attach_guardcondition(long waitset, long condition) {
         try {
@@ -4945,7 +6068,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_attach_readcondition = dc("int2dds_waitset_attach_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_attach_readcondition = dc(
+            "int2dds_waitset_attach_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_attach_readcondition(long waitset, long condition) {
         try {
@@ -4955,7 +6079,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_attach_statuscondition = dc("int2dds_waitset_attach_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_attach_statuscondition = dc(
+            "int2dds_waitset_attach_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_attach_statuscondition(long waitset, long condition) {
         try {
@@ -4965,7 +6090,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_delete = dc("int2dds_waitset_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_delete = dc("int2dds_waitset_delete",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_waitset_delete(long waitset) {
         try {
@@ -4975,7 +6101,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_detach_guardcondition = dc("int2dds_waitset_detach_guardcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_detach_guardcondition = dc(
+            "int2dds_waitset_detach_guardcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_detach_guardcondition(long waitset, long condition) {
         try {
@@ -4985,7 +6112,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_detach_readcondition = dc("int2dds_waitset_detach_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_detach_readcondition = dc(
+            "int2dds_waitset_detach_readcondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_detach_readcondition(long waitset, long condition) {
         try {
@@ -4995,7 +6123,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_detach_statuscondition = dc("int2dds_waitset_detach_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_detach_statuscondition = dc(
+            "int2dds_waitset_detach_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_detach_statuscondition(long waitset, long condition) {
         try {
@@ -5005,7 +6134,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_new = dc("int2dds_waitset_new", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_new = dc("int2dds_waitset_new",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_waitset_new(long waitset_out) {
         try {
@@ -5015,7 +6145,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_wait_ex = dc("int2dds_waitset_wait_ex", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_wait_ex = dc("int2dds_waitset_wait_ex",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_wait_ex(long waitset, long timeout_ms, long conditions_out) {
         try {
@@ -5025,7 +6156,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_waitset_wait_ex_ns = dc("int2dds_waitset_wait_ex_ns", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_waitset_wait_ex_ns = dc("int2dds_waitset_wait_ex_ns",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_waitset_wait_ex_ns(long waitset, long timeout_ns, long conditions_out) {
         try {
@@ -5035,7 +6167,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_create = dc("int2dds_xml_type_registry_create", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_xml_type_registry_create = dc("int2dds_xml_type_registry_create",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_xml_type_registry_create(long out) {
         try {
@@ -5045,7 +6178,8 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_destroy = dc("int2dds_xml_type_registry_destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+    private static final MethodHandle MH_int2dds_xml_type_registry_destroy = dc("int2dds_xml_type_registry_destroy",
+            FunctionDescriptor.ofVoid(JAVA_LONG));
 
     static void int2dds_xml_type_registry_destroy(long registry) {
         try {
@@ -5055,67 +6189,80 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_from_file = dc("int2dds_xml_type_registry_from_file", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_xml_type_registry_from_file = dc("int2dds_xml_type_registry_from_file",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
 
     static int int2dds_xml_type_registry_from_file(byte[] path, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_path = (path == null) ? MemorySegment.NULL : __ffi_arena.allocate(path.length + 1);
-            if (path != null) MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
+            if (path != null)
+                MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
             return (int) MH_int2dds_xml_type_registry_from_file.invokeExact(__ffi_seg_path, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_xml_type_registry_from_file", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_get_type_object = dc("int2dds_xml_type_registry_get_type_object", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_xml_type_registry_get_type_object = dc(
+            "int2dds_xml_type_registry_get_type_object",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_xml_type_registry_get_type_object(long registry, byte[] name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
             return (int) MH_int2dds_xml_type_registry_get_type_object.invokeExact(registry, __ffi_seg_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_xml_type_registry_get_type_object", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_get_type_support = dc("int2dds_xml_type_registry_get_type_support", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_xml_type_registry_get_type_support = dc(
+            "int2dds_xml_type_registry_get_type_support",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG));
 
     static int int2dds_xml_type_registry_get_type_support(long registry, byte[] name, long out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_name = (name == null) ? MemorySegment.NULL : __ffi_arena.allocate(name.length + 1);
-            if (name != null) MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
+            if (name != null)
+                MemorySegment.copy(name, 0, __ffi_seg_name, JAVA_BYTE, 0, name.length);
             return (int) MH_int2dds_xml_type_registry_get_type_support.invokeExact(registry, __ffi_seg_name, out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_xml_type_registry_get_type_support", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_load_file = dc("int2dds_xml_type_registry_load_file", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_xml_type_registry_load_file = dc("int2dds_xml_type_registry_load_file",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_xml_type_registry_load_file(long registry, byte[] path) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_path = (path == null) ? MemorySegment.NULL : __ffi_arena.allocate(path.length + 1);
-            if (path != null) MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
+            if (path != null)
+                MemorySegment.copy(path, 0, __ffi_seg_path, JAVA_BYTE, 0, path.length);
             return (int) MH_int2dds_xml_type_registry_load_file.invokeExact(registry, __ffi_seg_path);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_xml_type_registry_load_file", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_load_str = dc("int2dds_xml_type_registry_load_str", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
+    private static final MethodHandle MH_int2dds_xml_type_registry_load_str = dc("int2dds_xml_type_registry_load_str",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS));
 
     static int int2dds_xml_type_registry_load_str(long registry, byte[] xml) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_xml = (xml == null) ? MemorySegment.NULL : __ffi_arena.allocate(xml.length + 1);
-            if (xml != null) MemorySegment.copy(xml, 0, __ffi_seg_xml, JAVA_BYTE, 0, xml.length);
+            if (xml != null)
+                MemorySegment.copy(xml, 0, __ffi_seg_xml, JAVA_BYTE, 0, xml.length);
             return (int) MH_int2dds_xml_type_registry_load_str.invokeExact(registry, __ffi_seg_xml);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_xml_type_registry_load_str", __ffi_thrown);
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_type_count = dc("int2dds_xml_type_registry_type_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_xml_type_registry_type_count = dc(
+            "int2dds_xml_type_registry_type_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_xml_type_registry_type_count(long registry, long out) {
         try {
@@ -5125,13 +6272,16 @@ public final class Ffi {
         }
     }
 
-    private static final MethodHandle MH_int2dds_xml_type_registry_type_name = dc("int2dds_xml_type_registry_type_name", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle MH_int2dds_xml_type_registry_type_name = dc("int2dds_xml_type_registry_type_name",
+            FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_xml_type_registry_type_name(long registry, long index, byte[] buf, long buf_len, long out_len) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_buf = (buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(buf.length);
-            int __ffi_ret = (int) MH_int2dds_xml_type_registry_type_name.invokeExact(registry, index, __ffi_seg_buf, buf_len, out_len);
-            if (buf != null) MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
+            int __ffi_ret = (int) MH_int2dds_xml_type_registry_type_name.invokeExact(registry, index, __ffi_seg_buf,
+                    buf_len, out_len);
+            if (buf != null)
+                MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_xml_type_registry_type_name", __ffi_thrown);

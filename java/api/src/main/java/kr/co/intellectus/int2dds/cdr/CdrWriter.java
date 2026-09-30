@@ -1,28 +1,28 @@
 package kr.co.intellectus.int2dds.cdr;
 
-import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.util.ArrayDeque;
+import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 
 /**
  * CDR encoder over a pooled direct {@link ByteBuffer}.
  *
- * <p>The buffer is direct so the serialized bytes already sit at a native
- * address and the FFI write needs no copy. Direct allocation is expensive
- * (malloc plus cleaner registration), so buffers are pooled per thread and
- * handed back by {@link #close()}.
+ * <p>The buffer is direct so the serialized bytes already sit at a native address and the FFI write
+ * needs no copy. Direct allocation is expensive (malloc plus cleaner registration), so buffers are
+ * pooled per thread and handed back by {@link #close()}.
  *
- * <p>Missing a {@code close()} costs performance, not correctness: the buffer
- * simply does not return to the pool and the JVM reclaims it when the reference
- * drops. Use try-with-resources.
+ * <p>Missing a {@code close()} costs performance, not correctness: the buffer simply does not
+ * return to the pool and the JVM reclaims it when the reference drops. Use try-with-resources.
  */
 public final class CdrWriter implements AutoCloseable {
 
-    /** Growth ceiling. A malformed or hostile sample must not be able to
-     *  consume unbounded native memory. */
+    /**
+     * Growth ceiling. A malformed or hostile sample must not be able to consume unbounded native
+     * memory.
+     */
     public static final int MAX_CAPACITY = 64 * 1024 * 1024;
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
@@ -50,9 +50,11 @@ public final class CdrWriter implements AutoCloseable {
                 }
             };
 
-    /** A direct buffer paired with its native address. The address is cached
-     *  because {@code directBufferAddress} is a JNI call — recomputing it per
-     *  sample would give back what the zero-copy buffer saves. */
+    /**
+     * A direct buffer paired with its native address. The address is cached because {@code
+     * directBufferAddress} is a JNI call — recomputing it per sample would give back what the
+     * zero-copy buffer saves.
+     */
     private static final class Pooled {
         ByteBuffer buffer;
         long address;
@@ -74,8 +76,8 @@ public final class CdrWriter implements AutoCloseable {
     }
 
     /** A writer that starts with the 4-byte encapsulation header. */
-    public static CdrWriter acquire(Extensibility extensibility, boolean littleEndian,
-            boolean xcdr2) {
+    public static CdrWriter acquire(
+            Extensibility extensibility, boolean littleEndian, boolean xcdr2) {
         CdrWriter w = new CdrWriter(littleEndian, xcdr2);
         w.writeEncapsulationHeader(extensibility);
         return w;
@@ -182,10 +184,9 @@ public final class CdrWriter implements AutoCloseable {
     /**
      * Writes {@code count} zero bytes at {@code pos} and advances.
      *
-     * <p>Required, not cosmetic. A pooled buffer arrives holding the previous
-     * sample's bytes; any span the encoder reserves but does not fill —
-     * alignment padding, a back-patched header — would otherwise carry that
-     * content onto the wire.
+     * <p>Required, not cosmetic. A pooled buffer arrives holding the previous sample's bytes; any
+     * span the encoder reserves but does not fill — alignment padding, a back-patched header —
+     * would otherwise carry that content onto the wire.
      */
     private void zeroFill(int count) {
         ensure(count);
@@ -208,9 +209,9 @@ public final class CdrWriter implements AutoCloseable {
     // ---- alignment ------------------------------------------------------
 
     /**
-     * Pads to the next {@code alignment} boundary measured from the start of
-     * the encapsulated stream, not from the start of the buffer — the 4-byte
-     * encapsulation header does not count toward alignment.
+     * Pads to the next {@code alignment} boundary measured from the start of the encapsulated
+     * stream, not from the start of the buffer — the 4-byte encapsulation header does not count
+     * toward alignment.
      *
      * <p>XCDR2 caps the maximum alignment at 4, so an 8-byte value aligns to 4.
      */
@@ -293,11 +294,11 @@ public final class CdrWriter implements AutoCloseable {
     // ---- strings, sequences, raw bytes -----------------------------------
 
     /**
-     * Writes a CDR string: a uint32 length that includes the terminator, the
-     * UTF-8 bytes, then a NUL.
+     * Writes a CDR string: a uint32 length that includes the terminator, the UTF-8 bytes, then a
+     * NUL.
      *
-     * <p>Length counts bytes, not characters. An interior NUL is preserved —
-     * CDR strings are length-prefixed, so it is legal payload.
+     * <p>Length counts bytes, not characters. An interior NUL is preserved — CDR strings are
+     * length-prefixed, so it is legal payload.
      */
     public void writeString(String s) {
         if (s == null) {
@@ -336,14 +337,12 @@ public final class CdrWriter implements AutoCloseable {
     }
 
     /**
-     * The UTF-8 byte count {@link #writeString} emits for {@code s}, excluding the
-     * terminator. This is the unit an IDL {@code string<N>} bound is measured in --
-     * {@code length()} counts UTF-16 units, which is larger than the bound allows
-     * for any non-ASCII text.
+     * The UTF-8 byte count {@link #writeString} emits for {@code s}, excluding the terminator. This
+     * is the unit an IDL {@code string<N>} bound is measured in -- {@code length()} counts UTF-16
+     * units, which is larger than the bound allows for any non-ASCII text.
      *
-     * <p>Takes the same two branches writeString does, so it cannot disagree with
-     * what actually reaches the wire: no allocation for ASCII, and the identical
-     * {@code getBytes} call otherwise.
+     * <p>Takes the same two branches writeString does, so it cannot disagree with what actually
+     * reaches the wire: no allocation for ASCII, and the identical {@code getBytes} call otherwise.
      */
     public static int utf8Length(String s) {
         if (s == null) {
@@ -357,10 +356,9 @@ public final class CdrWriter implements AutoCloseable {
     }
 
     /**
-     * Writes a CDR wstring: a uint32 count of UTF-16 code units, then each unit
-     * as a u16. Unlike {@link #writeString}, there is no terminator and the
-     * count does not include one -- {@code String.length()} is already the
-     * UTF-16 unit count, so a surrogate pair contributes two.
+     * Writes a CDR wstring: a uint32 count of UTF-16 code units, then each unit as a u16. Unlike
+     * {@link #writeString}, there is no terminator and the count does not include one -- {@code
+     * String.length()} is already the UTF-16 unit count, so a surrogate pair contributes two.
      */
     public void writeWString(String s) {
         if (s == null) {
@@ -435,8 +433,10 @@ public final class CdrWriter implements AutoCloseable {
 
     private void requireXcdr2(String what) {
         if (!xcdr2) {
-            throw new IllegalStateException(what + " is XCDR2-only; this writer is XCDR1. "
-                    + "XCDR1 mutable types use PL_CDR PID member headers, not EMHEADER.");
+            throw new IllegalStateException(
+                    what
+                            + " is XCDR2-only; this writer is XCDR1. "
+                            + "XCDR1 mutable types use PL_CDR PID member headers, not EMHEADER.");
         }
     }
 
@@ -448,9 +448,9 @@ public final class CdrWriter implements AutoCloseable {
     }
 
     /**
-     * Reserves a DHEADER and returns a token for {@link #dheaderFinalize(int)}.
-     * Returns {@code -1} under XCDR1, where there is no DHEADER; passing that
-     * token back is a no-op, so callers need no version branch.
+     * Reserves a DHEADER and returns a token for {@link #dheaderFinalize(int)}. Returns {@code -1}
+     * under XCDR1, where there is no DHEADER; passing that token back is a no-op, so callers need
+     * no version branch.
      */
     public int dheaderBegin() {
         if (!xcdr2) {
@@ -480,8 +480,8 @@ public final class CdrWriter implements AutoCloseable {
     }
 
     /**
-     * Writes an EMHEADER whose data length is not yet known, reserving the
-     * NEXTINT word. Returns a token for {@link #emheaderFinalize(int)}.
+     * Writes an EMHEADER whose data length is not yet known, reserving the NEXTINT word. Returns a
+     * token for {@link #emheaderFinalize(int)}.
      */
     public int emheaderBegin(int memberId, boolean mustUnderstand) {
         requireXcdr2("EMHEADER");
@@ -518,18 +518,16 @@ public final class CdrWriter implements AutoCloseable {
     private static final int MU_FLAG = 0x4000;
 
     /**
-     * Begins a PL_CDR member: aligns to 4 and reserves the header. Returns the
-     * header position for {@link #memberV1Finalize(int, int, boolean)}.
+     * Begins a PL_CDR member: aligns to 4 and reserves the header. Returns the header position for
+     * {@link #memberV1Finalize(int, int, boolean)}.
      *
-     * <p>Reserves 4 bytes for an id that fits the short form, 12 otherwise. If
-     * the content later overruns the short form's 16-bit length, finalize
-     * promotes it.
+     * <p>Reserves 4 bytes for an id that fits the short form, 12 otherwise. If the content later
+     * overruns the short form's 16-bit length, finalize promotes it.
      *
-     * <p>{@code zeroFill} is what reserves the span — it is the mechanism that
-     * advances {@code pos}, not just hygiene. Its zeroing is redundant on the
-     * normal path, since {@link #memberV1Finalize(int, int, boolean)} always
-     * overwrites the whole span; it is belt-and-braces for a caller that
-     * begins a member and abandons it without finalizing.
+     * <p>{@code zeroFill} is what reserves the span — it is the mechanism that advances {@code
+     * pos}, not just hygiene. Its zeroing is redundant on the normal path, since {@link
+     * #memberV1Finalize(int, int, boolean)} always overwrites the whole span; it is belt-and-braces
+     * for a caller that begins a member and abandons it without finalizing.
      */
     public int memberV1Begin(int memberId) {
         requireMemberId(memberId);

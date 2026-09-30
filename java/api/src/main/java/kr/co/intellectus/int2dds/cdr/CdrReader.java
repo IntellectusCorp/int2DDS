@@ -6,10 +6,9 @@ import java.nio.ByteOrder;
 /**
  * CDR decoder over a caller-owned {@link ByteBuffer}.
  *
- * <p>Does not copy and does not own the buffer. The receive path wraps a native
- * sample loan in a direct buffer and hands it here; tests hand it a heap buffer.
- * The caller keeps the buffer valid for the reader's lifetime — for a loan, that
- * means until the loan is returned.
+ * <p>Does not copy and does not own the buffer. The receive path wraps a native sample loan in a
+ * direct buffer and hands it here; tests hand it a heap buffer. The caller keeps the buffer valid
+ * for the reader's lifetime — for a loan, that means until the loan is returned.
  */
 public final class CdrReader {
 
@@ -76,8 +75,7 @@ public final class CdrReader {
                 break;
             default:
                 throw new CdrInvalidEncapsulationException(
-                        "Unrecognized encapsulation ID: 0x"
-                                + String.format("%04X", encapId));
+                        "Unrecognized encapsulation ID: 0x" + String.format("%04X", encapId));
         }
         return new CdrReader(slice, littleEndian, xcdr2, 4);
     }
@@ -203,12 +201,11 @@ public final class CdrReader {
 
     // ---- strings, sequences, raw bytes -----------------------------------
 
-    private static final java.nio.charset.Charset UTF8 =
-            java.nio.charset.Charset.forName("UTF-8");
+    private static final java.nio.charset.Charset UTF8 = java.nio.charset.Charset.forName("UTF-8");
 
     /**
-     * Reads a CDR string: a uint32 length including the terminator, then that
-     * many bytes, of which the trailing NUL is dropped.
+     * Reads a CDR string: a uint32 length including the terminator, then that many bytes, of which
+     * the trailing NUL is dropped.
      */
     public String readString() {
         int lenWithNul = readI32();
@@ -221,14 +218,13 @@ public final class CdrReader {
         for (int i = 0; i < contentLen; i++) {
             bytes[i] = data.get(pos + i);
         }
-        pos += lenWithNul;   // includes the terminator
+        pos += lenWithNul; // includes the terminator
         return new String(bytes, UTF8);
     }
 
     /**
-     * Reads a CDR wstring: a uint32 count of UTF-16 units, then that many u16
-     * units. No terminator, unlike {@link #readString}, so a count of zero is
-     * the empty wstring and not a malformed one.
+     * Reads a CDR wstring: a uint32 count of UTF-16 units, then that many u16 units. No terminator,
+     * unlike {@link #readString}, so a count of zero is the empty wstring and not a malformed one.
      */
     public String readWString() {
         int units = readI32();
@@ -250,9 +246,8 @@ public final class CdrReader {
     /**
      * Reads a sequence header and returns the element count.
      *
-     * <p>Every element costs at least one byte on the wire, so a count
-     * exceeding the remaining bytes cannot be genuine; rejected alongside a
-     * negative count.
+     * <p>Every element costs at least one byte on the wire, so a count exceeding the remaining
+     * bytes cannot be genuine; rejected alongside a negative count.
      */
     public int readSeqHeader() {
         int count = readI32();
@@ -303,11 +298,10 @@ public final class CdrReader {
     }
 
     /**
-     * Reads a DHEADER. Under XCDR1, where there is no DHEADER on the wire,
-     * nothing is consumed and {@code objectSize} is {@code 0} — matching
-     * {@code CdrReader.ReadDheader} in the C# implementation. Mirrors {@link
-     * CdrWriter#dheaderBegin()}, so version-agnostic caller code needs no
-     * branch here either.
+     * Reads a DHEADER. Under XCDR1, where there is no DHEADER on the wire, nothing is consumed and
+     * {@code objectSize} is {@code 0} — matching {@code CdrReader.ReadDheader} in the C#
+     * implementation. Mirrors {@link CdrWriter#dheaderBegin()}, so version-agnostic caller code
+     * needs no branch here either.
      */
     public Dheader readDheader() {
         if (!xcdr2) {
@@ -318,12 +312,11 @@ public final class CdrReader {
     }
 
     /**
-     * Skips to the end of a DHEADER-delimited aggregate. A no-op under
-     * XCDR1, mirroring {@link CdrWriter#dheaderFinalize(int)}.
+     * Skips to the end of a DHEADER-delimited aggregate. A no-op under XCDR1, mirroring {@link
+     * CdrWriter#dheaderFinalize(int)}.
      *
-     * <p>This is what makes APPENDABLE work: a writer that added members this
-     * reader does not know about leaves bytes behind, and this steps over them
-     * instead of decoding them.
+     * <p>This is what makes APPENDABLE work: a writer that added members this reader does not know
+     * about leaves bytes behind, and this steps over them instead of decoding them.
      */
     public void readDheaderEnd(Dheader d) {
         if (!xcdr2) {
@@ -332,8 +325,12 @@ public final class CdrReader {
         long end = (long) d.startPos + d.objectSize;
         if (d.objectSize < 0 || end > limit) {
             throw new CdrUnderflowException(
-                    "DHEADER claims " + d.objectSize + " bytes from " + d.startPos
-                            + " but the buffer ends at " + limit);
+                    "DHEADER claims "
+                            + d.objectSize
+                            + " bytes from "
+                            + d.startPos
+                            + " but the buffer ends at "
+                            + limit);
         }
         pos = (int) end;
     }
@@ -354,10 +351,9 @@ public final class CdrReader {
     /**
      * Reads an EMHEADER and its length.
      *
-     * <p>Length codes 0..3 encode the length implicitly; 4 puts it in a
-     * following NEXTINT word. Length codes 5, 6, 7 peek their NEXTINT without
-     * consuming, as those bytes belong to the member's data. This writer only
-     * emits 4, but a peer may use any of them, so all are decoded.
+     * <p>Length codes 0..3 encode the length implicitly; 4 puts it in a following NEXTINT word.
+     * Length codes 5, 6, 7 peek their NEXTINT without consuming, as those bytes belong to the
+     * member's data. This writer only emits 4, but a peer may use any of them, so all are decoded.
      */
     public Emheader readEmheader() {
         int header = readI32();
@@ -366,10 +362,18 @@ public final class CdrReader {
         int memberId = header & 0x0FFFFFFF;
         long dataLength;
         switch (lc) {
-            case 0: dataLength = 1; break;
-            case 1: dataLength = 2; break;
-            case 2: dataLength = 4; break;
-            case 3: dataLength = 8; break;
+            case 0:
+                dataLength = 1;
+                break;
+            case 1:
+                dataLength = 2;
+                break;
+            case 2:
+                dataLength = 4;
+                break;
+            case 3:
+                dataLength = 8;
+                break;
             case 4:
                 // Length is a NEXTINT: consume and validate.
                 dataLength = readI32();

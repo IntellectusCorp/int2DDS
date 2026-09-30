@@ -4,17 +4,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import kr.co.intellectus.int2dds.conditions.Condition;
-import kr.co.intellectus.int2dds.conditions.GuardCondition;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import kr.co.intellectus.int2dds.conditions.Condition;
+import kr.co.intellectus.int2dds.conditions.GuardCondition;
 import org.junit.jupiter.api.Test;
 
 class AsyncWaitSetTest {
     @Test
     void waitAsyncCompletesWhenTriggeredFromAnotherThread() throws Exception {
-        try (AsyncWaitSet ws = new AsyncWaitSet(); GuardCondition gc = new GuardCondition()) {
+        try (AsyncWaitSet ws = new AsyncWaitSet();
+                GuardCondition gc = new GuardCondition()) {
             ws.attach(gc);
             CompletableFuture<List<Condition>> f = ws.waitAsync(3000);
             assertFalse(f.isDone(), "wait should still be blocking on the executor thread");
@@ -27,7 +28,8 @@ class AsyncWaitSetTest {
 
     @Test
     void waitAsyncTimesOutWhenNothingTriggers() throws Exception {
-        try (AsyncWaitSet ws = new AsyncWaitSet(); GuardCondition gc = new GuardCondition()) {
+        try (AsyncWaitSet ws = new AsyncWaitSet();
+                GuardCondition gc = new GuardCondition()) {
             ws.attach(gc); // trigger stays false
             long t0 = System.nanoTime();
             List<Condition> hit = ws.waitAsync(200).get(2, TimeUnit.SECONDS);

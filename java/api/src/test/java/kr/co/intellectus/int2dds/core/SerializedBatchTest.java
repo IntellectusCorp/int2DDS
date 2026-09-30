@@ -7,28 +7,27 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import kr.co.intellectus.int2dds.cdr.CdrReader;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.History;
 import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the batch serialized reads {@link DataReader#takeSerializedBatch}
- * / {@link DataReader#readSerializedBatch} -- the multi-sample counterpart of
- * the single-sample pair in {@link SerializedIoTest}: up to N samples' raw
- * CDR bytes plus {@link SampleInfo} in one native call, returned as a {@link
- * List}.
+ * Exercises the batch serialized reads {@link DataReader#takeSerializedBatch} / {@link
+ * DataReader#readSerializedBatch} -- the multi-sample counterpart of the single-sample pair in
+ * {@link SerializedIoTest}: up to N samples' raw CDR bytes plus {@link SampleInfo} in one native
+ * call, returned as a {@link List}.
  *
- * <p>All fixtures use {@code History(KEEP_ALL)} on both writer and reader:
- * {@code ConformanceRecord} is unkeyed (a single implicit instance), so the
- * default {@code KEEP_LAST} depth 1 would let each new write replace the
- * previous one before a multi-sample batch could observe them together.
+ * <p>All fixtures use {@code History(KEEP_ALL)} on both writer and reader: {@code
+ * ConformanceRecord} is unkeyed (a single implicit instance), so the default {@code KEEP_LAST}
+ * depth 1 would let each new write replace the previous one before a multi-sample batch could
+ * observe them together.
  */
 class SerializedBatchTest {
 
@@ -47,9 +46,8 @@ class SerializedBatchTest {
     }
 
     /**
-     * Strongest test: 3 distinct samples written, batch-taken in one call,
-     * and every element's bytes round-trip through the type's own CDR codec
-     * back to the exact record that was sent.
+     * Strongest test: 3 distinct samples written, batch-taken in one call, and every element's
+     * bytes round-trip through the type's own CDR codec back to the exact record that was sent.
      */
     @Test
     void takeSerializedBatchReturnsThreeDistinctValidSamples() throws InterruptedException {
@@ -90,7 +88,9 @@ class SerializedBatchTest {
 
             Set<Integer> decodedIds = new HashSet<Integer>();
             for (SerializedSample sample : batch) {
-                assertTrue(sample.bytes().length > 0, "each batch element should carry non-empty CDR bytes");
+                assertTrue(
+                        sample.bytes().length > 0,
+                        "each batch element should carry non-empty CDR bytes");
                 assertTrue(sample.info().validData(), "each batch element should carry valid data");
                 ConformanceRecord decoded = new ConformanceRecord();
                 decoded.deserializeCdr(CdrReader.of(sample.bytes()));
@@ -105,20 +105,21 @@ class SerializedBatchTest {
                     throw new AssertionError("unexpected decoded id: " + decoded.id);
                 }
             }
-            assertEquals(3, decodedIds.size(), "the 3 batch elements should decode to 3 distinct samples");
+            assertEquals(
+                    3,
+                    decodedIds.size(),
+                    "the 3 batch elements should decode to 3 distinct samples");
 
             r.setListener(null, null);
         }
     }
 
     /**
-     * {@code readSerializedBatch} must not remove; a following {@code
-     * takeSerializedBatch} must still return the same samples. Proven two
-     * ways: {@link DataReader#hasData()} stays true after the read and
-     * flips false only after the take, and the take's size still matches --
-     * confirming the native batch take/read match sample state {@code ANY}
-     * (not NOT_READ-only like the no-arg single-sample {@link
-     * DataReader#readSerialized()}), so an already-READ sample left by the
+     * {@code readSerializedBatch} must not remove; a following {@code takeSerializedBatch} must
+     * still return the same samples. Proven two ways: {@link DataReader#hasData()} stays true after
+     * the read and flips false only after the take, and the take's size still matches -- confirming
+     * the native batch take/read match sample state {@code ANY} (not NOT_READ-only like the no-arg
+     * single-sample {@link DataReader#readSerialized()}), so an already-READ sample left by the
      * read remains eligible for the take.
      */
     @Test
@@ -149,16 +150,21 @@ class SerializedBatchTest {
             assertTrue(r.hasData(), "readSerializedBatch must not remove samples from the cache");
 
             List<SerializedSample> taken = r.takeSerializedBatch(10);
-            assertEquals(2, taken.size(),
+            assertEquals(
+                    2,
+                    taken.size(),
                     "takeSerializedBatch matches ANY sample state, so it should still retrieve "
                             + "the samples readSerializedBatch already marked READ");
-            assertFalse(r.hasData(), "takeSerializedBatch should remove the samples from the cache");
+            assertFalse(
+                    r.hasData(), "takeSerializedBatch should remove the samples from the cache");
 
             r.setListener(null, null);
         }
     }
 
-    /** {@code maxSamples} caps how many are returned in one call; a follow-up call drains the rest. */
+    /**
+     * {@code maxSamples} caps how many are returned in one call; a follow-up call drains the rest.
+     */
     @Test
     void takeSerializedBatchRespectsMaxSamplesCap() throws InterruptedException {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
@@ -193,7 +199,10 @@ class SerializedBatchTest {
         }
     }
 
-    /** A fresh, unmatched reader has nothing queued: takeSerializedBatch returns an empty, non-null list. */
+    /**
+     * A fresh, unmatched reader has nothing queued: takeSerializedBatch returns an empty, non-null
+     * list.
+     */
     @Test
     void takeSerializedBatchReturnsEmptyListWhenNoData() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
@@ -234,17 +243,16 @@ class SerializedBatchTest {
     }
 
     /**
-     * Establishes the match between {@code w} and {@code r}, then drains the
-     * cache back to empty. Repeatedly writing a throwaway "warm" sample until
-     * a {@code take()} succeeds is necessary because a write racing ahead of
-     * discovery is silently dropped (VOLATILE durability) -- but under {@code
-     * KEEP_ALL} that repetition can also land more than one warm sample once
-     * the match completes, since each write to the sole (unkeyed) instance is
-     * queued rather than replacing the last; a short drain loop below sweeps
-     * up any such leftovers so the cache is empty before the real test data
-     * is written.
+     * Establishes the match between {@code w} and {@code r}, then drains the cache back to empty.
+     * Repeatedly writing a throwaway "warm" sample until a {@code take()} succeeds is necessary
+     * because a write racing ahead of discovery is silently dropped (VOLATILE durability) -- but
+     * under {@code KEEP_ALL} that repetition can also land more than one warm sample once the match
+     * completes, since each write to the sole (unkeyed) instance is queued rather than replacing
+     * the last; a short drain loop below sweeps up any such leftovers so the cache is empty before
+     * the real test data is written.
      */
-    private static void warmUpMatch(DataWriter<ConformanceRecord> w, DataReader<ConformanceRecord> r)
+    private static void warmUpMatch(
+            DataWriter<ConformanceRecord> w, DataReader<ConformanceRecord> r)
             throws InterruptedException {
         ConformanceRecord warm = new ConformanceRecord();
         warm.id = 1;
@@ -282,7 +290,10 @@ class SerializedBatchTest {
         }
     }
 
-    /** Polls {@code readSerializedBatch} (non-destructive) until it sees {@code expectedSize} samples. */
+    /**
+     * Polls {@code readSerializedBatch} (non-destructive) until it sees {@code expectedSize}
+     * samples.
+     */
     private static List<SerializedSample> pollUntilBatchSize(
             DataReader<ConformanceRecord> r, int expectedSize) throws InterruptedException {
         List<SerializedSample> last = null;

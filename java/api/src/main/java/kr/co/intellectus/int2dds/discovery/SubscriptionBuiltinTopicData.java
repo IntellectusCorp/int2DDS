@@ -1,28 +1,27 @@
 package kr.co.intellectus.int2dds.discovery;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import kr.co.intellectus.int2dds.conditions.InstanceState;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 
 /**
- * An immutable snapshot of one remote subscription's builtin topic data, as
- * discovered through the {@code DCPSSubscription} builtin topic.
+ * An immutable snapshot of one remote subscription's builtin topic data, as discovered through the
+ * {@code DCPSSubscription} builtin topic.
  *
- * <p>Holds no native handle: {@link #materialize} reads every field off a
- * native {@code SubscriptionBuiltinTopicData} box while it is still alive, so
- * an instance stays valid forever after, including past the box's own
- * destroy. See {@link kr.co.intellectus.int2dds.core.DomainParticipant#takeDiscoveredSubscriptions}
- * for the materialize-then-destroy lifecycle that produces these.
+ * <p>Holds no native handle: {@link #materialize} reads every field off a native {@code
+ * SubscriptionBuiltinTopicData} box while it is still alive, so an instance stays valid forever
+ * after, including past the box's own destroy. See {@link
+ * kr.co.intellectus.int2dds.core.DomainParticipant#takeDiscoveredSubscriptions} for the
+ * materialize-then-destroy lifecycle that produces these.
  *
- * <p>{@code reliabilityKind}: 0 = BEST_EFFORT, 1 = RELIABLE.
- * {@code durabilityKind}: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT,
- * 3 = PERSISTENT. {@code livelinessKind}: 0 = AUTOMATIC,
- * 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC (matching
- * {@code ffi/src/discovery.rs}). Every duration reports an infinite value as
- * (0x7fffffff, 0x7fffffff). Unlike {@link PublicationBuiltinTopicData}, there
- * is no {@code lifespan} -- that QoS policy applies to writers only.
+ * <p>{@code reliabilityKind}: 0 = BEST_EFFORT, 1 = RELIABLE. {@code durabilityKind}: 0 = VOLATILE,
+ * 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT. {@code livelinessKind}: 0 = AUTOMATIC, 1 =
+ * MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC (matching {@code ffi/src/discovery.rs}). Every
+ * duration reports an infinite value as (0x7fffffff, 0x7fffffff). Unlike {@link
+ * PublicationBuiltinTopicData}, there is no {@code lifespan} -- that QoS policy applies to writers
+ * only.
  */
 public final class SubscriptionBuiltinTopicData {
 
@@ -42,11 +41,22 @@ public final class SubscriptionBuiltinTopicData {
     private final int instanceState;
     private final boolean hasData;
 
-    private SubscriptionBuiltinTopicData(byte[] key, byte[] endpointGuid, byte[] participantKey,
-            String topicName, String typeName, int reliabilityKind, int durabilityKind,
-            int livelinessKind, int deadlineSeconds, int deadlineNanos,
-            int livelinessLeaseSeconds, int livelinessLeaseNanos, byte[] userData,
-            int instanceState, boolean hasData) {
+    private SubscriptionBuiltinTopicData(
+            byte[] key,
+            byte[] endpointGuid,
+            byte[] participantKey,
+            String topicName,
+            String typeName,
+            int reliabilityKind,
+            int durabilityKind,
+            int livelinessKind,
+            int deadlineSeconds,
+            int deadlineNanos,
+            int livelinessLeaseSeconds,
+            int livelinessLeaseNanos,
+            byte[] userData,
+            int instanceState,
+            boolean hasData) {
         this.key = key;
         this.endpointGuid = endpointGuid;
         this.participantKey = participantKey;
@@ -65,9 +75,9 @@ public final class SubscriptionBuiltinTopicData {
     }
 
     /**
-     * False for a departed endpoint: a dispose travels as a key with no
-     * payload, so only {@link #endpointGuid()} and {@link #instanceState()}
-     * are meaningful and every other field is empty or zero.
+     * False for a departed endpoint: a dispose travels as a key with no payload, so only {@link
+     * #endpointGuid()} and {@link #instanceState()} are meaningful and every other field is empty
+     * or zero.
      */
     public boolean hasData() {
         return hasData;
@@ -135,10 +145,9 @@ public final class SubscriptionBuiltinTopicData {
     }
 
     /**
-     * Reads every field off a live native {@code SubscriptionBuiltinTopicData}
-     * box into an immutable snapshot. {@code data} must still be valid when
-     * this is called; the caller retains ownership and is responsible for
-     * destroying it afterward -- this never does.
+     * Reads every field off a live native {@code SubscriptionBuiltinTopicData} box into an
+     * immutable snapshot. {@code data} must still be valid when this is called; the caller retains
+     * ownership and is responsible for destroying it afterward -- this never does.
      */
     public static SubscriptionBuiltinTopicData materialize(long data) {
         return materialize(data, InstanceState.ALIVE);
@@ -146,8 +155,22 @@ public final class SubscriptionBuiltinTopicData {
 
     /** A key-only snapshot entry; {@code endpointGuid} is the entry's 16-byte instance handle. */
     public static SubscriptionBuiltinTopicData keyOnly(byte[] endpointGuid, int instanceState) {
-        return new SubscriptionBuiltinTopicData(new byte[12], endpointGuid.clone(), new byte[12],
-                "", "", 0, 0, 0, 0, 0, 0, 0, new byte[0], instanceState, false);
+        return new SubscriptionBuiltinTopicData(
+                new byte[12],
+                endpointGuid.clone(),
+                new byte[12],
+                "",
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                new byte[0],
+                instanceState,
+                false);
     }
 
     /** {@link #materialize(long)} for a snapshot entry whose instance state is known. */
@@ -163,25 +186,29 @@ public final class SubscriptionBuiltinTopicData {
 
         final long dataHandle = data;
         byte[][] topicNameBytes = new byte[1][];
-        ReturnCodes.check(FfiAccess.readGrowableString(
-                new FfiAccess.GrowableStringGetter() {
-                    @Override
-                    public int get(long buf, long capacity, long sizeOut) {
-                        return FfiAccess.subDataGetTopicName(dataHandle, buf, capacity, sizeOut);
-                    }
-                },
-                topicNameBytes));
+        ReturnCodes.check(
+                FfiAccess.readGrowableString(
+                        new FfiAccess.GrowableStringGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.subDataGetTopicName(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        topicNameBytes));
         String topicName = new String(topicNameBytes[0], StandardCharsets.UTF_8);
 
         byte[][] typeNameBytes = new byte[1][];
-        ReturnCodes.check(FfiAccess.readGrowableString(
-                new FfiAccess.GrowableStringGetter() {
-                    @Override
-                    public int get(long buf, long capacity, long sizeOut) {
-                        return FfiAccess.subDataGetTypeName(dataHandle, buf, capacity, sizeOut);
-                    }
-                },
-                typeNameBytes));
+        ReturnCodes.check(
+                FfiAccess.readGrowableString(
+                        new FfiAccess.GrowableStringGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.subDataGetTypeName(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        typeNameBytes));
         String typeName = new String(typeNameBytes[0], StandardCharsets.UTF_8);
 
         int[] reliabilityKind = new int[1];
@@ -203,24 +230,43 @@ public final class SubscriptionBuiltinTopicData {
                 FfiAccess.subDataGetLivelinessLeaseDuration(data, leaseSeconds, leaseNanos));
 
         byte[][] userDataBytes = new byte[1][];
-        ReturnCodes.check(FfiAccess.readGrowableBytes(
-                new FfiAccess.GrowableBytesGetter() {
-                    @Override
-                    public int get(long buf, long capacity, long sizeOut) {
-                        return FfiAccess.subDataGetUserData(dataHandle, buf, capacity, sizeOut);
-                    }
-                },
-                userDataBytes));
+        ReturnCodes.check(
+                FfiAccess.readGrowableBytes(
+                        new FfiAccess.GrowableBytesGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.subDataGetUserData(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        userDataBytes));
 
-        return new SubscriptionBuiltinTopicData(key, endpointGuid, participantKey, topicName,
-                typeName, reliabilityKind[0], durabilityKind[0], livelinessKind[0],
-                deadlineSeconds[0], deadlineNanos[0], leaseSeconds[0], leaseNanos[0],
-                userDataBytes[0], instanceState, true);
+        return new SubscriptionBuiltinTopicData(
+                key,
+                endpointGuid,
+                participantKey,
+                topicName,
+                typeName,
+                reliabilityKind[0],
+                durabilityKind[0],
+                livelinessKind[0],
+                deadlineSeconds[0],
+                deadlineNanos[0],
+                leaseSeconds[0],
+                leaseNanos[0],
+                userDataBytes[0],
+                instanceState,
+                true);
     }
 
     @Override
     public String toString() {
-        return "SubscriptionBuiltinTopicData{topicName=" + topicName + ", typeName=" + typeName
-                + ", endpointGuid=" + Arrays.toString(endpointGuid) + "}";
+        return "SubscriptionBuiltinTopicData{topicName="
+                + topicName
+                + ", typeName="
+                + typeName
+                + ", endpointGuid="
+                + Arrays.toString(endpointGuid)
+                + "}";
     }
 }

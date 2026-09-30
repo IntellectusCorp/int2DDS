@@ -16,9 +16,9 @@ public enum Extensibility {
     }
 
     /**
-     * The value the C ABI uses, from {@code ExtensibilityKind} in
-     * {@code dds/src/xtypes/type_object.rs}. Explicit rather than
-     * {@code ordinal()} so reordering the constants cannot change the wire.
+     * The value the C ABI uses, from {@code ExtensibilityKind} in {@code
+     * dds/src/xtypes/type_object.rs}. Explicit rather than {@code ordinal()} so reordering the
+     * constants cannot change the wire.
      */
     public int value() {
         return value;

@@ -41,6 +41,7 @@ public class WriterDataLifecycle {
     @Override
     public String toString() {
         return "WriterDataLifecycle{autodisposeUnregisteredInstances="
-                + autodisposeUnregisteredInstances + "}";
+                + autodisposeUnregisteredInstances
+                + "}";
     }
 }

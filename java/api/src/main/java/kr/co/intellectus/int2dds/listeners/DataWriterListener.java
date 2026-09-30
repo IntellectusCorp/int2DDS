@@ -9,13 +9,11 @@ import kr.co.intellectus.int2dds.status.PublicationMatchedStatus;
 /**
  * Receives status-change notifications for a {@link DataWriter}.
  *
- * <p>Callbacks fire on native DDS background threads, not the caller's thread —
- * implementations must be thread-safe. Any exception thrown from a callback is
- * described and cleared at the native boundary and never propagates back into
- * the DDS thread.
+ * <p>Callbacks fire on native DDS background threads, not the caller's thread — implementations
+ * must be thread-safe. Any exception thrown from a callback is described and cleared at the native
+ * boundary and never propagates back into the DDS thread.
  *
- * <p>Prefer extending {@link DataWriterListenerBase} so future callbacks stay
- * source-compatible.
+ * <p>Prefer extending {@link DataWriterListenerBase} so future callbacks stay source-compatible.
  */
 public interface DataWriterListener {
 

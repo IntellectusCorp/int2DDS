@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import kr.co.intellectus.int2dds.core.DataReader;
 import kr.co.intellectus.int2dds.core.DataWriter;
 import kr.co.intellectus.int2dds.core.DomainParticipant;
@@ -12,9 +15,6 @@ import kr.co.intellectus.int2dds.core.Sample;
 import kr.co.intellectus.int2dds.core.Subscriber;
 import kr.co.intellectus.int2dds.core.Topic;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ReadConditionTest {
@@ -28,15 +28,18 @@ class ReadConditionTest {
     @Test
     void readConditionTriggersWhenAMatchingSampleArrives() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> topic = p.createTopic("ReadCondTrigger", new ConformanceRecord());
+            Topic<ConformanceRecord> topic =
+                    p.createTopic("ReadCondTrigger", new ConformanceRecord());
             Publisher pub = p.createPublisher();
             DataWriter<ConformanceRecord> w = pub.createDataWriter(topic);
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> reader = sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> reader =
+                    sub.createDataReader(topic, ConformanceRecord::new);
 
             try (WaitSet ws = new WaitSet();
-                    ReadCondition rc = reader.createReadCondition(
-                            SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
+                    ReadCondition rc =
+                            reader.createReadCondition(
+                                    SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
                 ws.attach(rc);
 
                 ConformanceRecord sent = new ConformanceRecord();
@@ -67,22 +70,31 @@ class ReadConditionTest {
     @Test
     void queryConditionCreateAttachSetParamsDetachDoesNotCrash() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> topic = p.createTopic("QueryCondSmoke", new ConformanceRecord());
+            Topic<ConformanceRecord> topic =
+                    p.createTopic("QueryCondSmoke", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> reader = sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> reader =
+                    sub.createDataReader(topic, ConformanceRecord::new);
 
             byte[] expr = "id >= %0".getBytes(StandardCharsets.UTF_8);
             byte[][] params = {"0".getBytes(StandardCharsets.UTF_8)};
 
             try (WaitSet ws = new WaitSet();
-                    QueryCondition qc = reader.createQueryCondition(
-                            SampleState.ANY, ViewState.ANY, InstanceState.ANY, expr, params)) {
-                assertDoesNotThrow(() -> {
-                    qc.setQueryParameters(new byte[][] {"1".getBytes(StandardCharsets.UTF_8)});
-                    ws.attach(qc);
-                    qc.triggerValue(); // inherited type-correct accessor; must not segfault
-                    ws.detach(qc);
-                });
+                    QueryCondition qc =
+                            reader.createQueryCondition(
+                                    SampleState.ANY,
+                                    ViewState.ANY,
+                                    InstanceState.ANY,
+                                    expr,
+                                    params)) {
+                assertDoesNotThrow(
+                        () -> {
+                            qc.setQueryParameters(
+                                    new byte[][] {"1".getBytes(StandardCharsets.UTF_8)});
+                            ws.attach(qc);
+                            qc.triggerValue(); // inherited type-correct accessor; must not segfault
+                            ws.detach(qc);
+                        });
             }
         }
     }

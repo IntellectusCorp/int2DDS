@@ -1,26 +1,25 @@
 package kr.co.intellectus.int2dds.conditions;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
 
 /**
- * Blocks the calling thread until one of its attached {@link Condition}s
- * triggers. Not thread-safe: use one WaitSet per waiting thread.
+ * Blocks the calling thread until one of its attached {@link Condition}s triggers. Not thread-safe:
+ * use one WaitSet per waiting thread.
  *
- * <p><b>Contract:</b> an attached {@link Condition} should be {@link #detach}ed
- * before it is closed. Per DDS, deleting an attached condition is a
- * precondition violation. In this binding, closing a still-attached condition
- * does not crash or corrupt the native WaitSet: the native side keeps its own
- * reference to the condition alive until the WaitSet itself is closed, and
- * {@link #await} simply skips such a condition. It is however a leak until
- * the WaitSet is closed, so detach first when you can.
+ * <p><b>Contract:</b> an attached {@link Condition} should be {@link #detach}ed before it is
+ * closed. Per DDS, deleting an attached condition is a precondition violation. In this binding,
+ * closing a still-attached condition does not crash or corrupt the native WaitSet: the native side
+ * keeps its own reference to the condition alive until the WaitSet itself is closed, and {@link
+ * #await} simply skips such a condition. It is however a leak until the WaitSet is closed, so
+ * detach first when you can.
  */
 public final class WaitSet implements AutoCloseable {
     private final NativeHandle handle;
@@ -36,9 +35,9 @@ public final class WaitSet implements AutoCloseable {
     }
 
     /**
-     * Attaches a condition (dispatch by type). Idempotent: re-attaching an
-     * already-attached instance is a no-op. Must be {@link #detach}ed before
-     * {@code c} is closed; see the class Javadoc for why.
+     * Attaches a condition (dispatch by type). Idempotent: re-attaching an already-attached
+     * instance is a no-op. Must be {@link #detach}ed before {@code c} is closed; see the class
+     * Javadoc for why.
      */
     public void attach(Condition c) {
         Objects.requireNonNull(c, "condition");
@@ -99,16 +98,15 @@ public final class WaitSet implements AutoCloseable {
     }
 
     /**
-     * Blocks up to {@code timeoutMillis} (negative = infinite) and returns the
-     * attached conditions whose trigger value is set. Empty on timeout.
+     * Blocks up to {@code timeoutMillis} (negative = infinite) and returns the attached conditions
+     * whose trigger value is set. Empty on timeout.
      *
-     * <p>Named {@code await}, not {@code wait}: {@code Object.wait(long)} is
-     * {@code final}, so a same-erasure instance method named {@code wait}
-     * cannot be declared here at all, regardless of return type.
+     * <p>Named {@code await}, not {@code wait}: {@code Object.wait(long)} is {@code final}, so a
+     * same-erasure instance method named {@code wait} cannot be declared here at all, regardless of
+     * return type.
      *
-     * <p>If an attached condition was closed without first being
-     * {@link #detach}ed, it is skipped (and dropped from the attached set)
-     * rather than causing this method to throw.
+     * <p>If an attached condition was closed without first being {@link #detach}ed, it is skipped
+     * (and dropped from the attached set) rather than causing this method to throw.
      */
     public List<Condition> await(long timeoutMillis) {
         long[] seqOut = new long[1];
@@ -118,10 +116,9 @@ public final class WaitSet implements AutoCloseable {
     }
 
     /**
-     * Nanosecond-precision counterpart of {@link #await(long)}: blocks up to
-     * {@code timeoutNanos} (negative = infinite) and returns the attached
-     * conditions whose trigger value is set. Empty on timeout. Same
-     * closed-condition handling as {@link #await(long)}.
+     * Nanosecond-precision counterpart of {@link #await(long)}: blocks up to {@code timeoutNanos}
+     * (negative = infinite) and returns the attached conditions whose trigger value is set. Empty
+     * on timeout. Same closed-condition handling as {@link #await(long)}.
      */
     public List<Condition> awaitNanos(long timeoutNanos) {
         long[] seqOut = new long[1];

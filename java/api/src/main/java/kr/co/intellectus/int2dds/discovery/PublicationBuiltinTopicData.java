@@ -1,29 +1,27 @@
 package kr.co.intellectus.int2dds.discovery;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import kr.co.intellectus.int2dds.conditions.InstanceState;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.xtypes.TypeObject;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 
 /**
- * An immutable snapshot of one remote publication's builtin topic data, as
- * discovered through the {@code DCPSPublication} builtin topic.
+ * An immutable snapshot of one remote publication's builtin topic data, as discovered through the
+ * {@code DCPSPublication} builtin topic.
  *
- * <p>Holds no native handle: {@link #materialize} reads every field off a
- * native {@code PublicationBuiltinTopicData} box while it is still alive, so
- * an instance stays valid forever after, including past the box's own
- * destroy. See {@link kr.co.intellectus.int2dds.core.DomainParticipant#takeDiscoveredPublications}
- * for the materialize-then-destroy lifecycle that produces these.
+ * <p>Holds no native handle: {@link #materialize} reads every field off a native {@code
+ * PublicationBuiltinTopicData} box while it is still alive, so an instance stays valid forever
+ * after, including past the box's own destroy. See {@link
+ * kr.co.intellectus.int2dds.core.DomainParticipant#takeDiscoveredPublications} for the
+ * materialize-then-destroy lifecycle that produces these.
  *
- * <p>{@code reliabilityKind}: 0 = BEST_EFFORT, 1 = RELIABLE.
- * {@code durabilityKind}: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT,
- * 3 = PERSISTENT. {@code livelinessKind}: 0 = AUTOMATIC,
- * 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC (matching
- * {@code ffi/src/discovery.rs}). Every duration reports an infinite value as
- * (0x7fffffff, 0x7fffffff).
+ * <p>{@code reliabilityKind}: 0 = BEST_EFFORT, 1 = RELIABLE. {@code durabilityKind}: 0 = VOLATILE,
+ * 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT. {@code livelinessKind}: 0 = AUTOMATIC, 1 =
+ * MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC (matching {@code ffi/src/discovery.rs}). Every
+ * duration reports an infinite value as (0x7fffffff, 0x7fffffff).
  */
 public final class PublicationBuiltinTopicData {
 
@@ -46,11 +44,25 @@ public final class PublicationBuiltinTopicData {
     private final boolean hasData;
     private final TypeObject typeObject;
 
-    private PublicationBuiltinTopicData(byte[] key, byte[] endpointGuid, byte[] participantKey,
-            String topicName, String typeName, int reliabilityKind, int durabilityKind,
-            int livelinessKind, int deadlineSeconds, int deadlineNanos, int lifespanSeconds,
-            int lifespanNanos, int livelinessLeaseSeconds, int livelinessLeaseNanos,
-            byte[] userData, int instanceState, boolean hasData, TypeObject typeObject) {
+    private PublicationBuiltinTopicData(
+            byte[] key,
+            byte[] endpointGuid,
+            byte[] participantKey,
+            String topicName,
+            String typeName,
+            int reliabilityKind,
+            int durabilityKind,
+            int livelinessKind,
+            int deadlineSeconds,
+            int deadlineNanos,
+            int lifespanSeconds,
+            int lifespanNanos,
+            int livelinessLeaseSeconds,
+            int livelinessLeaseNanos,
+            byte[] userData,
+            int instanceState,
+            boolean hasData,
+            TypeObject typeObject) {
         this.key = key;
         this.endpointGuid = endpointGuid;
         this.participantKey = participantKey;
@@ -72,22 +84,21 @@ public final class PublicationBuiltinTopicData {
     }
 
     /**
-     * The TypeObject this publication carried inline in its discovery data, or
-     * null when it carried none or this snapshot was not taken through {@link
-     * kr.co.intellectus.int2dds.core.Subscriber#takePublicationData}. An int2DDS
-     * peer serves its TypeObject on demand through TypeLookup instead of inline,
-     * so for one this is null; use {@link
-     * kr.co.intellectus.int2dds.core.DomainParticipant#waitForTypeObject} there.
-     * Owned by the caller; close it when done.
+     * The TypeObject this publication carried inline in its discovery data, or null when it carried
+     * none or this snapshot was not taken through {@link
+     * kr.co.intellectus.int2dds.core.Subscriber#takePublicationData}. An int2DDS peer serves its
+     * TypeObject on demand through TypeLookup instead of inline, so for one this is null; use
+     * {@link kr.co.intellectus.int2dds.core.DomainParticipant#waitForTypeObject} there. Owned by
+     * the caller; close it when done.
      */
     public TypeObject typeObject() {
         return typeObject;
     }
 
     /**
-     * False for a departed endpoint: a dispose travels as a key with no
-     * payload, so only {@link #endpointGuid()} and {@link #instanceState()}
-     * are meaningful and every other field is empty or zero.
+     * False for a departed endpoint: a dispose travels as a key with no payload, so only {@link
+     * #endpointGuid()} and {@link #instanceState()} are meaningful and every other field is empty
+     * or zero.
      */
     public boolean hasData() {
         return hasData;
@@ -163,10 +174,9 @@ public final class PublicationBuiltinTopicData {
     }
 
     /**
-     * Reads every field off a live native {@code PublicationBuiltinTopicData}
-     * box into an immutable snapshot. {@code data} must still be valid when
-     * this is called; the caller retains ownership and is responsible for
-     * destroying it afterward -- this never does.
+     * Reads every field off a live native {@code PublicationBuiltinTopicData} box into an immutable
+     * snapshot. {@code data} must still be valid when this is called; the caller retains ownership
+     * and is responsible for destroying it afterward -- this never does.
      */
     public static PublicationBuiltinTopicData materialize(long data) {
         return materialize(data, InstanceState.ALIVE);
@@ -174,8 +184,25 @@ public final class PublicationBuiltinTopicData {
 
     /** A key-only snapshot entry; {@code endpointGuid} is the entry's 16-byte instance handle. */
     public static PublicationBuiltinTopicData keyOnly(byte[] endpointGuid, int instanceState) {
-        return new PublicationBuiltinTopicData(new byte[12], endpointGuid.clone(), new byte[12],
-                "", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, new byte[0], instanceState, false, null);
+        return new PublicationBuiltinTopicData(
+                new byte[12],
+                endpointGuid.clone(),
+                new byte[12],
+                "",
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                new byte[0],
+                instanceState,
+                false,
+                null);
     }
 
     /** {@link #materialize(long)} for a snapshot entry whose instance state is known. */
@@ -184,11 +211,11 @@ public final class PublicationBuiltinTopicData {
     }
 
     /**
-     * {@link #materialize(long, int)} that also clones the advertised TypeObject
-     * out of the box when {@code withTypeObject} is set; see {@link #typeObject()}.
+     * {@link #materialize(long, int)} that also clones the advertised TypeObject out of the box
+     * when {@code withTypeObject} is set; see {@link #typeObject()}.
      */
-    public static PublicationBuiltinTopicData materialize(long data, int instanceState,
-            boolean withTypeObject) {
+    public static PublicationBuiltinTopicData materialize(
+            long data, int instanceState, boolean withTypeObject) {
         TypeObject typeObject = null;
         if (withTypeObject) {
             long[] out = new long[1];
@@ -209,25 +236,29 @@ public final class PublicationBuiltinTopicData {
 
         final long dataHandle = data;
         byte[][] topicNameBytes = new byte[1][];
-        ReturnCodes.check(FfiAccess.readGrowableString(
-                new FfiAccess.GrowableStringGetter() {
-                    @Override
-                    public int get(long buf, long capacity, long sizeOut) {
-                        return FfiAccess.pubDataGetTopicName(dataHandle, buf, capacity, sizeOut);
-                    }
-                },
-                topicNameBytes));
+        ReturnCodes.check(
+                FfiAccess.readGrowableString(
+                        new FfiAccess.GrowableStringGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.pubDataGetTopicName(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        topicNameBytes));
         String topicName = new String(topicNameBytes[0], StandardCharsets.UTF_8);
 
         byte[][] typeNameBytes = new byte[1][];
-        ReturnCodes.check(FfiAccess.readGrowableString(
-                new FfiAccess.GrowableStringGetter() {
-                    @Override
-                    public int get(long buf, long capacity, long sizeOut) {
-                        return FfiAccess.pubDataGetTypeName(dataHandle, buf, capacity, sizeOut);
-                    }
-                },
-                typeNameBytes));
+        ReturnCodes.check(
+                FfiAccess.readGrowableString(
+                        new FfiAccess.GrowableStringGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.pubDataGetTypeName(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        typeNameBytes));
         String typeName = new String(typeNameBytes[0], StandardCharsets.UTF_8);
 
         int[] reliabilityKind = new int[1];
@@ -253,24 +284,46 @@ public final class PublicationBuiltinTopicData {
                 FfiAccess.pubDataGetLivelinessLeaseDuration(data, leaseSeconds, leaseNanos));
 
         byte[][] userDataBytes = new byte[1][];
-        ReturnCodes.check(FfiAccess.readGrowableBytes(
-                new FfiAccess.GrowableBytesGetter() {
-                    @Override
-                    public int get(long buf, long capacity, long sizeOut) {
-                        return FfiAccess.pubDataGetUserData(dataHandle, buf, capacity, sizeOut);
-                    }
-                },
-                userDataBytes));
+        ReturnCodes.check(
+                FfiAccess.readGrowableBytes(
+                        new FfiAccess.GrowableBytesGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.pubDataGetUserData(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        userDataBytes));
 
-        return new PublicationBuiltinTopicData(key, endpointGuid, participantKey, topicName,
-                typeName, reliabilityKind[0], durabilityKind[0], livelinessKind[0],
-                deadlineSeconds[0], deadlineNanos[0], lifespanSeconds[0], lifespanNanos[0],
-                leaseSeconds[0], leaseNanos[0], userDataBytes[0], instanceState, true, typeObject);
+        return new PublicationBuiltinTopicData(
+                key,
+                endpointGuid,
+                participantKey,
+                topicName,
+                typeName,
+                reliabilityKind[0],
+                durabilityKind[0],
+                livelinessKind[0],
+                deadlineSeconds[0],
+                deadlineNanos[0],
+                lifespanSeconds[0],
+                lifespanNanos[0],
+                leaseSeconds[0],
+                leaseNanos[0],
+                userDataBytes[0],
+                instanceState,
+                true,
+                typeObject);
     }
 
     @Override
     public String toString() {
-        return "PublicationBuiltinTopicData{topicName=" + topicName + ", typeName=" + typeName
-                + ", endpointGuid=" + Arrays.toString(endpointGuid) + "}";
+        return "PublicationBuiltinTopicData{topicName="
+                + topicName
+                + ", typeName="
+                + typeName
+                + ", endpointGuid="
+                + Arrays.toString(endpointGuid)
+                + "}";
     }
 }

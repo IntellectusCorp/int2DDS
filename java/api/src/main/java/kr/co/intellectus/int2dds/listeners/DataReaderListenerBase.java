@@ -9,9 +9,8 @@ import kr.co.intellectus.int2dds.status.SampleRejectedStatus;
 import kr.co.intellectus.int2dds.status.SubscriptionMatchedStatus;
 
 /**
- * No-op {@link DataReaderListener}. Extend this and override only the callbacks
- * you need; later callbacks added to the interface land here as no-ops, so
- * subclasses stay source-compatible.
+ * No-op {@link DataReaderListener}. Extend this and override only the callbacks you need; later
+ * callbacks added to the interface land here as no-ops, so subclasses stay source-compatible.
  */
 public class DataReaderListenerBase implements DataReaderListener {
 
@@ -36,12 +35,14 @@ public class DataReaderListenerBase implements DataReaderListener {
     }
 
     @Override
-    public void onRequestedDeadlineMissed(DataReader<?> reader, RequestedDeadlineMissedStatus status) {
+    public void onRequestedDeadlineMissed(
+            DataReader<?> reader, RequestedDeadlineMissedStatus status) {
         // no-op
     }
 
     @Override
-    public void onRequestedIncompatibleQos(DataReader<?> reader, RequestedIncompatibleQosStatus status) {
+    public void onRequestedIncompatibleQos(
+            DataReader<?> reader, RequestedIncompatibleQosStatus status) {
         // no-op
     }
 

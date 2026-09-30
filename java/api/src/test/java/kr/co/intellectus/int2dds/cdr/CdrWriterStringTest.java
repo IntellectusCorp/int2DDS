@@ -21,9 +21,7 @@ class CdrWriterStringTest {
     void stringIsLengthIncludingNulThenBytesThenNul() {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
             w.writeString("abc");
-            assertArrayEquals(
-                    new byte[] {0x04, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00},
-                    payload(w));
+            assertArrayEquals(new byte[] {0x04, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00}, payload(w));
         }
     }
 
@@ -67,7 +65,7 @@ class CdrWriterStringTest {
     void supplementaryPlaneCharactersSurviveIntact() {
         // A surrogate pair is 4 UTF-8 bytes. This is exactly what JNI's
         // modified UTF-8 would corrupt, which is why strings cross as byte[].
-        String s = "🌡";   // U+1F321
+        String s = "🌡"; // U+1F321
         byte[] utf8 = s.getBytes(UTF8);
         assertEquals(4, utf8.length);
 
@@ -116,8 +114,7 @@ class CdrWriterStringTest {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
             w.writeWString("ab");
             assertArrayEquals(
-                    new byte[] {0x02, 0x00, 0x00, 0x00, 'a', 0x00, 'b', 0x00},
-                    payload(w));
+                    new byte[] {0x02, 0x00, 0x00, 0x00, 'a', 0x00, 'b', 0x00}, payload(w));
         }
     }
 
@@ -134,10 +131,9 @@ class CdrWriterStringTest {
         // The count is UTF-16 code units, not characters, matching
         // encode_utf16().count() on the core side.
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
-            w.writeWString("🌡");   // U+1F321 -> D83C DF21
+            w.writeWString("🌡"); // U+1F321 -> D83C DF21
             assertArrayEquals(
-                    new byte[] {0x02, 0x00, 0x00, 0x00,
-                            0x3C, (byte) 0xD8, 0x21, (byte) 0xDF},
+                    new byte[] {0x02, 0x00, 0x00, 0x00, 0x3C, (byte) 0xD8, 0x21, (byte) 0xDF},
                     payload(w));
         }
     }
@@ -164,8 +160,7 @@ class CdrWriterStringTest {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
             w.writeEnum(-1);
             assertArrayEquals(
-                    new byte[] {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF},
-                    payload(w));
+                    new byte[] {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF}, payload(w));
         }
     }
 

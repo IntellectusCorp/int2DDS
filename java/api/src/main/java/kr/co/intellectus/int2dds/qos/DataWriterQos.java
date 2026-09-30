@@ -5,10 +5,9 @@ import java.util.Objects;
 /**
  * DataWriter QoS.
  *
- * <p>Every field is nullable and defaults to null, meaning "leave it to the
- * core". {@code dataFrag} is an {@code Integer} rather than an {@code int} so
- * that null is distinguishable from zero; it is an int2DDS extension (DATA_FRAG
- * max fragment size), not a standard DDS policy.
+ * <p>Every field is nullable and defaults to null, meaning "leave it to the core". {@code dataFrag}
+ * is an {@code Integer} rather than an {@code int} so that null is distinguishable from zero; it is
+ * an int2DDS extension (DATA_FRAG max fragment size), not a standard DDS policy.
  */
 public class DataWriterQos {
 

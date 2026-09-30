@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.Charset;
 import kr.co.intellectus.int2dds.cdr.CdrReader;
 import kr.co.intellectus.int2dds.cdr.CdrWriter;
 import kr.co.intellectus.int2dds.cdr.Extensibility;
@@ -13,31 +16,26 @@ import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.xtypes.TypeInfo;
 import kr.co.intellectus.int2dds.xtypes.TypeObject;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.charset.Charset;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Hands bytes produced by the <em>generated</em> {@link CdrGolden} to the
- * core's own deserializer and asserts the field values it decodes.
+ * Hands bytes produced by the <em>generated</em> {@link CdrGolden} to the core's own deserializer
+ * and asserts the field values it decodes.
  *
- * <p>Every other {@code codegen::java} test is a string snapshot against a
- * literal the same author wrote, and {@code java/scripts/check-idl-java.sh} only
- * compiles the output. Neither can see a wire-format mistake, and neither can
- * a round trip through our own reader: writer and reader share the mapping, so
- * they agree even when both are wrong. This test cannot, because the decoder
- * on the other side is the core the interoperability workflow validates
- * against other vendors.
+ * <p>Every other {@code codegen::java} test is a string snapshot against a literal the same author
+ * wrote, and {@code java/scripts/check-idl-java.sh} only compiles the output. Neither can see a
+ * wire-format mistake, and neither can a round trip through our own reader: writer and reader share
+ * the mapping, so they agree even when both are wrong. This test cannot, because the decoder on the
+ * other side is the core the interoperability workflow validates against other vendors.
  *
- * <p>No golden hex appears here on purpose. A hex snapshot of our own writer's
- * output would enshrine whatever that writer does, bug included.
+ * <p>No golden hex appears here on purpose. A hex snapshot of our own writer's output would
+ * enshrine whatever that writer does, bug included.
  *
- * <p>The type object is built from the generated {@link CdrGolden#typeInfo()}
- * itself -- exactly what {@code createTopic} advertises, not a hand-copied
- * list -- so that is what the core is asked to decode with.
+ * <p>The type object is built from the generated {@link CdrGolden#typeInfo()} itself -- exactly
+ * what {@code createTopic} advertises, not a hand-copied list -- so that is what the core is asked
+ * to decode with.
  */
 class GeneratedTypeConformanceTest {
 
@@ -75,9 +73,8 @@ class GeneratedTypeConformanceTest {
     // --- the sample values -------------------------------------------------
 
     /**
-     * Values chosen so a wrong mapping shows up rather than cancelling out:
-     * every signed minimum, every unsigned value past its Java type's positive
-     * range, and a multi-byte string.
+     * Values chosen so a wrong mapping shows up rather than cancelling out: every signed minimum,
+     * every unsigned value past its Java type's positive range, and a multi-byte string.
      */
     private static CdrGolden extremes() {
         CdrGolden g = new CdrGolden();
@@ -170,75 +167,114 @@ class GeneratedTypeConformanceTest {
             ByteBuffer out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
             long outAddr = FfiAccess.directBufferAddress(out);
 
-            assertEquals(0, FfiAccess.dynamicSampleGetI32(
-                    w.address(), w.length(), typeObject, utf8("id"), outAddr),
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetI32(
+                            w.address(), w.length(), typeObject, utf8("id"), outAddr),
                     what + ": the core must accept our encoding");
             assertEquals(g.id, out.getInt(0), what + ": id");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetBool(
-                    w.address(), w.length(), typeObject, utf8("bool_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetBool(
+                            w.address(), w.length(), typeObject, utf8("bool_val"), outAddr),
+                    what);
             assertEquals(g.boolVal, out.get(0) != 0, what + ": bool_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetI8(
-                    w.address(), w.length(), typeObject, utf8("i8_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetI8(
+                            w.address(), w.length(), typeObject, utf8("i8_val"), outAddr),
+                    what);
             assertEquals(g.i8Val, out.get(0), what + ": i8_val");
 
             // uint8 lives in a Java byte; the core hands back the unsigned value.
-            assertEquals(0, FfiAccess.dynamicSampleGetU8(
-                    w.address(), w.length(), typeObject, utf8("u8_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetU8(
+                            w.address(), w.length(), typeObject, utf8("u8_val"), outAddr),
+                    what);
             assertEquals(g.u8Val & 0xFF, out.get(0) & 0xFF, what + ": u8_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetI16(
-                    w.address(), w.length(), typeObject, utf8("i16_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetI16(
+                            w.address(), w.length(), typeObject, utf8("i16_val"), outAddr),
+                    what);
             assertEquals(g.i16Val, out.getShort(0), what + ": i16_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetU16(
-                    w.address(), w.length(), typeObject, utf8("u16_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetU16(
+                            w.address(), w.length(), typeObject, utf8("u16_val"), outAddr),
+                    what);
             assertEquals(g.u16Val & 0xFFFF, out.getShort(0) & 0xFFFF, what + ": u16_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetI32(
-                    w.address(), w.length(), typeObject, utf8("i32_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetI32(
+                            w.address(), w.length(), typeObject, utf8("i32_val"), outAddr),
+                    what);
             assertEquals(g.i32Val, out.getInt(0), what + ": i32_val");
 
             // uint32 wraps into a Java int; compare as unsigned.
-            assertEquals(0, FfiAccess.dynamicSampleGetU32(
-                    w.address(), w.length(), typeObject, utf8("u32_val"), outAddr), what);
-            assertEquals(g.u32Val & 0xFFFFFFFFL, out.getInt(0) & 0xFFFFFFFFL,
-                    what + ": u32_val");
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetU32(
+                            w.address(), w.length(), typeObject, utf8("u32_val"), outAddr),
+                    what);
+            assertEquals(g.u32Val & 0xFFFFFFFFL, out.getInt(0) & 0xFFFFFFFFL, what + ": u32_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetI64(
-                    w.address(), w.length(), typeObject, utf8("i64_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetI64(
+                            w.address(), w.length(), typeObject, utf8("i64_val"), outAddr),
+                    what);
             assertEquals(g.i64Val, out.getLong(0), what + ": i64_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetU64(
-                    w.address(), w.length(), typeObject, utf8("u64_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetU64(
+                            w.address(), w.length(), typeObject, utf8("u64_val"), outAddr),
+                    what);
             assertEquals(g.u64Val, out.getLong(0), what + ": u64_val");
 
-            assertEquals(g.unboundedStr, coreString(w, "unbounded_str"),
-                    what + ": unbounded_str");
+            assertEquals(g.unboundedStr, coreString(w, "unbounded_str"), what + ": unbounded_str");
             assertEquals(g.boundedStr, coreString(w, "bounded_str"), what + ": bounded_str");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetByte(
-                    w.address(), w.length(), typeObject, utf8("byte_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetByte(
+                            w.address(), w.length(), typeObject, utf8("byte_val"), outAddr),
+                    what);
             assertEquals(g.byteVal & 0xFF, out.get(0) & 0xFF, what + ": byte_val");
 
             // IDL char maps to a Java byte written through writeU8.
-            assertEquals(0, FfiAccess.dynamicSampleGetChar8(
-                    w.address(), w.length(), typeObject, utf8("char_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetChar8(
+                            w.address(), w.length(), typeObject, utf8("char_val"), outAddr),
+                    what);
             assertEquals(g.charVal & 0xFF, out.get(0) & 0xFF, what + ": char_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetF32(
-                    w.address(), w.length(), typeObject, utf8("f32_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetF32(
+                            w.address(), w.length(), typeObject, utf8("f32_val"), outAddr),
+                    what);
             assertEquals(g.f32Val, out.getFloat(0), 0.0f, what + ": f32_val");
 
-            assertEquals(0, FfiAccess.dynamicSampleGetF64(
-                    w.address(), w.length(), typeObject, utf8("f64_val"), outAddr), what);
+            assertEquals(
+                    0,
+                    FfiAccess.dynamicSampleGetF64(
+                            w.address(), w.length(), typeObject, utf8("f64_val"), outAddr),
+                    what);
             assertEquals(g.f64Val, out.getDouble(0), 0.0d, what + ": f64_val");
 
             // The core hands a decoded wstring back as UTF-8 like any other
             // string, so the same getter reads both.
-            assertEquals(g.unboundedWstr, coreString(w, "unbounded_wstr"),
-                    what + ": unbounded_wstr");
+            assertEquals(
+                    g.unboundedWstr, coreString(w, "unbounded_wstr"), what + ": unbounded_wstr");
             assertEquals(g.boundedWstr, coreString(w, "bounded_wstr"), what + ": bounded_wstr");
         }
     }
@@ -249,8 +285,15 @@ class GeneratedTypeConformanceTest {
         while (true) {
             byte[] buf = new byte[cap];
             ByteBuffer lenSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-            int rc = FfiAccess.dynamicSampleGetString(w.address(), w.length(), typeObject,
-                    utf8(field), buf, cap, FfiAccess.directBufferAddress(lenSlot));
+            int rc =
+                    FfiAccess.dynamicSampleGetString(
+                            w.address(),
+                            w.length(),
+                            typeObject,
+                            utf8(field),
+                            buf,
+                            cap,
+                            FfiAccess.directBufferAddress(lenSlot));
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
                 cap = (int) lenSlot.getLong(0) + 1; // out_len excludes the NUL
                 continue;

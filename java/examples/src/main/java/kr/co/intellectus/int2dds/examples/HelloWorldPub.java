@@ -11,18 +11,15 @@ import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 /**
  * Publishes a {@link HelloWorld} sample once a second.
  *
- * <p>Modeled on the C# {@code HelloWorldPub} example, with one deliberate
- * difference: it does not wait for a subscriber before publishing. The C#
- * example attaches a {@code StatusCondition} to a {@code WaitSet} and blocks
- * until {@code PublicationMatched} fires; conditions are not part of this
- * branch yet. This example simply publishes on a fixed interval and prints
- * what it sent — that is honest about what a write-only branch can prove: it
- * confirms the write path accepted the sample, not that any subscriber
- * received it.
+ * <p>Modeled on the C# {@code HelloWorldPub} example, with one deliberate difference: it does not
+ * wait for a subscriber before publishing. The C# example attaches a {@code StatusCondition} to a
+ * {@code WaitSet} and blocks until {@code PublicationMatched} fires; conditions are not part of
+ * this branch yet. This example simply publishes on a fixed interval and prints what it sent — that
+ * is honest about what a write-only branch can prove: it confirms the write path accepted the
+ * sample, not that any subscriber received it.
  *
- * <p>Run with {@code -d}/{@code --domain <id>} (default 0, the real DDS
- * default domain) and {@code --reliable} (default BEST_EFFORT), the same
- * flags the C# and Rust examples take.
+ * <p>Run with {@code -d}/{@code --domain <id>} (default 0, the real DDS default domain) and {@code
+ * --reliable} (default BEST_EFFORT), the same flags the C# and Rust examples take.
  */
 public final class HelloWorldPub {
 
@@ -53,7 +50,8 @@ public final class HelloWorldPub {
             System.out.println("Created topic: " + topic.name() + " (" + topic.typeName() + ")");
 
             Publisher publisher = participant.createPublisher();
-            ReliabilityKind kind = reliable ? ReliabilityKind.RELIABLE : ReliabilityKind.BEST_EFFORT;
+            ReliabilityKind kind =
+                    reliable ? ReliabilityKind.RELIABLE : ReliabilityKind.BEST_EFFORT;
             DataWriterQos qos = new DataWriterQos();
             qos.setReliability(new Reliability(kind));
             DataWriter<HelloWorld> writer = publisher.createDataWriter(topic, qos);

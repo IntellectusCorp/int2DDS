@@ -1,8 +1,8 @@
 package kr.co.intellectus.int2dds.conditions;
 
 /**
- * Instance-state bit values for {@link ReadCondition} masks. Matches the
- * core's {@code InstanceStateKind} ({@code dds/src/dcps/subscription/sample_info.rs}).
+ * Instance-state bit values for {@link ReadCondition} masks. Matches the core's {@code
+ * InstanceStateKind} ({@code dds/src/dcps/subscription/sample_info.rs}).
  */
 public final class InstanceState {
     public static final int ALIVE = 0x0001;

@@ -1,5 +1,6 @@
 package kr.co.intellectus.int2dds.xtypes;
 
+import java.util.Objects;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
@@ -7,12 +8,11 @@ import kr.co.intellectus.int2dds.internal.QosMarshal;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
-import java.util.Objects;
 
 /**
- * Publishes {@link DynamicData} samples to a {@link DynamicTopic}. Produced by
- * {@link kr.co.intellectus.int2dds.core.Publisher#createDynamicDataWriter}.
- * NativeCleaner-managed like {@link kr.co.intellectus.int2dds.core.DataWriter}.
+ * Publishes {@link DynamicData} samples to a {@link DynamicTopic}. Produced by {@link
+ * kr.co.intellectus.int2dds.core.Publisher#createDynamicDataWriter}. NativeCleaner-managed like
+ * {@link kr.co.intellectus.int2dds.core.DataWriter}.
  */
 public final class DynamicDataWriter implements AutoCloseable {
 
@@ -29,17 +29,19 @@ public final class DynamicDataWriter implements AutoCloseable {
     }
 
     /**
-     * Wraps an already-created native dynamic-datawriter handle. Public, the
-     * same style as {@link DynamicData#fromHandle}, so {@link
-     * kr.co.intellectus.int2dds.core.Publisher#createDynamicDataWriter} --
-     * outside this package -- can hand back a handle produced by {@link
-     * FfiAccess#createDataWriterDynamic}.
+     * Wraps an already-created native dynamic-datawriter handle. Public, the same style as {@link
+     * DynamicData#fromHandle}, so {@link
+     * kr.co.intellectus.int2dds.core.Publisher#createDynamicDataWriter} -- outside this package --
+     * can hand back a handle produced by {@link FfiAccess#createDataWriterDynamic}.
      */
     public static DynamicDataWriter fromHandle(long rawHandle) {
         return new DynamicDataWriter(rawHandle, null);
     }
 
-    /** {@link #fromHandle(long)}, additionally keeping {@code owner} reachable for this writer's lifetime. */
+    /**
+     * {@link #fromHandle(long)}, additionally keeping {@code owner} reachable for this writer's
+     * lifetime.
+     */
     public static DynamicDataWriter fromHandle(long rawHandle, Object owner) {
         return new DynamicDataWriter(rawHandle, owner);
     }
@@ -71,10 +73,9 @@ public final class DynamicDataWriter implements AutoCloseable {
     }
 
     /**
-     * Reads this writer's current QoS off the native side — not the {@code
-     * DataWriterQos} it was constructed with, which this class does not
-     * retain. Policies with no native getter come back null; see {@link
-     * QosMarshal#readWriterQos}'s own doc for the full list.
+     * Reads this writer's current QoS off the native side — not the {@code DataWriterQos} it was
+     * constructed with, which this class does not retain. Policies with no native getter come back
+     * null; see {@link QosMarshal#readWriterQos}'s own doc for the full list.
      */
     public DataWriterQos getQos() {
         long h = handle();

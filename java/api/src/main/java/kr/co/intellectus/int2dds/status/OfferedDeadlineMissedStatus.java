@@ -5,9 +5,8 @@ import java.util.Arrays;
 /**
  * Immutable snapshot of a DataWriter's OFFERED_DEADLINE_MISSED status.
  *
- * <p>Constructed from the native trampoline via the {@code (II[B)V}
- * constructor; the field order matches the core's
- * {@code Int2DdsOfferedDeadlineMissedStatus}.
+ * <p>Constructed from the native trampoline via the {@code (II[B)V} constructor; the field order
+ * matches the core's {@code Int2DdsOfferedDeadlineMissedStatus}.
  */
 public final class OfferedDeadlineMissedStatus {
 
@@ -15,14 +14,15 @@ public final class OfferedDeadlineMissedStatus {
     private final int totalCountChange;
     private final byte[] lastInstanceHandle;
 
-    public OfferedDeadlineMissedStatus(int totalCount, int totalCountChange,
-            byte[] lastInstanceHandle) {
+    public OfferedDeadlineMissedStatus(
+            int totalCount, int totalCountChange, byte[] lastInstanceHandle) {
         this.totalCount = totalCount;
         this.totalCountChange = totalCountChange;
         // Defensive copy: the caller's array must not alias this snapshot.
-        this.lastInstanceHandle = lastInstanceHandle == null
-                ? new byte[0]
-                : Arrays.copyOf(lastInstanceHandle, lastInstanceHandle.length);
+        this.lastInstanceHandle =
+                lastInstanceHandle == null
+                        ? new byte[0]
+                        : Arrays.copyOf(lastInstanceHandle, lastInstanceHandle.length);
     }
 
     /** Cumulative count of missed deadlines. */

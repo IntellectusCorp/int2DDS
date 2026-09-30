@@ -3,8 +3,8 @@ package kr.co.intellectus.int2dds.qos;
 /**
  * Data representation kinds. The value is the wire encoding, not the ordinal.
  *
- * <p>This is the enum where ordinal and wire value genuinely disagree:
- * {@code XCDR2} skips value 1, so its ordinal is 1 but its wire value is 2.
+ * <p>This is the enum where ordinal and wire value genuinely disagree: {@code XCDR2} skips value 1,
+ * so its ordinal is 1 but its wire value is 2.
  */
 public enum DataRepresentationKind {
     XCDR1(0),

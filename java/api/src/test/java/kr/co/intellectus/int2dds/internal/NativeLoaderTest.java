@@ -19,7 +19,8 @@ class NativeLoaderTest {
     void nativeVersionMatchesTheJarVersion() {
         NativeLoader.load();
         String nativeVersion = NativeLoader.nativeVersion();
-        assertTrue(nativeVersion.matches("\\d+\\.\\d+\\.\\d+.*"),
+        assertTrue(
+                nativeVersion.matches("\\d+\\.\\d+\\.\\d+.*"),
                 "expected a semver-ish version, got: " + nativeVersion);
         // Set by api/build.gradle.kts from Cargo.toml [workspace.package].
         assertEquals(System.getProperty("int2dds.version"), nativeVersion);
@@ -27,8 +28,10 @@ class NativeLoaderTest {
 
     @Test
     void mismatchedVersionsAreRejected() {
-        NativeLoadException e = assertThrows(NativeLoadException.class,
-                () -> NativeLoader.verifyVersion("0.0.1", "9.9.9"));
+        NativeLoadException e =
+                assertThrows(
+                        NativeLoadException.class,
+                        () -> NativeLoader.verifyVersion("0.0.1", "9.9.9"));
         assertTrue(e.getMessage().contains("0.0.1"), e.getMessage());
         assertTrue(e.getMessage().contains("9.9.9"), e.getMessage());
     }
@@ -51,8 +54,10 @@ class NativeLoaderTest {
 
     @Test
     void aMissingExplicitPathIsReportedClearly() {
-        NativeLoadException e = assertThrows(NativeLoadException.class,
-                () -> NativeLoader.loadFrom("/nonexistent/libint2dds_java.so"));
+        NativeLoadException e =
+                assertThrows(
+                        NativeLoadException.class,
+                        () -> NativeLoader.loadFrom("/nonexistent/libint2dds_java.so"));
         assertTrue(e.getMessage().contains("/nonexistent/libint2dds_java.so"), e.getMessage());
     }
 }

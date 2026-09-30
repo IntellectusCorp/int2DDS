@@ -3,8 +3,8 @@ package kr.co.intellectus.int2dds.qos;
 import java.util.Objects;
 
 /**
- * Lifespan reference QoS policy (DataReader only, an int2DDS extension): which
- * timestamp a reader measures the writer's {@link Lifespan} against.
+ * Lifespan reference QoS policy (DataReader only, an int2DDS extension): which timestamp a reader
+ * measures the writer's {@link Lifespan} against.
  */
 public class LifespanReference {
 

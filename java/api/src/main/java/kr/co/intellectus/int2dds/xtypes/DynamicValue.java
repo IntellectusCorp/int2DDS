@@ -1,29 +1,26 @@
 package kr.co.intellectus.int2dds.xtypes;
 
+import java.nio.charset.Charset;
+import java.util.concurrent.atomic.AtomicBoolean;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import java.nio.charset.Charset;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * A standalone dynamic-type value, built up from scalars (and, via {@link
- * #push} or {@link #insert}, sequences/arrays or maps of them) and then
- * handed to {@link DynamicData#setValue} to write a field that a plain
- * scalar setter cannot reach -- today, a sequence, array or map.
+ * A standalone dynamic-type value, built up from scalars (and, via {@link #push} or {@link
+ * #insert}, sequences/arrays or maps of them) and then handed to {@link DynamicData#setValue} to
+ * write a field that a plain scalar setter cannot reach -- today, a sequence, array or map.
  *
- * <p><b>Ownership.</b> The native layer transfers ownership of a value's
- * handle whenever it is moved into something else: {@link #push} moves this
- * value into the sequence/array it is called on, {@link #insert} moves a key
- * and a value into the map it is called on, and {@link DynamicData#setValue}
- * moves a value into a field. After any of these happen, the moved handle is
- * dead on the native side -- the memory it pointed to has been freed -- so
- * this class tracks a {@code consumed} flag and makes every use of a
- * consumed value's handle (further {@link #push}, {@link #insert} or {@link
- * #handle()} calls, {@link #close()}, and the NativeCleaner reaper) a no-op
- * or a loud failure instead of a double-free.
+ * <p><b>Ownership.</b> The native layer transfers ownership of a value's handle whenever it is
+ * moved into something else: {@link #push} moves this value into the sequence/array it is called
+ * on, {@link #insert} moves a key and a value into the map it is called on, and {@link
+ * DynamicData#setValue} moves a value into a field. After any of these happen, the moved handle is
+ * dead on the native side -- the memory it pointed to has been freed -- so this class tracks a
+ * {@code consumed} flag and makes every use of a consumed value's handle (further {@link #push},
+ * {@link #insert} or {@link #handle()} calls, {@link #close()}, and the NativeCleaner reaper) a
+ * no-op or a loud failure instead of a double-free.
  */
 public final class DynamicValue implements AutoCloseable {
 
@@ -33,11 +30,10 @@ public final class DynamicValue implements AutoCloseable {
     private final NativeHandle handle;
 
     /**
-     * Package-visible so {@link DynamicData#getValue} can wrap a handle
-     * produced by {@code int2dds_dynamic_data_get_value} -- that call clones
-     * a new, independently-owned value rather than transferring ownership of
-     * an existing one, so the result is a fresh {@code DynamicValue} exactly
-     * like one of the static factories below returns.
+     * Package-visible so {@link DynamicData#getValue} can wrap a handle produced by {@code
+     * int2dds_dynamic_data_get_value} -- that call clones a new, independently-owned value rather
+     * than transferring ownership of an existing one, so the result is a fresh {@code DynamicValue}
+     * exactly like one of the static factories below returns.
      */
     DynamicValue(long rawHandle) {
         // The deleter captures only the flag, never `this`: NativeCleaner holds
@@ -47,10 +43,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * The deleter registered with the NativeCleaner. Guards the reaper path
-     * the same way {@link #close()} guards the explicit path: once {@code
-     * consumed} is set, the handle has already been freed as part of moving
-     * it into a collection or a DynamicData field, so there is nothing left
+     * The deleter registered with the NativeCleaner. Guards the reaper path the same way {@link
+     * #close()} guards the explicit path: once {@code consumed} is set, the handle has already been
+     * freed as part of moving it into a collection or a DynamicData field, so there is nothing left
      * here to destroy.
      */
     private static int deleteUnlessConsumed(AtomicBoolean consumed, long h) {
@@ -229,10 +224,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Snapshots the current field values of {@code data} into an immutable
-     * struct value. {@code data} is cloned natively, not consumed -- the
-     * caller still owns {@code data} and must {@link DynamicData#close} it
-     * independently, before or after this call.
+     * Snapshots the current field values of {@code data} into an immutable struct value. {@code
+     * data} is cloned natively, not consumed -- the caller still owns {@code data} and must {@link
+     * DynamicData#close} it independently, before or after this call.
      */
     public static DynamicValue struct(DynamicData data) {
         long d = data.handle();
@@ -244,21 +238,17 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Builds a union value from {@code discriminator} and {@code value}, the
-     * selected branch.
+     * Builds a union value from {@code discriminator} and {@code value}, the selected branch.
      *
-     * <p>Consumes BOTH {@code discriminator} and {@code value}: the native
-     * call frees their handles unconditionally -- right after its null
-     * checks and before any fallible step -- so, unlike {@link #push} and
-     * {@link #insert}, there is no failure path that leaves either argument
-     * still owned by the caller. Both are therefore marked consumed the same
-     * way regardless of the returned code, mirroring {@link
-     * DynamicData#setValue}: if the native call somehow still failed, the
-     * handles are already dead, and marking them consumed before the {@link
-     * ReturnCodes#check} that raises the exception avoids a double-free from
-     * a subsequent {@link #close()}. Throws (without consuming either) only
-     * if a null is passed or an argument has already been consumed --
-     * conditions Java rejects before making the native call.
+     * <p>Consumes BOTH {@code discriminator} and {@code value}: the native call frees their handles
+     * unconditionally -- right after its null checks and before any fallible step -- so, unlike
+     * {@link #push} and {@link #insert}, there is no failure path that leaves either argument still
+     * owned by the caller. Both are therefore marked consumed the same way regardless of the
+     * returned code, mirroring {@link DynamicData#setValue}: if the native call somehow still
+     * failed, the handles are already dead, and marking them consumed before the {@link
+     * ReturnCodes#check} that raises the exception avoids a double-free from a subsequent {@link
+     * #close()}. Throws (without consuming either) only if a null is passed or an argument has
+     * already been consumed -- conditions Java rejects before making the native call.
      */
     public static DynamicValue union(DynamicValue discriminator, DynamicValue value) {
         if (discriminator == null) {
@@ -289,10 +279,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Clones this union value's discriminator into a new,
-     * independently-owned {@link DynamicValue}. The caller owns the
-     * returned value and must {@link #close} it -- this value is untouched
-     * and remains usable afterward.
+     * Clones this union value's discriminator into a new, independently-owned {@link DynamicValue}.
+     * The caller owns the returned value and must {@link #close} it -- this value is untouched and
+     * remains usable afterward.
      */
     public DynamicValue unionDiscriminator() {
         long v = handle();
@@ -304,10 +293,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Clones this union value's selected branch value into a new,
-     * independently-owned {@link DynamicValue}. The caller owns the
-     * returned value and must {@link #close} it -- this value is untouched
-     * and remains usable afterward.
+     * Clones this union value's selected branch value into a new, independently-owned {@link
+     * DynamicValue}. The caller owns the returned value and must {@link #close} it -- this value is
+     * untouched and remains usable afterward.
      */
     public DynamicValue unionValue() {
         long v = handle();
@@ -339,10 +327,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Clones the element at {@code index} of this sequence/array value into a
-     * new, independently-owned {@link DynamicValue}. The caller owns the
-     * returned value and must {@link #close} it -- this value is untouched
-     * and remains usable afterward.
+     * Clones the element at {@code index} of this sequence/array value into a new,
+     * independently-owned {@link DynamicValue}. The caller owns the returned value and must {@link
+     * #close} it -- this value is untouched and remains usable afterward.
      */
     public DynamicValue element(int index) {
         long v = handle();
@@ -354,10 +341,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Clones the key at {@code index} of this map value into a new,
-     * independently-owned {@link DynamicValue}. The caller owns the returned
-     * value and must {@link #close} it -- this value is untouched and
-     * remains usable afterward.
+     * Clones the key at {@code index} of this map value into a new, independently-owned {@link
+     * DynamicValue}. The caller owns the returned value and must {@link #close} it -- this value is
+     * untouched and remains usable afterward.
      */
     public DynamicValue mapKey(int index) {
         long v = handle();
@@ -369,10 +355,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Clones the value at {@code index} of this map value into a new,
-     * independently-owned {@link DynamicValue}. The caller owns the returned
-     * value and must {@link #close} it -- this value is untouched and
-     * remains usable afterward.
+     * Clones the value at {@code index} of this map value into a new, independently-owned {@link
+     * DynamicValue}. The caller owns the returned value and must {@link #close} it -- this value is
+     * untouched and remains usable afterward.
      */
     public DynamicValue mapValue(int index) {
         long v = handle();
@@ -403,7 +388,9 @@ public final class DynamicValue implements AutoCloseable {
         return (byte) out[0];
     }
 
-    /** Reads this value as a {@code uint8}, its unsigned 0-255 value. Throws if it is not a uint8. */
+    /**
+     * Reads this value as a {@code uint8}, its unsigned 0-255 value. Throws if it is not a uint8.
+     */
     public int asU8() {
         long v = handle();
         int[] out = new int[1];
@@ -423,7 +410,10 @@ public final class DynamicValue implements AutoCloseable {
         return (short) out[0];
     }
 
-    /** Reads this value as a {@code uint16}, its unsigned 0-65535 value. Throws if it is not a uint16. */
+    /**
+     * Reads this value as a {@code uint16}, its unsigned 0-65535 value. Throws if it is not a
+     * uint16.
+     */
     public int asU16() {
         long v = handle();
         int[] out = new int[1];
@@ -444,9 +434,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Reads this value as a {@code uint32}, its raw 32 bits. A value at or
-     * above 2^31 reads back negative; widen with {@code & 0xFFFFFFFFL} for
-     * the unsigned magnitude. Throws if it is not a uint32.
+     * Reads this value as a {@code uint32}, its raw 32 bits. A value at or above 2^31 reads back
+     * negative; widen with {@code & 0xFFFFFFFFL} for the unsigned magnitude. Throws if it is not a
+     * uint32.
      */
     public int asU32() {
         long v = handle();
@@ -468,8 +458,8 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Reads this value as a {@code uint64}, its raw 64 bits. A value at or
-     * above 2^63 reads back negative. Throws if it is not a uint64.
+     * Reads this value as a {@code uint64}, its raw 64 bits. A value at or above 2^63 reads back
+     * negative. Throws if it is not a uint64.
      */
     public long asU64() {
         long v = handle();
@@ -520,7 +510,10 @@ public final class DynamicValue implements AutoCloseable {
         return out[0];
     }
 
-    /** Reads this value as a {@code char8}, its unsigned 0-255 byte value. Throws if it is not a char8. */
+    /**
+     * Reads this value as a {@code char8}, its unsigned 0-255 byte value. Throws if it is not a
+     * char8.
+     */
     public int asChar8() {
         long v = handle();
         int[] out = new int[1];
@@ -541,10 +534,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Formats this value regardless of kind, in the core's {@code Display}
-     * form (the same text Python's {@code str()} and C#'s {@code ToString()}
-     * produce). A consumed or closed value formats as a placeholder instead of
-     * throwing, since debuggers and loggers call this freely.
+     * Formats this value regardless of kind, in the core's {@code Display} form (the same text
+     * Python's {@code str()} and C#'s {@code ToString()} produce). A consumed or closed value
+     * formats as a placeholder instead of throwing, since debuggers and loggers call this freely.
      */
     @Override
     public String toString() {
@@ -563,8 +555,8 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Reads this value as an {@code enum} literal, its numeric value and
-     * name. Throws if it is not an enum.
+     * Reads this value as an {@code enum} literal, its numeric value and name. Throws if it is not
+     * an enum.
      */
     public EnumValue asEnum() {
         long v = handle();
@@ -577,10 +569,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Clones this struct value's fields into a new, independently-owned
-     * {@link DynamicData}. The caller owns the returned handle and must
-     * {@link DynamicData#close} it -- this value is untouched and remains
-     * usable afterward. Throws if this value is not a struct.
+     * Clones this struct value's fields into a new, independently-owned {@link DynamicData}. The
+     * caller owns the returned handle and must {@link DynamicData#close} it -- this value is
+     * untouched and remains usable afterward. Throws if this value is not a struct.
      */
     public DynamicData asStruct() {
         long v = handle();
@@ -594,12 +585,10 @@ public final class DynamicValue implements AutoCloseable {
     /**
      * Appends {@code element} to this sequence/array value.
      *
-     * <p>Consumes {@code element}: on success its handle has been moved into
-     * this collection, so it must not be used, pushed elsewhere, or closed
-     * again -- this method marks it consumed itself, making its {@link
-     * #close()} a no-op. Throws (without consuming {@code element}) if this
-     * value is not a sequence/array, or if either value has already been
-     * consumed.
+     * <p>Consumes {@code element}: on success its handle has been moved into this collection, so it
+     * must not be used, pushed elsewhere, or closed again -- this method marks it consumed itself,
+     * making its {@link #close()} a no-op. Throws (without consuming {@code element}) if this value
+     * is not a sequence/array, or if either value has already been consumed.
      */
     public void push(DynamicValue element) {
         if (element == null) {
@@ -623,12 +612,11 @@ public final class DynamicValue implements AutoCloseable {
     /**
      * Inserts {@code key}/{@code value} into this map value.
      *
-     * <p>Consumes BOTH {@code key} and {@code value}: on success their
-     * handles have been moved into this map, so neither must be used, pushed
-     * or inserted elsewhere, or closed again -- this method marks both
-     * consumed itself, making their {@link #close()} a no-op. Throws
-     * (without consuming either) if this value is not a map, or if either
-     * argument has already been consumed.
+     * <p>Consumes BOTH {@code key} and {@code value}: on success their handles have been moved into
+     * this map, so neither must be used, pushed or inserted elsewhere, or closed again -- this
+     * method marks both consumed itself, making their {@link #close()} a no-op. Throws (without
+     * consuming either) if this value is not a map, or if either argument has already been
+     * consumed.
      */
     public void insert(DynamicValue key, DynamicValue value) {
         if (key == null) {
@@ -659,10 +647,9 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * The native handle. Throws if this value has already been consumed
-     * (moved into a collection or a DynamicData field) -- its handle is
-     * dead and must not be read again, let alone passed to another native
-     * call.
+     * The native handle. Throws if this value has already been consumed (moved into a collection or
+     * a DynamicData field) -- its handle is dead and must not be read again, let alone passed to
+     * another native call.
      */
     long handle() {
         if (consumed.get()) {
@@ -681,18 +668,18 @@ public final class DynamicValue implements AutoCloseable {
     }
 
     /**
-     * Marks this value consumed without a native call -- used by {@link
-     * DynamicData#setValue} after a successful {@code dynamic_data_set_value},
-     * which moves this value's handle into the DynamicData field.
+     * Marks this value consumed without a native call -- used by {@link DynamicData#setValue} after
+     * a successful {@code dynamic_data_set_value}, which moves this value's handle into the
+     * DynamicData field.
      */
     void markConsumed() {
         consumed.set(true);
     }
 
     /**
-     * Releases this value's handle. For a consumed value (moved into a
-     * collection or a DynamicData field) the deleter frees nothing, but the
-     * handle is still closed so NativeCleaner drops its registration.
+     * Releases this value's handle. For a consumed value (moved into a collection or a DynamicData
+     * field) the deleter frees nothing, but the handle is still closed so NativeCleaner drops its
+     * registration.
      */
     @Override
     public void close() {

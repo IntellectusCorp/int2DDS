@@ -7,10 +7,9 @@ import java.util.Objects;
 /**
  * Property QoS policy (DomainParticipant only).
  *
- * <p>The well-known name {@code int2dds.transport.UDPv4.multicast_ttl}
- * configures the IPv4 multicast TTL for the participant; {@link
- * #setMulticastTtl(int)} is a convenience for that entry that replaces rather
- * than appends.
+ * <p>The well-known name {@code int2dds.transport.UDPv4.multicast_ttl} configures the IPv4
+ * multicast TTL for the participant; {@link #setMulticastTtl(int)} is a convenience for that entry
+ * that replaces rather than appends.
  */
 public class Property {
 

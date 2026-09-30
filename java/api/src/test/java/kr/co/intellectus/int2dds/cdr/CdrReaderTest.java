@@ -41,23 +41,27 @@ class CdrReaderTest {
 
     @Test
     void anUnknownEncapsulationIdIsRejected() {
-        assertThrows(CdrInvalidEncapsulationException.class,
+        assertThrows(
+                CdrInvalidEncapsulationException.class,
                 () -> CdrReader.of(new byte[] {0x00, 0x7F, 0x00, 0x00}));
     }
 
     @Test
     void aBufferTooShortForTheHeaderIsRejected() {
-        assertThrows(CdrUnderflowException.class,
-                () -> CdrReader.of(new byte[] {0x00, 0x01, 0x00}));
+        assertThrows(
+                CdrUnderflowException.class, () -> CdrReader.of(new byte[] {0x00, 0x01, 0x00}));
     }
 
     @Test
     void alignmentSkipsPaddingMeasuredFromTheStream() {
         // bool at stream offset 0, then 3 pad bytes, then the i32.
-        CdrReader r = CdrReader.of(new byte[] {
-                0x00, 0x01, 0x00, 0x00,
-                0x01, 0x00, 0x00, 0x00,
-                0x04, 0x03, 0x02, 0x01});
+        CdrReader r =
+                CdrReader.of(
+                        new byte[] {
+                            0x00, 0x01, 0x00, 0x00,
+                            0x01, 0x00, 0x00, 0x00,
+                            0x04, 0x03, 0x02, 0x01
+                        });
         assertTrue(r.readBool());
         assertEquals(0x01020304, r.readI32());
         assertEquals(0, r.remaining());
@@ -79,10 +83,11 @@ class CdrReaderTest {
 
     @Test
     void unsignedReadersWidenRatherThanTruncate() {
-        CdrReader r = CdrReader.of(new byte[] {
-                0x00, 0x01, 0x00, 0x00,
-                (byte) 0xFF, 0x00,
-                (byte) 0xFF, (byte) 0xFF});
+        CdrReader r =
+                CdrReader.of(
+                        new byte[] {
+                            0x00, 0x01, 0x00, 0x00, (byte) 0xFF, 0x00, (byte) 0xFF, (byte) 0xFF
+                        });
         assertEquals(255, r.readU8());
         r.skip(1);
         assertEquals(65535, r.readU16());
@@ -109,9 +114,8 @@ class CdrReaderTest {
 
     @Test
     void floatsRoundTripTheirBitPattern() {
-        CdrReader r = CdrReader.of(new byte[] {
-                0x00, 0x01, 0x00, 0x00,
-                0x00, 0x00, (byte) 0x80, 0x3F});
+        CdrReader r =
+                CdrReader.of(new byte[] {0x00, 0x01, 0x00, 0x00, 0x00, 0x00, (byte) 0x80, 0x3F});
         assertEquals(1.0f, r.readF32(), 0.0f);
     }
 
@@ -169,19 +173,40 @@ class CdrReaderTest {
     @Test
     void readSeqHeaderRejectsANegativeCount() {
         // -1 as a wire int32, little-endian.
-        CdrReader r = CdrReader.of(new byte[] {
-                0x00, 0x01, 0x00, 0x00,
-                (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF});
+        CdrReader r =
+                CdrReader.of(
+                        new byte[] {
+                            0x00,
+                            0x01,
+                            0x00,
+                            0x00,
+                            (byte) 0xFF,
+                            (byte) 0xFF,
+                            (byte) 0xFF,
+                            (byte) 0xFF
+                        });
         assertThrows(CdrUnderflowException.class, r::readSeqHeader);
     }
 
     @Test
     void readSeqHeaderRejectsACountLargerThanTheBuffer() {
         // Claims 1000 elements but only 4 bytes remain.
-        CdrReader r = CdrReader.of(new byte[] {
-                0x00, 0x01, 0x00, 0x00,
-                (byte) 0xE8, 0x03, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00});
+        CdrReader r =
+                CdrReader.of(
+                        new byte[] {
+                            0x00,
+                            0x01,
+                            0x00,
+                            0x00,
+                            (byte) 0xE8,
+                            0x03,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00
+                        });
         assertThrows(CdrUnderflowException.class, r::readSeqHeader);
     }
 
@@ -199,6 +224,7 @@ class CdrReaderTest {
         CdrReader r = CdrReader.of(b);
         r.readI32();
 
-        assertEquals(originalPos, b.position(), "Reader should not modify caller's buffer position");
+        assertEquals(
+                originalPos, b.position(), "Reader should not modify caller's buffer position");
     }
 }

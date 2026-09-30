@@ -17,13 +17,12 @@ import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises {@link DynamicSample} against a REAL serialized sample: {@link
- * ConformanceRecord} (id: int32, value: float64, label: string, all flat)
- * written through an ordinary typed {@link DataWriter} and pulled back off
- * the wire as raw CDR bytes with {@link DataReader#takeSerialized}, decoded
- * against a {@link TypeObject} built independently through {@link TypeInfo}
- * -- the same field order/types {@code CdrConformanceTest} uses, kept in
- * step with {@link ConformanceRecord#serializeCdr}.
+ * Exercises {@link DynamicSample} against a REAL serialized sample: {@link ConformanceRecord} (id:
+ * int32, value: float64, label: string, all flat) written through an ordinary typed {@link
+ * DataWriter} and pulled back off the wire as raw CDR bytes with {@link DataReader#takeSerialized},
+ * decoded against a {@link TypeObject} built independently through {@link TypeInfo} -- the same
+ * field order/types {@code CdrConformanceTest} uses, kept in step with {@link
+ * ConformanceRecord#serializeCdr}.
  */
 class DynamicSamplePeekTest {
 
@@ -80,8 +79,8 @@ class DynamicSamplePeekTest {
 
             // Real can-fail: an unknown field name throws rather than
             // silently returning a garbage decode.
-            assertThrows(DdsException.class,
-                    () -> DynamicSample.getI32(sample, type, "no_such_field"));
+            assertThrows(
+                    DdsException.class, () -> DynamicSample.getI32(sample, type, "no_such_field"));
 
             r.setListener(null, null);
         }

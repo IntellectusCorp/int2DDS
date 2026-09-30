@@ -62,9 +62,12 @@ public class ResourceLimits {
 
     @Override
     public String toString() {
-        return "ResourceLimits{maxSamples=" + maxSamples
-                + ", maxInstances=" + maxInstances
-                + ", maxSamplesPerInstance=" + maxSamplesPerInstance
+        return "ResourceLimits{maxSamples="
+                + maxSamples
+                + ", maxInstances="
+                + maxInstances
+                + ", maxSamplesPerInstance="
+                + maxSamplesPerInstance
                 + "}";
     }
 }

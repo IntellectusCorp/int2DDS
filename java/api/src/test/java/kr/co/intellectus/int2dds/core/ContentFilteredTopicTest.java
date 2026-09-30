@@ -3,6 +3,8 @@ package kr.co.intellectus.int2dds.core;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.List;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.History;
@@ -10,27 +12,23 @@ import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.util.ArrayList;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the ContentFilteredTopic (CFT) path added in this branch: a
- * reader created on a CFT should only receive samples matching the filter
- * expression, while a plain reader on the same topic receives everything.
+ * Exercises the ContentFilteredTopic (CFT) path added in this branch: a reader created on a CFT
+ * should only receive samples matching the filter expression, while a plain reader on the same
+ * topic receives everything.
  *
- * <p>The related topic must be created with explicit field descriptors
- * ({@link Topic#createWithFieldDescriptors}) for the core's SQL filter
- * evaluator to resolve {@code id} against sample bytes at all -- see that
- * seam's own doc. A plain {@link DomainParticipant#createTopic} topic (no
- * field descriptors) makes every filter evaluation error, which the core
- * treats as "passes", silently turning the CFT into a no-op passthrough;
- * this test's whole point is pinning that filtering actually drops samples,
- * so it deliberately does not use the plain path for the related topic.
+ * <p>The related topic must be created with explicit field descriptors ({@link
+ * Topic#createWithFieldDescriptors}) for the core's SQL filter evaluator to resolve {@code id}
+ * against sample bytes at all -- see that seam's own doc. A plain {@link
+ * DomainParticipant#createTopic} topic (no field descriptors) makes every filter evaluation error,
+ * which the core treats as "passes", silently turning the CFT into a no-op passthrough; this test's
+ * whole point is pinning that filtering actually drops samples, so it deliberately does not use the
+ * plain path for the related topic.
  *
- * <p>Two participants, the pattern {@code ReliabilityLivelinessTest} and
- * {@code MatchedEndpointsTest} settled on: matching does not loop back
- * within a single participant.
+ * <p>Two participants, the pattern {@code ReliabilityLivelinessTest} and {@code
+ * MatchedEndpointsTest} settled on: matching does not loop back within a single participant.
  */
 class ContentFilteredTopicTest {
 
@@ -42,7 +40,8 @@ class ContentFilteredTopicTest {
     private static final long DATA_TIMEOUT_NANOS = 3_000_000_000L;
 
     @Test
-    void cftReaderReceivesOnlyMatchingSamplesWhilePlainReaderReceivesAll() throws InterruptedException {
+    void cftReaderReceivesOnlyMatchingSamplesWhilePlainReaderReceivesAll()
+            throws InterruptedException {
         try (DomainParticipant writerParticipant = new DomainParticipant(testDomain());
                 DomainParticipant readerParticipant = new DomainParticipant(testDomain())) {
 
@@ -62,9 +61,14 @@ class ContentFilteredTopicTest {
             // Field descriptors ("id" only -- it's the first CDR field, so no
             // earlier field needs declaring) are what let the core's filter
             // evaluator actually resolve "id" against sample bytes.
-            Topic<ConformanceRecord> readerTopic = Topic.createWithFieldDescriptors(
-                    readerParticipant, "CftJavaTestTopic", new ConformanceRecord(),
-                    new String[] {"id"}, new int[] {1}, new boolean[] {false});
+            Topic<ConformanceRecord> readerTopic =
+                    Topic.createWithFieldDescriptors(
+                            readerParticipant,
+                            "CftJavaTestTopic",
+                            new ConformanceRecord(),
+                            new String[] {"id"},
+                            new int[] {1},
+                            new boolean[] {false});
             Subscriber sub = readerParticipant.createSubscriber();
             DataReaderQos readerQos = new DataReaderQos();
             readerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
@@ -73,8 +77,9 @@ class ContentFilteredTopicTest {
             DataReader<ConformanceRecord> plainReader =
                     sub.createDataReader(readerTopic, ConformanceRecord::new, readerQos);
 
-            ContentFilteredTopic<ConformanceRecord> cft = readerParticipant.createContentFilteredTopic(
-                    "CftJavaTestTopicFiltered", readerTopic, "id > %0", "5");
+            ContentFilteredTopic<ConformanceRecord> cft =
+                    readerParticipant.createContentFilteredTopic(
+                            "CftJavaTestTopicFiltered", readerTopic, "id > %0", "5");
             DataReader<ConformanceRecord> cftReader =
                     sub.createDataReader(cft, ConformanceRecord::new, readerQos);
 
@@ -92,12 +97,17 @@ class ContentFilteredTopicTest {
             List<Integer> cftIds = collectIds(cftReader, 2000L);
             List<Integer> plainIds = collectIds(plainReader, 2000L);
 
-            assertTrue(cftIds.contains(7), "CFT reader should receive id=7 (matches id > 5): got " + cftIds);
-            assertFalse(cftIds.contains(3),
+            assertTrue(
+                    cftIds.contains(7),
+                    "CFT reader should receive id=7 (matches id > 5): got " + cftIds);
+            assertFalse(
+                    cftIds.contains(3),
                     "CFT reader should NOT receive id=3 (filtered out by id > 5): got " + cftIds);
 
             assertTrue(plainIds.contains(7), "plain reader should receive id=7: got " + plainIds);
-            assertTrue(plainIds.contains(3), "plain reader should receive id=3 (unfiltered): got " + plainIds);
+            assertTrue(
+                    plainIds.contains(3),
+                    "plain reader should receive id=3 (unfiltered): got " + plainIds);
 
             cft.setEnabled(false);
 
@@ -116,11 +126,15 @@ class ContentFilteredTopicTest {
             }
             Thread.sleep(50);
         }
-        assertTrue(writer.getMatchedSubscriptions().size() >= expected,
+        assertTrue(
+                writer.getMatchedSubscriptions().size() >= expected,
                 "writer should see " + expected + " matched subscriptions within 5s");
     }
 
-    /** Bounded take loop collecting every sample's {@code id} until the cache empties or budget runs out. */
+    /**
+     * Bounded take loop collecting every sample's {@code id} until the cache empties or budget runs
+     * out.
+     */
     private static List<Integer> collectIds(DataReader<ConformanceRecord> reader, long budgetMillis)
             throws InterruptedException {
         List<Integer> ids = new ArrayList<Integer>();

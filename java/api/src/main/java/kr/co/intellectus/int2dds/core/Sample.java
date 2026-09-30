@@ -3,9 +3,8 @@ package kr.co.intellectus.int2dds.core;
 import kr.co.intellectus.int2dds.types.IDdsType;
 
 /**
- * One received sample: the deserialized {@code data}, or {@code null} for a
- * sample whose {@link SampleInfo#validData()} is false (dispose/unregister),
- * paired with its {@link SampleInfo}.
+ * One received sample: the deserialized {@code data}, or {@code null} for a sample whose {@link
+ * SampleInfo#validData()} is false (dispose/unregister), paired with its {@link SampleInfo}.
  *
  * @param <T> the DDS data type.
  */

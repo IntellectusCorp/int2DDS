@@ -1,8 +1,8 @@
 package kr.co.intellectus.int2dds.xtypes;
 
 /**
- * Immutable snapshot of one struct member's introspection info, as returned
- * by {@link TypeObject#memberInfo}.
+ * Immutable snapshot of one struct member's introspection info, as returned by {@link
+ * TypeObject#memberInfo}.
  */
 public final class MemberInfo {
 

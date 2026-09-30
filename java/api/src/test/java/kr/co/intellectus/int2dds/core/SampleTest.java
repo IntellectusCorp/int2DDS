@@ -10,8 +10,8 @@ class SampleTest {
 
     @Test
     void carriesDataAndInfo() {
-        SampleInfo info = new SampleInfo(0, 0, 0, 0, 0, new byte[16], new byte[16],
-                0, 0, 0, 0, 0, true);
+        SampleInfo info =
+                new SampleInfo(0, 0, 0, 0, 0, new byte[16], new byte[16], 0, 0, 0, 0, 0, true);
         ConformanceRecord data = new ConformanceRecord();
         Sample<ConformanceRecord> sample = new Sample<ConformanceRecord>(data, info);
         assertSame(data, sample.data());
@@ -20,8 +20,8 @@ class SampleTest {
 
     @Test
     void invalidSampleHasNullData() {
-        SampleInfo info = new SampleInfo(0, 0, 0, 0, 0, new byte[16], new byte[16],
-                0, 0, 0, 0, 0, false);
+        SampleInfo info =
+                new SampleInfo(0, 0, 0, 0, 0, new byte[16], new byte[16], 0, 0, 0, 0, 0, false);
         Sample<ConformanceRecord> sample = new Sample<ConformanceRecord>(null, info);
         assertNull(sample.data());
         assertSame(info, sample.info());

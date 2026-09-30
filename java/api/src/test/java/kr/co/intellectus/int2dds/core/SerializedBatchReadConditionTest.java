@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import kr.co.intellectus.int2dds.cdr.CdrReader;
 import kr.co.intellectus.int2dds.conditions.InstanceState;
 import kr.co.intellectus.int2dds.conditions.QueryCondition;
@@ -17,16 +19,14 @@ import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.History;
 import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.nio.charset.StandardCharsets;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the ReadCondition/QueryCondition-filtered batch serialized reads
- * ({@link DataReader#takeSerializedBatch(ReadCondition, int)}, {@link
- * DataReader#readSerializedBatch(ReadCondition, int)}), the last variant of
- * the serialized-read matrix -- dynamic content-filtered batch reads,
- * distinct from the static-mask variants in {@link SerializedBatchFilteredTest}.
+ * Exercises the ReadCondition/QueryCondition-filtered batch serialized reads ({@link
+ * DataReader#takeSerializedBatch(ReadCondition, int)}, {@link
+ * DataReader#readSerializedBatch(ReadCondition, int)}), the last variant of the serialized-read
+ * matrix -- dynamic content-filtered batch reads, distinct from the static-mask variants in {@link
+ * SerializedBatchFilteredTest}.
  */
 class SerializedBatchReadConditionTest {
 
@@ -45,10 +45,9 @@ class SerializedBatchReadConditionTest {
     }
 
     /**
-     * A QueryCondition filtering "id > 5": writes samples both above and
-     * below the threshold, then a batch take through the condition must
-     * return only the matching ones -- every returned element decodes to
-     * id > 5, and a known non-matching id is never present.
+     * A QueryCondition filtering "id > 5": writes samples both above and below the threshold, then
+     * a batch take through the condition must return only the matching ones -- every returned
+     * element decodes to id > 5, and a known non-matching id is never present.
      */
     @Test
     void queryConditionBatchTakeReturnsOnlyMatchingSamples() throws InterruptedException {
@@ -56,9 +55,14 @@ class SerializedBatchReadConditionTest {
             // "id" is ConformanceRecord's first CDR field -- field
             // descriptors are required for the SQL filter evaluator to
             // resolve it against sample bytes; see ContentFilteredTopicTest.
-            Topic<ConformanceRecord> topic = Topic.createWithFieldDescriptors(p,
-                    "SerializedBatchQueryCondition", new ConformanceRecord(),
-                    new String[] {"id"}, new int[] {1}, new boolean[] {false});
+            Topic<ConformanceRecord> topic =
+                    Topic.createWithFieldDescriptors(
+                            p,
+                            "SerializedBatchQueryCondition",
+                            new ConformanceRecord(),
+                            new String[] {"id"},
+                            new int[] {1},
+                            new boolean[] {false});
             Publisher pub = p.createPublisher();
             Subscriber sub = p.createSubscriber();
             DataWriter<ConformanceRecord> w = pub.createDataWriter(topic, keepAllWriterQos());
@@ -70,8 +74,9 @@ class SerializedBatchReadConditionTest {
             byte[] expr = "id > %0".getBytes(StandardCharsets.UTF_8);
             byte[][] params = {"5".getBytes(StandardCharsets.UTF_8)};
 
-            try (QueryCondition qc = r.createQueryCondition(
-                    SampleState.ANY, ViewState.ANY, InstanceState.ANY, expr, params)) {
+            try (QueryCondition qc =
+                    r.createQueryCondition(
+                            SampleState.ANY, ViewState.ANY, InstanceState.ANY, expr, params)) {
 
                 ConformanceRecord low = new ConformanceRecord();
                 low.id = 3;
@@ -88,7 +93,8 @@ class SerializedBatchReadConditionTest {
                 for (SerializedSample sample : batch) {
                     ConformanceRecord decoded = new ConformanceRecord();
                     decoded.deserializeCdr(CdrReader.of(sample.bytes()));
-                    assertTrue(decoded.id > 5,
+                    assertTrue(
+                            decoded.id > 5,
                             "every returned sample must satisfy id > 5, got id=" + decoded.id);
                     assertFalse(decoded.id == 3, "non-matching id=3 must never be returned");
                 }
@@ -105,7 +111,8 @@ class SerializedBatchReadConditionTest {
                         sawLow = true;
                     }
                 }
-                assertTrue(sawLow, "id=3 should remain in the cache after the content-filtered take");
+                assertTrue(
+                        sawLow, "id=3 should remain in the cache after the content-filtered take");
             }
 
             r.setListener(null, null);
@@ -113,9 +120,8 @@ class SerializedBatchReadConditionTest {
     }
 
     /**
-     * A plain state-filtering ReadCondition (ANY/ANY/ANY): a batch take
-     * through it retrieves every written sample, the same as the no-arg
-     * {@link DataReader#takeSerializedBatch(int)}.
+     * A plain state-filtering ReadCondition (ANY/ANY/ANY): a batch take through it retrieves every
+     * written sample, the same as the no-arg {@link DataReader#takeSerializedBatch(int)}.
      */
     @Test
     void readConditionBatchTakeReturnsStateMatchingSamples() throws InterruptedException {
@@ -130,8 +136,8 @@ class SerializedBatchReadConditionTest {
 
             warmUpMatch(w, r);
 
-            try (ReadCondition rc = r.createReadCondition(
-                    SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
+            try (ReadCondition rc =
+                    r.createReadCondition(SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
 
                 ConformanceRecord a = new ConformanceRecord();
                 a.id = 101;
@@ -152,14 +158,15 @@ class SerializedBatchReadConditionTest {
     }
 
     /**
-     * readSerializedBatch(condition, ...) is non-removing: the sample stays
-     * in the cache and is still there for a follow-up take.
+     * readSerializedBatch(condition, ...) is non-removing: the sample stays in the cache and is
+     * still there for a follow-up take.
      */
     @Test
     void readConditionBatchReadIsNonRemoving() throws InterruptedException {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
             Topic<ConformanceRecord> topic =
-                    p.createTopic("SerializedBatchReadConditionNonRemoving", new ConformanceRecord());
+                    p.createTopic(
+                            "SerializedBatchReadConditionNonRemoving", new ConformanceRecord());
             Publisher pub = p.createPublisher();
             Subscriber sub = p.createSubscriber();
             DataWriter<ConformanceRecord> w = pub.createDataWriter(topic, keepAllWriterQos());
@@ -168,8 +175,8 @@ class SerializedBatchReadConditionTest {
 
             warmUpMatch(w, r);
 
-            try (ReadCondition rc = r.createReadCondition(
-                    SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
+            try (ReadCondition rc =
+                    r.createReadCondition(SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
 
                 ConformanceRecord s = new ConformanceRecord();
                 s.id = 201;
@@ -179,10 +186,15 @@ class SerializedBatchReadConditionTest {
                 List<SerializedSample> read = pollUntilReadConditionReadBatchSize(r, rc, 1);
                 assertNotNull(read, "no sample within 5s");
                 assertEquals(1, read.size());
-                assertTrue(r.hasData(), "readSerializedBatch(condition,...) must not remove the sample");
+                assertTrue(
+                        r.hasData(),
+                        "readSerializedBatch(condition,...) must not remove the sample");
 
                 List<SerializedSample> take = r.takeSerializedBatch(rc, 10);
-                assertEquals(1, take.size(), "the sample should still be takeable after the non-removing read");
+                assertEquals(
+                        1,
+                        take.size(),
+                        "the sample should still be takeable after the non-removing read");
                 assertFalse(r.hasData(), "the take should have removed the sample");
             }
 
@@ -190,7 +202,10 @@ class SerializedBatchReadConditionTest {
         }
     }
 
-    /** A fresh, unmatched reader has nothing queued: both condition-filtered methods return non-null empty lists. */
+    /**
+     * A fresh, unmatched reader has nothing queued: both condition-filtered methods return non-null
+     * empty lists.
+     */
     @Test
     void conditionBatchReturnsEmptyListWhenNoData() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
@@ -200,8 +215,8 @@ class SerializedBatchReadConditionTest {
             DataReader<ConformanceRecord> reader =
                     sub.createDataReader(topic, ConformanceRecord::new);
 
-            try (ReadCondition rc = reader.createReadCondition(
-                    SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
+            try (ReadCondition rc =
+                    reader.createReadCondition(SampleState.ANY, ViewState.ANY, InstanceState.ANY)) {
                 List<SerializedSample> take = reader.takeSerializedBatch(rc, 10);
                 assertNotNull(take, "empty cache should still return a non-null list");
                 assertEquals(0, take.size());
@@ -214,7 +229,8 @@ class SerializedBatchReadConditionTest {
     }
 
     /** Same warm-up-and-drain idiom as {@link SerializedBatchFilteredTest#warmUpMatch}. */
-    private static void warmUpMatch(DataWriter<ConformanceRecord> w, DataReader<ConformanceRecord> r)
+    private static void warmUpMatch(
+            DataWriter<ConformanceRecord> w, DataReader<ConformanceRecord> r)
             throws InterruptedException {
         ConformanceRecord warm = new ConformanceRecord();
         warm.id = 999999;
@@ -249,7 +265,9 @@ class SerializedBatchReadConditionTest {
         }
     }
 
-    /** Polls takeSerializedBatch(queryCondition, ...) until it removes at least one matching sample. */
+    /**
+     * Polls takeSerializedBatch(queryCondition, ...) until it removes at least one matching sample.
+     */
     private static List<SerializedSample> pollUntilQueryBatchNonEmpty(
             DataReader<ConformanceRecord> r, QueryCondition qc) throws InterruptedException {
         long deadline = System.nanoTime() + DATA_TIMEOUT_NANOS;
@@ -264,13 +282,13 @@ class SerializedBatchReadConditionTest {
     }
 
     /**
-     * Polls takeSerializedBatch(readCondition, ...) until it has cumulatively
-     * removed {@code expectedSize} samples (writes may not all be visible in
-     * the cache on the first poll), accumulating across calls in case
-     * delivery is split across polls.
+     * Polls takeSerializedBatch(readCondition, ...) until it has cumulatively removed {@code
+     * expectedSize} samples (writes may not all be visible in the cache on the first poll),
+     * accumulating across calls in case delivery is split across polls.
      */
     private static List<SerializedSample> pollUntilReadConditionBatchSize(
-            DataReader<ConformanceRecord> r, ReadCondition rc, int expectedSize) throws InterruptedException {
+            DataReader<ConformanceRecord> r, ReadCondition rc, int expectedSize)
+            throws InterruptedException {
         List<SerializedSample> acc = new java.util.ArrayList<SerializedSample>();
         long deadline = System.nanoTime() + DATA_TIMEOUT_NANOS;
         while (System.nanoTime() < deadline && acc.size() < expectedSize) {
@@ -283,9 +301,13 @@ class SerializedBatchReadConditionTest {
         return acc;
     }
 
-    /** Polls readSerializedBatch(readCondition, ...) until it sees {@code expectedSize} samples, without removing them. */
+    /**
+     * Polls readSerializedBatch(readCondition, ...) until it sees {@code expectedSize} samples,
+     * without removing them.
+     */
     private static List<SerializedSample> pollUntilReadConditionReadBatchSize(
-            DataReader<ConformanceRecord> r, ReadCondition rc, int expectedSize) throws InterruptedException {
+            DataReader<ConformanceRecord> r, ReadCondition rc, int expectedSize)
+            throws InterruptedException {
         List<SerializedSample> last = null;
         long deadline = System.nanoTime() + DATA_TIMEOUT_NANOS;
         while (System.nanoTime() < deadline) {

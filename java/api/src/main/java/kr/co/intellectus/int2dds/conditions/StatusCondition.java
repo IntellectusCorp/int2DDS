@@ -8,16 +8,15 @@ import kr.co.intellectus.int2dds.status.StatusMask;
 /**
  * A condition tied to an entity's own communication-status changes.
  *
- * <p>Obtained fresh from an entity's {@code getStatusCondition()} (e.g.
- * {@code DataReader}/{@code DataWriter}): each call mints a new native box,
- * so this wraps its own handle rather than one shared with the entity.
+ * <p>Obtained fresh from an entity's {@code getStatusCondition()} (e.g. {@code DataReader}/{@code
+ * DataWriter}): each call mints a new native box, so this wraps its own handle rather than one
+ * shared with the entity.
  */
 public final class StatusCondition extends Condition {
     /**
-     * Wraps a status-condition handle already minted by the native layer
-     * (e.g. by {@code int2dds_datareader_get_statuscondition}). Meant for the
-     * entity {@code getStatusCondition()} accessors, not for wrapping an
-     * arbitrary handle.
+     * Wraps a status-condition handle already minted by the native layer (e.g. by {@code
+     * int2dds_datareader_get_statuscondition}). Meant for the entity {@code getStatusCondition()}
+     * accessors, not for wrapping an arbitrary handle.
      */
     public StatusCondition(long rawHandle) {
         super(rawHandle, FfiAccess::statusConditionDelete);

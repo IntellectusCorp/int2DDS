@@ -1,9 +1,8 @@
 package kr.co.intellectus.int2dds.xtypes;
 
 /**
- * Field kind constants for {@link TypeInfo#addField}, transcribed from
- * {@code INT2DDS_FIELD_*} in {@code ffi/src/type_info.rs} — the single
- * source of truth for these numbers.
+ * Field kind constants for {@link TypeInfo#addField}, transcribed from {@code INT2DDS_FIELD_*} in
+ * {@code ffi/src/type_info.rs} — the single source of truth for these numbers.
  */
 public final class FieldType {
 

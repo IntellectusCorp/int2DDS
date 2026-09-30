@@ -3,8 +3,8 @@ package kr.co.intellectus.int2dds.status;
 /**
  * Immutable snapshot of a Topic's INCONSISTENT_TOPIC status.
  *
- * <p>Constructed from the native trampoline via the {@code (II)V}
- * constructor; the field order matches the core's {@code Int2DdsInconsistentTopicStatus}.
+ * <p>Constructed from the native trampoline via the {@code (II)V} constructor; the field order
+ * matches the core's {@code Int2DdsInconsistentTopicStatus}.
  */
 public final class InconsistentTopicStatus {
 

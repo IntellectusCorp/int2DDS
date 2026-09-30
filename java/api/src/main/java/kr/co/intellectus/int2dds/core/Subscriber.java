@@ -1,5 +1,8 @@
 package kr.co.intellectus.int2dds.core;
 
+import java.nio.charset.Charset;
+import java.util.Objects;
+import java.util.function.Supplier;
 import kr.co.intellectus.int2dds.conditions.InstanceState;
 import kr.co.intellectus.int2dds.conditions.StatusCondition;
 import kr.co.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
@@ -17,17 +20,13 @@ import kr.co.intellectus.int2dds.types.IDdsType;
 import kr.co.intellectus.int2dds.xtypes.DynamicDataReader;
 import kr.co.intellectus.int2dds.xtypes.DynamicTopic;
 import kr.co.intellectus.int2dds.xtypes.DynamicTypeSupport;
-import java.nio.charset.Charset;
-import java.util.Objects;
-import java.util.function.Supplier;
 
 /**
  * Groups DataReaders for coordinated subscription.
  *
- * <p>Created through {@link DomainParticipant#createSubscriber}, which
- * registers this instance in the participant's weak child list — the
- * structural twin of {@link Publisher}. DataReader factory methods land on
- * this class in a later task, once {@code DataReader} itself exists.
+ * <p>Created through {@link DomainParticipant#createSubscriber}, which registers this instance in
+ * the participant's weak child list — the structural twin of {@link Publisher}. DataReader factory
+ * methods land on this class in a later task, once {@code DataReader} itself exists.
  */
 public final class Subscriber extends NativeEntity {
 
@@ -35,40 +34,43 @@ public final class Subscriber extends NativeEntity {
 
     /**
      * @param qos may be null for the core's default Subscriber QoS; {@link
-     *     DomainParticipant#createSubscriber(SubscriberQos)} is responsible
-     *     for rejecting an explicit null before reaching here.
+     *     DomainParticipant#createSubscriber(SubscriberQos)} is responsible for rejecting an
+     *     explicit null before reaching here.
      */
     Subscriber(DomainParticipant participant, SubscriberQos qos) {
-        super(Objects.requireNonNull(participant, "participant"), create(participant, qos),
+        super(
+                Objects.requireNonNull(participant, "participant"),
+                create(participant, qos),
                 FfiAccess::deleteSubscriber);
     }
 
     /**
      * Package-private profile-create path, reached only through {@link
-     * DomainParticipant#createSubscriber(String)}: a normal subscriber whose
-     * QoS comes from the named profile at {@code profilePath} (a {@code
-     * "LibraryName::ProfileName"} path previously loaded via {@link
-     * DomainParticipantFactory#loadProfiles}), released the same way as the
+     * DomainParticipant#createSubscriber(String)}: a normal subscriber whose QoS comes from the
+     * named profile at {@code profilePath} (a {@code "LibraryName::ProfileName"} path previously
+     * loaded via {@link DomainParticipantFactory#loadProfiles}), released the same way as the
      * default-QoS path ({@code FfiAccess::deleteSubscriber}).
      */
     Subscriber(DomainParticipant participant, String profilePath) {
-        super(Objects.requireNonNull(participant, "participant"),
+        super(
+                Objects.requireNonNull(participant, "participant"),
                 createWithProfile(participant, Objects.requireNonNull(profilePath, "profilePath")),
                 FfiAccess::deleteSubscriber);
     }
 
     private Subscriber(DomainParticipant participant, NativeCleaner.Deleter deleter) {
-        super(Objects.requireNonNull(participant, "participant"), create(participant, null),
+        super(
+                Objects.requireNonNull(participant, "participant"),
+                create(participant, null),
                 deleter);
     }
 
     /**
-     * Package-private construction seam, the same pattern as {@link
-     * Publisher#createForTest}: the same default-QoS creation path as the
-     * public factory, but with an explicit deleter in place of the fixed
-     * {@code FfiAccess::deleteSubscriber}, for tests that need to observe
-     * exactly how many times the deleter is actually invoked. A
-     * test-supplied deleter should still delegate to the real delete.
+     * Package-private construction seam, the same pattern as {@link Publisher#createForTest}: the
+     * same default-QoS creation path as the public factory, but with an explicit deleter in place
+     * of the fixed {@code FfiAccess::deleteSubscriber}, for tests that need to observe exactly how
+     * many times the deleter is actually invoked. A test-supplied deleter should still delegate to
+     * the real delete.
      */
     static Subscriber createForTest(DomainParticipant participant, NativeCleaner.Deleter deleter) {
         return new Subscriber(participant, deleter);
@@ -80,8 +82,8 @@ public final class Subscriber extends NativeEntity {
 
     /**
      * Wraps the participant's builtin subscriber, reached through {@link
-     * DomainParticipant#getBuiltinSubscriber}. {@code int2dds_delete_subscriber}
-     * refuses a builtin subscriber, so this wrapper's deleter releases nothing.
+     * DomainParticipant#getBuiltinSubscriber}. {@code int2dds_delete_subscriber} refuses a builtin
+     * subscriber, so this wrapper's deleter releases nothing.
      */
     static Subscriber builtin(DomainParticipant participant, long handle) {
         return new Subscriber(participant, handle);
@@ -92,17 +94,20 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * Takes one DCPSPublication discovery sample, blocking up to {@code timeoutMs}
-     * (negative = indefinitely) for one whose topic name equals {@code
-     * topicNameFilter} ({@code null} accepts any). Returns null on timeout.
-     * Meaningful only on the builtin subscriber. The result carries the
-     * TypeObject when the publication sent one inline; see {@link
+     * Takes one DCPSPublication discovery sample, blocking up to {@code timeoutMs} (negative =
+     * indefinitely) for one whose topic name equals {@code topicNameFilter} ({@code null} accepts
+     * any). Returns null on timeout. Meaningful only on the builtin subscriber. The result carries
+     * the TypeObject when the publication sent one inline; see {@link
      * PublicationBuiltinTopicData#typeObject()} for when that is the case.
      */
     public PublicationBuiltinTopicData takePublicationData(String topicNameFilter, int timeoutMs) {
         long[] out = new long[1];
-        int rc = FfiAccess.subscriberTakePublicationData(handle(),
-                topicNameFilter == null ? null : topicNameFilter.getBytes(UTF8), timeoutMs, out);
+        int rc =
+                FfiAccess.subscriberTakePublicationData(
+                        handle(),
+                        topicNameFilter == null ? null : topicNameFilter.getBytes(UTF8),
+                        timeoutMs,
+                        out);
         NativeKeepAlive.keepAlive(this);
         if (rc == DdsException.RET_DYNAMIC_TIMEOUT) {
             return null;
@@ -117,9 +122,9 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * Deletes every datareader created through this subscriber. Their Java
-     * wrappers are closed first, so none outlives its native reader; the
-     * native call then removes any reader the tree does not track.
+     * Deletes every datareader created through this subscriber. Their Java wrappers are closed
+     * first, so none outlives its native reader; the native call then removes any reader the tree
+     * does not track.
      */
     public void deleteContainedEntities() {
         closeChildren();
@@ -138,7 +143,8 @@ public final class Subscriber extends NativeEntity {
     }
 
     /** Creates a datareader for {@code topic} with the core's default QoS. */
-    public <T extends IDdsType> DataReader<T> createDataReader(Topic<T> topic, Supplier<T> factory) {
+    public <T extends IDdsType> DataReader<T> createDataReader(
+            Topic<T> topic, Supplier<T> factory) {
         // Cast disambiguates from the (Topic, Supplier, String) profile-create constructor.
         return new DataReader<T>(this, topic, factory, (DataReaderQos) null);
     }
@@ -150,18 +156,23 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * Creates a datareader for {@code topic} with QoS from the named profile
-     * at {@code profilePath} (a {@code "LibraryName::ProfileName"} path).
-     * The profile must already be loaded via {@link
+     * Creates a datareader for {@code topic} with QoS from the named profile at {@code profilePath}
+     * (a {@code "LibraryName::ProfileName"} path). The profile must already be loaded via {@link
      * DomainParticipantFactory#loadProfiles}.
      */
     public <T extends IDdsType> DataReader<T> createDataReader(
             Topic<T> topic, Supplier<T> factory, String profilePath) {
-        return new DataReader<T>(this, Objects.requireNonNull(topic, "topic"), factory,
+        return new DataReader<T>(
+                this,
+                Objects.requireNonNull(topic, "topic"),
+                factory,
                 Objects.requireNonNull(profilePath, "profilePath"));
     }
 
-    /** Creates a datareader for {@code cft} (a filtered view of a Topic) with the core's default QoS. */
+    /**
+     * Creates a datareader for {@code cft} (a filtered view of a Topic) with the core's default
+     * QoS.
+     */
     public <T extends IDdsType> DataReader<T> createDataReader(
             ContentFilteredTopic<T> cft, Supplier<T> factory) {
         return DataReader.forCft(this, cft, factory, null);
@@ -174,10 +185,11 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * Creates a datareader for {@code topic}, backed by {@code support} (an
-     * XTypes dynamic type support), with the core's default QoS.
+     * Creates a datareader for {@code topic}, backed by {@code support} (an XTypes dynamic type
+     * support), with the core's default QoS.
      */
-    public DynamicDataReader createDynamicDataReader(DynamicTopic topic, DynamicTypeSupport support) {
+    public DynamicDataReader createDynamicDataReader(
+            DynamicTopic topic, DynamicTypeSupport support) {
         Objects.requireNonNull(topic, "topic");
         Objects.requireNonNull(support, "support");
         long sub = handle();
@@ -197,12 +209,12 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * Creates a datareader for {@code topic}, backed by {@code support} (an
-     * XTypes dynamic type support), with an explicit QoS.
+     * Creates a datareader for {@code topic}, backed by {@code support} (an XTypes dynamic type
+     * support), with an explicit QoS.
      *
-     * <p>Builds a native {@link DataReaderQos} handle, applies {@code qos}'s
-     * policies onto it, and destroys it again once the create call returns —
-     * the same shape as {@link DataReader}'s own QoS-taking constructor path.
+     * <p>Builds a native {@link DataReaderQos} handle, applies {@code qos}'s policies onto it, and
+     * destroys it again once the create call returns — the same shape as {@link DataReader}'s own
+     * QoS-taking constructor path.
      */
     public DynamicDataReader createDynamicDataReader(
             DynamicTopic topic, DynamicTypeSupport support, DataReaderQos qos) {
@@ -233,14 +245,12 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * Applies {@code qos} to this subscriber at runtime. Reads this
-     * subscriber's current QoS into a native handle, applies {@code qos}'s
-     * non-null policies onto it (a null policy keeps its current value),
-     * and destroys it again once the native {@code set_qos} call returns —
-     * success or failure, thrown or not, the same build-apply-destroy shape
-     * {@link #create} uses for the create path. The core rejects a change to
-     * {@code Presentation} once this subscriber is enabled, surfaced here
-     * through {@link ReturnCodes#check}; {@code Partition}, {@code
+     * Applies {@code qos} to this subscriber at runtime. Reads this subscriber's current QoS into a
+     * native handle, applies {@code qos}'s non-null policies onto it (a null policy keeps its
+     * current value), and destroys it again once the native {@code set_qos} call returns — success
+     * or failure, thrown or not, the same build-apply-destroy shape {@link #create} uses for the
+     * create path. The core rejects a change to {@code Presentation} once this subscriber is
+     * enabled, surfaced here through {@link ReturnCodes#check}; {@code Partition}, {@code
      * GroupData} and {@code EntityFactory} remain mutable.
      *
      * @throws NullPointerException if {@code qos} is null
@@ -264,8 +274,8 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * A fresh StatusCondition for this subscriber's status changes; attach
-     * it to a WaitSet to wait on status transitions.
+     * A fresh StatusCondition for this subscriber's status changes; attach it to a WaitSet to wait
+     * on status transitions.
      */
     public StatusCondition getStatusCondition() {
         long h = handle();
@@ -277,9 +287,8 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * The set of statuses that have changed since last read (per DDS, reading
-     * a status via its getter or here clears it). Attach a StatusCondition to
-     * a WaitSet to block on these.
+     * The set of statuses that have changed since last read (per DDS, reading a status via its
+     * getter or here clears it). Attach a StatusCondition to a WaitSet to block on these.
      */
     public StatusMask getStatusChanges() {
         int[] out = new int[1];
@@ -290,12 +299,11 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
-     * Resolves the create argument and, when {@code qos} is supplied, builds
-     * a native QoS handle, applies the policies onto it, and destroys it
-     * again once the create call returns — success or failure, thrown or
-     * not, the same shape as {@link Publisher#create}. {@code qos == null}
-     * passes {@code 0L}, engaging the same core-side default resolution as
-     * an explicit {@link SubscriberQos} with every policy left null.
+     * Resolves the create argument and, when {@code qos} is supplied, builds a native QoS handle,
+     * applies the policies onto it, and destroys it again once the create call returns — success or
+     * failure, thrown or not, the same shape as {@link Publisher#create}. {@code qos == null}
+     * passes {@code 0L}, engaging the same core-side default resolution as an explicit {@link
+     * SubscriberQos} with every policy left null.
      */
     private static long create(DomainParticipant participant, SubscriberQos qos) {
         if (qos == null) {
@@ -332,8 +340,9 @@ public final class Subscriber extends NativeEntity {
     /** The profile-create path, the same keep-alive/check shape as {@link #createNative}. */
     private static long createWithProfile(DomainParticipant participant, String profilePath) {
         long[] handleOut = new long[1];
-        int rc = FfiAccess.createSubscriberWithProfile(
-                participant.handle(), profilePath.getBytes(UTF8), handleOut);
+        int rc =
+                FfiAccess.createSubscriberWithProfile(
+                        participant.handle(), profilePath.getBytes(UTF8), handleOut);
         NativeKeepAlive.keepAlive(participant);
         ReturnCodes.check(rc);
         return handleOut[0];

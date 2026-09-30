@@ -17,8 +17,7 @@ class DataReaderTest {
     @Test
     void takeReturnsNullWhenNoData() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> topic =
-                    p.createTopic("NoDataTopic", new ConformanceRecord());
+            Topic<ConformanceRecord> topic = p.createTopic("NoDataTopic", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
             DataReader<ConformanceRecord> reader =
                     sub.createDataReader(topic, ConformanceRecord::new);
@@ -101,8 +100,7 @@ class DataReaderTest {
     @Test
     void aReaderHonoursItsQos() {
         try (DomainParticipant p = new DomainParticipant(testDomain())) {
-            Topic<ConformanceRecord> topic =
-                    p.createTopic("reader_qos", new ConformanceRecord());
+            Topic<ConformanceRecord> topic = p.createTopic("reader_qos", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
 
             DataReaderQos qos = new DataReaderQos();

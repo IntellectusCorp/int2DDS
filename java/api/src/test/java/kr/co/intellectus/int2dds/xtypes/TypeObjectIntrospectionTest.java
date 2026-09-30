@@ -8,10 +8,9 @@ import kr.co.intellectus.int2dds.exceptions.DdsException;
 import org.junit.jupiter.api.Test;
 
 /**
- * Proves the runtime TypeObject introspection surface (member count, name,
- * lookup, per-member info, extensibility) reads back what {@link TypeInfo}
- * built -- a wrong native struct offset or {@link FieldType} kind mapping
- * would fail these assertions.
+ * Proves the runtime TypeObject introspection surface (member count, name, lookup, per-member info,
+ * extensibility) reads back what {@link TypeInfo} built -- a wrong native struct offset or {@link
+ * FieldType} kind mapping would fail these assertions.
  */
 class TypeObjectIntrospectionTest {
 

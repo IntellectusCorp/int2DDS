@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.util.List;
 import kr.co.intellectus.int2dds.conditions.Condition;
 import kr.co.intellectus.int2dds.conditions.StatusCondition;
 import kr.co.intellectus.int2dds.conditions.WaitSet;
@@ -12,14 +13,12 @@ import kr.co.intellectus.int2dds.core.DomainParticipant;
 import kr.co.intellectus.int2dds.core.Publisher;
 import kr.co.intellectus.int2dds.core.Subscriber;
 import kr.co.intellectus.int2dds.status.StatusMask;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Proves a {@link WaitSet} can wait on a dynamic reader's {@link
- * StatusCondition} instead of polling {@link DynamicDataReader#take}: same
- * two-participant XML Telemetry round trip as {@link DynamicPubSubTest}, but
- * the reader side blocks on {@code ws.await} until DATA_AVAILABLE triggers.
+ * Proves a {@link WaitSet} can wait on a dynamic reader's {@link StatusCondition} instead of
+ * polling {@link DynamicDataReader#take}: same two-participant XML Telemetry round trip as {@link
+ * DynamicPubSubTest}, but the reader side blocks on {@code ws.await} until DATA_AVAILABLE triggers.
  */
 class DynamicWaitSetTest {
 
@@ -27,15 +26,16 @@ class DynamicWaitSetTest {
         return Integer.parseInt(System.getProperty("int2dds.test.domain", "137"));
     }
 
-    private static final String XML = "<types>\n"
-            + " <struct name=\"Telemetry\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"temperature\" type=\"float32\"/>\n"
-            + "  <member name=\"active\" type=\"boolean\"/>\n"
-            + "  <member name=\"label\" type=\"string\"/>\n"
-            + "  <member name=\"count\" type=\"int64\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String XML =
+            "<types>\n"
+                    + " <struct name=\"Telemetry\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"temperature\" type=\"float32\"/>\n"
+                    + "  <member name=\"active\" type=\"boolean\"/>\n"
+                    + "  <member name=\"label\" type=\"string\"/>\n"
+                    + "  <member name=\"count\" type=\"int64\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     @Test
     void waitSetWakesOnDynamicReaderStatusCondition() throws InterruptedException {

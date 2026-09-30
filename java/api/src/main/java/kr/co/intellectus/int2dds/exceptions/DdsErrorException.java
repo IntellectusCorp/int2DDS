@@ -10,10 +10,11 @@ public class DdsErrorException extends DdsException {
         super(DEFAULT_MESSAGE, RET_ERROR);
     }
 
-    /** Uses the native error message when present, falling back to the
-     *  default when {@code message} is null or empty. */
+    /**
+     * Uses the native error message when present, falling back to the default when {@code message}
+     * is null or empty.
+     */
     public DdsErrorException(String message) {
-        super((message == null || message.isEmpty()) ? DEFAULT_MESSAGE : message,
-                RET_ERROR);
+        super((message == null || message.isEmpty()) ? DEFAULT_MESSAGE : message, RET_ERROR);
     }
 }

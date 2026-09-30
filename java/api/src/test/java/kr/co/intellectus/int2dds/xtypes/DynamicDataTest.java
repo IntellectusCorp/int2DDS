@@ -2,18 +2,18 @@ package kr.co.intellectus.int2dds.xtypes;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import java.nio.ByteOrder;
 import kr.co.intellectus.int2dds.cdr.CdrWriter;
 import kr.co.intellectus.int2dds.cdr.Extensibility;
 import kr.co.intellectus.int2dds.core.DomainParticipant;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.nio.ByteOrder;
 import org.junit.jupiter.api.Test;
 
 /**
- * End-to-end proof of the DynamicData read path: build a runtime type with
- * {@link TypeInfo}, encode a sample with the same {@link CdrWriter} the write
- * path uses, decode it back with {@link DomainParticipant#dynamicDataFromSample},
- * and read the fields back through the {@link DynamicData} object API.
+ * End-to-end proof of the DynamicData read path: build a runtime type with {@link TypeInfo}, encode
+ * a sample with the same {@link CdrWriter} the write path uses, decode it back with {@link
+ * DomainParticipant#dynamicDataFromSample}, and read the fields back through the {@link
+ * DynamicData} object API.
  */
 class DynamicDataTest {
 
@@ -37,8 +37,11 @@ class DynamicDataTest {
                 sent.label = "hello";
 
                 byte[] serialized;
-                try (CdrWriter w = CdrWriter.acquire(sent.extensibility(),
-                        ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                try (CdrWriter w =
+                        CdrWriter.acquire(
+                                sent.extensibility(),
+                                ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                false)) {
                     sent.serializeCdr(w);
                     serialized = w.toBytes();
                 }
@@ -57,7 +60,8 @@ class DynamicDataTest {
     @Test
     void readsEveryRemainingPrimitiveGetter() {
         DomainParticipant p = new DomainParticipant(testDomain());
-        try (TypeInfo typeInfo = new TypeInfo("PrimitiveConformanceRecord", Extensibility.APPENDABLE)) {
+        try (TypeInfo typeInfo =
+                new TypeInfo("PrimitiveConformanceRecord", Extensibility.APPENDABLE)) {
             typeInfo.addField("boolVal", FieldType.BOOL, 0);
             typeInfo.addField("i8Val", FieldType.INT8, 0);
             typeInfo.addField("u8Val", FieldType.UINT8, 0);
@@ -81,8 +85,11 @@ class DynamicDataTest {
                 byte char8Val = (byte) 'Z';
 
                 byte[] serialized;
-                try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
-                        ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                try (CdrWriter w =
+                        CdrWriter.acquire(
+                                Extensibility.APPENDABLE,
+                                ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                false)) {
                     int token = w.dheaderBegin();
                     w.writeBool(true);
                     w.writeI8(i8Val);
@@ -126,8 +133,11 @@ class DynamicDataTest {
                 int[] values = {10, 20, 30};
 
                 byte[] serialized;
-                try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
-                        ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                try (CdrWriter w =
+                        CdrWriter.acquire(
+                                Extensibility.APPENDABLE,
+                                ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                false)) {
                     int token = w.dheaderBegin();
                     w.writeSeqHeader(values.length);
                     for (int v : values) {
@@ -150,9 +160,9 @@ class DynamicDataTest {
      * {@code getMember} on a struct-typed nested field, decoded through {@link
      * TypeInfo#addNestedField}'s dependency closure. Exercises the fix in {@code
      * int2dds_dynamic_data_from_sample} (ffi/src/dynamic.rs): it now registers {@code
-     * TypeObject.deps} into a throwaway {@code TypeRegistry} before resolving, the same
-     * way {@code decode_flat} already did -- previously this path ignored {@code deps}
-     * entirely and any struct-typed nested field failed to decode.
+     * TypeObject.deps} into a throwaway {@code TypeRegistry} before resolving, the same way {@code
+     * decode_flat} already did -- previously this path ignored {@code deps} entirely and any
+     * struct-typed nested field failed to decode.
      */
     @Test
     void getMemberReadsANestedStructField() {
@@ -169,8 +179,11 @@ class DynamicDataTest {
                     int y = 22;
 
                     byte[] serialized;
-                    try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
-                            ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                    try (CdrWriter w =
+                            CdrWriter.acquire(
+                                    Extensibility.APPENDABLE,
+                                    ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                    false)) {
                         int token = w.dheaderBegin();
                         w.writeI32(x);
                         w.writeI32(y);

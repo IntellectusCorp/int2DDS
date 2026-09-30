@@ -1,18 +1,17 @@
 package kr.co.intellectus.int2dds.xtypes;
 
+import java.nio.charset.Charset;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import java.nio.charset.Charset;
 
 /**
- * A decoded sample, read field-by-field through dotted {@code path} strings
- * rather than a generated accessor class. Produced by {@link
- * kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample}.
- * NativeCleaner-managed like {@link
- * kr.co.intellectus.int2dds.conditions.Condition}.
+ * A decoded sample, read field-by-field through dotted {@code path} strings rather than a generated
+ * accessor class. Produced by {@link
+ * kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample}. NativeCleaner-managed
+ * like {@link kr.co.intellectus.int2dds.conditions.Condition}.
  */
 public final class DynamicData implements AutoCloseable {
 
@@ -25,19 +24,19 @@ public final class DynamicData implements AutoCloseable {
     }
 
     /**
-     * Wraps an already-created native DynamicData handle. Public, in the same
-     * style as {@code ParticipantBuiltinTopicData.materialize}, so callers
-     * outside this package (namely {@code DomainParticipant}) can hand back a
-     * handle produced by a bridge such as {@link FfiAccess#dynamicDataFromSample}.
+     * Wraps an already-created native DynamicData handle. Public, in the same style as {@code
+     * ParticipantBuiltinTopicData.materialize}, so callers outside this package (namely {@code
+     * DomainParticipant}) can hand back a handle produced by a bridge such as {@link
+     * FfiAccess#dynamicDataFromSample}.
      */
     public static DynamicData fromHandle(long rawHandle) {
         return new DynamicData(rawHandle);
     }
 
     /**
-     * Creates a new, writable DynamicData instance from {@code support}.
-     * Consumes {@code support}'s handle for the call, not ownership -- the
-     * caller still owns and must close {@code support} independently.
+     * Creates a new, writable DynamicData instance from {@code support}. Consumes {@code support}'s
+     * handle for the call, not ownership -- the caller still owns and must close {@code support}
+     * independently.
      */
     public static DynamicData create(DynamicTypeSupport support) {
         long s = support.handle();
@@ -142,9 +141,9 @@ public final class DynamicData implements AutoCloseable {
     }
 
     /**
-     * Reads a {@code uint32} field at {@code path} (dotted/indexed) as its raw
-     * 32 bits. A value at or above 2^31 reads back negative; widen with
-     * {@code & 0xFFFFFFFFL} for the unsigned magnitude.
+     * Reads a {@code uint32} field at {@code path} (dotted/indexed) as its raw 32 bits. A value at
+     * or above 2^31 reads back negative; widen with {@code & 0xFFFFFFFFL} for the unsigned
+     * magnitude.
      */
     public int getU32(String path) {
         long h = handle();
@@ -166,8 +165,8 @@ public final class DynamicData implements AutoCloseable {
     }
 
     /**
-     * Reads a {@code uint64} field at {@code path} (dotted/indexed) as its raw
-     * 64 bits. A value at or above 2^63 reads back negative.
+     * Reads a {@code uint64} field at {@code path} (dotted/indexed) as its raw 64 bits. A value at
+     * or above 2^63 reads back negative.
      */
     public long getU64(String path) {
         long h = handle();
@@ -209,10 +208,9 @@ public final class DynamicData implements AutoCloseable {
     }
 
     /**
-     * Reads a nested struct field at {@code path} (dotted/indexed) as its own
-     * {@link DynamicData}, NativeCleaner-managed the same way as this one --
-     * the caller owns the returned handle and should {@link #close} it
-     * independently of the one it was read from.
+     * Reads a nested struct field at {@code path} (dotted/indexed) as its own {@link DynamicData},
+     * NativeCleaner-managed the same way as this one -- the caller owns the returned handle and
+     * should {@link #close} it independently of the one it was read from.
      */
     public DynamicData getMember(String path) {
         long h = handle();
@@ -224,9 +222,9 @@ public final class DynamicData implements AutoCloseable {
     }
 
     /**
-     * Clones the field at {@code path} (dotted/indexed) into a new, owned
-     * {@link DynamicValue} snapshot -- independent of this DynamicData, which
-     * is untouched by the call. Close the returned value when done with it.
+     * Clones the field at {@code path} (dotted/indexed) into a new, owned {@link DynamicValue}
+     * snapshot -- independent of this DynamicData, which is untouched by the call. Close the
+     * returned value when done with it.
      */
     public DynamicValue getValue(String path) {
         long h = handle();
@@ -342,13 +340,13 @@ public final class DynamicData implements AutoCloseable {
     }
 
     /**
-     * Sets field {@code field} to a built {@link DynamicValue} -- the path for
-     * a value a scalar setter cannot reach, e.g. a sequence built with {@link
-     * DynamicValue#sequence()} and {@link DynamicValue#push}.
+     * Sets field {@code field} to a built {@link DynamicValue} -- the path for a value a scalar
+     * setter cannot reach, e.g. a sequence built with {@link DynamicValue#sequence()} and {@link
+     * DynamicValue#push}.
      *
-     * <p>Consumes {@code value}: its handle is moved into this DynamicData, so
-     * afterward {@code value} must not be used or closed -- this method marks
-     * it consumed itself, making its {@link DynamicValue#close()} a no-op.
+     * <p>Consumes {@code value}: its handle is moved into this DynamicData, so afterward {@code
+     * value} must not be used or closed -- this method marks it consumed itself, making its {@link
+     * DynamicValue#close()} a no-op.
      */
     public void setValue(String field, DynamicValue value) {
         long h = handle();

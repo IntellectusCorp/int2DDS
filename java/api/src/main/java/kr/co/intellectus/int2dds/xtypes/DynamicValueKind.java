@@ -1,8 +1,8 @@
 package kr.co.intellectus.int2dds.xtypes;
 
 /**
- * The kind returned by {@link DynamicValue#kind()} -- mirrors the
- * {@code INT2DDS_VALUE_KIND_*} constants in {@code ffi/src/dynamic_value.rs}.
+ * The kind returned by {@link DynamicValue#kind()} -- mirrors the {@code INT2DDS_VALUE_KIND_*}
+ * constants in {@code ffi/src/dynamic_value.rs}.
  */
 public final class DynamicValueKind {
 

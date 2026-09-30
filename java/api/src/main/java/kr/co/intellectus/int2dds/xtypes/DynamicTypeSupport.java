@@ -6,9 +6,9 @@ import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 
 /**
- * A type support looked up from an {@link XmlTypeRegistry}, used to create
- * writable {@link DynamicData} instances via {@link DynamicData#create}.
- * NativeCleaner-managed like {@link TypeObject}.
+ * A type support looked up from an {@link XmlTypeRegistry}, used to create writable {@link
+ * DynamicData} instances via {@link DynamicData#create}. NativeCleaner-managed like {@link
+ * TypeObject}.
  */
 public final class DynamicTypeSupport implements AutoCloseable {
 
@@ -19,10 +19,10 @@ public final class DynamicTypeSupport implements AutoCloseable {
     }
 
     /**
-     * Wraps an already-created native DynamicTypeSupport handle. Public, in
-     * the same style as {@link DynamicData#fromHandle}, so callers outside
-     * this package (namely {@code DomainParticipantFactory}) can hand back a
-     * handle produced by a bridge such as {@link FfiAccess#getDynamicTypeSupport}.
+     * Wraps an already-created native DynamicTypeSupport handle. Public, in the same style as
+     * {@link DynamicData#fromHandle}, so callers outside this package (namely {@code
+     * DomainParticipantFactory}) can hand back a handle produced by a bridge such as {@link
+     * FfiAccess#getDynamicTypeSupport}.
      */
     public static DynamicTypeSupport fromHandle(long rawHandle) {
         return new DynamicTypeSupport(rawHandle);
@@ -34,13 +34,13 @@ public final class DynamicTypeSupport implements AutoCloseable {
     }
 
     /**
-     * The native pointer. Public -- unlike the package-private {@code
-     * handle()} convention elsewhere -- because {@link
-     * kr.co.intellectus.int2dds.core.DomainParticipant#createDynamicTopic},
-     * {@link kr.co.intellectus.int2dds.core.Publisher#createDynamicDataWriter}
-     * and {@link kr.co.intellectus.int2dds.core.Subscriber#createDynamicDataReader}
-     * live in a different package and need it to call the matching
-     * {@code FfiAccess} bridge, the same reasoning as {@link TypeObject#handle()}.
+     * The native pointer. Public -- unlike the package-private {@code handle()} convention
+     * elsewhere -- because {@link
+     * kr.co.intellectus.int2dds.core.DomainParticipant#createDynamicTopic}, {@link
+     * kr.co.intellectus.int2dds.core.Publisher#createDynamicDataWriter} and {@link
+     * kr.co.intellectus.int2dds.core.Subscriber#createDynamicDataReader} live in a different
+     * package and need it to call the matching {@code FfiAccess} bridge, the same reasoning as
+     * {@link TypeObject#handle()}.
      */
     public long handle() {
         return handle.value();

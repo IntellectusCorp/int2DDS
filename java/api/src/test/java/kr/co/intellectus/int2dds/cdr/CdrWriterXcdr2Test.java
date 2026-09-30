@@ -16,8 +16,10 @@ class CdrWriterXcdr2Test {
     }
 
     private static int leInt(byte[] b, int at) {
-        return (b[at] & 0xFF) | ((b[at + 1] & 0xFF) << 8)
-                | ((b[at + 2] & 0xFF) << 16) | ((b[at + 3] & 0xFF) << 24);
+        return (b[at] & 0xFF)
+                | ((b[at + 1] & 0xFF) << 8)
+                | ((b[at + 2] & 0xFF) << 16)
+                | ((b[at + 3] & 0xFF) << 24);
     }
 
     @Test
@@ -91,10 +93,9 @@ class CdrWriterXcdr2Test {
     @Test
     void memberIdsWiderThan28BitsAreRejected() {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.MUTABLE, true, true)) {
-            assertThrows(IllegalArgumentException.class,
-                    () -> w.writeEmheader(0x10000000, 4, false));
-            assertThrows(IllegalArgumentException.class,
-                    () -> w.emheaderBegin(0x10000000, false));
+            assertThrows(
+                    IllegalArgumentException.class, () -> w.writeEmheader(0x10000000, 4, false));
+            assertThrows(IllegalArgumentException.class, () -> w.emheaderBegin(0x10000000, false));
         }
     }
 
@@ -129,7 +130,10 @@ class CdrWriterXcdr2Test {
 
             byte[] p = payload(w);
             assertEquals(4, leInt(p, 4), "inner covers its own i32");
-            assertEquals(12, leInt(p, 0), "outer covers the inner DHEADER, its i32, and the trailing i32");
+            assertEquals(
+                    12,
+                    leInt(p, 0),
+                    "outer covers the inner DHEADER, its i32, and the trailing i32");
         }
     }
 }

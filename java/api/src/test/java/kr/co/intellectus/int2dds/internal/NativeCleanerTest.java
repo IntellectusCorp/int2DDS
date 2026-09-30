@@ -6,16 +6,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import kr.co.intellectus.int2dds.exceptions.DdsException;
-import kr.co.intellectus.int2dds.exceptions.DdsPreconditionNotMetException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import kr.co.intellectus.int2dds.exceptions.DdsException;
+import kr.co.intellectus.int2dds.exceptions.DdsPreconditionNotMetException;
 import org.junit.jupiter.api.Test;
 
 class NativeCleanerTest {
@@ -23,10 +23,9 @@ class NativeCleanerTest {
     /**
      * Drives the collector until {@code latch} falls, or fails.
      *
-     * <p>{@code System.gc()} is a hint, so it is retried rather than trusted
-     * once — but the loop is bounded, so a cleaner that never runs fails in two
-     * seconds instead of hanging. Never replaced with a bare sleep: a sleep
-     * followed by an assertion passes whether or not anything happened.
+     * <p>{@code System.gc()} is a hint, so it is retried rather than trusted once — but the loop is
+     * bounded, so a cleaner that never runs fails in two seconds instead of hanging. Never replaced
+     * with a bare sleep: a sleep followed by an assertion passes whether or not anything happened.
      */
     private static void awaitCleanup(CountDownLatch latch) throws InterruptedException {
         for (int i = 0; i < 10; i++) {
@@ -39,8 +38,8 @@ class NativeCleanerTest {
     }
 
     /**
-     * Polls {@code condition} until true, or fails. Same bounded-retry shape
-     * as {@link #awaitCleanup}, for a condition that is not a single latch.
+     * Polls {@code condition} until true, or fails. Same bounded-retry shape as {@link
+     * #awaitCleanup}, for a condition that is not a single latch.
      */
     private static void awaitCondition(BooleanSupplier condition, String failureMessage)
             throws InterruptedException {
@@ -58,11 +57,14 @@ class NativeCleanerTest {
     private static CountDownLatch registerAndAbandon(long handle, List<Long> order) {
         CountDownLatch latch = new CountDownLatch(1);
         Object owner = new Object();
-        NativeCleaner.register(owner, handle, h -> {
-            order.add(h);
-            latch.countDown();
-            return 0;
-        });
+        NativeCleaner.register(
+                owner,
+                handle,
+                h -> {
+                    order.add(h);
+                    latch.countDown();
+                    return 0;
+                });
         return latch;
     }
 
@@ -82,10 +84,14 @@ class NativeCleanerTest {
     void anExplicitCloseReleasesExactlyOnce() throws InterruptedException {
         AtomicInteger calls = new AtomicInteger();
         Object owner = new Object();
-        NativeHandle h = NativeCleaner.register(owner, 0x2222L, x -> {
-            calls.incrementAndGet();
-            return 0;
-        });
+        NativeHandle h =
+                NativeCleaner.register(
+                        owner,
+                        0x2222L,
+                        x -> {
+                            calls.incrementAndGet();
+                            return 0;
+                        });
 
         assertEquals(0, h.close());
         assertTrue(h.isClosed());
@@ -123,10 +129,14 @@ class NativeCleanerTest {
 
     private static void closeThenAbandon(AtomicInteger calls) {
         Object owner = new Object();
-        NativeHandle h = NativeCleaner.register(owner, 0x3333L, x -> {
-            calls.incrementAndGet();
-            return 0;
-        });
+        NativeHandle h =
+                NativeCleaner.register(
+                        owner,
+                        0x3333L,
+                        x -> {
+                            calls.incrementAndGet();
+                            return 0;
+                        });
         h.close();
     }
 
@@ -149,32 +159,39 @@ class NativeCleanerTest {
     // actually encounters them in — but nothing here depends on the GC
     // choosing an order on its own.
 
-    /** A parent whose delete is refused for as long as {@code childAlive} is
-     *  true, and counts its own successes locally so a caller can verify "no
-     *  double release" without relying on the shared, backoff-driven, global
-     *  {@code releasedCount()} counter — which other tests' background retry
-     *  activity can also touch. */
+    /**
+     * A parent whose delete is refused for as long as {@code childAlive} is true, and counts its
+     * own successes locally so a caller can verify "no double release" without relying on the
+     * shared, backoff-driven, global {@code releasedCount()} counter — which other tests'
+     * background retry activity can also touch.
+     */
     private static void registerAbandonedParent(
             AtomicBoolean childAlive, AtomicInteger successes, CountDownLatch released) {
         Object owner = new Object();
-        NativeCleaner.register(owner, 0xA0L, h -> {
-            if (childAlive.get()) {
-                return DdsException.RET_PRECONDITION_NOT_MET;
-            }
-            successes.incrementAndGet();
-            released.countDown();
-            return 0;
-        });
+        NativeCleaner.register(
+                owner,
+                0xA0L,
+                h -> {
+                    if (childAlive.get()) {
+                        return DdsException.RET_PRECONDITION_NOT_MET;
+                    }
+                    successes.incrementAndGet();
+                    released.countDown();
+                    return 0;
+                });
     }
 
     /** A child whose delete always succeeds and clears {@code childAlive}. */
     private static void registerAbandonedChild(AtomicBoolean childAlive, CountDownLatch released) {
         Object owner = new Object();
-        NativeCleaner.register(owner, 0xC1L, h -> {
-            childAlive.set(false);
-            released.countDown();
-            return 0;
-        });
+        NativeCleaner.register(
+                owner,
+                0xC1L,
+                h -> {
+                    childAlive.set(false);
+                    released.countDown();
+                    return 0;
+                });
     }
 
     @Test
@@ -191,7 +208,9 @@ class NativeCleanerTest {
         registerAbandonedParent(childAlive, new AtomicInteger(), parentReleased);
         awaitCleanup(parentReleased);
 
-        assertEquals(deferredBefore, NativeCleaner.deferredCount(),
+        assertEquals(
+                deferredBefore,
+                NativeCleaner.deferredCount(),
                 "the child was already gone, so the parent was never refused");
     }
 
@@ -207,7 +226,8 @@ class NativeCleanerTest {
         long deferredBefore = NativeCleaner.deferredCount();
 
         registerAbandonedParent(childAlive, parentSuccesses, parentReleased);
-        awaitCondition(() -> NativeCleaner.deferredCount() > deferredBefore,
+        awaitCondition(
+                () -> NativeCleaner.deferredCount() > deferredBefore,
                 "the parent was never refused, so this test forced nothing");
         assertEquals(1, parentReleased.getCount(), "must not release while the child is alive");
 
@@ -223,10 +243,13 @@ class NativeCleanerTest {
         // asserting immediately avoids a race against that trailing update;
         // it is not a race in NativeCleaner's own correctness, only in how
         // soon this thread can observe the caller-side list bookkeeping.
-        awaitCondition(() -> NativeCleaner.deferredCount() == deferredBefore,
+        awaitCondition(
+                () -> NativeCleaner.deferredCount() == deferredBefore,
                 "parent never left the deferred list");
         assertEquals(deferredBefore, NativeCleaner.deferredCount(), "no longer stuck");
-        assertEquals(1, parentSuccesses.get(),
+        assertEquals(
+                1,
+                parentSuccesses.get(),
                 "the parent's deleter must succeed exactly once, however many times it was "
                         + "refused first");
     }
@@ -234,8 +257,11 @@ class NativeCleanerTest {
     @Test
     void explicitCloseOnARefusedHandleThrowsAndLeavesItOpen() {
         AtomicBoolean refuse = new AtomicBoolean(true);
-        NativeHandle h = NativeCleaner.register(new Object(), 0x8888L,
-                x -> refuse.get() ? DdsException.RET_PRECONDITION_NOT_MET : 0);
+        NativeHandle h =
+                NativeCleaner.register(
+                        new Object(),
+                        0x8888L,
+                        x -> refuse.get() ? DdsException.RET_PRECONDITION_NOT_MET : 0);
 
         assertThrows(DdsPreconditionNotMetException.class, h::close);
         assertFalse(h.isClosed(), "refused: the entity is still alive, per the native contract");
@@ -290,20 +316,24 @@ class NativeCleanerTest {
         // retried forever) so it does not linger in the background for later
         // tests' deferredCount() checks to trip over.
         stopThrowing.set(true);
-        awaitCondition(() -> NativeCleaner.deferredCount() == deferredBefore,
+        awaitCondition(
+                () -> NativeCleaner.deferredCount() == deferredBefore,
                 "the once-throwing resource never left the deferred list");
     }
 
     private static CountDownLatch abandonThrowing(AtomicBoolean stopThrowing) {
         CountDownLatch threw = new CountDownLatch(1);
         Object owner = new Object();
-        NativeCleaner.register(owner, 0x6666L, x -> {
-            if (stopThrowing.get()) {
-                return 0;
-            }
-            threw.countDown();
-            throw new IllegalStateException("deliberate");
-        });
+        NativeCleaner.register(
+                owner,
+                0x6666L,
+                x -> {
+                    if (stopThrowing.get()) {
+                        return 0;
+                    }
+                    threw.countDown();
+                    throw new IllegalStateException("deliberate");
+                });
         return threw;
     }
 
@@ -317,20 +347,26 @@ class NativeCleanerTest {
         CountDownLatch deleterEntered = new CountDownLatch(1);
         CountDownLatch releaseDeleter = new CountDownLatch(1);
         AtomicInteger calls = new AtomicInteger();
-        NativeHandle h = NativeCleaner.register(new Object(), 0xBEEFL, x -> {
-            calls.incrementAndGet();
-            deleterEntered.countDown();
-            try {
-                releaseDeleter.await(2, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            return 0;
-        });
+        NativeHandle h =
+                NativeCleaner.register(
+                        new Object(),
+                        0xBEEFL,
+                        x -> {
+                            calls.incrementAndGet();
+                            deleterEntered.countDown();
+                            try {
+                                releaseDeleter.await(2, TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                            return 0;
+                        });
 
         Thread first = new Thread(h::close);
         first.start();
-        assertTrue(deleterEntered.await(2, TimeUnit.SECONDS), "the first close() never reached the deleter");
+        assertTrue(
+                deleterEntered.await(2, TimeUnit.SECONDS),
+                "the first close() never reached the deleter");
 
         // The handle is now RELEASING and will stay there until
         // releaseDeleter falls. Start the second close() while that is still
@@ -346,8 +382,13 @@ class NativeCleanerTest {
         second.join(2000);
         assertFalse(first.isAlive(), "first close() did not finish");
         assertFalse(second.isAlive(), "second close() did not finish");
-        assertEquals(1, calls.get(), "only one of the two concurrent close() calls may reach the deleter");
-        assertEquals(0, secondResult.get(),
+        assertEquals(
+                1,
+                calls.get(),
+                "only one of the two concurrent close() calls may reach the deleter");
+        assertEquals(
+                0,
+                secondResult.get(),
                 "the losing close() must report the real, successful outcome, not a premature 0");
     }
 

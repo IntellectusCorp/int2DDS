@@ -3,12 +3,11 @@ package kr.co.intellectus.int2dds.status;
 import java.util.Arrays;
 
 /**
- * Immutable snapshot of a DataReader's SUBSCRIPTION_MATCHED status: how many
- * DataWriters it has matched, and the change since the status was last read.
+ * Immutable snapshot of a DataReader's SUBSCRIPTION_MATCHED status: how many DataWriters it has
+ * matched, and the change since the status was last read.
  *
- * <p>Constructed from the native trampoline via the {@code (IIII[B)V}
- * constructor; the field order matches the core's
- * {@code Int2DdsSubscriptionMatchedStatus}.
+ * <p>Constructed from the native trampoline via the {@code (IIII[B)V} constructor; the field order
+ * matches the core's {@code Int2DdsSubscriptionMatchedStatus}.
  */
 public final class SubscriptionMatchedStatus {
 
@@ -18,16 +17,21 @@ public final class SubscriptionMatchedStatus {
     private final int currentCountChange;
     private final byte[] lastPublicationHandle;
 
-    public SubscriptionMatchedStatus(int totalCount, int totalCountChange,
-            int currentCount, int currentCountChange, byte[] lastPublicationHandle) {
+    public SubscriptionMatchedStatus(
+            int totalCount,
+            int totalCountChange,
+            int currentCount,
+            int currentCountChange,
+            byte[] lastPublicationHandle) {
         this.totalCount = totalCount;
         this.totalCountChange = totalCountChange;
         this.currentCount = currentCount;
         this.currentCountChange = currentCountChange;
         // Defensive copy: the caller's array must not alias this snapshot.
-        this.lastPublicationHandle = lastPublicationHandle == null
-                ? new byte[0]
-                : Arrays.copyOf(lastPublicationHandle, lastPublicationHandle.length);
+        this.lastPublicationHandle =
+                lastPublicationHandle == null
+                        ? new byte[0]
+                        : Arrays.copyOf(lastPublicationHandle, lastPublicationHandle.length);
     }
 
     /** Cumulative count of DataWriters ever matched. */

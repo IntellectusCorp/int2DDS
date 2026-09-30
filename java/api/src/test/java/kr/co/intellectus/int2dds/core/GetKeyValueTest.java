@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Collections;
+import java.util.List;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
@@ -14,17 +16,14 @@ import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
 import kr.co.intellectus.int2dds.xtypes.FieldType;
-import java.util.Collections;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises {@link DataWriter#getKeyValue} and {@link DataReader#getKeyValue}
- * on the same keyed-topic fixture {@link InstanceManagementTest} uses ("id"
- * as key on {@link ConformanceRecord}). Both return the serialized KEY bytes
- * for an instance handle -- a key-only CDR the core produces, not a full
- * sample -- so this only asserts on the raw {@code byte[]}, not a decoded
- * sample.
+ * Exercises {@link DataWriter#getKeyValue} and {@link DataReader#getKeyValue} on the same
+ * keyed-topic fixture {@link InstanceManagementTest} uses ("id" as key on {@link
+ * ConformanceRecord}). Both return the serialized KEY bytes for an instance handle -- a key-only
+ * CDR the core produces, not a full sample -- so this only asserts on the raw {@code byte[]}, not a
+ * decoded sample.
  */
 class GetKeyValueTest {
 
@@ -40,13 +39,16 @@ class GetKeyValueTest {
         try (DomainParticipant writerParticipant = new DomainParticipant(testDomain());
                 DomainParticipant readerParticipant = new DomainParticipant(testDomain())) {
 
-            List<TopicFieldDescriptor> idKeyField = Collections.singletonList(
-                    new TopicFieldDescriptor("id", FieldType.INT32, true));
+            List<TopicFieldDescriptor> idKeyField =
+                    Collections.singletonList(
+                            new TopicFieldDescriptor("id", FieldType.INT32, true));
 
-            Topic<ConformanceRecord> writerTopic = writerParticipant.createTopic(
-                    "GetKeyValueJavaTestTopic", new ConformanceRecord(), idKeyField);
-            Topic<ConformanceRecord> readerTopic = readerParticipant.createTopic(
-                    "GetKeyValueJavaTestTopic", new ConformanceRecord(), idKeyField);
+            Topic<ConformanceRecord> writerTopic =
+                    writerParticipant.createTopic(
+                            "GetKeyValueJavaTestTopic", new ConformanceRecord(), idKeyField);
+            Topic<ConformanceRecord> readerTopic =
+                    readerParticipant.createTopic(
+                            "GetKeyValueJavaTestTopic", new ConformanceRecord(), idKeyField);
 
             Publisher pub = writerParticipant.createPublisher();
             Subscriber sub = readerParticipant.createSubscriber();
@@ -72,7 +74,8 @@ class GetKeyValueTest {
             InstanceHandle registered = writer.registerInstance(one);
             byte[] writerKey = writer.getKeyValue(registered);
             assertNotNull(writerKey);
-            assertTrue(writerKey.length > 0, "writer.getKeyValue should return non-empty key bytes");
+            assertTrue(
+                    writerKey.length > 0, "writer.getKeyValue should return non-empty key bytes");
 
             // Reader side: write + take to get a real instance handle off a
             // received sample's SampleInfo, then getKeyValue on the reader.
@@ -82,14 +85,18 @@ class GetKeyValueTest {
             InstanceHandle readerHandle = new InstanceHandle(received.info().instanceHandle());
             byte[] readerKey = reader.getKeyValue(readerHandle);
             assertNotNull(readerKey);
-            assertTrue(readerKey.length > 0, "reader.getKeyValue should return non-empty key bytes");
+            assertTrue(
+                    readerKey.length > 0, "reader.getKeyValue should return non-empty key bytes");
 
             // Cross-side consistency: same logical instance, same key bytes.
-            assertArrayEquals(writerKey, readerKey,
+            assertArrayEquals(
+                    writerKey,
+                    readerKey,
                     "writer-side and reader-side key bytes should agree for the same instance");
 
             // Negative: a nil/unknown handle is rejected (BAD_PARAMETER).
-            assertThrows(DdsException.class,
+            assertThrows(
+                    DdsException.class,
                     () -> writer.getKeyValue(new InstanceHandle(new byte[16])),
                     "getKeyValue with a nil handle should throw");
 
@@ -107,13 +114,17 @@ class GetKeyValueTest {
             }
             Thread.sleep(50);
         }
-        assertTrue(writer.getMatchedSubscriptions().size() >= expected,
+        assertTrue(
+                writer.getMatchedSubscriptions().size() >= expected,
                 "writer should see " + expected + " matched subscriptions within 5s");
     }
 
-    /** Bounded take loop returning the first sample matching {@code predicate}, or null on timeout. */
+    /**
+     * Bounded take loop returning the first sample matching {@code predicate}, or null on timeout.
+     */
     private static Sample<ConformanceRecord> takeUntil(
-            DataReader<ConformanceRecord> reader, java.util.function.Predicate<Sample<ConformanceRecord>> predicate)
+            DataReader<ConformanceRecord> reader,
+            java.util.function.Predicate<Sample<ConformanceRecord>> predicate)
             throws InterruptedException {
         long deadline = System.nanoTime() + DATA_TIMEOUT_NANOS;
         while (System.nanoTime() < deadline) {

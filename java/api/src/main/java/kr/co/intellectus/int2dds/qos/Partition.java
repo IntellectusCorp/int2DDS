@@ -5,8 +5,8 @@ import java.util.Arrays;
 /**
  * Partition QoS policy.
  *
- * <p>{@code names} is copied on the way in and out so that a later mutation
- * of the caller's array cannot change QoS that was already applied.
+ * <p>{@code names} is copied on the way in and out so that a later mutation of the caller's array
+ * cannot change QoS that was already applied.
  */
 public class Partition {
 

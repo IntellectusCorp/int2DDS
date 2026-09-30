@@ -1,18 +1,18 @@
 package kr.co.intellectus.int2dds.internal.ffi;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.NativeLoader;
 import kr.co.intellectus.int2dds.listeners.DataReaderListener;
 import kr.co.intellectus.int2dds.listeners.DataWriterListener;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 
 /**
  * Package-visible bridge to the generated {@link Ffi} declarations.
  *
- * <p>Exists so callers get the native library loaded automatically and so that
- * hand-written code never has to live inside the generated file.
+ * <p>Exists so callers get the native library loaded automatically and so that hand-written code
+ * never has to live inside the generated file.
  */
 public final class FfiAccess {
 
@@ -33,8 +33,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Copies the last error message into {@code buf} as UTF-8 and returns the
-     * message's full length, which may exceed {@code buf.length}.
+     * Copies the last error message into {@code buf} as UTF-8 and returns the message's full
+     * length, which may exceed {@code buf.length}.
      */
     public static int lastErrorMessage(byte[] buf) {
         return Ffi.int2dds_last_error_message(buf, buf.length);
@@ -51,44 +51,44 @@ public final class FfiAccess {
     }
 
     /**
-     * Wraps the {@code cap}-byte region at native address {@code addr} as a
-     * direct {@link ByteBuffer}, the reverse of {@link
-     * #directBufferAddress}. Returns {@code null} on failure. Policy-free
-     * passthrough to {@link FfiHandwritten}, exposed here so callers outside
-     * this package (e.g. {@code core.DataWriter}) can reach it.
+     * Wraps the {@code cap}-byte region at native address {@code addr} as a direct {@link
+     * ByteBuffer}, the reverse of {@link #directBufferAddress}. Returns {@code null} on failure.
+     * Policy-free passthrough to {@link FfiHandwritten}, exposed here so callers outside this
+     * package (e.g. {@code core.DataWriter}) can reach it.
      */
     public static ByteBuffer addressToDirectByteBuffer(long addr, long cap) {
         return FfiHandwritten.addressToDirectByteBuffer(addr, cap);
     }
 
     /**
-     * Creates a dynamic value holding {@code value}, writing the handle to the
-     * native address {@code out}, which must be at least 8 bytes.
+     * Creates a dynamic value holding {@code value}, writing the handle to the native address
+     * {@code out}, which must be at least 8 bytes.
      */
     public static int dynamicValueI32(int value, long out) {
         return Ffi.int2dds_dynamic_value_i32(value, out);
     }
 
     /**
-     * Renders a dynamic value into {@code buf} as UTF-8 and writes the text's
-     * byte length to the native address {@code outLen}. The buffer must hold the
-     * text plus a trailing NUL.
+     * Renders a dynamic value into {@code buf} as UTF-8 and writes the text's byte length to the
+     * native address {@code outLen}. The buffer must hold the text plus a trailing NUL.
      */
     public static int dynamicValueToString(long value, byte[] buf, long bufLen, long outLen) {
         return Ffi.int2dds_dynamic_value_to_string(value, buf, bufLen, outLen);
     }
 
     /**
-     * Grow-and-retry driver over {@link #dynamicValueToString(long, byte[],
-     * long, long)}, with the same buffer contract as {@link
-     * #dynamicValueAsString}: {@code out_len} excludes the trailing NUL.
+     * Grow-and-retry driver over {@link #dynamicValueToString(long, byte[], long, long)}, with the
+     * same buffer contract as {@link #dynamicValueAsString}: {@code out_len} excludes the trailing
+     * NUL.
      */
     public static int dynamicValueToString(long value, byte[][] bytesOut) {
         int cap = 64;
         while (true) {
             byte[] buf = new byte[cap];
             ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-            int rc = Ffi.int2dds_dynamic_value_to_string(value, buf, cap, directBufferAddress(sizeSlot));
+            int rc =
+                    Ffi.int2dds_dynamic_value_to_string(
+                            value, buf, cap, directBufferAddress(sizeSlot));
             NativeKeepAlive.keepAlive(sizeSlot);
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
                 cap = (int) sizeSlot.getLong(0) + 1;
@@ -110,10 +110,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a dynamic value holding {@code value}, writing the handle to
-     * {@code out[0]} on success. Sibling of {@link #dynamicValueI32(int, long)}
-     * that follows this file's usual {@code long[] out} idiom instead of a raw
-     * native address, for callers building a value with {@link
+     * Creates a dynamic value holding {@code value}, writing the handle to {@code out[0]} on
+     * success. Sibling of {@link #dynamicValueI32(int, long)} that follows this file's usual {@code
+     * long[] out} idiom instead of a raw native address, for callers building a value with {@link
      * kr.co.intellectus.int2dds.xtypes.DynamicValue}.
      */
     public static int dynamicValueI32(int value, long[] out) {
@@ -127,8 +126,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a dynamic value holding a UTF-8 string, writing the handle to
-     * {@code out[0]} on success.
+     * Creates a dynamic value holding a UTF-8 string, writing the handle to {@code out[0]} on
+     * success.
      */
     public static int dynamicValueString(byte[] value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -141,8 +140,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a dynamic value holding a wide-string (UTF-8-encoded) string,
-     * writing the handle to {@code out[0]} on success.
+     * Creates a dynamic value holding a wide-string (UTF-8-encoded) string, writing the handle to
+     * {@code out[0]} on success.
      */
     public static int dynamicValueWstring(byte[] value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -220,7 +219,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Creates a {@code byte} (octet) dynamic value, writing the handle to {@code out[0]} on success. */
+    /**
+     * Creates a {@code byte} (octet) dynamic value, writing the handle to {@code out[0]} on
+     * success.
+     */
     public static int dynamicValueByte(int value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_byte(value, directBufferAddress(slot));
@@ -264,7 +266,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Creates a {@code bitmask} dynamic value from its packed bits, writing the handle to {@code out[0]} on success. */
+    /**
+     * Creates a {@code bitmask} dynamic value from its packed bits, writing the handle to {@code
+     * out[0]} on success.
+     */
     public static int dynamicValueBitmask(long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_bitmask(value, directBufferAddress(slot));
@@ -275,7 +280,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Creates a {@code bitset} dynamic value from its packed bitfields, writing the handle to {@code out[0]} on success. */
+    /**
+     * Creates a {@code bitset} dynamic value from its packed bitfields, writing the handle to
+     * {@code out[0]} on success.
+     */
     public static int dynamicValueBitset(long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_bitset(value, directBufferAddress(slot));
@@ -309,8 +317,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates an empty sequence dynamic value, writing the handle to {@code
-     * out[0]} on success. Append elements with {@link #dynamicValuePush}.
+     * Creates an empty sequence dynamic value, writing the handle to {@code out[0]} on success.
+     * Append elements with {@link #dynamicValuePush}.
      */
     public static int dynamicValueSequence(long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -323,21 +331,19 @@ public final class FfiAccess {
     }
 
     /**
-     * Appends {@code element} to the sequence/array value {@code collection}.
-     * On {@code RET_OK} this consumes {@code element}'s handle -- it is moved
-     * into {@code collection} and the caller must not use or destroy it again.
-     * On any other code (e.g. {@code collection} is not a sequence/array),
-     * {@code element} is left untouched and still owned by the caller.
+     * Appends {@code element} to the sequence/array value {@code collection}. On {@code RET_OK}
+     * this consumes {@code element}'s handle -- it is moved into {@code collection} and the caller
+     * must not use or destroy it again. On any other code (e.g. {@code collection} is not a
+     * sequence/array), {@code element} is left untouched and still owned by the caller.
      */
     public static int dynamicValuePush(long collection, long element) {
         return Ffi.int2dds_dynamic_value_push(collection, element);
     }
 
     /**
-     * Snapshots the populated DynamicData {@code data} into a struct dynamic
-     * value, writing the handle to {@code out[0]} on success. {@code data} is
-     * cloned natively, not consumed -- the caller still owns and must destroy
-     * {@code data} independently.
+     * Snapshots the populated DynamicData {@code data} into a struct dynamic value, writing the
+     * handle to {@code out[0]} on success. {@code data} is cloned natively, not consumed -- the
+     * caller still owns and must destroy {@code data} independently.
      */
     public static int dynamicValueStruct(long data, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -350,9 +356,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates an {@code enum} dynamic value from a literal {@code name} and
-     * its numeric {@code value}, writing the handle to {@code out[0]} on
-     * success.
+     * Creates an {@code enum} dynamic value from a literal {@code name} and its numeric {@code
+     * value}, writing the handle to {@code out[0]} on success.
      */
     public static int dynamicValueEnum(byte[] name, int value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -365,8 +370,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates an empty array dynamic value, writing the handle to {@code
-     * out[0]} on success. Append elements with {@link #dynamicValuePush}.
+     * Creates an empty array dynamic value, writing the handle to {@code out[0]} on success. Append
+     * elements with {@link #dynamicValuePush}.
      */
     public static int dynamicValueArray(long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -381,10 +386,9 @@ public final class FfiAccess {
     // --- DomainParticipantFactory / DomainParticipant ---
 
     /**
-     * The process-wide participant factory handle, or 0 on failure. No status
-     * a caller could act on differently accompanies a failure here — the
-     * factory singleton either exists or something is catastrophically wrong
-     * with the native library — so, unlike {@link #createParticipant}, this
+     * The process-wide participant factory handle, or 0 on failure. No status a caller could act on
+     * differently accompanies a failure here — the factory singleton either exists or something is
+     * catastrophically wrong with the native library — so, unlike {@link #createParticipant}, this
      * does not report a status code.
      */
     public static long participantFactoryGetInstance() {
@@ -403,27 +407,24 @@ public final class FfiAccess {
     }
 
     /**
-     * Loads named QoS profiles (and any {@code <types>}) from {@code count}
-     * JSON files into the process-wide factory singleton. Returns the C ABI
-     * status code; no out-slot, nothing built here to free.
+     * Loads named QoS profiles (and any {@code <types>}) from {@code count} JSON files into the
+     * process-wide factory singleton. Returns the C ABI status code; no out-slot, nothing built
+     * here to free.
      */
     public static int loadProfiles(byte[][] paths, long count) {
         return Ffi.int2dds_load_profiles(paths, count);
     }
 
     /**
-     * Creates a participant. Returns the C ABI status code and, only on
-     * success, writes the new handle to {@code handleOut[0]}; on failure
-     * {@code handleOut} is left untouched.
+     * Creates a participant. Returns the C ABI status code and, only on success, writes the new
+     * handle to {@code handleOut[0]}; on failure {@code handleOut} is left untouched.
      *
-     * <p>Returning the status alongside the handle, rather than folding a
-     * failure into a bare 0 handle the way the QoS-handle creators above do,
-     * is deliberate: {@link kr.co.intellectus.int2dds.core.DomainParticipant}
-     * needs the real code to raise the exception it maps to through {@link
-     * kr.co.intellectus.int2dds.internal.ReturnCodes#check}, and a 0 handle
-     * alone cannot carry that. Every create bridge added for Topic, Publisher
-     * and DataWriter follows this same {@code (rc, long[] handleOut)} shape
-     * for that reason.
+     * <p>Returning the status alongside the handle, rather than folding a failure into a bare 0
+     * handle the way the QoS-handle creators above do, is deliberate: {@link
+     * kr.co.intellectus.int2dds.core.DomainParticipant} needs the real code to raise the exception
+     * it maps to through {@link kr.co.intellectus.int2dds.internal.ReturnCodes#check}, and a 0
+     * handle alone cannot carry that. Every create bridge added for Topic, Publisher and DataWriter
+     * follows this same {@code (rc, long[] handleOut)} shape for that reason.
      */
     public static int createParticipant(long factory, int domainId, long qos, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -443,17 +444,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a participant whose QoS comes from a loaded profile ({@code
-     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
-     * (rc, long[] handleOut)} shape as {@link #createParticipant}, and the
-     * resulting participant is a normal participant, released the same way
-     * ({@link #deleteParticipant}).
+     * Creates a participant whose QoS comes from a loaded profile ({@code qosPath} is a {@code
+     * "LibraryName::ProfileName"} path). Same {@code (rc, long[] handleOut)} shape as {@link
+     * #createParticipant}, and the resulting participant is a normal participant, released the same
+     * way ({@link #deleteParticipant}).
      */
     public static int createParticipantWithProfile(
             long factory, int domainId, byte[] qosPath, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_participant_with_profile(
-                factory, domainId, qosPath, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_participant_with_profile(
+                        factory, domainId, qosPath, directBufferAddress(slot));
         // Same fence as createParticipant.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -465,18 +466,18 @@ public final class FfiAccess {
     // --- Configured participant (declarative XML tree) ---
 
     /**
-     * Builds a whole participant tree -- participant, publishers/
-     * subscribers, datawriters/datareaders and topics -- from a {@code
-     * domain_participant_library} entry already loaded into this factory via
-     * {@link #loadProfiles}. {@code path} is a {@code
-     * "LibraryName::ParticipantName"} library path, not a file path. Same
-     * {@code (rc, long[] handleOut)} shape as {@link #createParticipant}, but
-     * the returned handle names a configured tree, released with {@link
-     * #configuredParticipantDestroy}, not {@link #deleteParticipant}.
+     * Builds a whole participant tree -- participant, publishers/ subscribers,
+     * datawriters/datareaders and topics -- from a {@code domain_participant_library} entry already
+     * loaded into this factory via {@link #loadProfiles}. {@code path} is a {@code
+     * "LibraryName::ParticipantName"} library path, not a file path. Same {@code (rc, long[]
+     * handleOut)} shape as {@link #createParticipant}, but the returned handle names a configured
+     * tree, released with {@link #configuredParticipantDestroy}, not {@link #deleteParticipant}.
      */
     public static int createParticipantFromConfig(long factory, byte[] path, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_participant_from_config(factory, path, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_participant_from_config(
+                        factory, path, directBufferAddress(slot));
         // Same fence as createParticipant.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -486,32 +487,18 @@ public final class FfiAccess {
     }
 
     /**
-     * Fetches a datawriter already built into {@code configured} by its
-     * {@code "publisher::writer"} name. Returns {@code
-     * RET_DYNAMIC_FIELD_NOT_FOUND} (200) if no such name exists in the tree.
-     * The returned handle is an Arc-clone sharing the underlying entity with
-     * the tree's own copy through one shared atomic deleted flag, so
-     * releasing either does not free out from under the other.
+     * Fetches a datawriter already built into {@code configured} by its {@code "publisher::writer"}
+     * name. Returns {@code RET_DYNAMIC_FIELD_NOT_FOUND} (200) if no such name exists in the tree.
+     * The returned handle is an Arc-clone sharing the underlying entity with the tree's own copy
+     * through one shared atomic deleted flag, so releasing either does not free out from under the
+     * other.
      */
     public static int configuredParticipantGetDataWriter(
             long configured, byte[] name, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_configured_participant_get_datawriter(
-                configured, name, directBufferAddress(slot));
-        // Same fence as createParticipant.
-        NativeKeepAlive.keepAlive(slot);
-        if (rc == 0) {
-            handleOut[0] = slot.getLong(0);
-        }
-        return rc;
-    }
-
-    /** Fetches a datareader by {@code "subscriber::reader"} name. Same shape as {@link #configuredParticipantGetDataWriter}. */
-    public static int configuredParticipantGetDataReader(
-            long configured, byte[] name, long[] handleOut) {
-        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_configured_participant_get_datareader(
-                configured, name, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_configured_participant_get_datawriter(
+                        configured, name, directBufferAddress(slot));
         // Same fence as createParticipant.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -521,38 +508,55 @@ public final class FfiAccess {
     }
 
     /**
-     * Releases a whole configured tree -- participant, publishers/
-     * subscribers, datawriters/datareaders and topics it built. Every
-     * previously-fetched writer/reader wrapper should be closed first (see
-     * {@link kr.co.intellectus.int2dds.core.ConfiguredParticipant#close}); the
-     * shared deleted flag {@link #configuredParticipantGetDataWriter} notes
-     * makes a second release of the same entity a safe no-op either way.
+     * Fetches a datareader by {@code "subscriber::reader"} name. Same shape as {@link
+     * #configuredParticipantGetDataWriter}.
+     */
+    public static int configuredParticipantGetDataReader(
+            long configured, byte[] name, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc =
+                Ffi.int2dds_configured_participant_get_datareader(
+                        configured, name, directBufferAddress(slot));
+        // Same fence as createParticipant.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Releases a whole configured tree -- participant, publishers/ subscribers,
+     * datawriters/datareaders and topics it built. Every previously-fetched writer/reader wrapper
+     * should be closed first (see {@link
+     * kr.co.intellectus.int2dds.core.ConfiguredParticipant#close}); the shared deleted flag {@link
+     * #configuredParticipantGetDataWriter} notes makes a second release of the same entity a safe
+     * no-op either way.
      */
     public static void configuredParticipantDestroy(long configured) {
         Ffi.int2dds_configured_participant_destroy(configured);
     }
 
     /**
-     * Reads a participant's resolved domain id into {@code domainIdOut}
-     * (a direct address, at least 4 bytes) and returns the C ABI status
-     * code. "Resolved" matters specifically for {@code DEFAULT_DOMAIN_ID}
-     * (-1): the core substitutes {@code DDS_DOMAIN_ID} (or 0) for -1 before
-     * ever constructing the participant, so this reads back that
-     * substituted value, not -1 itself.
+     * Reads a participant's resolved domain id into {@code domainIdOut} (a direct address, at least
+     * 4 bytes) and returns the C ABI status code. "Resolved" matters specifically for {@code
+     * DEFAULT_DOMAIN_ID} (-1): the core substitutes {@code DDS_DOMAIN_ID} (or 0) for -1 before ever
+     * constructing the participant, so this reads back that substituted value, not -1 itself.
      */
     public static int participantGetDomainId(long participant, long domainIdOut) {
         return Ffi.int2dds_participant_get_domain_id(participant, domainIdOut);
     }
 
     /**
-     * The participant's current time (sec, nanosec) since the DDS epoch.
-     * Writes it to {@code secOut[0]}/{@code nanosecOut[0]} on success.
+     * The participant's current time (sec, nanosec) since the DDS epoch. Writes it to {@code
+     * secOut[0]}/{@code nanosecOut[0]} on success.
      */
     public static int participantGetCurrentTime(long participant, int[] secOut, int[] nanosecOut) {
         ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
         ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_get_current_time(
-                participant, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        int rc =
+                Ffi.int2dds_participant_get_current_time(
+                        participant, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
         NativeKeepAlive.keepAlive(secSlot);
         NativeKeepAlive.keepAlive(nanoSlot);
         if (rc == 0) {
@@ -655,33 +659,42 @@ public final class FfiAccess {
     // --- Entity setQos bridges ---
 
     /**
-     * Applies {@code qos} to an already-created datawriter. Returns the C ABI
-     * status code, which the core maps to {@code RET_IMMUTABLE_POLICY} for a
-     * change to an immutable policy on an enabled writer. Unlike the {@code
-     * createXQos}/{@code getXxxQos} bridges above, this takes two live
-     * handles and returns nothing but a status -- no out-slot, no {@code
-     * directBufferAddress}.
+     * Applies {@code qos} to an already-created datawriter. Returns the C ABI status code, which
+     * the core maps to {@code RET_IMMUTABLE_POLICY} for a change to an immutable policy on an
+     * enabled writer. Unlike the {@code createXQos}/{@code getXxxQos} bridges above, this takes two
+     * live handles and returns nothing but a status -- no out-slot, no {@code directBufferAddress}.
      */
     public static int datawriterSetQos(long writer, long qos) {
         return Ffi.int2dds_datawriter_set_qos(writer, qos);
     }
 
-    /** Applies {@code qos} to an already-created datareader. Same shape as {@link #datawriterSetQos}. */
+    /**
+     * Applies {@code qos} to an already-created datareader. Same shape as {@link
+     * #datawriterSetQos}.
+     */
     public static int datareaderSetQos(long reader, long qos) {
         return Ffi.int2dds_datareader_set_qos(reader, qos);
     }
 
-    /** Applies {@code qos} to an already-created publisher. Same shape as {@link #datawriterSetQos}. */
+    /**
+     * Applies {@code qos} to an already-created publisher. Same shape as {@link #datawriterSetQos}.
+     */
     public static int publisherSetQos(long publisher, long qos) {
         return Ffi.int2dds_publisher_set_qos(publisher, qos);
     }
 
-    /** Applies {@code qos} to an already-created subscriber. Same shape as {@link #datawriterSetQos}. */
+    /**
+     * Applies {@code qos} to an already-created subscriber. Same shape as {@link
+     * #datawriterSetQos}.
+     */
     public static int subscriberSetQos(long subscriber, long qos) {
         return Ffi.int2dds_subscriber_set_qos(subscriber, qos);
     }
 
-    /** Applies {@code qos} to an already-created participant. Same shape as {@link #datawriterSetQos}. */
+    /**
+     * Applies {@code qos} to an already-created participant. Same shape as {@link
+     * #datawriterSetQos}.
+     */
     public static int participantSetQos(long participant, long qos) {
         return Ffi.int2dds_participant_set_qos(participant, qos);
     }
@@ -694,20 +707,29 @@ public final class FfiAccess {
     // --- Topic / Publisher / DataWriter ---
 
     /**
-     * Creates a topic. Returns the C ABI status code and, only on success,
-     * writes the new handle to {@code handleOut[0]}; on failure {@code
-     * handleOut} is left untouched — the same shape as {@link
-     * #createParticipant}, which explains why a status code travels
-     * alongside the handle here too. {@code topicName} and {@code typeName}
-     * cross as UTF-8 {@code byte[]}, never {@code String}: JNI's modified
-     * UTF-8 would corrupt either one. {@code qos} is {@code 0L} for the
+     * Creates a topic. Returns the C ABI status code and, only on success, writes the new handle to
+     * {@code handleOut[0]}; on failure {@code handleOut} is left untouched — the same shape as
+     * {@link #createParticipant}, which explains why a status code travels alongside the handle
+     * here too. {@code topicName} and {@code typeName} cross as UTF-8 {@code byte[]}, never {@code
+     * String}: JNI's modified UTF-8 would corrupt either one. {@code qos} is {@code 0L} for the
      * core's default Topic QoS.
      */
-    public static int createTopic(long participant, byte[] topicName, byte[] typeName,
-            int extensibility, long qos, long[] handleOut) {
+    public static int createTopic(
+            long participant,
+            byte[] topicName,
+            byte[] typeName,
+            int extensibility,
+            long qos,
+            long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_topic(
-                participant, topicName, typeName, extensibility, qos, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_topic(
+                        participant,
+                        topicName,
+                        typeName,
+                        extensibility,
+                        qos,
+                        directBufferAddress(slot));
         // Same hazard as participantFactoryGetInstance's fence above -- see
         // NativeKeepAlive's own doc for the full argument.
         NativeKeepAlive.keepAlive(slot);
@@ -723,19 +745,22 @@ public final class FfiAccess {
     }
 
     /**
-     * Looks up an existing topic named {@code topicName} of type {@code
-     * ddsTypeName}, waiting up to {@code timeoutMs} (negative = infinite).
-     * Returns the C ABI status code and, only on success, writes an OWNED
-     * handle (an Arc clone) to {@code handleOut[0]} -- same shape and same
-     * {@link #deleteTopic} lifecycle as {@link #createTopic}, just without
-     * minting a new topic. Failure (timeout or not found) leaves {@code
-     * handleOut} untouched.
+     * Looks up an existing topic named {@code topicName} of type {@code ddsTypeName}, waiting up to
+     * {@code timeoutMs} (negative = infinite). Returns the C ABI status code and, only on success,
+     * writes an OWNED handle (an Arc clone) to {@code handleOut[0]} -- same shape and same {@link
+     * #deleteTopic} lifecycle as {@link #createTopic}, just without minting a new topic. Failure
+     * (timeout or not found) leaves {@code handleOut} untouched.
      */
-    public static int participantFindTopic(long participant, byte[] topicName,
-            byte[] ddsTypeName, int timeoutMs, long[] handleOut) {
+    public static int participantFindTopic(
+            long participant,
+            byte[] topicName,
+            byte[] ddsTypeName,
+            int timeoutMs,
+            long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_find_topic(
-                participant, topicName, ddsTypeName, timeoutMs, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_find_topic(
+                        participant, topicName, ddsTypeName, timeoutMs, directBufferAddress(slot));
         // Same fence as createTopic.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -745,16 +770,27 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a topic whose QoS comes from a loaded profile ({@code qosPath}
-     * is a {@code "LibraryName::ProfileName"} path). Same {@code (rc,
-     * long[] handleOut)} shape as {@link #createTopic}, and the resulting
-     * topic is a normal topic, released the same way ({@link #deleteTopic}).
+     * Creates a topic whose QoS comes from a loaded profile ({@code qosPath} is a {@code
+     * "LibraryName::ProfileName"} path). Same {@code (rc, long[] handleOut)} shape as {@link
+     * #createTopic}, and the resulting topic is a normal topic, released the same way ({@link
+     * #deleteTopic}).
      */
-    public static int createTopicWithProfile(long participant, byte[] topicName,
-            byte[] ddsTypeName, int extensibility, byte[] qosPath, long[] handleOut) {
+    public static int createTopicWithProfile(
+            long participant,
+            byte[] topicName,
+            byte[] ddsTypeName,
+            int extensibility,
+            byte[] qosPath,
+            long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_topic_with_profile(participant, topicName, ddsTypeName,
-                extensibility, qosPath, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_topic_with_profile(
+                        participant,
+                        topicName,
+                        ddsTypeName,
+                        extensibility,
+                        qosPath,
+                        directBufferAddress(slot));
         // Same fence as createTopic.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -764,31 +800,34 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a topic with explicit CDR field descriptors, so a {@code
-     * ContentFilteredTopic} built against it can evaluate a SQL filter
-     * expression against named fields -- the {@code
-     * int2dds_create_topic_with_field_descriptors} path. A plain {@link
-     * #createTopic} topic registers no field metadata, so filter evaluation
-     * against it errors on every sample and the core treats that as "passes"
-     * (see {@code DataReader::passes_content_filter}), silently delivering
-     * everything unfiltered.
+     * Creates a topic with explicit CDR field descriptors, so a {@code ContentFilteredTopic} built
+     * against it can evaluate a SQL filter expression against named fields -- the {@code
+     * int2dds_create_topic_with_field_descriptors} path. A plain {@link #createTopic} topic
+     * registers no field metadata, so filter evaluation against it errors on every sample and the
+     * core treats that as "passes" (see {@code DataReader::passes_content_filter}), silently
+     * delivering everything unfiltered.
      *
-     * <p>{@code fieldTypeCodes} are the native {@code field_descriptor_type}
-     * codes (0=String, 1=Int32, 2=UInt32, 3=Int16, 4=UInt16, 5=Int64,
-     * 6=UInt64, 7=Int8, 8=UInt8, 9=Bool) -- a distinct encoding from the
-     * XTypes {@code INT2DDS_FIELD_*} constants {@link #typeInfoAddField}
-     * uses. The core's flat parser walks {@code fieldNames} in order and
-     * stops at the first name match, skipping each field ahead of it by its
-     * declared type -- so a field after the one being filtered on may be
-     * omitted entirely, but any field before it must still be declared (with
-     * a type the parser can skip), or every field after the gap misaligns.
-     * {@code fieldTypeCodes} and {@code fieldIsKey} cross as raw native
-     * arrays (a direct-buffer address each), not JNI arrays -- the same
-     * shape the generated declaration expects.
+     * <p>{@code fieldTypeCodes} are the native {@code field_descriptor_type} codes (0=String,
+     * 1=Int32, 2=UInt32, 3=Int16, 4=UInt16, 5=Int64, 6=UInt64, 7=Int8, 8=UInt8, 9=Bool) -- a
+     * distinct encoding from the XTypes {@code INT2DDS_FIELD_*} constants {@link #typeInfoAddField}
+     * uses. The core's flat parser walks {@code fieldNames} in order and stops at the first name
+     * match, skipping each field ahead of it by its declared type -- so a field after the one being
+     * filtered on may be omitted entirely, but any field before it must still be declared (with a
+     * type the parser can skip), or every field after the gap misaligns. {@code fieldTypeCodes} and
+     * {@code fieldIsKey} cross as raw native arrays (a direct-buffer address each), not JNI arrays
+     * -- the same shape the generated declaration expects.
      */
-    public static int createTopicWithFieldDescriptors(long participant, byte[] topicName,
-            byte[] typeName, int extensibility, long qos, byte[][] fieldNames,
-            int[] fieldTypeCodes, boolean[] fieldIsKey, long fieldCount, long[] handleOut) {
+    public static int createTopicWithFieldDescriptors(
+            long participant,
+            byte[] topicName,
+            byte[] typeName,
+            int extensibility,
+            long qos,
+            byte[][] fieldNames,
+            int[] fieldTypeCodes,
+            boolean[] fieldIsKey,
+            long fieldCount,
+            long[] handleOut) {
         ByteBuffer typesBuf =
                 ByteBuffer.allocateDirect(fieldTypeCodes.length * 4).order(ByteOrder.nativeOrder());
         for (int c : fieldTypeCodes) {
@@ -800,9 +839,18 @@ public final class FfiAccess {
             isKeyBuf.put((byte) (k ? 1 : 0));
         }
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_topic_with_field_descriptors(participant, topicName, typeName,
-                extensibility, qos, fieldNames, directBufferAddress(typesBuf),
-                directBufferAddress(isKeyBuf), fieldCount, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_topic_with_field_descriptors(
+                        participant,
+                        topicName,
+                        typeName,
+                        extensibility,
+                        qos,
+                        fieldNames,
+                        directBufferAddress(typesBuf),
+                        directBufferAddress(isKeyBuf),
+                        fieldCount,
+                        directBufferAddress(slot));
         // typesBuf/isKeyBuf/slot were only handed off by native address above;
         // keep them all reachable across the call -- see NativeKeepAlive's own
         // doc for the full argument.
@@ -816,16 +864,16 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a topic from a native {@code TypeInfo} builder: the type name,
-     * extensibility, keys and the advertised TypeObject all come from {@code
-     * typeInfo}, which is borrowed. {@code qos} may be {@code 0L}. Same
-     * status-code/{@code handleOut} shape as {@link #createTopic}.
+     * Creates a topic from a native {@code TypeInfo} builder: the type name, extensibility, keys
+     * and the advertised TypeObject all come from {@code typeInfo}, which is borrowed. {@code qos}
+     * may be {@code 0L}. Same status-code/{@code handleOut} shape as {@link #createTopic}.
      */
-    public static int createTopicWithTypeInfo(long participant, byte[] topicName, long typeInfo,
-            long qos, long[] handleOut) {
+    public static int createTopicWithTypeInfo(
+            long participant, byte[] topicName, long typeInfo, long qos, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_topic_with_type_info(participant, topicName, typeInfo, qos,
-                directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_topic_with_type_info(
+                        participant, topicName, typeInfo, qos, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
@@ -834,20 +882,30 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a ContentFilteredTopic on {@code relatedTopic}: samples not
-     * matching {@code filterExpr} (a SQL-92-like WHERE clause, {@code %0}
-     * {@code %1}... referencing {@code params} positionally) are not
-     * delivered to a reader created on the returned handle. {@code
-     * topicName}, {@code filterExpr} and each element of {@code params}
-     * cross as UTF-8 {@code byte[]}, never {@code String}.
+     * Creates a ContentFilteredTopic on {@code relatedTopic}: samples not matching {@code
+     * filterExpr} (a SQL-92-like WHERE clause, {@code %0} {@code %1}... referencing {@code params}
+     * positionally) are not delivered to a reader created on the returned handle. {@code
+     * topicName}, {@code filterExpr} and each element of {@code params} cross as UTF-8 {@code
+     * byte[]}, never {@code String}.
      */
-    public static int createContentFilteredTopic(long participant, byte[] topicName,
-            long relatedTopic, byte[] filterExpr, byte[][] params, long paramCount,
+    public static int createContentFilteredTopic(
+            long participant,
+            byte[] topicName,
+            long relatedTopic,
+            byte[] filterExpr,
+            byte[][] params,
+            long paramCount,
             long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_contentfilteredtopic(
-                participant, topicName, relatedTopic, filterExpr, params, paramCount,
-                directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_contentfilteredtopic(
+                        participant,
+                        topicName,
+                        relatedTopic,
+                        filterExpr,
+                        params,
+                        paramCount,
+                        directBufferAddress(slot));
         // Same fence as createTopic.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -864,7 +922,8 @@ public final class FfiAccess {
     /** Replaces a ContentFilteredTopic's filter expression and parameters. */
     public static int contentFilteredTopicSetFilterExpression(
             long cft, byte[] filterExpr, byte[][] params, long count) {
-        return Ffi.int2dds_contentfilteredtopic_set_filter_expression(cft, filterExpr, params, count);
+        return Ffi.int2dds_contentfilteredtopic_set_filter_expression(
+                cft, filterExpr, params, count);
     }
 
     /** Replaces a ContentFilteredTopic's expression parameters, keeping its filter expression. */
@@ -879,19 +938,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads the topic's INCONSISTENT_TOPIC status into the 8-byte native
-     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
-     * the buffer and decodes it.
+     * Reads the topic's INCONSISTENT_TOPIC status into the 8-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int topicGetInconsistentTopicStatus(long topic, long statusOutAddr) {
         return Ffi.int2dds_topic_get_inconsistent_topic_status(topic, statusOutAddr);
     }
 
     /**
-     * Creates a publisher. Returns the C ABI status code and, only on
-     * success, writes the new handle to {@code handleOut[0]}; on failure
-     * {@code handleOut} is left untouched. {@code qos} is {@code 0L} for the
-     * core's default Publisher QoS.
+     * Creates a publisher. Returns the C ABI status code and, only on success, writes the new
+     * handle to {@code handleOut[0]}; on failure {@code handleOut} is left untouched. {@code qos}
+     * is {@code 0L} for the core's default Publisher QoS.
      */
     public static int createPublisher(long participant, long qos, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -911,16 +968,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a publisher whose QoS comes from a loaded profile ({@code
-     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
-     * (rc, long[] handleOut)} shape as {@link #createPublisher}, and the
-     * resulting publisher is a normal publisher, released the same way
+     * Creates a publisher whose QoS comes from a loaded profile ({@code qosPath} is a {@code
+     * "LibraryName::ProfileName"} path). Same {@code (rc, long[] handleOut)} shape as {@link
+     * #createPublisher}, and the resulting publisher is a normal publisher, released the same way
      * ({@link #deletePublisher}).
      */
-    public static int createPublisherWithProfile(long participant, byte[] qosPath, long[] handleOut) {
+    public static int createPublisherWithProfile(
+            long participant, byte[] qosPath, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_publisher_with_profile(
-                participant, qosPath, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_publisher_with_profile(
+                        participant, qosPath, directBufferAddress(slot));
         // Same fence as createPublisher.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -929,25 +987,27 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** The 16-byte instance handle identifying this publisher. {@code handleOut} must be a 16-byte array. */
+    /**
+     * The 16-byte instance handle identifying this publisher. {@code handleOut} must be a 16-byte
+     * array.
+     */
     public static int publisherGetInstanceHandle(long publisher, byte[] handleOut) {
         return Ffi.int2dds_publisher_get_instance_handle(publisher, handleOut);
     }
 
     /**
-     * Creates a datawriter. Returns the C ABI status code and, only on
-     * success, writes the new handle to {@code handleOut[0]}; on failure
-     * {@code handleOut} is left untouched — the same shape as {@link
-     * #createTopic} and {@link #createPublisher}. {@code qos} is {@code 0L}
-     * for the core's default DataWriter QoS. {@code listener} is {@code 0L}
-     * and {@code mask} is {@code 0} in this branch — listeners are a later
-     * branch.
+     * Creates a datawriter. Returns the C ABI status code and, only on success, writes the new
+     * handle to {@code handleOut[0]}; on failure {@code handleOut} is left untouched — the same
+     * shape as {@link #createTopic} and {@link #createPublisher}. {@code qos} is {@code 0L} for the
+     * core's default DataWriter QoS. {@code listener} is {@code 0L} and {@code mask} is {@code 0}
+     * in this branch — listeners are a later branch.
      */
-    public static int createDataWriter(long publisher, long topic, long qos, long listener,
-            int mask, long[] handleOut) {
+    public static int createDataWriter(
+            long publisher, long topic, long qos, long listener, int mask, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_datawriter(
-                publisher, topic, qos, listener, mask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_datawriter(
+                        publisher, topic, qos, listener, mask, directBufferAddress(slot));
         // slot is read below only on the rc == 0 path; on rc != 0 nothing
         // else touches it, so without this fence the JIT could treat it as
         // dead before the native call above actually finishes using the
@@ -967,27 +1027,26 @@ public final class FfiAccess {
     }
 
     /**
-     * The writer's effective data-representation id ({@code 0} XCDR1, {@code 2}
-     * XCDR2). A pure getter with no failure path: a null writer yields the
-     * default rather than an error code.
+     * The writer's effective data-representation id ({@code 0} XCDR1, {@code 2} XCDR2). A pure
+     * getter with no failure path: a null writer yields the default rather than an error code.
      */
     public static int datawriterDataRepresentation(long writer) {
         return Ffi.int2dds_datawriter_data_representation(writer);
     }
 
     /**
-     * Creates a datawriter whose QoS comes from a loaded profile ({@code
-     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
-     * (rc, long[] handleOut)} shape as {@link #createDataWriter}, and the
-     * resulting writer is a normal typed datawriter, released the same way
-     * ({@link #deleteDataWriter}). {@code listener} is {@code 0L} and {@code
-     * mask} is {@code 0} — no creation-time listener.
+     * Creates a datawriter whose QoS comes from a loaded profile ({@code qosPath} is a {@code
+     * "LibraryName::ProfileName"} path). Same {@code (rc, long[] handleOut)} shape as {@link
+     * #createDataWriter}, and the resulting writer is a normal typed datawriter, released the same
+     * way ({@link #deleteDataWriter}). {@code listener} is {@code 0L} and {@code mask} is {@code 0}
+     * — no creation-time listener.
      */
-    public static int createDataWriterWithProfile(long publisher, long topic, byte[] qosPath,
-            long listener, int mask, long[] handleOut) {
+    public static int createDataWriterWithProfile(
+            long publisher, long topic, byte[] qosPath, long listener, int mask, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_datawriter_with_profile(
-                publisher, topic, qosPath, listener, mask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_datawriter_with_profile(
+                        publisher, topic, qosPath, listener, mask, directBufferAddress(slot));
         // Same fence as createDataWriter.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -1002,46 +1061,42 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads the writer's PUBLICATION_MATCHED status into the 32-byte native
-     * struct at {@code statusOutAddr} (a direct-buffer address, the caller's
-     * responsibility to allocate and keep alive). Returns the C ABI status
-     * code. Thin passthrough -- the caller owns the buffer and decodes it.
+     * Reads the writer's PUBLICATION_MATCHED status into the 32-byte native struct at {@code
+     * statusOutAddr} (a direct-buffer address, the caller's responsibility to allocate and keep
+     * alive). Returns the C ABI status code. Thin passthrough -- the caller owns the buffer and
+     * decodes it.
      */
     public static int datawriterGetPublicationMatchedStatus(long writer, long statusOutAddr) {
         return Ffi.int2dds_datawriter_get_publication_matched_status(writer, statusOutAddr);
     }
 
     /**
-     * Reads the writer's LIVELINESS_LOST status into the 8-byte native
-     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
-     * the buffer and decodes it.
+     * Reads the writer's LIVELINESS_LOST status into the 8-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datawriterGetLivelinessLostStatus(long writer, long statusOutAddr) {
         return Ffi.int2dds_datawriter_get_liveliness_lost_status(writer, statusOutAddr);
     }
 
     /**
-     * Reads the writer's OFFERED_DEADLINE_MISSED status into the 24-byte
-     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
-     * owns the buffer and decodes it.
+     * Reads the writer's OFFERED_DEADLINE_MISSED status into the 24-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datawriterGetOfferedDeadlineMissedStatus(long writer, long statusOutAddr) {
         return Ffi.int2dds_datawriter_get_offered_deadline_missed_status(writer, statusOutAddr);
     }
 
     /**
-     * Reads the writer's OFFERED_INCOMPATIBLE_QOS status into the 16-byte
-     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
-     * owns the buffer and decodes it.
+     * Reads the writer's OFFERED_INCOMPATIBLE_QOS status into the 16-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datawriterGetOfferedIncompatibleQosStatus(long writer, long statusOutAddr) {
         return Ffi.int2dds_datawriter_get_offered_incompatible_qos_status(writer, statusOutAddr);
     }
 
     /**
-     * Reads the writer's OFFERED_INCOMPATIBLE_TYPE status into the 8-byte
-     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
-     * owns the buffer and decodes it.
+     * Reads the writer's OFFERED_INCOMPATIBLE_TYPE status into the 8-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datawriterGetOfferedIncompatibleTypeStatus(long writer, long statusOutAddr) {
         return Ffi.int2dds_datawriter_get_offered_incompatible_type_status(writer, statusOutAddr);
@@ -1050,55 +1105,58 @@ public final class FfiAccess {
     // --- DataWriter listeners (hand-written trampoline layer) ---
 
     /**
-     * Installs {@code listener} on {@code writer} for {@code mask}. Returns the
-     * binding-owned context pointer to pass back to {@link #writerListenerClear},
-     * or 0 on failure. Policy-free passthrough to {@link FfiHandwritten}.
+     * Installs {@code listener} on {@code writer} for {@code mask}. Returns the binding-owned
+     * context pointer to pass back to {@link #writerListenerClear}, or 0 on failure. Policy-free
+     * passthrough to {@link FfiHandwritten}.
      */
     public static long writerListenerSet(long writer, DataWriterListener listener, int mask) {
         return FfiHandwritten.nativeWriterListenerSet(writer, listener, mask);
     }
 
     /**
-     * Clears the listener on {@code writer} and releases {@code ctx}. Returns the
-     * C ABI status code. Policy-free passthrough to {@link FfiHandwritten}.
+     * Clears the listener on {@code writer} and releases {@code ctx}. Returns the C ABI status
+     * code. Policy-free passthrough to {@link FfiHandwritten}.
      */
     public static int writerListenerClear(long writer, long ctx) {
         return FfiHandwritten.nativeWriterListenerClear(writer, ctx);
     }
 
     /**
-     * Writes a pre-serialized CDR sample. No key is passed: the core derives
-     * the instance key and KeyHash canonically from {@code data}, the full
-     * serialized sample, for a keyed topic the same way as an unkeyed one.
+     * Writes a pre-serialized CDR sample. No key is passed: the core derives the instance key and
+     * KeyHash canonically from {@code data}, the full serialized sample, for a keyed topic the same
+     * way as an unkeyed one.
      */
     public static int datawriterWriteSerialized(long writer, long data, long dataLen) {
         return Ffi.int2dds_datawriter_write_serialized(writer, data, dataLen);
     }
 
     /** Same as {@link #datawriterWriteSerialized} but with an explicit source timestamp. */
-    public static int datawriterWriteSerializedWTimestamp(long writer, long data, long dataLen,
-            int tsSec, int tsNanosec) {
+    public static int datawriterWriteSerializedWTimestamp(
+            long writer, long data, long dataLen, int tsSec, int tsNanosec) {
         return Ffi.int2dds_datawriter_write_serialized_w_timestamp(
                 writer, data, dataLen, tsSec, tsNanosec);
     }
 
     /**
-     * Prepares a DDS-owned, at-least-{@code capacity}-byte write buffer for a
-     * zero-copy serialized write. On {@code RET_OK} writes the buffer's
-     * native address to {@code dataOut[0]}, its actual capacity to {@code
-     * capOut[0]} (may exceed {@code capacity}), and the loan handle to {@code
-     * loanOut[0]}; on any other code the three arrays are left untouched and
-     * there is no loan to release. Three 8-byte out-slots, one call, the same
-     * multi-out shape {@link #participantGetCurrentTime} uses for two.
+     * Prepares a DDS-owned, at-least-{@code capacity}-byte write buffer for a zero-copy serialized
+     * write. On {@code RET_OK} writes the buffer's native address to {@code dataOut[0]}, its actual
+     * capacity to {@code capOut[0]} (may exceed {@code capacity}), and the loan handle to {@code
+     * loanOut[0]}; on any other code the three arrays are left untouched and there is no loan to
+     * release. Three 8-byte out-slots, one call, the same multi-out shape {@link
+     * #participantGetCurrentTime} uses for two.
      */
     public static int datawriterPrepareSerializedWrite(
             long writer, long capacity, long[] dataOut, long[] capOut, long[] loanOut) {
         ByteBuffer dataSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         ByteBuffer capSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         ByteBuffer loanSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datawriter_prepare_serialized_write(writer, capacity,
-                directBufferAddress(dataSlot), directBufferAddress(capSlot),
-                directBufferAddress(loanSlot));
+        int rc =
+                Ffi.int2dds_datawriter_prepare_serialized_write(
+                        writer,
+                        capacity,
+                        directBufferAddress(dataSlot),
+                        directBufferAddress(capSlot),
+                        directBufferAddress(loanSlot));
         // Same fence as createParticipant's slot -- all three were only
         // handed off by native address above.
         NativeKeepAlive.keepAlive(dataSlot);
@@ -1113,36 +1171,32 @@ public final class FfiAccess {
     }
 
     /**
-     * Publishes {@code actualSize} bytes from a loan {@link
-     * #datawriterPrepareSerializedWrite} returned. On {@code RET_OK} the loan
-     * is consumed and freed natively -- the caller must not abort it
-     * afterward. On any other code the loan remains valid and must be
-     * released with {@link #datawriterAbortSerializedWrite} exactly once.
+     * Publishes {@code actualSize} bytes from a loan {@link #datawriterPrepareSerializedWrite}
+     * returned. On {@code RET_OK} the loan is consumed and freed natively -- the caller must not
+     * abort it afterward. On any other code the loan remains valid and must be released with {@link
+     * #datawriterAbortSerializedWrite} exactly once.
      */
     public static int datawriterCommitSerializedWrite(long writer, long loan, long actualSize) {
         return Ffi.int2dds_datawriter_commit_serialized_write(writer, loan, actualSize);
     }
 
     /**
-     * Frees a loan from {@link #datawriterPrepareSerializedWrite} without
-     * publishing it. Must not be called twice on the same loan, and must not
-     * be called on a loan already consumed by a successful {@link
-     * #datawriterCommitSerializedWrite}.
+     * Frees a loan from {@link #datawriterPrepareSerializedWrite} without publishing it. Must not
+     * be called twice on the same loan, and must not be called on a loan already consumed by a
+     * successful {@link #datawriterCommitSerializedWrite}.
      */
     public static int datawriterAbortSerializedWrite(long loan) {
         return Ffi.int2dds_datawriter_abort_serialized_write(loan);
     }
 
     /**
-     * Reads a datawriter's current QoS into a freshly allocated native
-     * handle. Returns the C ABI status code and, only on success, writes the
-     * new QoS handle to {@code handleOut[0]}; on failure {@code handleOut} is
-     * left untouched — the same shape as {@link #createParticipant}. Unlike
-     * {@link #createParticipantQos} and its siblings, this does not fold a
-     * failure into a bare {@code 0L}: {@code writer} names a real, possibly
-     * already-invalid entity, so the real code is worth preserving for
-     * {@link kr.co.intellectus.int2dds.internal.ReturnCodes#check} to map,
-     * rather than collapsing every failure into one generic exception.
+     * Reads a datawriter's current QoS into a freshly allocated native handle. Returns the C ABI
+     * status code and, only on success, writes the new QoS handle to {@code handleOut[0]}; on
+     * failure {@code handleOut} is left untouched — the same shape as {@link #createParticipant}.
+     * Unlike {@link #createParticipantQos} and its siblings, this does not fold a failure into a
+     * bare {@code 0L}: {@code writer} names a real, possibly already-invalid entity, so the real
+     * code is worth preserving for {@link kr.co.intellectus.int2dds.internal.ReturnCodes#check} to
+     * map, rather than collapsing every failure into one generic exception.
      */
     public static int getWriterQos(long writer, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -1156,8 +1210,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a typed datareader's current QoS into a freshly allocated native
-     * handle. Same shape as {@link #getWriterQos}.
+     * Reads a typed datareader's current QoS into a freshly allocated native handle. Same shape as
+     * {@link #getWriterQos}.
      */
     public static int getReaderQos(long reader, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -1216,7 +1270,10 @@ public final class FfiAccess {
 
     // --- Reliability / liveliness ---
 
-    /** Blocks up to {@code timeoutMs} for all matched reliable readers to ack. Status code, incl. RET_TIMEOUT. */
+    /**
+     * Blocks up to {@code timeoutMs} for all matched reliable readers to ack. Status code, incl.
+     * RET_TIMEOUT.
+     */
     public static int datawriterWaitForAcknowledgments(long writer, long timeoutMs) {
         return Ffi.int2dds_datawriter_wait_for_acknowledgments(writer, timeoutMs);
     }
@@ -1236,7 +1293,10 @@ public final class FfiAccess {
         return Ffi.int2dds_participant_assert_liveliness(participant);
     }
 
-    /** Blocks up to {@code timeoutMs} for historical (durable) data to arrive. Status code, incl. RET_TIMEOUT. */
+    /**
+     * Blocks up to {@code timeoutMs} for historical (durable) data to arrive. Status code, incl.
+     * RET_TIMEOUT.
+     */
     public static int datareaderWaitForHistoricalData(long reader, long timeoutMs) {
         return Ffi.int2dds_datareader_wait_for_historical_data(reader, timeoutMs);
     }
@@ -1247,70 +1307,68 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads the reader's SUBSCRIPTION_MATCHED status into the 32-byte native
-     * struct at {@code statusOutAddr} (a direct-buffer address, the caller's
-     * responsibility to allocate and keep alive). Returns the C ABI status
-     * code. Thin passthrough -- the caller owns the buffer and decodes it.
+     * Reads the reader's SUBSCRIPTION_MATCHED status into the 32-byte native struct at {@code
+     * statusOutAddr} (a direct-buffer address, the caller's responsibility to allocate and keep
+     * alive). Returns the C ABI status code. Thin passthrough -- the caller owns the buffer and
+     * decodes it.
      */
     public static int datareaderGetSubscriptionMatchedStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_subscription_matched_status(reader, statusOutAddr);
     }
 
     /**
-     * Reads the reader's LIVELINESS_CHANGED status into the 32-byte native
-     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
-     * the buffer and decodes it.
+     * Reads the reader's LIVELINESS_CHANGED status into the 32-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datareaderGetLivelinessChangedStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_liveliness_changed_status(reader, statusOutAddr);
     }
 
     /**
-     * Reads the reader's REQUESTED_DEADLINE_MISSED status into the 24-byte
-     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
-     * owns the buffer and decodes it.
+     * Reads the reader's REQUESTED_DEADLINE_MISSED status into the 24-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datareaderGetRequestedDeadlineMissedStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_requested_deadline_missed_status(reader, statusOutAddr);
     }
 
     /**
-     * Reads the reader's REQUESTED_INCOMPATIBLE_QOS status into the 16-byte
-     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
-     * owns the buffer and decodes it.
+     * Reads the reader's REQUESTED_INCOMPATIBLE_QOS status into the 16-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datareaderGetRequestedIncompatibleQosStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_requested_incompatible_qos_status(reader, statusOutAddr);
     }
 
     /**
-     * Reads the reader's REQUESTED_INCOMPATIBLE_TYPE status into the 8-byte
-     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
-     * owns the buffer and decodes it.
+     * Reads the reader's REQUESTED_INCOMPATIBLE_TYPE status into the 8-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
-    public static int datareaderGetRequestedIncompatibleTypeStatus(long reader, long statusOutAddr) {
+    public static int datareaderGetRequestedIncompatibleTypeStatus(
+            long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_requested_incompatible_type_status(reader, statusOutAddr);
     }
 
     /**
-     * Reads the reader's SAMPLE_LOST status into the 8-byte native struct at
-     * {@code statusOutAddr}. Thin passthrough -- the caller owns the buffer
-     * and decodes it.
+     * Reads the reader's SAMPLE_LOST status into the 8-byte native struct at {@code statusOutAddr}.
+     * Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datareaderGetSampleLostStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_sample_lost_status(reader, statusOutAddr);
     }
 
     /**
-     * Reads the reader's SAMPLE_REJECTED status into the 28-byte native
-     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
-     * the buffer and decodes it.
+     * Reads the reader's SAMPLE_REJECTED status into the 28-byte native struct at {@code
+     * statusOutAddr}. Thin passthrough -- the caller owns the buffer and decodes it.
      */
     public static int datareaderGetSampleRejectedStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_sample_rejected_status(reader, statusOutAddr);
     }
 
-    /** Whether the reader has any samples available to take/read. Writes it to {@code out[0]} on success. */
+    /**
+     * Whether the reader has any samples available to take/read. Writes it to {@code out[0]} on
+     * success.
+     */
     public static int datareaderHasData(long reader, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datareader_has_data(reader, directBufferAddress(slot));
@@ -1654,43 +1712,57 @@ public final class FfiAccess {
         return Ffi.int2dds_type_info_add_field(typeInfo, fieldName, fieldType, flags);
     }
 
-    /** Appends a sequence field ({@code bound == 0} means unbounded). Returns the C ABI status code. */
+    /**
+     * Appends a sequence field ({@code bound == 0} means unbounded). Returns the C ABI status code.
+     */
     public static int typeInfoAddSequenceField(
             long typeInfo, byte[] fieldName, int elementType, int bound, int flags) {
-        return Ffi.int2dds_type_info_add_sequence_field(typeInfo, fieldName, elementType, bound, flags);
+        return Ffi.int2dds_type_info_add_sequence_field(
+                typeInfo, fieldName, elementType, bound, flags);
     }
 
     /**
-     * Appends a nested struct-typed field, referencing {@code nestedTypeInfo}'s own
-     * builder. {@code nestedTypeInfo} is borrowed, not consumed -- the caller still owns
-     * it and must destroy it separately. Returns the C ABI status code.
+     * Appends a nested struct-typed field, referencing {@code nestedTypeInfo}'s own builder. {@code
+     * nestedTypeInfo} is borrowed, not consumed -- the caller still owns it and must destroy it
+     * separately. Returns the C ABI status code.
      */
     public static int typeInfoAddNestedField(
             long typeInfo, byte[] fieldName, long nestedTypeInfo, int flags) {
         return Ffi.int2dds_type_info_add_nested_field(typeInfo, fieldName, nestedTypeInfo, flags);
     }
 
-    /** Appends a bounded string field ({@code bound == 0} means unbounded). Returns the C ABI status code. */
-    public static int typeInfoAddStringField(long typeInfo, byte[] fieldName, int bound, int flags) {
+    /**
+     * Appends a bounded string field ({@code bound == 0} means unbounded). Returns the C ABI status
+     * code.
+     */
+    public static int typeInfoAddStringField(
+            long typeInfo, byte[] fieldName, int bound, int flags) {
         return Ffi.int2dds_type_info_add_string_field(typeInfo, fieldName, bound, flags);
     }
 
-    /** Appends a bounded wide-string field ({@code bound == 0} means unbounded). Returns the C ABI status code. */
-    public static int typeInfoAddWstringField(long typeInfo, byte[] fieldName, int bound, int flags) {
+    /**
+     * Appends a bounded wide-string field ({@code bound == 0} means unbounded). Returns the C ABI
+     * status code.
+     */
+    public static int typeInfoAddWstringField(
+            long typeInfo, byte[] fieldName, int bound, int flags) {
         return Ffi.int2dds_type_info_add_wstring_field(typeInfo, fieldName, bound, flags);
     }
 
-    /** Appends a fixed-size array field of a primitive {@link kr.co.intellectus.int2dds.xtypes.FieldType}. Returns the C ABI status code. */
+    /**
+     * Appends a fixed-size array field of a primitive {@link
+     * kr.co.intellectus.int2dds.xtypes.FieldType}. Returns the C ABI status code.
+     */
     public static int typeInfoAddArrayField(
             long typeInfo, byte[] fieldName, int elementType, int arraySize, int flags) {
-        return Ffi.int2dds_type_info_add_array_field(typeInfo, fieldName, elementType, arraySize, flags);
+        return Ffi.int2dds_type_info_add_array_field(
+                typeInfo, fieldName, elementType, arraySize, flags);
     }
 
     /**
-     * Appends a fixed-size array field whose element is a nested struct, referencing
-     * {@code elementTypeInfo}'s own builder. {@code elementTypeInfo} is borrowed, not
-     * consumed -- the caller still owns it and must destroy it separately. Returns the
-     * C ABI status code.
+     * Appends a fixed-size array field whose element is a nested struct, referencing {@code
+     * elementTypeInfo}'s own builder. {@code elementTypeInfo} is borrowed, not consumed -- the
+     * caller still owns it and must destroy it separately. Returns the C ABI status code.
      */
     public static int typeInfoAddArrayOfNestedField(
             long typeInfo, byte[] fieldName, long elementTypeInfo, int arraySize, int flags) {
@@ -1699,10 +1771,10 @@ public final class FfiAccess {
     }
 
     /**
-     * Appends a sequence field whose element is a nested struct ({@code bound == 0}
-     * means unbounded), referencing {@code elementTypeInfo}'s own builder. {@code
-     * elementTypeInfo} is borrowed, not consumed -- the caller still owns it and must
-     * destroy it separately. Returns the C ABI status code.
+     * Appends a sequence field whose element is a nested struct ({@code bound == 0} means
+     * unbounded), referencing {@code elementTypeInfo}'s own builder. {@code elementTypeInfo} is
+     * borrowed, not consumed -- the caller still owns it and must destroy it separately. Returns
+     * the C ABI status code.
      */
     public static int typeInfoAddSequenceOfNestedField(
             long typeInfo, byte[] fieldName, long elementTypeInfo, int bound, int flags) {
@@ -1711,9 +1783,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates an enum type-info builder ({@code bitBound} is the discriminant bit width;
-     * IDL enums use 32). Returns the C ABI status code; writes the new builder handle to
-     * {@code out[0]} only when it is {@code 0}.
+     * Creates an enum type-info builder ({@code bitBound} is the discriminant bit width; IDL enums
+     * use 32). Returns the C ABI status code; writes the new builder handle to {@code out[0]} only
+     * when it is {@code 0}.
      */
     public static int typeInfoCreateEnum(byte[] typeName, int bitBound, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -1727,13 +1799,14 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a bitmask type-info builder ({@code bitBound} is the flag storage bit
-     * width). Returns the C ABI status code; writes the new builder handle to {@code
-     * out[0]} only when it is {@code 0}.
+     * Creates a bitmask type-info builder ({@code bitBound} is the flag storage bit width). Returns
+     * the C ABI status code; writes the new builder handle to {@code out[0]} only when it is {@code
+     * 0}.
      */
     public static int typeInfoCreateBitmask(byte[] typeName, int bitBound, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_type_info_create_bitmask(typeName, bitBound, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_type_info_create_bitmask(typeName, bitBound, directBufferAddress(slot));
         // Same fence as typeInfoCreate.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -1743,23 +1816,26 @@ public final class FfiAccess {
     }
 
     /**
-     * Appends a literal to an enum builder. {@code isDefault} marks the {@code @default}
-     * literal (0/1). Returns the C ABI status code.
+     * Appends a literal to an enum builder. {@code isDefault} marks the {@code @default} literal
+     * (0/1). Returns the C ABI status code.
      */
     public static int typeInfoAddEnumLiteral(
             long typeInfo, byte[] literalName, int value, int isDefault) {
         return Ffi.int2dds_type_info_add_enum_literal(typeInfo, literalName, value, isDefault);
     }
 
-    /** Appends a flag to a bitmask builder. {@code position} is the bit index. Returns the C ABI status code. */
+    /**
+     * Appends a flag to a bitmask builder. {@code position} is the bit index. Returns the C ABI
+     * status code.
+     */
     public static int typeInfoAddBitmaskFlag(long typeInfo, byte[] flagName, int position) {
         return Ffi.int2dds_type_info_add_bitmask_flag(typeInfo, flagName, position);
     }
 
     /**
-     * Appends a field referencing another type by name-hash (a {@code MinimalTypeId}
-     * computed from {@code typeHashName}), rather than by a borrowed builder handle.
-     * Returns the C ABI status code.
+     * Appends a field referencing another type by name-hash (a {@code MinimalTypeId} computed from
+     * {@code typeHashName}), rather than by a borrowed builder handle. Returns the C ABI status
+     * code.
      */
     public static int typeInfoAddNamedTypeField(
             long typeInfo, byte[] fieldName, byte[] typeHashName, int flags) {
@@ -1767,10 +1843,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Appends a sequence field whose element is a type referenced by name-hash rather
-     * than a borrowed builder handle ({@code bound == 0} means unbounded). Same
-     * discovery-resolved caveat as {@link #typeInfoAddNamedTypeField}. Returns the C ABI
-     * status code.
+     * Appends a sequence field whose element is a type referenced by name-hash rather than a
+     * borrowed builder handle ({@code bound == 0} means unbounded). Same discovery-resolved caveat
+     * as {@link #typeInfoAddNamedTypeField}. Returns the C ABI status code.
      */
     public static int typeInfoAddSequenceOfNamedField(
             long typeInfo, byte[] fieldName, byte[] elementHashName, int bound, int flags) {
@@ -1779,8 +1854,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Appends a fixed-size array field whose element is a type referenced by name-hash
-     * rather than a borrowed builder handle. Same discovery-resolved caveat as {@link
+     * Appends a fixed-size array field whose element is a type referenced by name-hash rather than
+     * a borrowed builder handle. Same discovery-resolved caveat as {@link
      * #typeInfoAddNamedTypeField}. Returns the C ABI status code.
      */
     public static int typeInfoAddArrayOfNamedField(
@@ -1805,17 +1880,16 @@ public final class FfiAccess {
     }
 
     /**
-     * Releases a type object built by {@link #typeInfoToTypeObject}. This is a
-     * distinct native allocation from the builder that produced it — both
-     * must be released.
+     * Releases a type object built by {@link #typeInfoToTypeObject}. This is a distinct native
+     * allocation from the builder that produced it — both must be released.
      */
     public static void typeObjectDestroy(long typeObject) {
         Ffi.int2dds_type_object_destroy(typeObject);
     }
 
     /**
-     * Reads a struct TypeObject's member count into {@code out[0]} on success.
-     * {@code RET_DYNAMIC_UNSUPPORTED_TYPE} for a non-struct TypeObject.
+     * Reads a struct TypeObject's member count into {@code out[0]} on success. {@code
+     * RET_DYNAMIC_UNSUPPORTED_TYPE} for a non-struct TypeObject.
      */
     public static int typeObjectMemberCount(long t, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
@@ -1828,19 +1902,20 @@ public final class FfiAccess {
     }
 
     /**
-     * Grow-and-retry driver for the member name at {@code index}, mirroring
-     * {@link #dynamicDataGetString} exactly: {@code
-     * int2dds_type_object_member_name} shares the same {@code copy_str_to_c}
-     * contract (out_len excludes the NUL, both on {@code RET_BUFFER_TOO_SMALL}
-     * and on success), so the same regrow-to-{@code outLen + 1} logic applies.
+     * Grow-and-retry driver for the member name at {@code index}, mirroring {@link
+     * #dynamicDataGetString} exactly: {@code int2dds_type_object_member_name} shares the same
+     * {@code copy_str_to_c} contract (out_len excludes the NUL, both on {@code
+     * RET_BUFFER_TOO_SMALL} and on success), so the same regrow-to-{@code outLen + 1} logic
+     * applies.
      */
     public static int typeObjectMemberName(long t, int index, byte[][] bytesOut) {
         int cap = 64;
         while (true) {
             byte[] buf = new byte[cap];
             ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-            int rc = Ffi.int2dds_type_object_member_name(
-                    t, index, buf, cap, directBufferAddress(sizeSlot));
+            int rc =
+                    Ffi.int2dds_type_object_member_name(
+                            t, index, buf, cap, directBufferAddress(sizeSlot));
             NativeKeepAlive.keepAlive(sizeSlot);
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
                 cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
@@ -1857,10 +1932,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Finds a struct TypeObject member's index by name, writing it to {@code
-     * indexOut[0]} on success. {@code RET_DYNAMIC_FIELD_NOT_FOUND} if no
-     * member has that name; {@code RET_DYNAMIC_UNSUPPORTED_TYPE} for a
-     * non-struct TypeObject.
+     * Finds a struct TypeObject member's index by name, writing it to {@code indexOut[0]} on
+     * success. {@code RET_DYNAMIC_FIELD_NOT_FOUND} if no member has that name; {@code
+     * RET_DYNAMIC_UNSUPPORTED_TYPE} for a non-struct TypeObject.
      */
     public static int typeObjectFindMember(long t, byte[] name, int[] indexOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
@@ -1873,20 +1947,18 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a struct TypeObject member's info at {@code index} into the
-     * 12-byte {@code Int2DdsMemberInfo} struct at {@code structOutAddr} (a
-     * direct-buffer address, the caller's responsibility to allocate and keep
-     * alive). Thin passthrough -- the caller owns the buffer and decodes it,
-     * the same shape as {@link #datawriterGetPublicationMatchedStatus}.
+     * Reads a struct TypeObject member's info at {@code index} into the 12-byte {@code
+     * Int2DdsMemberInfo} struct at {@code structOutAddr} (a direct-buffer address, the caller's
+     * responsibility to allocate and keep alive). Thin passthrough -- the caller owns the buffer
+     * and decodes it, the same shape as {@link #datawriterGetPublicationMatchedStatus}.
      */
     public static int typeObjectMemberInfo(long t, int index, long structOutAddr) {
         return Ffi.int2dds_type_object_member_info(t, index, structOutAddr);
     }
 
     /**
-     * Reads a struct TypeObject's extensibility into {@code out[0]} on
-     * success: 0 Final, 1 Appendable, 2 Mutable. {@code
-     * RET_DYNAMIC_UNSUPPORTED_TYPE} for a non-struct TypeObject.
+     * Reads a struct TypeObject's extensibility into {@code out[0]} on success: 0 Final, 1
+     * Appendable, 2 Mutable. {@code RET_DYNAMIC_UNSUPPORTED_TYPE} for a non-struct TypeObject.
      */
     public static int typeObjectExtensibility(long t, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
@@ -1899,26 +1971,34 @@ public final class FfiAccess {
     }
 
     /**
-     * Waits up to {@code timeoutMs} (negative = infinite) for the TypeObject
-     * of the type used on topic {@code topicName} to be discovered, writing a
-     * TypeObject handle to {@code typeObjOut[0]} and the discovered type's
-     * fully-qualified name into {@code nameBuf} on success. {@code nameBuf}
-     * shares {@code copy_str_to_c}'s contract with {@link
-     * #typeObjectMemberName}: the needed length (excluding the NUL) is
-     * written to {@code outLen[0]} on both success and {@code
-     * RET_BUFFER_TOO_SMALL}. Unlike {@link #typeObjectMemberName}, the
-     * grow-and-retry on the name buffer is the caller's responsibility, not
-     * this bridge's -- {@code nameBuf} is caller-supplied so it can be reused
-     * or sized from a prior attempt. Never throws -- policy-free like every
-     * other bridge here.
+     * Waits up to {@code timeoutMs} (negative = infinite) for the TypeObject of the type used on
+     * topic {@code topicName} to be discovered, writing a TypeObject handle to {@code
+     * typeObjOut[0]} and the discovered type's fully-qualified name into {@code nameBuf} on
+     * success. {@code nameBuf} shares {@code copy_str_to_c}'s contract with {@link
+     * #typeObjectMemberName}: the needed length (excluding the NUL) is written to {@code outLen[0]}
+     * on both success and {@code RET_BUFFER_TOO_SMALL}. Unlike {@link #typeObjectMemberName}, the
+     * grow-and-retry on the name buffer is the caller's responsibility, not this bridge's -- {@code
+     * nameBuf} is caller-supplied so it can be reused or sized from a prior attempt. Never throws
+     * -- policy-free like every other bridge here.
      */
-    public static int participantWaitForTypeObject(long participant, byte[] topicName,
-            int timeoutMs, long[] typeObjOut, byte[] nameBuf, long[] outLen) {
+    public static int participantWaitForTypeObject(
+            long participant,
+            byte[] topicName,
+            int timeoutMs,
+            long[] typeObjOut,
+            byte[] nameBuf,
+            long[] outLen) {
         ByteBuffer typeObjSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         ByteBuffer outLenSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_wait_for_type_object(participant, topicName, timeoutMs,
-                directBufferAddress(typeObjSlot), nameBuf, nameBuf.length,
-                directBufferAddress(outLenSlot));
+        int rc =
+                Ffi.int2dds_participant_wait_for_type_object(
+                        participant,
+                        topicName,
+                        timeoutMs,
+                        directBufferAddress(typeObjSlot),
+                        nameBuf,
+                        nameBuf.length,
+                        directBufferAddress(outLenSlot));
         NativeKeepAlive.keepAlive(typeObjSlot);
         NativeKeepAlive.keepAlive(outLenSlot);
         NativeKeepAlive.keepAlive(nameBuf);
@@ -1932,93 +2012,97 @@ public final class FfiAccess {
     }
 
     /** Decodes one bool field out of a serialized sample. */
-    public static int dynamicSampleGetBool(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetBool(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_bool(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one int8 field out of a serialized sample. */
-    public static int dynamicSampleGetI8(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetI8(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_i8(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one uint8 field out of a serialized sample. */
-    public static int dynamicSampleGetU8(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetU8(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_u8(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one byte (octet) field out of a serialized sample. */
-    public static int dynamicSampleGetByte(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetByte(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_byte(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one int16 field out of a serialized sample. */
-    public static int dynamicSampleGetI16(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetI16(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_i16(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one uint16 field out of a serialized sample. */
-    public static int dynamicSampleGetU16(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetU16(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_u16(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one i32 field out of a serialized sample. */
-    public static int dynamicSampleGetI32(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetI32(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_i32(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one uint32 field out of a serialized sample. */
-    public static int dynamicSampleGetU32(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetU32(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_u32(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one int64 field out of a serialized sample. */
-    public static int dynamicSampleGetI64(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetI64(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_i64(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one uint64 field out of a serialized sample. */
-    public static int dynamicSampleGetU64(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetU64(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_u64(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one float32 field out of a serialized sample. */
-    public static int dynamicSampleGetF32(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetF32(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_f32(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one f64 field out of a serialized sample. */
-    public static int dynamicSampleGetF64(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetF64(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_f64(bytes, len, typeObj, fieldName, out);
     }
 
     /** Decodes one char8 field out of a serialized sample. */
-    public static int dynamicSampleGetChar8(long bytes, long len, long typeObj,
-            byte[] fieldName, long out) {
+    public static int dynamicSampleGetChar8(
+            long bytes, long len, long typeObj, byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_char8(bytes, len, typeObj, fieldName, out);
     }
 
     /**
-     * Decodes one string field out of a serialized sample into {@code
-     * outBuf}, writing the copied length (excluding the NUL) to the native
-     * address {@code outLenAddr}. Thin passthrough sharing {@code
-     * copy_str_to_c}'s grow-and-retry contract with {@link
-     * #typeObjectMemberName}: the caller drives the retry on {@code
-     * RET_BUFFER_TOO_SMALL}.
+     * Decodes one string field out of a serialized sample into {@code outBuf}, writing the copied
+     * length (excluding the NUL) to the native address {@code outLenAddr}. Thin passthrough sharing
+     * {@code copy_str_to_c}'s grow-and-retry contract with {@link #typeObjectMemberName}: the
+     * caller drives the retry on {@code RET_BUFFER_TOO_SMALL}.
      */
-    public static int dynamicSampleGetString(long bytes, long len, long typeObj,
-            byte[] fieldName, byte[] outBuf, long bufCap, long outLenAddr) {
+    public static int dynamicSampleGetString(
+            long bytes,
+            long len,
+            long typeObj,
+            byte[] fieldName,
+            byte[] outBuf,
+            long bufCap,
+            long outLenAddr) {
         return Ffi.int2dds_dynamic_sample_get_string(
                 bytes, len, typeObj, fieldName, outBuf, bufCap, outLenAddr);
     }
@@ -2026,17 +2110,17 @@ public final class FfiAccess {
     // --- DynamicData (handle-based, xtypes read path) ---
 
     /**
-     * Decodes {@code bytesAddr}/{@code len} (a serialized sample, encapsulation
-     * header included) against {@code typeObj} into a live DynamicData handle,
-     * writing it to {@code out[0]} only on success. {@code bytesAddr} is a
-     * direct-buffer address, the same shape as {@link #dynamicSampleGetI32}'s
-     * {@code bytes}.
+     * Decodes {@code bytesAddr}/{@code len} (a serialized sample, encapsulation header included)
+     * against {@code typeObj} into a live DynamicData handle, writing it to {@code out[0]} only on
+     * success. {@code bytesAddr} is a direct-buffer address, the same shape as {@link
+     * #dynamicSampleGetI32}'s {@code bytes}.
      */
     public static int dynamicDataFromSample(
             long participant, long bytesAddr, long len, long typeObj, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_dynamic_data_from_sample(
-                participant, bytesAddr, len, typeObj, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_dynamic_data_from_sample(
+                        participant, bytesAddr, len, typeObj, directBufferAddress(slot));
         // Same hazard as participantFactoryGetInstance's fence above -- see
         // NativeKeepAlive's own doc for the full argument.
         NativeKeepAlive.keepAlive(slot);
@@ -2076,28 +2160,26 @@ public final class FfiAccess {
     /**
      * Grow-and-retry driver for a string field at {@code path}, mirroring {@link
      * #readGrowableString} but for a different native contract: {@code
-     * int2dds_dynamic_data_get_string} (ffi/src/dynamic.rs {@code copy_str_to_c})
-     * reports the required size WITHOUT the trailing NUL -- both on {@code
-     * RET_BUFFER_TOO_SMALL} and on success -- unlike {@code copy_string_to_c}
-     * (discovery.rs), which {@link #readGrowableString} was written for and which
-     * includes the NUL in its size. Regrowing to {@code outLen} (not {@code
-     * outLen + 1}) here would repeat the same too-small capacity forever, so this
-     * regrows to {@code outLen + 1} and does not subtract 1 from the length on
-     * the success path. {@code out_buf} crosses as a plain {@code byte[]} here,
-     * not a direct-buffer address -- the generated shim marshals it as a JNI
-     * array (see {@code Java_..._int2dds_1dynamic_1data_1get_1string} in
-     * generated.rs) -- so only {@code sizeSlot}, the one direct buffer, needs
-     * the keepAlive fence. Never throws -- policy-free like every other bridge
-     * here -- it just returns the final status code and, only on {@code RET_OK},
-     * writes the decoded UTF-8 bytes to {@code bytesOut[0]}.
+     * int2dds_dynamic_data_get_string} (ffi/src/dynamic.rs {@code copy_str_to_c}) reports the
+     * required size WITHOUT the trailing NUL -- both on {@code RET_BUFFER_TOO_SMALL} and on success
+     * -- unlike {@code copy_string_to_c} (discovery.rs), which {@link #readGrowableString} was
+     * written for and which includes the NUL in its size. Regrowing to {@code outLen} (not {@code
+     * outLen + 1}) here would repeat the same too-small capacity forever, so this regrows to {@code
+     * outLen + 1} and does not subtract 1 from the length on the success path. {@code out_buf}
+     * crosses as a plain {@code byte[]} here, not a direct-buffer address -- the generated shim
+     * marshals it as a JNI array (see {@code Java_..._int2dds_1dynamic_1data_1get_1string} in
+     * generated.rs) -- so only {@code sizeSlot}, the one direct buffer, needs the keepAlive fence.
+     * Never throws -- policy-free like every other bridge here -- it just returns the final status
+     * code and, only on {@code RET_OK}, writes the decoded UTF-8 bytes to {@code bytesOut[0]}.
      */
     public static int dynamicDataGetString(long d, byte[] path, byte[][] bytesOut) {
         int cap = 64;
         while (true) {
             byte[] buf = new byte[cap];
             ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-            int rc = Ffi.int2dds_dynamic_data_get_string(
-                    d, path, buf, cap, directBufferAddress(sizeSlot));
+            int rc =
+                    Ffi.int2dds_dynamic_data_get_string(
+                            d, path, buf, cap, directBufferAddress(sizeSlot));
             NativeKeepAlive.keepAlive(sizeSlot);
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
                 cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
@@ -2135,7 +2217,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a u8 field at {@code path}, writing its unsigned 0-255 value to {@code out[0]} on success. */
+    /**
+     * Reads a u8 field at {@code path}, writing its unsigned 0-255 value to {@code out[0]} on
+     * success.
+     */
     public static int dynamicDataGetU8(long d, byte[] path, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_data_get_u8(d, path, directBufferAddress(slot));
@@ -2157,7 +2242,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a u16 field at {@code path}, writing its unsigned 0-65535 value to {@code out[0]} on success. */
+    /**
+     * Reads a u16 field at {@code path}, writing its unsigned 0-65535 value to {@code out[0]} on
+     * success.
+     */
     public static int dynamicDataGetU16(long d, byte[] path, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_data_get_u16(d, path, directBufferAddress(slot));
@@ -2169,10 +2257,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a u32 field at {@code path}, writing its raw 32 bits to {@code
-     * out[0]} on success -- callers wanting the unsigned magnitude widen with
-     * {@code & 0xFFFFFFFFL} themselves, mirroring how {@link
-     * #statusConditionGetEnabledStatuses} hands back a raw u32 mask.
+     * Reads a u32 field at {@code path}, writing its raw 32 bits to {@code out[0]} on success --
+     * callers wanting the unsigned magnitude widen with {@code & 0xFFFFFFFFL} themselves, mirroring
+     * how {@link #statusConditionGetEnabledStatuses} hands back a raw u32 mask.
      */
     public static int dynamicDataGetU32(long d, byte[] path, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2196,9 +2283,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a u64 field at {@code path}, writing its raw 64 bits to {@code
-     * out[0]} on success -- same "raw bits, caller widens" contract as {@link
-     * #dynamicDataGetU32}.
+     * Reads a u64 field at {@code path}, writing its raw 64 bits to {@code out[0]} on success --
+     * same "raw bits, caller widens" contract as {@link #dynamicDataGetU32}.
      */
     public static int dynamicDataGetU64(long d, byte[] path, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2221,7 +2307,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a char8 field at {@code path} as its raw byte value, writing it to {@code out[0]} on success. */
+    /**
+     * Reads a char8 field at {@code path} as its raw byte value, writing it to {@code out[0]} on
+     * success.
+     */
     public static int dynamicDataGetChar8(long d, byte[] path, byte[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_data_get_char8(d, path, directBufferAddress(slot));
@@ -2233,8 +2322,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads the element count of a sequence/array field at {@code path},
-     * writing it to {@code out[0]} on success.
+     * Reads the element count of a sequence/array field at {@code path}, writing it to {@code
+     * out[0]} on success.
      */
     public static int dynamicDataGetLen(long d, byte[] path, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2247,11 +2336,10 @@ public final class FfiAccess {
     }
 
     /**
-     * Extracts a nested struct field at {@code path} into a new DynamicData
-     * handle, writing it to {@code out[0]} on success. An independent native
-     * box (ffi/src/dynamic.rs clones the nested value into its own {@code
-     * Int2DdsDynamicData}), released through {@link #dynamicDataDestroy} the
-     * same as a top-level handle.
+     * Extracts a nested struct field at {@code path} into a new DynamicData handle, writing it to
+     * {@code out[0]} on success. An independent native box (ffi/src/dynamic.rs clones the nested
+     * value into its own {@code Int2DdsDynamicData}), released through {@link #dynamicDataDestroy}
+     * the same as a top-level handle.
      */
     public static int dynamicDataGetMember(long d, byte[] path, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2266,10 +2354,9 @@ public final class FfiAccess {
     // --- DynamicValue (xtypes read/introspection path) ---
 
     /**
-     * Clones the value at {@code path} into a new, independently-owned
-     * DynamicValue handle, writing it to {@code out[0]} on success. The
-     * caller owns the returned handle and must destroy it (via {@link
-     * #dynamicValueDestroy}) -- {@code d} itself is untouched.
+     * Clones the value at {@code path} into a new, independently-owned DynamicValue handle, writing
+     * it to {@code out[0]} on success. The caller owns the returned handle and must destroy it (via
+     * {@link #dynamicValueDestroy}) -- {@code d} itself is untouched.
      */
     public static int dynamicDataGetValue(long d, byte[] path, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2303,7 +2390,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a dynamic value as {@code uint8}, writing its unsigned 0-255 value to {@code out[0]} on success. */
+    /**
+     * Reads a dynamic value as {@code uint8}, writing its unsigned 0-255 value to {@code out[0]} on
+     * success.
+     */
     public static int dynamicValueAsU8(long value, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_as_u8(value, directBufferAddress(slot));
@@ -2325,7 +2415,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a dynamic value as {@code uint16}, writing its unsigned 0-65535 value to {@code out[0]} on success. */
+    /**
+     * Reads a dynamic value as {@code uint16}, writing its unsigned 0-65535 value to {@code out[0]}
+     * on success.
+     */
     public static int dynamicValueAsU16(long value, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_as_u16(value, directBufferAddress(slot));
@@ -2348,10 +2441,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a dynamic value as {@code uint32}, writing its raw 32 bits to
-     * {@code out[0]} on success -- callers wanting the unsigned magnitude
-     * widen with {@code & 0xFFFFFFFFL} themselves, mirroring {@link
-     * #dynamicDataGetU32}.
+     * Reads a dynamic value as {@code uint32}, writing its raw 32 bits to {@code out[0]} on success
+     * -- callers wanting the unsigned magnitude widen with {@code & 0xFFFFFFFFL} themselves,
+     * mirroring {@link #dynamicDataGetU32}.
      */
     public static int dynamicValueAsU32(long value, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2375,9 +2467,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a dynamic value as {@code uint64}, writing its raw 64 bits to
-     * {@code out[0]} on success -- same "raw bits, caller widens" contract as
-     * {@link #dynamicValueAsU32}.
+     * Reads a dynamic value as {@code uint64}, writing its raw 64 bits to {@code out[0]} on success
+     * -- same "raw bits, caller widens" contract as {@link #dynamicValueAsU32}.
      */
     public static int dynamicValueAsU64(long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2434,11 +2525,11 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a dynamic value as {@code char8}, writing its unsigned 0-255 byte
-     * value to {@code out[0]} on success. Native out is {@code *mut u8}, one
-     * byte, the same as {@link #dynamicDataGetChar8} but widened here instead
-     * of left raw, to match this file's {@code i8/u8/i16/u16/i32/u32/char8 ->
-     * int} carrier convention for {@code DynamicValue} scalar extractors.
+     * Reads a dynamic value as {@code char8}, writing its unsigned 0-255 byte value to {@code
+     * out[0]} on success. Native out is {@code *mut u8}, one byte, the same as {@link
+     * #dynamicDataGetChar8} but widened here instead of left raw, to match this file's {@code
+     * i8/u8/i16/u16/i32/u32/char8 -> int} carrier convention for {@code DynamicValue} scalar
+     * extractors.
      */
     public static int dynamicValueAsChar8(long value, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2451,21 +2542,21 @@ public final class FfiAccess {
     }
 
     /**
-     * Grow-and-retry driver for a dynamic value's {@code string}/{@code
-     * wstring} contents, mirroring {@link #dynamicDataGetString} exactly:
-     * {@code int2dds_dynamic_value_as_string} (ffi/src/dynamic_value.rs)
-     * shares {@code copy_str_to_c} with {@code int2dds_dynamic_data_get_string},
-     * so the required size excludes the trailing NUL both on {@code
-     * RET_BUFFER_TOO_SMALL} and on success, and this regrows to {@code
-     * outLen + 1} accordingly. Never throws -- policy-free like every other
-     * bridge here.
+     * Grow-and-retry driver for a dynamic value's {@code string}/{@code wstring} contents,
+     * mirroring {@link #dynamicDataGetString} exactly: {@code int2dds_dynamic_value_as_string}
+     * (ffi/src/dynamic_value.rs) shares {@code copy_str_to_c} with {@code
+     * int2dds_dynamic_data_get_string}, so the required size excludes the trailing NUL both on
+     * {@code RET_BUFFER_TOO_SMALL} and on success, and this regrows to {@code outLen + 1}
+     * accordingly. Never throws -- policy-free like every other bridge here.
      */
     public static int dynamicValueAsString(long value, byte[][] bytesOut) {
         int cap = 64;
         while (true) {
             byte[] buf = new byte[cap];
             ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-            int rc = Ffi.int2dds_dynamic_value_as_string(value, buf, cap, directBufferAddress(sizeSlot));
+            int rc =
+                    Ffi.int2dds_dynamic_value_as_string(
+                            value, buf, cap, directBufferAddress(sizeSlot));
             NativeKeepAlive.keepAlive(sizeSlot);
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
                 cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
@@ -2482,14 +2573,13 @@ public final class FfiAccess {
     }
 
     /**
-     * Grow-and-retry driver for an enum dynamic value's literal name, plus a
-     * single fixed-size out slot for its numeric value read in the same
-     * native call -- mirrors {@link #dynamicValueAsString}'s buffer contract
-     * for the name (out_len excludes the NUL, regrow to {@code outLen + 1});
-     * {@code int2dds_dynamic_value_as_enum} (ffi/src/dynamic_value.rs) writes
-     * the numeric value to {@code out_value} before the string copy, so it is
-     * available on every call, but only read here on {@code RET_OK} since a
-     * too-small buffer means a retry is coming anyway.
+     * Grow-and-retry driver for an enum dynamic value's literal name, plus a single fixed-size out
+     * slot for its numeric value read in the same native call -- mirrors {@link
+     * #dynamicValueAsString}'s buffer contract for the name (out_len excludes the NUL, regrow to
+     * {@code outLen + 1}); {@code int2dds_dynamic_value_as_enum} (ffi/src/dynamic_value.rs) writes
+     * the numeric value to {@code out_value} before the string copy, so it is available on every
+     * call, but only read here on {@code RET_OK} since a too-small buffer means a retry is coming
+     * anyway.
      */
     public static int dynamicValueAsEnum(long value, byte[][] nameOut, int[] valueOut) {
         int cap = 64;
@@ -2497,8 +2587,13 @@ public final class FfiAccess {
             byte[] buf = new byte[cap];
             ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
             ByteBuffer valueSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-            int rc = Ffi.int2dds_dynamic_value_as_enum(
-                    value, buf, cap, directBufferAddress(sizeSlot), directBufferAddress(valueSlot));
+            int rc =
+                    Ffi.int2dds_dynamic_value_as_enum(
+                            value,
+                            buf,
+                            cap,
+                            directBufferAddress(sizeSlot),
+                            directBufferAddress(valueSlot));
             NativeKeepAlive.keepAlive(sizeSlot);
             NativeKeepAlive.keepAlive(valueSlot);
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
@@ -2517,12 +2612,11 @@ public final class FfiAccess {
     }
 
     /**
-     * Clones a struct dynamic value's fields into a new, independently-owned
-     * DynamicData handle, writing it to {@code out[0]} on success. {@code
-     * int2dds_dynamic_value_as_struct} (ffi/src/dynamic_value.rs) clones the
-     * inner DynamicData rather than transferring ownership of an existing
-     * one, so the source value is untouched and the caller owns the returned
-     * handle and must destroy it (via {@link #dynamicDataDestroy}).
+     * Clones a struct dynamic value's fields into a new, independently-owned DynamicData handle,
+     * writing it to {@code out[0]} on success. {@code int2dds_dynamic_value_as_struct}
+     * (ffi/src/dynamic_value.rs) clones the inner DynamicData rather than transferring ownership of
+     * an existing one, so the source value is untouched and the caller owns the returned handle and
+     * must destroy it (via {@link #dynamicDataDestroy}).
      */
     public static int dynamicValueAsStruct(long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2534,7 +2628,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a dynamic value's kind (one of {@code DynamicValueKind}'s constants) into {@code out[0]}. */
+    /**
+     * Reads a dynamic value's kind (one of {@code DynamicValueKind}'s constants) into {@code
+     * out[0]}.
+     */
     public static int dynamicValueKind(long value, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_kind(value, directBufferAddress(slot));
@@ -2545,10 +2642,7 @@ public final class FfiAccess {
         return rc;
     }
 
-    /**
-     * Reads the element count of a sequence/array/map dynamic value into
-     * {@code out[0]}.
-     */
+    /** Reads the element count of a sequence/array/map dynamic value into {@code out[0]}. */
     public static int dynamicValueLen(long value, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_len(value, directBufferAddress(slot));
@@ -2560,11 +2654,10 @@ public final class FfiAccess {
     }
 
     /**
-     * Clones the element at {@code index} of a sequence/array dynamic value
-     * into a new, independently-owned DynamicValue handle, writing it to
-     * {@code out[0]} on success. The caller owns the returned handle and must
-     * destroy it (via {@link #dynamicValueDestroy}) -- the source value is
-     * untouched.
+     * Clones the element at {@code index} of a sequence/array dynamic value into a new,
+     * independently-owned DynamicValue handle, writing it to {@code out[0]} on success. The caller
+     * owns the returned handle and must destroy it (via {@link #dynamicValueDestroy}) -- the source
+     * value is untouched.
      */
     public static int dynamicValueElement(long value, long index, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2577,8 +2670,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates an empty map dynamic value, writing the handle to {@code
-     * out[0]} on success. Fill it with {@link #dynamicValueMapInsert}.
+     * Creates an empty map dynamic value, writing the handle to {@code out[0]} on success. Fill it
+     * with {@link #dynamicValueMapInsert}.
      */
     public static int dynamicValueMap(long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2591,10 +2684,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Inserts a key/value pair into the map value {@code map}. On {@code
-     * RET_OK} this consumes BOTH {@code key} and {@code value}'s handles --
-     * they are moved into {@code map} and the caller must not use or destroy
-     * either again. On any other code (e.g. {@code map} is not a map), both
+     * Inserts a key/value pair into the map value {@code map}. On {@code RET_OK} this consumes BOTH
+     * {@code key} and {@code value}'s handles -- they are moved into {@code map} and the caller
+     * must not use or destroy either again. On any other code (e.g. {@code map} is not a map), both
      * are left untouched and still owned by the caller.
      */
     public static int dynamicValueMapInsert(long map, long key, long value) {
@@ -2602,10 +2694,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Clones the key at {@code index} of a map dynamic value into a new,
-     * independently-owned DynamicValue handle, writing it to {@code out[0]}
-     * on success. The caller owns the returned handle and must destroy it --
-     * the source value is untouched.
+     * Clones the key at {@code index} of a map dynamic value into a new, independently-owned
+     * DynamicValue handle, writing it to {@code out[0]} on success. The caller owns the returned
+     * handle and must destroy it -- the source value is untouched.
      */
     public static int dynamicValueMapKey(long value, long index, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2618,10 +2709,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Clones the value at {@code index} of a map dynamic value into a new,
-     * independently-owned DynamicValue handle, writing it to {@code out[0]}
-     * on success. The caller owns the returned handle and must destroy it --
-     * the source value is untouched.
+     * Clones the value at {@code index} of a map dynamic value into a new, independently-owned
+     * DynamicValue handle, writing it to {@code out[0]} on success. The caller owns the returned
+     * handle and must destroy it -- the source value is untouched.
      */
     public static int dynamicValueMapValue(long value, long index, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2634,13 +2724,12 @@ public final class FfiAccess {
     }
 
     /**
-     * Constructs a union dynamic value from {@code discriminator} and {@code
-     * value}, writing the handle to {@code out[0]} on success. Consumes BOTH
-     * {@code discriminator} and {@code value}'s handles unconditionally --
-     * the native call frees them via {@code Box::from_raw} right after its
-     * null checks and before any fallible step, so unlike {@link
-     * #dynamicValuePush} and {@link #dynamicValueMapInsert} there is no
-     * failure path that leaves either argument still owned by the caller.
+     * Constructs a union dynamic value from {@code discriminator} and {@code value}, writing the
+     * handle to {@code out[0]} on success. Consumes BOTH {@code discriminator} and {@code value}'s
+     * handles unconditionally -- the native call frees them via {@code Box::from_raw} right after
+     * its null checks and before any fallible step, so unlike {@link #dynamicValuePush} and {@link
+     * #dynamicValueMapInsert} there is no failure path that leaves either argument still owned by
+     * the caller.
      */
     public static int dynamicValueUnion(long discriminator, long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2653,10 +2742,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Clones a union value's discriminator into a new, independently-owned
-     * DynamicValue handle, writing it to {@code out[0]} on success. The
-     * caller owns the returned handle and must destroy it -- the source
-     * value is untouched.
+     * Clones a union value's discriminator into a new, independently-owned DynamicValue handle,
+     * writing it to {@code out[0]} on success. The caller owns the returned handle and must destroy
+     * it -- the source value is untouched.
      */
     public static int dynamicValueUnionDiscriminator(long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2669,10 +2757,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Clones a union value's selected branch value into a new,
-     * independently-owned DynamicValue handle, writing it to {@code out[0]}
-     * on success. The caller owns the returned handle and must destroy it --
-     * the source value is untouched.
+     * Clones a union value's selected branch value into a new, independently-owned DynamicValue
+     * handle, writing it to {@code out[0]} on success. The caller owns the returned handle and must
+     * destroy it -- the source value is untouched.
      */
     public static int dynamicValueUnionValue(long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2698,9 +2785,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a new registry and loads {@code path} into it in one step,
-     * writing the new handle to {@code out[0]} on success -- the same
-     * {@code (rc, long[] out)} shape as {@link #xmlTypeRegistryCreate}.
+     * Creates a new registry and loads {@code path} into it in one step, writing the new handle to
+     * {@code out[0]} on success -- the same {@code (rc, long[] out)} shape as {@link
+     * #xmlTypeRegistryCreate}.
      */
     public static int xmlTypeRegistryFromFile(byte[] path, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2722,7 +2809,9 @@ public final class FfiAccess {
         return Ffi.int2dds_xml_type_registry_load_file(registry, path);
     }
 
-    /** Reads the number of types loaded into a registry, writing it to {@code out[0]} on success. */
+    /**
+     * Reads the number of types loaded into a registry, writing it to {@code out[0]} on success.
+     */
     public static int xmlTypeRegistryTypeCount(long registry, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_xml_type_registry_type_count(registry, directBufferAddress(slot));
@@ -2734,12 +2823,14 @@ public final class FfiAccess {
     }
 
     /**
-     * Looks up a loaded type by name, writing a DynamicTypeSupport handle to
-     * {@code out[0]} on success.
+     * Looks up a loaded type by name, writing a DynamicTypeSupport handle to {@code out[0]} on
+     * success.
      */
     public static int xmlTypeRegistryGetTypeSupport(long registry, byte[] name, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_xml_type_registry_get_type_support(registry, name, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_xml_type_registry_get_type_support(
+                        registry, name, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -2748,10 +2839,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Builds a DynamicTypeSupport for a type name loaded into the factory
-     * singleton via {@code loadProfiles} (a {@code <types>} XML section),
-     * writing its handle to {@code out[0]} on success. {@code
-     * RET_DYNAMIC_FIELD_NOT_FOUND} (200) for an unknown name -- the
+     * Builds a DynamicTypeSupport for a type name loaded into the factory singleton via {@code
+     * loadProfiles} (a {@code <types>} XML section), writing its handle to {@code out[0]} on
+     * success. {@code RET_DYNAMIC_FIELD_NOT_FOUND} (200) for an unknown name -- the
      * factory-singleton companion to {@link #xmlTypeRegistryGetTypeSupport}.
      */
     public static int getDynamicTypeSupport(byte[] typeName, long[] out) {
@@ -2765,14 +2855,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Looks up a loaded type by name, writing a TypeObject handle to {@code
-     * out[0]} on success. Returns {@code RET_DYNAMIC_FIELD_NOT_FOUND} (200) if
-     * no type by that name is loaded -- the same handle type {@link
-     * #typeInfoToTypeObject} produces, released the same way.
+     * Looks up a loaded type by name, writing a TypeObject handle to {@code out[0]} on success.
+     * Returns {@code RET_DYNAMIC_FIELD_NOT_FOUND} (200) if no type by that name is loaded -- the
+     * same handle type {@link #typeInfoToTypeObject} produces, released the same way.
      */
     public static int xmlTypeRegistryGetTypeObject(long registry, byte[] name, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_xml_type_registry_get_type_object(registry, name, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_xml_type_registry_get_type_object(
+                        registry, name, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -2781,24 +2872,22 @@ public final class FfiAccess {
     }
 
     /**
-     * Grow-and-retry driver for the fully-qualified name of the type at
-     * {@code index}, mirroring {@link #dynamicDataGetString} exactly: {@code
-     * int2dds_xml_type_registry_type_name} shares {@code copy_str_to_c}'s
-     * contract with {@code int2dds_dynamic_data_get_string} (size reported
-     * WITHOUT the trailing NUL, both on {@code RET_BUFFER_TOO_SMALL} and on
-     * success), so the same regrow-to-{@code outLen + 1} logic applies. An
-     * out-of-range {@code index} returns {@code RET_INVALID_ARGUMENT} on the
-     * first call, never {@code RET_BUFFER_TOO_SMALL}, so the loop exits
-     * immediately in that case. Never throws -- policy-free like every other
-     * bridge here.
+     * Grow-and-retry driver for the fully-qualified name of the type at {@code index}, mirroring
+     * {@link #dynamicDataGetString} exactly: {@code int2dds_xml_type_registry_type_name} shares
+     * {@code copy_str_to_c}'s contract with {@code int2dds_dynamic_data_get_string} (size reported
+     * WITHOUT the trailing NUL, both on {@code RET_BUFFER_TOO_SMALL} and on success), so the same
+     * regrow-to-{@code outLen + 1} logic applies. An out-of-range {@code index} returns {@code
+     * RET_INVALID_ARGUMENT} on the first call, never {@code RET_BUFFER_TOO_SMALL}, so the loop
+     * exits immediately in that case. Never throws -- policy-free like every other bridge here.
      */
     public static int xmlTypeRegistryTypeName(long registry, long index, byte[][] bytesOut) {
         int cap = 64;
         while (true) {
             byte[] buf = new byte[cap];
             ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-            int rc = Ffi.int2dds_xml_type_registry_type_name(
-                    registry, index, buf, cap, directBufferAddress(sizeSlot));
+            int rc =
+                    Ffi.int2dds_xml_type_registry_type_name(
+                            registry, index, buf, cap, directBufferAddress(sizeSlot));
             NativeKeepAlive.keepAlive(sizeSlot);
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
                 cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
@@ -2825,8 +2914,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a writable DynamicData instance from a DynamicTypeSupport,
-     * writing its handle to {@code out[0]} on success.
+     * Creates a writable DynamicData instance from a DynamicTypeSupport, writing its handle to
+     * {@code out[0]} on success.
      */
     public static int dynamicDataCreate(long support, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2843,22 +2932,30 @@ public final class FfiAccess {
         return Ffi.int2dds_dynamic_data_set_bool(data, field, value);
     }
 
-    /** Sets an i8 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    /**
+     * Sets an i8 field at {@code field} (passed widened as an int). Returns the C ABI status code.
+     */
     public static int dynamicDataSetI8(long data, byte[] field, int value) {
         return Ffi.int2dds_dynamic_data_set_i8(data, field, value);
     }
 
-    /** Sets a u8 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    /**
+     * Sets a u8 field at {@code field} (passed widened as an int). Returns the C ABI status code.
+     */
     public static int dynamicDataSetU8(long data, byte[] field, int value) {
         return Ffi.int2dds_dynamic_data_set_u8(data, field, value);
     }
 
-    /** Sets an i16 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    /**
+     * Sets an i16 field at {@code field} (passed widened as an int). Returns the C ABI status code.
+     */
     public static int dynamicDataSetI16(long data, byte[] field, int value) {
         return Ffi.int2dds_dynamic_data_set_i16(data, field, value);
     }
 
-    /** Sets a u16 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    /**
+     * Sets a u16 field at {@code field} (passed widened as an int). Returns the C ABI status code.
+     */
     public static int dynamicDataSetU16(long data, byte[] field, int value) {
         return Ffi.int2dds_dynamic_data_set_u16(data, field, value);
     }
@@ -2893,20 +2990,26 @@ public final class FfiAccess {
         return Ffi.int2dds_dynamic_data_set_f64(data, field, value);
     }
 
-    /** Sets a char8 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    /**
+     * Sets a char8 field at {@code field} (passed widened as an int). Returns the C ABI status
+     * code.
+     */
     public static int dynamicDataSetChar8(long data, byte[] field, int value) {
         return Ffi.int2dds_dynamic_data_set_char8(data, field, value);
     }
 
-    /** Sets a string field at {@code field} to {@code value} (UTF-8 bytes). Returns the C ABI status code. */
+    /**
+     * Sets a string field at {@code field} to {@code value} (UTF-8 bytes). Returns the C ABI status
+     * code.
+     */
     public static int dynamicDataSetString(long data, byte[] field, byte[] value) {
         return Ffi.int2dds_dynamic_data_set_string(data, field, value);
     }
 
     /**
-     * Sets field {@code field} to the dynamic value {@code value}. On {@code
-     * RET_OK} this consumes {@code value}'s handle -- it is moved into {@code
-     * data} and the caller must not use or destroy it again.
+     * Sets field {@code field} to the dynamic value {@code value}. On {@code RET_OK} this consumes
+     * {@code value}'s handle -- it is moved into {@code data} and the caller must not use or
+     * destroy it again.
      */
     public static int dynamicDataSetValue(long data, byte[] field, long value) {
         return Ffi.int2dds_dynamic_data_set_value(data, field, value);
@@ -2944,16 +3047,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a subscriber whose QoS comes from a loaded profile ({@code
-     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
-     * (rc, long[] handleOut)} shape as {@link #createSubscriber}, and the
-     * resulting subscriber is a normal subscriber, released the same way
-     * ({@link #deleteSubscriber}).
+     * Creates a subscriber whose QoS comes from a loaded profile ({@code qosPath} is a {@code
+     * "LibraryName::ProfileName"} path). Same {@code (rc, long[] handleOut)} shape as {@link
+     * #createSubscriber}, and the resulting subscriber is a normal subscriber, released the same
+     * way ({@link #deleteSubscriber}).
      */
-    public static int createSubscriberWithProfile(long participant, byte[] qosPath, long[] handleOut) {
+    public static int createSubscriberWithProfile(
+            long participant, byte[] qosPath, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_subscriber_with_profile(
-                participant, qosPath, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_subscriber_with_profile(
+                        participant, qosPath, directBufferAddress(slot));
         // Same fence as createSubscriber.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -2962,17 +3066,21 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** The 16-byte instance handle identifying this subscriber. {@code handleOut} must be a 16-byte array. */
+    /**
+     * The 16-byte instance handle identifying this subscriber. {@code handleOut} must be a 16-byte
+     * array.
+     */
     public static int subscriberGetInstanceHandle(long subscriber, byte[] handleOut) {
         return Ffi.int2dds_subscriber_get_instance_handle(subscriber, handleOut);
     }
 
     /** Creates a datareader. Returns rc; writes the handle to handleOut[0] only when rc == 0. */
-    public static int createDataReader(long subscriber, long topic, long qos, long listener,
-            int mask, long[] handleOut) {
+    public static int createDataReader(
+            long subscriber, long topic, long qos, long listener, int mask, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_datareader(
-                subscriber, topic, qos, listener, mask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_datareader(
+                        subscriber, topic, qos, listener, mask, directBufferAddress(slot));
         // Same fence as createDataWriter.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -2987,18 +3095,23 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a datareader whose QoS comes from a loaded profile ({@code
-     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
-     * (rc, long[] handleOut)} shape as {@link #createDataReader}, and the
-     * resulting reader is a normal typed datareader, released the same way
-     * ({@link #deleteDataReader}). {@code listener} is {@code 0L} and {@code
-     * mask} is {@code 0} — no creation-time listener.
+     * Creates a datareader whose QoS comes from a loaded profile ({@code qosPath} is a {@code
+     * "LibraryName::ProfileName"} path). Same {@code (rc, long[] handleOut)} shape as {@link
+     * #createDataReader}, and the resulting reader is a normal typed datareader, released the same
+     * way ({@link #deleteDataReader}). {@code listener} is {@code 0L} and {@code mask} is {@code 0}
+     * — no creation-time listener.
      */
-    public static int createDataReaderWithProfile(long subscriber, long topic, byte[] qosPath,
-            long listener, int mask, long[] handleOut) {
+    public static int createDataReaderWithProfile(
+            long subscriber,
+            long topic,
+            byte[] qosPath,
+            long listener,
+            int mask,
+            long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_datareader_with_profile(
-                subscriber, topic, qosPath, listener, mask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_datareader_with_profile(
+                        subscriber, topic, qosPath, listener, mask, directBufferAddress(slot));
         // Same fence as createDataReader.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -3008,16 +3121,16 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a datareader on a ContentFilteredTopic rather than a plain
-     * Topic. Returns the same {@code Int2DdsDataReader} handle shape as
-     * {@link #createDataReader} -- read/take/status calls afterward are
-     * identical either way.
+     * Creates a datareader on a ContentFilteredTopic rather than a plain Topic. Returns the same
+     * {@code Int2DdsDataReader} handle shape as {@link #createDataReader} -- read/take/status calls
+     * afterward are identical either way.
      */
-    public static int createDataReaderCft(long subscriber, long cft, long qos, long listener,
-            int mask, long[] handleOut) {
+    public static int createDataReaderCft(
+            long subscriber, long cft, long qos, long listener, int mask, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_datareader_cft(
-                subscriber, cft, qos, listener, mask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_datareader_cft(
+                        subscriber, cft, qos, listener, mask, directBufferAddress(slot));
         // Same fence as createDataReader.
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
@@ -3029,93 +3142,118 @@ public final class FfiAccess {
     // --- DataReader listeners (hand-written trampoline layer) ---
 
     /**
-     * Installs {@code listener} on {@code reader} for {@code mask}. Returns the
-     * binding-owned context pointer to pass back to {@link #readerListenerClear},
-     * or 0 on failure. Policy-free passthrough to {@link FfiHandwritten}.
+     * Installs {@code listener} on {@code reader} for {@code mask}. Returns the binding-owned
+     * context pointer to pass back to {@link #readerListenerClear}, or 0 on failure. Policy-free
+     * passthrough to {@link FfiHandwritten}.
      */
     public static long readerListenerSet(long reader, DataReaderListener listener, int mask) {
         return FfiHandwritten.nativeReaderListenerSet(reader, listener, mask);
     }
 
     /**
-     * Clears the listener on {@code reader} and releases {@code ctx}. Returns the
-     * C ABI status code. Policy-free passthrough to {@link FfiHandwritten}.
+     * Clears the listener on {@code reader} and releases {@code ctx}. Returns the C ABI status
+     * code. Policy-free passthrough to {@link FfiHandwritten}.
      */
     public static int readerListenerClear(long reader, long ctx) {
         return FfiHandwritten.nativeReaderListenerClear(reader, ctx);
     }
 
     /**
-     * Takes one serialized sample into a caller-supplied buffer. Returns the
-     * C ABI status code — {@code NO_DATA} when nothing is queued, not a
-     * loan-based signal: unlike the loaned variants, this copies into {@code
-     * buffer} and hands back nothing to return. {@code validDataOut} points
-     * at a single {@code bool} (one byte), not an {@code int} — reading it as
-     * four bytes picks up three unrelated adjacent ones, the same shape of
-     * mistake the QoS read-back hit on the previous branch.
+     * Takes one serialized sample into a caller-supplied buffer. Returns the C ABI status code —
+     * {@code NO_DATA} when nothing is queued, not a loan-based signal: unlike the loaned variants,
+     * this copies into {@code buffer} and hands back nothing to return. {@code validDataOut} points
+     * at a single {@code bool} (one byte), not an {@code int} — reading it as four bytes picks up
+     * three unrelated adjacent ones, the same shape of mistake the QoS read-back hit on the
+     * previous branch.
      */
-    public static int datareaderTakeSerialized(long reader, long buffer, long bufferCapacity,
-            long actualSizeOut, long validDataOut) {
+    public static int datareaderTakeSerialized(
+            long reader, long buffer, long bufferCapacity, long actualSizeOut, long validDataOut) {
         return Ffi.int2dds_datareader_take_serialized(
                 reader, buffer, bufferCapacity, actualSizeOut, validDataOut);
     }
 
     /** Same as {@link #datareaderTakeSerialized} but non-removing (read, not take). */
-    public static int datareaderReadSerialized(long reader, long buffer, long bufferCapacity,
-            long actualSizeOut, long validDataOut) {
+    public static int datareaderReadSerialized(
+            long reader, long buffer, long bufferCapacity, long actualSizeOut, long validDataOut) {
         return Ffi.int2dds_datareader_read_serialized(
                 reader, buffer, bufferCapacity, actualSizeOut, validDataOut);
     }
 
     /** take with full SampleInfo. Copies into the caller buffer; sample removed only if it fits. */
-    public static int datareaderTakeSerializedWInfo(long reader, long buffer, long bufferCapacity,
-            long actualSizeOut, long infoOut) {
+    public static int datareaderTakeSerializedWInfo(
+            long reader, long buffer, long bufferCapacity, long actualSizeOut, long infoOut) {
         return Ffi.int2dds_datareader_take_serialized_w_info(
                 reader, buffer, bufferCapacity, actualSizeOut, infoOut);
     }
 
     /** read with full SampleInfo. Same signature as take; does not remove the sample. */
-    public static int datareaderReadSerializedWInfo(long reader, long buffer, long bufferCapacity,
-            long actualSizeOut, long infoOut) {
+    public static int datareaderReadSerializedWInfo(
+            long reader, long buffer, long bufferCapacity, long actualSizeOut, long infoOut) {
         return Ffi.int2dds_datareader_read_serialized_w_info(
                 reader, buffer, bufferCapacity, actualSizeOut, infoOut);
     }
 
     /**
-     * take with full SampleInfo, filtered by sample/view/instance state masks
-     * -- unlike {@link #datareaderTakeSerializedWInfo}, which only ever
-     * matches a NOT_READ sample, this can retrieve a sample in any state the
-     * masks admit (e.g. an already-READ one via {@code SampleState.READ}).
-     * {@code NO_DATA} when nothing matches the masks.
+     * take with full SampleInfo, filtered by sample/view/instance state masks -- unlike {@link
+     * #datareaderTakeSerializedWInfo}, which only ever matches a NOT_READ sample, this can retrieve
+     * a sample in any state the masks admit (e.g. an already-READ one via {@code
+     * SampleState.READ}). {@code NO_DATA} when nothing matches the masks.
      */
-    public static int datareaderTakeSerializedWStates(long reader, long buffer, long bufferCapacity,
-            long actualSizeOut, long infoOut, int sampleStateMask, int viewStateMask,
+    public static int datareaderTakeSerializedWStates(
+            long reader,
+            long buffer,
+            long bufferCapacity,
+            long actualSizeOut,
+            long infoOut,
+            int sampleStateMask,
+            int viewStateMask,
             int instanceStateMask) {
-        return Ffi.int2dds_datareader_take_serialized_w_states(reader, buffer, bufferCapacity,
-                actualSizeOut, infoOut, sampleStateMask, viewStateMask, instanceStateMask);
-    }
-
-    /** read with full SampleInfo, filtered by state masks. Same signature as take; does not remove. */
-    public static int datareaderReadSerializedWStates(long reader, long buffer, long bufferCapacity,
-            long actualSizeOut, long infoOut, int sampleStateMask, int viewStateMask,
-            int instanceStateMask) {
-        return Ffi.int2dds_datareader_read_serialized_w_states(reader, buffer, bufferCapacity,
-                actualSizeOut, infoOut, sampleStateMask, viewStateMask, instanceStateMask);
+        return Ffi.int2dds_datareader_take_serialized_w_states(
+                reader,
+                buffer,
+                bufferCapacity,
+                actualSizeOut,
+                infoOut,
+                sampleStateMask,
+                viewStateMask,
+                instanceStateMask);
     }
 
     /**
-     * Takes up to {@code maxSamples} serialized samples as a batch, writing a
-     * native sample-sequence handle to {@code seqOut[0]} on {@code RET_OK} or
-     * {@code RET_NO_DATA} -- on NO_DATA the native side still allocates an
-     * empty sequence, which must be freed with {@link #sampleSeqDelete} the
-     * same as a non-empty one. Iterate the sequence with {@link
-     * #sampleSeqLength}, {@link #sampleSeqGetData} and {@link
-     * #sampleSeqGetInfo}.
+     * read with full SampleInfo, filtered by state masks. Same signature as take; does not remove.
+     */
+    public static int datareaderReadSerializedWStates(
+            long reader,
+            long buffer,
+            long bufferCapacity,
+            long actualSizeOut,
+            long infoOut,
+            int sampleStateMask,
+            int viewStateMask,
+            int instanceStateMask) {
+        return Ffi.int2dds_datareader_read_serialized_w_states(
+                reader,
+                buffer,
+                bufferCapacity,
+                actualSizeOut,
+                infoOut,
+                sampleStateMask,
+                viewStateMask,
+                instanceStateMask);
+    }
+
+    /**
+     * Takes up to {@code maxSamples} serialized samples as a batch, writing a native
+     * sample-sequence handle to {@code seqOut[0]} on {@code RET_OK} or {@code RET_NO_DATA} -- on
+     * NO_DATA the native side still allocates an empty sequence, which must be freed with {@link
+     * #sampleSeqDelete} the same as a non-empty one. Iterate the sequence with {@link
+     * #sampleSeqLength}, {@link #sampleSeqGetData} and {@link #sampleSeqGetInfo}.
      */
     public static int datareaderTakeSerializedBatch(long reader, int maxSamples, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_take_serialized_batch(
-                reader, maxSamples, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_take_serialized_batch(
+                        reader, maxSamples, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
             seqOut[0] = slot.getLong(0);
@@ -3123,11 +3261,14 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Non-removing counterpart of {@link #datareaderTakeSerializedBatch}. Same seq_out contract. */
+    /**
+     * Non-removing counterpart of {@link #datareaderTakeSerializedBatch}. Same seq_out contract.
+     */
     public static int datareaderReadSerializedBatch(long reader, int maxSamples, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_read_serialized_batch(
-                reader, maxSamples, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_read_serialized_batch(
+                        reader, maxSamples, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
             seqOut[0] = slot.getLong(0);
@@ -3136,30 +3277,27 @@ public final class FfiAccess {
     }
 
     /**
-     * State-filtered counterpart of {@link #datareaderTakeSerializedBatch}. Same
-     * {@code seqOut} contract (RET_OK or RET_NO_DATA both allocate a sequence
-     * to be freed with {@link #sampleSeqDelete}), but only samples matching
-     * {@code sampleStateMask}/{@code viewStateMask}/{@code instanceStateMask}
-     * are included.
+     * State-filtered counterpart of {@link #datareaderTakeSerializedBatch}. Same {@code seqOut}
+     * contract (RET_OK or RET_NO_DATA both allocate a sequence to be freed with {@link
+     * #sampleSeqDelete}), but only samples matching {@code sampleStateMask}/{@code
+     * viewStateMask}/{@code instanceStateMask} are included.
      */
-    public static int datareaderTakeSerializedBatchWStates(long reader, int maxSamples,
-            long[] seqOut, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+    public static int datareaderTakeSerializedBatchWStates(
+            long reader,
+            int maxSamples,
+            long[] seqOut,
+            int sampleStateMask,
+            int viewStateMask,
+            int instanceStateMask) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_take_serialized_batch_w_states(reader, maxSamples,
-                directBufferAddress(slot), sampleStateMask, viewStateMask, instanceStateMask);
-        NativeKeepAlive.keepAlive(slot);
-        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
-            seqOut[0] = slot.getLong(0);
-        }
-        return rc;
-    }
-
-    /** Non-removing counterpart of {@link #datareaderTakeSerializedBatchWStates}. Same {@code seqOut} contract. */
-    public static int datareaderReadSerializedBatchWStates(long reader, int maxSamples,
-            long[] seqOut, int sampleStateMask, int viewStateMask, int instanceStateMask) {
-        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_read_serialized_batch_w_states(reader, maxSamples,
-                directBufferAddress(slot), sampleStateMask, viewStateMask, instanceStateMask);
+        int rc =
+                Ffi.int2dds_datareader_take_serialized_batch_w_states(
+                        reader,
+                        maxSamples,
+                        directBufferAddress(slot),
+                        sampleStateMask,
+                        viewStateMask,
+                        instanceStateMask);
         NativeKeepAlive.keepAlive(slot);
         if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
             seqOut[0] = slot.getLong(0);
@@ -3168,30 +3306,44 @@ public final class FfiAccess {
     }
 
     /**
-     * ReadCondition/QueryCondition-filtered counterpart of {@link
-     * #datareaderTakeSerializedBatch}: batch take of samples matching {@code
-     * condition} (its own native handle, from {@link
-     * kr.co.intellectus.int2dds.internal.ConditionHandleAccess#handle}). Same
-     * {@code seqOut} contract.
+     * Non-removing counterpart of {@link #datareaderTakeSerializedBatchWStates}. Same {@code
+     * seqOut} contract.
+     */
+    public static int datareaderReadSerializedBatchWStates(
+            long reader,
+            int maxSamples,
+            long[] seqOut,
+            int sampleStateMask,
+            int viewStateMask,
+            int instanceStateMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc =
+                Ffi.int2dds_datareader_read_serialized_batch_w_states(
+                        reader,
+                        maxSamples,
+                        directBufferAddress(slot),
+                        sampleStateMask,
+                        viewStateMask,
+                        instanceStateMask);
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * ReadCondition/QueryCondition-filtered counterpart of {@link #datareaderTakeSerializedBatch}:
+     * batch take of samples matching {@code condition} (its own native handle, from {@link
+     * kr.co.intellectus.int2dds.internal.ConditionHandleAccess#handle}). Same {@code seqOut}
+     * contract.
      */
     public static int datareaderTakeSerializedBatchWReadCondition(
             long reader, long condition, int maxSamples, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_take_serialized_batch_w_readcondition(
-                reader, condition, maxSamples, directBufferAddress(slot));
-        NativeKeepAlive.keepAlive(slot);
-        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
-            seqOut[0] = slot.getLong(0);
-        }
-        return rc;
-    }
-
-    /** Non-removing counterpart of {@link #datareaderTakeSerializedBatchWReadCondition}. Same {@code seqOut} contract. */
-    public static int datareaderReadSerializedBatchWReadCondition(
-            long reader, long condition, int maxSamples, long[] seqOut) {
-        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_read_serialized_batch_w_readcondition(
-                reader, condition, maxSamples, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_take_serialized_batch_w_readcondition(
+                        reader, condition, maxSamples, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
             seqOut[0] = slot.getLong(0);
@@ -3200,17 +3352,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Batch take scoped to the single instance {@code handle} (16 bytes)
-     * identifies, filtered by state masks. Same {@code seqOut} contract as
-     * {@link #datareaderTakeSerializedBatch}. Note the native parameter
-     * order: {@code handle} and the state masks precede {@code seqOut}.
+     * Non-removing counterpart of {@link #datareaderTakeSerializedBatchWReadCondition}. Same {@code
+     * seqOut} contract.
      */
-    public static int datareaderTakeInstanceSerializedBatch(long reader, byte[] handle,
-            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask,
-            long[] seqOut) {
+    public static int datareaderReadSerializedBatchWReadCondition(
+            long reader, long condition, int maxSamples, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_take_instance_serialized_batch(reader, handle, maxSamples,
-                sampleStateMask, viewStateMask, instanceStateMask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_read_serialized_batch_w_readcondition(
+                        reader, condition, maxSamples, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
             seqOut[0] = slot.getLong(0);
@@ -3218,13 +3368,58 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Non-removing counterpart of {@link #datareaderTakeInstanceSerializedBatch}. Same {@code seqOut} contract. */
-    public static int datareaderReadInstanceSerializedBatch(long reader, byte[] handle,
-            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask,
+    /**
+     * Batch take scoped to the single instance {@code handle} (16 bytes) identifies, filtered by
+     * state masks. Same {@code seqOut} contract as {@link #datareaderTakeSerializedBatch}. Note the
+     * native parameter order: {@code handle} and the state masks precede {@code seqOut}.
+     */
+    public static int datareaderTakeInstanceSerializedBatch(
+            long reader,
+            byte[] handle,
+            int maxSamples,
+            int sampleStateMask,
+            int viewStateMask,
+            int instanceStateMask,
             long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_read_instance_serialized_batch(reader, handle, maxSamples,
-                sampleStateMask, viewStateMask, instanceStateMask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_take_instance_serialized_batch(
+                        reader,
+                        handle,
+                        maxSamples,
+                        sampleStateMask,
+                        viewStateMask,
+                        instanceStateMask,
+                        directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Non-removing counterpart of {@link #datareaderTakeInstanceSerializedBatch}. Same {@code
+     * seqOut} contract.
+     */
+    public static int datareaderReadInstanceSerializedBatch(
+            long reader,
+            byte[] handle,
+            int maxSamples,
+            int sampleStateMask,
+            int viewStateMask,
+            int instanceStateMask,
+            long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc =
+                Ffi.int2dds_datareader_read_instance_serialized_batch(
+                        reader,
+                        handle,
+                        maxSamples,
+                        sampleStateMask,
+                        viewStateMask,
+                        instanceStateMask,
+                        directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
             seqOut[0] = slot.getLong(0);
@@ -3238,11 +3433,10 @@ public final class FfiAccess {
     }
 
     /**
-     * Copies sample {@code index}'s raw CDR bytes into {@code buffer}.
-     * Returns {@code RET_BUFFER_TOO_SMALL} with {@code actualSizeOut} set to
-     * the required size when {@code bufferCapacity} is too small -- the
-     * buffer is left untouched (no truncated copy), so a caller grows and
-     * retries, the same contract as the single-sample take/read bridges.
+     * Copies sample {@code index}'s raw CDR bytes into {@code buffer}. Returns {@code
+     * RET_BUFFER_TOO_SMALL} with {@code actualSizeOut} set to the required size when {@code
+     * bufferCapacity} is too small -- the buffer is left untouched (no truncated copy), so a caller
+     * grows and retries, the same contract as the single-sample take/read bridges.
      */
     public static int sampleSeqGetData(
             long seq, long index, long buffer, long bufferCapacity, long actualSizeOut) {
@@ -3250,8 +3444,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Writes sample {@code index}'s SampleInfo into the native buffer at
-     * {@code infoOut} (decode with {@link kr.co.intellectus.int2dds.core.SampleInfo#decode}).
+     * Writes sample {@code index}'s SampleInfo into the native buffer at {@code infoOut} (decode
+     * with {@link kr.co.intellectus.int2dds.core.SampleInfo#decode}).
      */
     public static int sampleSeqGetInfo(long seq, long index, long infoOut) {
         return Ffi.int2dds_sample_seq_get_info(seq, index, infoOut);
@@ -3279,14 +3473,12 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a trigger value through the generic {@code Int2DdsCondition} accessor,
-     * writing it to {@code out[0]} on success. Only valid for a handle obtained
-     * from {@code condition_seq_get} — that wrapper type (a fat
-     * {@code Arc<dyn Condition>}) has a different native layout from a concrete
-     * condition's own handle (e.g. a GuardCondition's thin
-     * {@code Arc<GuardCondition>}), so calling this on an original handle reads
-     * across the mismatch and corrupts memory. Use {@link
-     * #guardConditionGetTriggerValue} etc. for a concrete condition's own handle.
+     * Reads a trigger value through the generic {@code Int2DdsCondition} accessor, writing it to
+     * {@code out[0]} on success. Only valid for a handle obtained from {@code condition_seq_get} —
+     * that wrapper type (a fat {@code Arc<dyn Condition>}) has a different native layout from a
+     * concrete condition's own handle (e.g. a GuardCondition's thin {@code Arc<GuardCondition>}),
+     * so calling this on an original handle reads across the mismatch and corrupts memory. Use
+     * {@link #guardConditionGetTriggerValue} etc. for a concrete condition's own handle.
      */
     public static int conditionGetTriggerValue(long condition, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3299,8 +3491,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a guard condition's own trigger value (its own handle, not a seq
-     * entry), writing it to {@code out[0]} on success.
+     * Reads a guard condition's own trigger value (its own handle, not a seq entry), writing it to
+     * {@code out[0]} on success.
      */
     public static int guardConditionGetTriggerValue(long condition, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3349,13 +3541,11 @@ public final class FfiAccess {
     }
 
     /**
-     * Blocks up to {@code timeoutMs} (negative = infinite) for an attached
-     * condition to trigger. On success writes the resulting condition
-     * sequence's handle to {@code seqOut[0]} — a new pointer sequence
-     * unrelated to the attached handles, meant only to be passed to {@link
-     * #conditionSeqDelete}, never to {@code condition_seq_get}. Returns
-     * {@code RET_TIMEOUT} with {@code seqOut} left untouched when nothing
-     * triggered before the timeout.
+     * Blocks up to {@code timeoutMs} (negative = infinite) for an attached condition to trigger. On
+     * success writes the resulting condition sequence's handle to {@code seqOut[0]} — a new pointer
+     * sequence unrelated to the attached handles, meant only to be passed to {@link
+     * #conditionSeqDelete}, never to {@code condition_seq_get}. Returns {@code RET_TIMEOUT} with
+     * {@code seqOut} left untouched when nothing triggered before the timeout.
      */
     public static int waitsetWaitEx(long waitset, long timeoutMs, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3384,9 +3574,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints a fresh status condition for {@code reader}, writing its handle to
-     * {@code handleOut[0]} on success. Each call returns a new native box the
-     * caller owns and must release through {@link #statusConditionDelete}.
+     * Mints a fresh status condition for {@code reader}, writing its handle to {@code handleOut[0]}
+     * on success. Each call returns a new native box the caller owns and must release through
+     * {@link #statusConditionDelete}.
      */
     public static int datareaderGetStatusCondition(long reader, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3399,9 +3589,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints a fresh status condition for {@code writer}, writing its handle to
-     * {@code handleOut[0]} on success. Each call returns a new native box the
-     * caller owns and must release through {@link #statusConditionDelete}.
+     * Mints a fresh status condition for {@code writer}, writing its handle to {@code handleOut[0]}
+     * on success. Each call returns a new native box the caller owns and must release through
+     * {@link #statusConditionDelete}.
      */
     public static int datawriterGetStatusCondition(long writer, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3414,9 +3604,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints a fresh status condition for {@code publisher}, writing its handle
-     * to {@code handleOut[0]} on success. Each call returns a new native box
-     * the caller owns and must release through {@link #statusConditionDelete}.
+     * Mints a fresh status condition for {@code publisher}, writing its handle to {@code
+     * handleOut[0]} on success. Each call returns a new native box the caller owns and must release
+     * through {@link #statusConditionDelete}.
      */
     public static int publisherGetStatusCondition(long publisher, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3429,10 +3619,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints a fresh status condition for {@code subscriber}, writing its
-     * handle to {@code handleOut[0]} on success. Each call returns a new
-     * native box the caller owns and must release through {@link
-     * #statusConditionDelete}.
+     * Mints a fresh status condition for {@code subscriber}, writing its handle to {@code
+     * handleOut[0]} on success. Each call returns a new native box the caller owns and must release
+     * through {@link #statusConditionDelete}.
      */
     public static int subscriberGetStatusCondition(long subscriber, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3445,14 +3634,14 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints a fresh status condition for {@code participant}, writing its
-     * handle to {@code handleOut[0]} on success. Each call returns a new
-     * native box the caller owns and must release through {@link
-     * #statusConditionDelete}.
+     * Mints a fresh status condition for {@code participant}, writing its handle to {@code
+     * handleOut[0]} on success. Each call returns a new native box the caller owns and must release
+     * through {@link #statusConditionDelete}.
      */
     public static int participantGetStatusCondition(long participant, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_get_statuscondition(participant, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_get_statuscondition(participant, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
@@ -3461,9 +3650,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints a fresh status condition for {@code topic}, writing its handle to
-     * {@code handleOut[0]} on success. Each call returns a new native box the
-     * caller owns and must release through {@link #statusConditionDelete}.
+     * Mints a fresh status condition for {@code topic}, writing its handle to {@code handleOut[0]}
+     * on success. Each call returns a new native box the caller owns and must release through
+     * {@link #statusConditionDelete}.
      */
     public static int topicGetStatusCondition(long topic, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3475,7 +3664,9 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a reader's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    /**
+     * Reads a reader's pending status-changes mask, writing it to {@code outMask[0]} on success.
+     */
     public static int datareaderGetStatusChanges(long reader, int[] outMask) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datareader_get_status_changes(reader, directBufferAddress(slot));
@@ -3486,7 +3677,9 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a writer's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    /**
+     * Reads a writer's pending status-changes mask, writing it to {@code outMask[0]} on success.
+     */
     public static int datawriterGetStatusChanges(long writer, int[] outMask) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datawriter_get_status_changes(writer, directBufferAddress(slot));
@@ -3497,7 +3690,9 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a publisher's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    /**
+     * Reads a publisher's pending status-changes mask, writing it to {@code outMask[0]} on success.
+     */
     public static int publisherGetStatusChanges(long publisher, int[] outMask) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_publisher_get_status_changes(publisher, directBufferAddress(slot));
@@ -3508,7 +3703,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a subscriber's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    /**
+     * Reads a subscriber's pending status-changes mask, writing it to {@code outMask[0]} on
+     * success.
+     */
     public static int subscriberGetStatusChanges(long subscriber, int[] outMask) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_subscriber_get_status_changes(subscriber, directBufferAddress(slot));
@@ -3519,7 +3717,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a participant's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    /**
+     * Reads a participant's pending status-changes mask, writing it to {@code outMask[0]} on
+     * success.
+     */
     public static int participantGetStatusChanges(long participant, int[] outMask) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_participant_get_status_changes(participant, directBufferAddress(slot));
@@ -3542,12 +3743,13 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a status condition's own trigger value (its own handle, not a seq
-     * entry), writing it to {@code out[0]} on success.
+     * Reads a status condition's own trigger value (its own handle, not a seq entry), writing it to
+     * {@code out[0]} on success.
      */
     public static int statusConditionGetTriggerValue(long condition, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_statuscondition_get_trigger_value(condition, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_statuscondition_get_trigger_value(condition, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
@@ -3555,10 +3757,15 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads a status condition's enabled-statuses mask, writing it to {@code outMask[0]} on success. */
+    /**
+     * Reads a status condition's enabled-statuses mask, writing it to {@code outMask[0]} on
+     * success.
+     */
     public static int statusConditionGetEnabledStatuses(long condition, int[] outMask) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_statuscondition_get_enabled_statuses(condition, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_statuscondition_get_enabled_statuses(
+                        condition, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             outMask[0] = slot.getInt(0); // mask out is a u32
@@ -3587,16 +3794,16 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a read condition on {@code reader} for the given state masks,
-     * writing its handle to {@code out[0]} on success. Each call mints a new
-     * native box the caller owns and must release through {@link
-     * #readConditionDelete}.
+     * Creates a read condition on {@code reader} for the given state masks, writing its handle to
+     * {@code out[0]} on success. Each call mints a new native box the caller owns and must release
+     * through {@link #readConditionDelete}.
      */
     public static int datareaderCreateReadCondition(
             long reader, int sampleMask, int viewMask, int instanceMask, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_create_readcondition(
-                reader, sampleMask, viewMask, instanceMask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_create_readcondition(
+                        reader, sampleMask, viewMask, instanceMask, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -3605,20 +3812,32 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a query condition on {@code reader} for the given state masks
-     * and query, writing its handle to {@code out[0]} on success. {@code
-     * queryExpr} and {@code queryParams} cross as UTF-8 {@code byte[]} /
-     * {@code byte[][]}, never {@code String}. Each call mints a new native
-     * box the caller owns and must release through {@link
-     * #readConditionDelete} — a query condition is deleted the same way as a
-     * read condition.
+     * Creates a query condition on {@code reader} for the given state masks and query, writing its
+     * handle to {@code out[0]} on success. {@code queryExpr} and {@code queryParams} cross as UTF-8
+     * {@code byte[]} / {@code byte[][]}, never {@code String}. Each call mints a new native box the
+     * caller owns and must release through {@link #readConditionDelete} — a query condition is
+     * deleted the same way as a read condition.
      */
-    public static int datareaderCreateQueryCondition(long reader, int sampleMask, int viewMask,
-            int instanceMask, byte[] queryExpr, byte[][] queryParams, long paramsCount,
+    public static int datareaderCreateQueryCondition(
+            long reader,
+            int sampleMask,
+            int viewMask,
+            int instanceMask,
+            byte[] queryExpr,
+            byte[][] queryParams,
+            long paramsCount,
             long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_create_querycondition(reader, sampleMask, viewMask,
-                instanceMask, queryExpr, queryParams, paramsCount, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_create_querycondition(
+                        reader,
+                        sampleMask,
+                        viewMask,
+                        instanceMask,
+                        queryExpr,
+                        queryParams,
+                        paramsCount,
+                        directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -3627,9 +3846,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a read condition's own trigger value (its own handle, not a seq
-     * entry), writing it to {@code out[0]} on success. Also valid for a
-     * QueryCondition handle, which is a ReadCondition.
+     * Reads a read condition's own trigger value (its own handle, not a seq entry), writing it to
+     * {@code out[0]} on success. Also valid for a QueryCondition handle, which is a ReadCondition.
      */
     public static int readConditionGetTriggerValue(long condition, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3663,7 +3881,9 @@ public final class FfiAccess {
 
     // --- Discovery: PublicationBuiltinTopicData (materialize-then-destroy) ---
 
-    /** Bridge shape for a {@code copy_string_to_c} getter: (bufAddr, capacity, sizeOutAddr) -> rc. */
+    /**
+     * Bridge shape for a {@code copy_string_to_c} getter: (bufAddr, capacity, sizeOutAddr) -> rc.
+     */
     public interface GrowableStringGetter {
         int get(long bufAddr, long capacity, long sizeOutAddr);
     }
@@ -3674,13 +3894,12 @@ public final class FfiAccess {
     }
 
     /**
-     * Grow-and-retry driver for a {@code copy_string_to_c}-style getter, mirroring
-     * {@code DataReader}'s payload-growth idiom on the read path. On {@code
-     * RET_BUFFER_TOO_SMALL} the size slot holds the required capacity (including
-     * the trailing NUL), so this regrows and retries. Never throws -- policy-free
-     * like every other bridge here -- it just returns the final status code and,
-     * only on {@code RET_OK}, writes the decoded UTF-8 bytes (NUL trimmed) to
-     * {@code bytesOut[0]}.
+     * Grow-and-retry driver for a {@code copy_string_to_c}-style getter, mirroring {@code
+     * DataReader}'s payload-growth idiom on the read path. On {@code RET_BUFFER_TOO_SMALL} the size
+     * slot holds the required capacity (including the trailing NUL), so this regrows and retries.
+     * Never throws -- policy-free like every other bridge here -- it just returns the final status
+     * code and, only on {@code RET_OK}, writes the decoded UTF-8 bytes (NUL trimmed) to {@code
+     * bytesOut[0]}.
      */
     public static int readGrowableString(GrowableStringGetter getter, byte[][] bytesOut) {
         int cap = 256;
@@ -3707,12 +3926,11 @@ public final class FfiAccess {
     }
 
     /**
-     * Grow-and-retry driver for a raw-bytes getter (e.g. {@code user_data}) that
-     * has no {@code BUFFER_TOO_SMALL} signal of its own: it always returns
-     * {@code RET_OK} and silently truncates when the buffer is too small, always
-     * reporting the untruncated length via the size slot. So this regrows and
-     * retries whenever the reported size exceeds what was actually copied,
-     * rather than switching on the status code. Never throws -- policy-free.
+     * Grow-and-retry driver for a raw-bytes getter (e.g. {@code user_data}) that has no {@code
+     * BUFFER_TOO_SMALL} signal of its own: it always returns {@code RET_OK} and silently truncates
+     * when the buffer is too small, always reporting the untruncated length via the size slot. So
+     * this regrows and retries whenever the reported size exceeds what was actually copied, rather
+     * than switching on the status code. Never throws -- policy-free.
      */
     public static int readGrowableBytes(GrowableBytesGetter getter, byte[][] bytesOut) {
         int cap = 256;
@@ -3739,17 +3957,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Collects a snapshot of discovered publications (the builtin DCPSPublication
-     * reader), blocking up to {@code timeoutMs} (negative = infinite). Returns rc;
-     * on {@code RET_OK} writes the snapshot sequence handle to {@code seqOut[0]}.
-     * The caller owns the sequence and must release it with {@link
-     * #pubDataSeqDelete}.
+     * Collects a snapshot of discovered publications (the builtin DCPSPublication reader), blocking
+     * up to {@code timeoutMs} (negative = infinite). Returns rc; on {@code RET_OK} writes the
+     * snapshot sequence handle to {@code seqOut[0]}. The caller owns the sequence and must release
+     * it with {@link #pubDataSeqDelete}.
      */
-    public static int takeDiscoveredPublicationsSnapshot(long participant, int timeoutMs,
-            long[] seqOut) {
+    public static int takeDiscoveredPublicationsSnapshot(
+            long participant, int timeoutMs, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_take_discovered_publications_snapshot(
-                participant, timeoutMs, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_take_discovered_publications_snapshot(
+                        participant, timeoutMs, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             seqOut[0] = slot.getLong(0);
@@ -3758,15 +3976,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Like {@link #takeDiscoveredPublicationsSnapshot} but restricted to entries
-     * whose instance state matches {@code instanceStateMask} (a bitwise-OR of
-     * {@code InstanceState} constants).
+     * Like {@link #takeDiscoveredPublicationsSnapshot} but restricted to entries whose instance
+     * state matches {@code instanceStateMask} (a bitwise-OR of {@code InstanceState} constants).
      */
-    public static int takeDiscoveredPublicationsSnapshotFiltered(long participant, int timeoutMs,
-            int instanceStateMask, long[] seqOut) {
+    public static int takeDiscoveredPublicationsSnapshotFiltered(
+            long participant, int timeoutMs, int instanceStateMask, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_take_discovered_publications_snapshot_filtered(
-                participant, timeoutMs, instanceStateMask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_take_discovered_publications_snapshot_filtered(
+                        participant, timeoutMs, instanceStateMask, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             seqOut[0] = slot.getLong(0);
@@ -3774,10 +3992,14 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Entry count of a publication snapshot. Returns rc; writes it to {@code out[0]} on success. */
+    /**
+     * Entry count of a publication snapshot. Returns rc; writes it to {@code out[0]} on success.
+     */
     public static int pubDataSeqLength(long seq, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_seq_length(seq, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_seq_length(
+                        seq, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -3786,14 +4008,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints an owned {@code PublicationBuiltinTopicData} box for the entry at
-     * {@code index} (the core clones its stored data into it). Returns rc; writes
-     * the handle to {@code dataOut[0]} on success. The caller owns the box and
-     * must release it with {@link #pubDataDestroy}.
+     * Mints an owned {@code PublicationBuiltinTopicData} box for the entry at {@code index} (the
+     * core clones its stored data into it). Returns rc; writes the handle to {@code dataOut[0]} on
+     * success. The caller owns the box and must release it with {@link #pubDataDestroy}.
      */
     public static int pubDataSeqGet(long seq, long index, long[] dataOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_seq_get(seq, index, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_seq_get(
+                        seq, index, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             dataOut[0] = slot.getLong(0);
@@ -3801,11 +4024,15 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Instance state ({@code InstanceState} bits) of the publication snapshot entry at {@code index}. */
+    /**
+     * Instance state ({@code InstanceState} bits) of the publication snapshot entry at {@code
+     * index}.
+     */
     public static int pubDataSeqGetInstanceState(long seq, long index, int[] stateOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_seq_get_instance_state(
-                seq, index, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_seq_get_instance_state(
+                        seq, index, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             stateOut[0] = slot.getInt(0);
@@ -3813,17 +4040,26 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Instance handle (the endpoint GUID) of the entry at {@code index}; present even for a key-only entry. */
+    /**
+     * Instance handle (the endpoint GUID) of the entry at {@code index}; present even for a
+     * key-only entry.
+     */
     public static int pubDataSeqGetInstanceHandle(long seq, long index, byte[] handleOut) {
-        return Ffi.int2dds_publication_builtin_topic_data_seq_get_instance_handle(seq, index, handleOut);
+        return Ffi.int2dds_publication_builtin_topic_data_seq_get_instance_handle(
+                seq, index, handleOut);
     }
 
-    /** Releases a publication snapshot sequence returned by {@link #takeDiscoveredPublicationsSnapshot}. */
+    /**
+     * Releases a publication snapshot sequence returned by {@link
+     * #takeDiscoveredPublicationsSnapshot}.
+     */
     public static void pubDataSeqDelete(long seq) {
         Ffi.int2dds_publication_builtin_topic_data_seq_delete(seq);
     }
 
-    /** Releases one owned {@code PublicationBuiltinTopicData} box minted by {@link #pubDataSeqGet}. */
+    /**
+     * Releases one owned {@code PublicationBuiltinTopicData} box minted by {@link #pubDataSeqGet}.
+     */
     public static void pubDataDestroy(long data) {
         Ffi.int2dds_publication_builtin_topic_data_destroy(data);
     }
@@ -3845,24 +4081,28 @@ public final class FfiAccess {
 
     /** Direct passthrough for {@link #readGrowableString}: the topic name getter. */
     public static int pubDataGetTopicName(long data, long buf, long capacity, long sizeOut) {
-        return Ffi.int2dds_publication_builtin_topic_data_get_topic_name(data, buf, capacity, sizeOut);
+        return Ffi.int2dds_publication_builtin_topic_data_get_topic_name(
+                data, buf, capacity, sizeOut);
     }
 
     /** Direct passthrough for {@link #readGrowableString}: the type name getter. */
     public static int pubDataGetTypeName(long data, long buf, long capacity, long sizeOut) {
-        return Ffi.int2dds_publication_builtin_topic_data_get_type_name(data, buf, capacity, sizeOut);
+        return Ffi.int2dds_publication_builtin_topic_data_get_type_name(
+                data, buf, capacity, sizeOut);
     }
 
     /** Direct passthrough for {@link #readGrowableBytes}: the user_data getter. */
     public static int pubDataGetUserData(long data, long buf, long capacity, long sizeOut) {
-        return Ffi.int2dds_publication_builtin_topic_data_get_user_data(data, buf, capacity, sizeOut);
+        return Ffi.int2dds_publication_builtin_topic_data_get_user_data(
+                data, buf, capacity, sizeOut);
     }
 
     /** Reliability kind: 0 = BEST_EFFORT, 1 = RELIABLE. Writes it to {@code out[0]} on success. */
     public static int pubDataGetReliabilityKind(long data, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_get_reliability_kind(
-                data, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_get_reliability_kind(
+                        data, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0);
@@ -3871,13 +4111,14 @@ public final class FfiAccess {
     }
 
     /**
-     * Durability kind: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT,
-     * 3 = PERSISTENT. Writes it to {@code out[0]} on success.
+     * Durability kind: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT. Writes it
+     * to {@code out[0]} on success.
      */
     public static int pubDataGetDurabilityKind(long data, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_get_durability_kind(
-                data, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_get_durability_kind(
+                        data, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0);
@@ -3886,13 +4127,14 @@ public final class FfiAccess {
     }
 
     /**
-     * Liveliness kind: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT,
-     * 2 = MANUAL_BY_TOPIC. Writes it to {@code out[0]} on success.
+     * Liveliness kind: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC. Writes it to
+     * {@code out[0]} on success.
      */
     public static int pubDataGetLivelinessKind(long data, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_get_liveliness_kind(
-                data, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_get_liveliness_kind(
+                        data, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0);
@@ -3901,15 +4143,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Deadline period (sec, nanosec); an infinite period reads back as
-     * (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
-     * nanosecOut[0]} on success.
+     * Deadline period (sec, nanosec); an infinite period reads back as (0x7fffffff, 0x7fffffff).
+     * Writes it to {@code secOut[0]}/{@code nanosecOut[0]} on success.
      */
     public static int pubDataGetDeadline(long data, int[] secOut, int[] nanosecOut) {
         ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
         ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_get_deadline(
-                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_get_deadline(
+                        data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
         NativeKeepAlive.keepAlive(secSlot);
         NativeKeepAlive.keepAlive(nanoSlot);
         if (rc == 0) {
@@ -3920,15 +4162,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Lifespan duration (sec, nanosec); an infinite duration reads back as
-     * (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
-     * nanosecOut[0]} on success.
+     * Lifespan duration (sec, nanosec); an infinite duration reads back as (0x7fffffff,
+     * 0x7fffffff). Writes it to {@code secOut[0]}/{@code nanosecOut[0]} on success.
      */
     public static int pubDataGetLifespan(long data, int[] secOut, int[] nanosecOut) {
         ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
         ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_get_lifespan(
-                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_get_lifespan(
+                        data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
         NativeKeepAlive.keepAlive(secSlot);
         NativeKeepAlive.keepAlive(nanoSlot);
         if (rc == 0) {
@@ -3939,15 +4181,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Liveliness lease duration (sec, nanosec); an infinite duration reads back
-     * as (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
-     * nanosecOut[0]} on success.
+     * Liveliness lease duration (sec, nanosec); an infinite duration reads back as (0x7fffffff,
+     * 0x7fffffff). Writes it to {@code secOut[0]}/{@code nanosecOut[0]} on success.
      */
     public static int pubDataGetLivelinessLeaseDuration(long data, int[] secOut, int[] nanosecOut) {
         ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
         ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(
-                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(
+                        data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
         NativeKeepAlive.keepAlive(secSlot);
         NativeKeepAlive.keepAlive(nanoSlot);
         if (rc == 0) {
@@ -3960,17 +4202,17 @@ public final class FfiAccess {
     // --- Discovery: SubscriptionBuiltinTopicData (materialize-then-destroy) ---
 
     /**
-     * Collects a snapshot of discovered subscriptions (the builtin DCPSSubscription
-     * reader), blocking up to {@code timeoutMs} (negative = infinite). Returns rc;
-     * on {@code RET_OK} writes the snapshot sequence handle to {@code seqOut[0]}.
-     * The caller owns the sequence and must release it with {@link
-     * #subDataSeqDelete}.
+     * Collects a snapshot of discovered subscriptions (the builtin DCPSSubscription reader),
+     * blocking up to {@code timeoutMs} (negative = infinite). Returns rc; on {@code RET_OK} writes
+     * the snapshot sequence handle to {@code seqOut[0]}. The caller owns the sequence and must
+     * release it with {@link #subDataSeqDelete}.
      */
-    public static int takeDiscoveredSubscriptionsSnapshot(long participant, int timeoutMs,
-            long[] seqOut) {
+    public static int takeDiscoveredSubscriptionsSnapshot(
+            long participant, int timeoutMs, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_take_discovered_subscriptions_snapshot(
-                participant, timeoutMs, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_take_discovered_subscriptions_snapshot(
+                        participant, timeoutMs, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             seqOut[0] = slot.getLong(0);
@@ -3979,15 +4221,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Like {@link #takeDiscoveredSubscriptionsSnapshot} but restricted to entries
-     * whose instance state matches {@code instanceStateMask} (a bitwise-OR of
-     * {@code InstanceState} constants).
+     * Like {@link #takeDiscoveredSubscriptionsSnapshot} but restricted to entries whose instance
+     * state matches {@code instanceStateMask} (a bitwise-OR of {@code InstanceState} constants).
      */
-    public static int takeDiscoveredSubscriptionsSnapshotFiltered(long participant, int timeoutMs,
-            int instanceStateMask, long[] seqOut) {
+    public static int takeDiscoveredSubscriptionsSnapshotFiltered(
+            long participant, int timeoutMs, int instanceStateMask, long[] seqOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
-                participant, timeoutMs, instanceStateMask, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
+                        participant, timeoutMs, instanceStateMask, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             seqOut[0] = slot.getLong(0);
@@ -3995,10 +4237,14 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Entry count of a subscription snapshot. Returns rc; writes it to {@code out[0]} on success. */
+    /**
+     * Entry count of a subscription snapshot. Returns rc; writes it to {@code out[0]} on success.
+     */
     public static int subDataSeqLength(long seq, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_seq_length(seq, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_seq_length(
+                        seq, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -4007,14 +4253,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints an owned {@code SubscriptionBuiltinTopicData} box for the entry at
-     * {@code index} (the core clones its stored data into it). Returns rc; writes
-     * the handle to {@code dataOut[0]} on success. The caller owns the box and
-     * must release it with {@link #subDataDestroy}.
+     * Mints an owned {@code SubscriptionBuiltinTopicData} box for the entry at {@code index} (the
+     * core clones its stored data into it). Returns rc; writes the handle to {@code dataOut[0]} on
+     * success. The caller owns the box and must release it with {@link #subDataDestroy}.
      */
     public static int subDataSeqGet(long seq, long index, long[] dataOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_seq_get(seq, index, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_seq_get(
+                        seq, index, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             dataOut[0] = slot.getLong(0);
@@ -4022,11 +4269,15 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Instance state ({@code InstanceState} bits) of the subscription snapshot entry at {@code index}. */
+    /**
+     * Instance state ({@code InstanceState} bits) of the subscription snapshot entry at {@code
+     * index}.
+     */
     public static int subDataSeqGetInstanceState(long seq, long index, int[] stateOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_seq_get_instance_state(
-                seq, index, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_seq_get_instance_state(
+                        seq, index, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             stateOut[0] = slot.getInt(0);
@@ -4034,17 +4285,26 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Instance handle (the endpoint GUID) of the entry at {@code index}; present even for a key-only entry. */
+    /**
+     * Instance handle (the endpoint GUID) of the entry at {@code index}; present even for a
+     * key-only entry.
+     */
     public static int subDataSeqGetInstanceHandle(long seq, long index, byte[] handleOut) {
-        return Ffi.int2dds_subscription_builtin_topic_data_seq_get_instance_handle(seq, index, handleOut);
+        return Ffi.int2dds_subscription_builtin_topic_data_seq_get_instance_handle(
+                seq, index, handleOut);
     }
 
-    /** Releases a subscription snapshot sequence returned by {@link #takeDiscoveredSubscriptionsSnapshot}. */
+    /**
+     * Releases a subscription snapshot sequence returned by {@link
+     * #takeDiscoveredSubscriptionsSnapshot}.
+     */
     public static void subDataSeqDelete(long seq) {
         Ffi.int2dds_subscription_builtin_topic_data_seq_delete(seq);
     }
 
-    /** Releases one owned {@code SubscriptionBuiltinTopicData} box minted by {@link #subDataSeqGet}. */
+    /**
+     * Releases one owned {@code SubscriptionBuiltinTopicData} box minted by {@link #subDataSeqGet}.
+     */
     public static void subDataDestroy(long data) {
         Ffi.int2dds_subscription_builtin_topic_data_destroy(data);
     }
@@ -4066,24 +4326,28 @@ public final class FfiAccess {
 
     /** Direct passthrough for {@link #readGrowableString}: the topic name getter. */
     public static int subDataGetTopicName(long data, long buf, long capacity, long sizeOut) {
-        return Ffi.int2dds_subscription_builtin_topic_data_get_topic_name(data, buf, capacity, sizeOut);
+        return Ffi.int2dds_subscription_builtin_topic_data_get_topic_name(
+                data, buf, capacity, sizeOut);
     }
 
     /** Direct passthrough for {@link #readGrowableString}: the type name getter. */
     public static int subDataGetTypeName(long data, long buf, long capacity, long sizeOut) {
-        return Ffi.int2dds_subscription_builtin_topic_data_get_type_name(data, buf, capacity, sizeOut);
+        return Ffi.int2dds_subscription_builtin_topic_data_get_type_name(
+                data, buf, capacity, sizeOut);
     }
 
     /** Direct passthrough for {@link #readGrowableBytes}: the user_data getter. */
     public static int subDataGetUserData(long data, long buf, long capacity, long sizeOut) {
-        return Ffi.int2dds_subscription_builtin_topic_data_get_user_data(data, buf, capacity, sizeOut);
+        return Ffi.int2dds_subscription_builtin_topic_data_get_user_data(
+                data, buf, capacity, sizeOut);
     }
 
     /** Reliability kind: 0 = BEST_EFFORT, 1 = RELIABLE. Writes it to {@code out[0]} on success. */
     public static int subDataGetReliabilityKind(long data, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_reliability_kind(
-                data, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_get_reliability_kind(
+                        data, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0);
@@ -4092,13 +4356,14 @@ public final class FfiAccess {
     }
 
     /**
-     * Durability kind: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT,
-     * 3 = PERSISTENT. Writes it to {@code out[0]} on success.
+     * Durability kind: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT. Writes it
+     * to {@code out[0]} on success.
      */
     public static int subDataGetDurabilityKind(long data, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_durability_kind(
-                data, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_get_durability_kind(
+                        data, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0);
@@ -4107,13 +4372,14 @@ public final class FfiAccess {
     }
 
     /**
-     * Liveliness kind: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT,
-     * 2 = MANUAL_BY_TOPIC. Writes it to {@code out[0]} on success.
+     * Liveliness kind: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC. Writes it to
+     * {@code out[0]} on success.
      */
     public static int subDataGetLivelinessKind(long data, int[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_liveliness_kind(
-                data, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_get_liveliness_kind(
+                        data, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0);
@@ -4122,15 +4388,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Deadline period (sec, nanosec); an infinite period reads back as
-     * (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
-     * nanosecOut[0]} on success.
+     * Deadline period (sec, nanosec); an infinite period reads back as (0x7fffffff, 0x7fffffff).
+     * Writes it to {@code secOut[0]}/{@code nanosecOut[0]} on success.
      */
     public static int subDataGetDeadline(long data, int[] secOut, int[] nanosecOut) {
         ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
         ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_deadline(
-                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_get_deadline(
+                        data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
         NativeKeepAlive.keepAlive(secSlot);
         NativeKeepAlive.keepAlive(nanoSlot);
         if (rc == 0) {
@@ -4141,15 +4407,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Liveliness lease duration (sec, nanosec); an infinite duration reads back
-     * as (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
-     * nanosecOut[0]} on success.
+     * Liveliness lease duration (sec, nanosec); an infinite duration reads back as (0x7fffffff,
+     * 0x7fffffff). Writes it to {@code secOut[0]}/{@code nanosecOut[0]} on success.
      */
     public static int subDataGetLivelinessLeaseDuration(long data, int[] secOut, int[] nanosecOut) {
         ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
         ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(
-                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        int rc =
+                Ffi.int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(
+                        data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
         NativeKeepAlive.keepAlive(secSlot);
         NativeKeepAlive.keepAlive(nanoSlot);
         if (rc == 0) {
@@ -4162,18 +4428,18 @@ public final class FfiAccess {
     // --- Discovery: ParticipantBuiltinTopicData (handle-list + per-handle lookup) ---
 
     /**
-     * Writes up to {@code capacity} discovered-participant handles (16 bytes
-     * each) into {@code handles}. Returns rc; writes the TRUE total discovered
-     * count to {@code countOut[0]} on success, even when it exceeds {@code
-     * capacity} (the JNI shim clamps what it actually copies to {@code
-     * handles.length / 16}, but still reports the real total so a caller can
-     * regrow and retry).
+     * Writes up to {@code capacity} discovered-participant handles (16 bytes each) into {@code
+     * handles}. Returns rc; writes the TRUE total discovered count to {@code countOut[0]} on
+     * success, even when it exceeds {@code capacity} (the JNI shim clamps what it actually copies
+     * to {@code handles.length / 16}, but still reports the real total so a caller can regrow and
+     * retry).
      */
-    public static int getDiscoveredParticipants(long participant, byte[] handles, long capacity,
-            long[] countOut) {
+    public static int getDiscoveredParticipants(
+            long participant, byte[] handles, long capacity, long[] countOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_get_discovered_participants(
-                participant, handles, capacity, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_get_discovered_participants(
+                        participant, handles, capacity, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             countOut[0] = slot.getLong(0);
@@ -4182,16 +4448,16 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints an owned {@code ParticipantBuiltinTopicData} box for the given
-     * 16-byte handle. Returns rc; writes the handle to {@code dataOut[0]} on
-     * success. The caller owns the box and must release it with {@link
-     * #participantDataDestroy}.
+     * Mints an owned {@code ParticipantBuiltinTopicData} box for the given 16-byte handle. Returns
+     * rc; writes the handle to {@code dataOut[0]} on success. The caller owns the box and must
+     * release it with {@link #participantDataDestroy}.
      */
-    public static int getDiscoveredParticipantData(long participant, byte[] handle,
-            long[] dataOut) {
+    public static int getDiscoveredParticipantData(
+            long participant, byte[] handle, long[] dataOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_get_discovered_participant_data(
-                participant, handle, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_get_discovered_participant_data(
+                        participant, handle, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             dataOut[0] = slot.getLong(0);
@@ -4200,14 +4466,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Whether {@code participant} contains the entity identified by the
-     * 16-byte {@code handle}. Writes the bool result to {@code out[0]} on
-     * success. Same 1-byte bool-slot shape as {@link #datareaderHasData}.
+     * Whether {@code participant} contains the entity identified by the 16-byte {@code handle}.
+     * Writes the bool result to {@code out[0]} on success. Same 1-byte bool-slot shape as {@link
+     * #datareaderHasData}.
      */
     public static int participantContainsEntity(long participant, byte[] handle, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_contains_entity(
-                participant, handle, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_contains_entity(
+                        participant, handle, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
@@ -4215,7 +4482,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Releases one owned {@code ParticipantBuiltinTopicData} box minted by {@link #getDiscoveredParticipantData}. */
+    /**
+     * Releases one owned {@code ParticipantBuiltinTopicData} box minted by {@link
+     * #getDiscoveredParticipantData}.
+     */
     public static void participantDataDestroy(long data) {
         Ffi.int2dds_participant_builtin_topic_data_destroy(data);
     }
@@ -4227,23 +4497,24 @@ public final class FfiAccess {
 
     /** Direct passthrough for {@link #readGrowableBytes}: the user_data getter. */
     public static int participantDataGetUserData(long data, long buf, long capacity, long sizeOut) {
-        return Ffi.int2dds_participant_builtin_topic_data_get_user_data(data, buf, capacity, sizeOut);
+        return Ffi.int2dds_participant_builtin_topic_data_get_user_data(
+                data, buf, capacity, sizeOut);
     }
 
     // --- Discovery: matched endpoints (handle-list + per-handle lookup) ---
 
     /**
-     * Writes up to {@code capacity} matched-subscription handles (16 bytes
-     * each) into {@code handles}, for the subscriptions currently matched to
-     * {@code writer}. Returns rc; writes the TRUE total matched count to
-     * {@code countOut[0]} on success, even when it exceeds {@code capacity} --
-     * same contract as {@link #getDiscoveredParticipants}.
+     * Writes up to {@code capacity} matched-subscription handles (16 bytes each) into {@code
+     * handles}, for the subscriptions currently matched to {@code writer}. Returns rc; writes the
+     * TRUE total matched count to {@code countOut[0]} on success, even when it exceeds {@code
+     * capacity} -- same contract as {@link #getDiscoveredParticipants}.
      */
-    public static int getMatchedSubscriptions(long writer, byte[] handles, long capacity,
-            long[] countOut) {
+    public static int getMatchedSubscriptions(
+            long writer, byte[] handles, long capacity, long[] countOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datawriter_get_matched_subscriptions(
-                writer, handles, capacity, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datawriter_get_matched_subscriptions(
+                        writer, handles, capacity, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             countOut[0] = slot.getLong(0);
@@ -4252,15 +4523,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints an owned {@code SubscriptionBuiltinTopicData} box for the given
-     * matched-subscription 16-byte handle. Returns rc; writes the handle to
-     * {@code dataOut[0]} on success. The caller owns the box and must release
-     * it with {@link #subDataDestroy}.
+     * Mints an owned {@code SubscriptionBuiltinTopicData} box for the given matched-subscription
+     * 16-byte handle. Returns rc; writes the handle to {@code dataOut[0]} on success. The caller
+     * owns the box and must release it with {@link #subDataDestroy}.
      */
     public static int getMatchedSubscriptionData(long writer, byte[] handle, long[] dataOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datawriter_get_matched_subscription_data(
-                writer, handle, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datawriter_get_matched_subscription_data(
+                        writer, handle, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             dataOut[0] = slot.getLong(0);
@@ -4269,17 +4540,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Writes up to {@code capacity} matched-publication handles (16 bytes
-     * each) into {@code handles}, for the publications currently matched to
-     * {@code reader}. Returns rc; writes the TRUE total matched count to
-     * {@code countOut[0]} on success, even when it exceeds {@code capacity} --
-     * same contract as {@link #getDiscoveredParticipants}.
+     * Writes up to {@code capacity} matched-publication handles (16 bytes each) into {@code
+     * handles}, for the publications currently matched to {@code reader}. Returns rc; writes the
+     * TRUE total matched count to {@code countOut[0]} on success, even when it exceeds {@code
+     * capacity} -- same contract as {@link #getDiscoveredParticipants}.
      */
-    public static int getMatchedPublications(long reader, byte[] handles, long capacity,
-            long[] countOut) {
+    public static int getMatchedPublications(
+            long reader, byte[] handles, long capacity, long[] countOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_get_matched_publications(
-                reader, handles, capacity, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_get_matched_publications(
+                        reader, handles, capacity, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             countOut[0] = slot.getLong(0);
@@ -4288,15 +4559,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints an owned {@code PublicationBuiltinTopicData} box for the given
-     * matched-publication 16-byte handle. Returns rc; writes the handle to
-     * {@code dataOut[0]} on success. The caller owns the box and must release
-     * it with {@link #pubDataDestroy}.
+     * Mints an owned {@code PublicationBuiltinTopicData} box for the given matched-publication
+     * 16-byte handle. Returns rc; writes the handle to {@code dataOut[0]} on success. The caller
+     * owns the box and must release it with {@link #pubDataDestroy}.
      */
     public static int getMatchedPublicationData(long reader, byte[] handle, long[] dataOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_datareader_get_matched_publication_data(
-                reader, handle, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_datareader_get_matched_publication_data(
+                        reader, handle, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             dataOut[0] = slot.getLong(0);
@@ -4307,15 +4578,16 @@ public final class FfiAccess {
     // --- Dynamic entities (xtypes write-path Topic/DataWriter/DataReader) ---
 
     /**
-     * Creates a topic backed by a dynamic type support. Returns rc; writes
-     * the handle to {@code out[0]} only when rc == 0 -- the same shape as
-     * {@link #createTopic}. {@code qos} is {@code 0L} for the core's default
-     * Topic QoS.
+     * Creates a topic backed by a dynamic type support. Returns rc; writes the handle to {@code
+     * out[0]} only when rc == 0 -- the same shape as {@link #createTopic}. {@code qos} is {@code
+     * 0L} for the core's default Topic QoS.
      */
-    public static int createTopicDynamic(long participant, byte[] topicName, long support, long[] out) {
+    public static int createTopicDynamic(
+            long participant, byte[] topicName, long support, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_topic_dynamic(
-                participant, topicName, support, 0L, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_topic_dynamic(
+                        participant, topicName, support, 0L, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -4324,26 +4596,26 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a datawriter backed by a dynamic type support, with the core's
-     * default DataWriter QoS. Delegates to {@link
-     * #createDataWriterDynamic(long, long, long, long, long[])} with {@code
-     * qos = 0L}.
+     * Creates a datawriter backed by a dynamic type support, with the core's default DataWriter
+     * QoS. Delegates to {@link #createDataWriterDynamic(long, long, long, long, long[])} with
+     * {@code qos = 0L}.
      */
-    public static int createDataWriterDynamic(long publisher, long topic, long support, long[] out) {
+    public static int createDataWriterDynamic(
+            long publisher, long topic, long support, long[] out) {
         return createDataWriterDynamic(publisher, topic, support, 0L, out);
     }
 
     /**
-     * Creates a datawriter backed by a dynamic type support. Returns rc;
-     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
-     * {@code 0L} for the core's default DataWriter QoS, or a handle from
-     * {@link #createDataWriterQos()} with policies applied.
+     * Creates a datawriter backed by a dynamic type support. Returns rc; writes the handle to
+     * {@code out[0]} only when rc == 0. {@code qos} is {@code 0L} for the core's default DataWriter
+     * QoS, or a handle from {@link #createDataWriterQos()} with policies applied.
      */
     public static int createDataWriterDynamic(
             long publisher, long topic, long support, long qos, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_datawriter_dynamic(
-                publisher, topic, support, qos, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_datawriter_dynamic(
+                        publisher, topic, support, qos, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -4352,26 +4624,26 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a datareader backed by a dynamic type support, with the core's
-     * default DataReader QoS. Delegates to {@link
-     * #createDataReaderDynamic(long, long, long, long, long[])} with {@code
-     * qos = 0L}.
+     * Creates a datareader backed by a dynamic type support, with the core's default DataReader
+     * QoS. Delegates to {@link #createDataReaderDynamic(long, long, long, long, long[])} with
+     * {@code qos = 0L}.
      */
-    public static int createDataReaderDynamic(long subscriber, long topic, long support, long[] out) {
+    public static int createDataReaderDynamic(
+            long subscriber, long topic, long support, long[] out) {
         return createDataReaderDynamic(subscriber, topic, support, 0L, out);
     }
 
     /**
-     * Creates a datareader backed by a dynamic type support. Returns rc;
-     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
-     * {@code 0L} for the core's default DataReader QoS, or a handle from
-     * {@link #createDataReaderQos()} with policies applied.
+     * Creates a datareader backed by a dynamic type support. Returns rc; writes the handle to
+     * {@code out[0]} only when rc == 0. {@code qos} is {@code 0L} for the core's default DataReader
+     * QoS, or a handle from {@link #createDataReaderQos()} with policies applied.
      */
     public static int createDataReaderDynamic(
             long subscriber, long topic, long support, long qos, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_datareader_dynamic(
-                subscriber, topic, support, qos, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_datareader_dynamic(
+                        subscriber, topic, support, qos, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -4385,10 +4657,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Takes the next available DynamicData sample. {@code out_info} is passed
-     * as {@code 0L} (NULL) -- sample info is not needed here. Returns rc;
-     * writes a fresh DynamicData handle to {@code outData[0]} only on
-     * success. {@code RET_NO_DATA} (27) means the cache is empty.
+     * Takes the next available DynamicData sample. {@code out_info} is passed as {@code 0L} (NULL)
+     * -- sample info is not needed here. Returns rc; writes a fresh DynamicData handle to {@code
+     * outData[0]} only on success. {@code RET_NO_DATA} (27) means the cache is empty.
      */
     public static int dynamicReaderTake(long reader, long[] outData) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -4401,11 +4672,10 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a dynamic writer's current QoS into a freshly allocated native
-     * handle. Same shape as {@link #getWriterQos}: returns the C ABI status
-     * code and, only on success, writes the new QoS handle to {@code
-     * handleOut[0]}. The handle is the same {@code Int2DdsDataWriterQos}
-     * type the typed path returns, readable with {@link
+     * Reads a dynamic writer's current QoS into a freshly allocated native handle. Same shape as
+     * {@link #getWriterQos}: returns the C ABI status code and, only on success, writes the new QoS
+     * handle to {@code handleOut[0]}. The handle is the same {@code Int2DdsDataWriterQos} type the
+     * typed path returns, readable with {@link
      * kr.co.intellectus.int2dds.internal.QosMarshal#readWriterQos}.
      */
     public static int dynamicWriterGetQos(long writer, long[] handleOut) {
@@ -4418,10 +4688,15 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads the number of DataReaders matched to a dynamic writer, writing it to {@code out[0]} on success. */
+    /**
+     * Reads the number of DataReaders matched to a dynamic writer, writing it to {@code out[0]} on
+     * success.
+     */
     public static int dynamicWriterPublicationMatchedCount(long writer, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_dynamic_writer_publication_matched_count(writer, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_dynamic_writer_publication_matched_count(
+                        writer, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0); // native writes an i32 (4 bytes), not 8
@@ -4430,10 +4705,10 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a dynamic reader's current QoS into a freshly allocated native
-     * handle. Same shape as {@link #dynamicWriterGetQos}: the handle is the
-     * same {@code Int2DdsDataReaderQos} type the typed path returns, readable
-     * with {@link kr.co.intellectus.int2dds.internal.QosMarshal#readReaderQos}.
+     * Reads a dynamic reader's current QoS into a freshly allocated native handle. Same shape as
+     * {@link #dynamicWriterGetQos}: the handle is the same {@code Int2DdsDataReaderQos} type the
+     * typed path returns, readable with {@link
+     * kr.co.intellectus.int2dds.internal.QosMarshal#readReaderQos}.
      */
     public static int dynamicReaderGetQos(long reader, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -4445,10 +4720,15 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Reads the number of DataWriters matched to a dynamic reader, writing it to {@code out[0]} on success. */
+    /**
+     * Reads the number of DataWriters matched to a dynamic reader, writing it to {@code out[0]} on
+     * success.
+     */
     public static int dynamicReaderSubscriptionMatchedCount(long reader, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_dynamic_reader_subscription_matched_count(reader, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_dynamic_reader_subscription_matched_count(
+                        reader, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0); // native writes an i32 (4 bytes), not 8
@@ -4457,10 +4737,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Mints a fresh status condition for a dynamic {@code reader}, writing its
-     * handle to {@code handleOut[0]} on success. Each call returns a new
-     * native box the caller owns and must release through {@link
-     * #statusConditionDelete}.
+     * Mints a fresh status condition for a dynamic {@code reader}, writing its handle to {@code
+     * handleOut[0]} on success. Each call returns a new native box the caller owns and must release
+     * through {@link #statusConditionDelete}.
      */
     public static int dynamicReaderGetStatusCondition(long reader, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -4485,11 +4764,10 @@ public final class FfiAccess {
     // --- Instance management (register/unregister/dispose/lookup) ---
 
     /**
-     * Registers the instance identified by the serialized sample at {@code
-     * keyAddr}/{@code keyLen} (the core derives the KeyHash from it, the same
-     * canonical derivation {@link #datawriterWriteSerialized} relies on),
-     * writing the 16-byte instance handle to {@code handleOut}. Requires a
-     * keyed topic ({@code RET_PRECONDITION_NOT_MET} otherwise).
+     * Registers the instance identified by the serialized sample at {@code keyAddr}/{@code keyLen}
+     * (the core derives the KeyHash from it, the same canonical derivation {@link
+     * #datawriterWriteSerialized} relies on), writing the 16-byte instance handle to {@code
+     * handleOut}. Requires a keyed topic ({@code RET_PRECONDITION_NOT_MET} otherwise).
      */
     public static int datawriterRegisterInstance(
             long writer, long keyAddr, long keyLen, byte[] handleOut) {
@@ -4497,9 +4775,9 @@ public final class FfiAccess {
     }
 
     /**
-     * Unregisters the instance identified by the serialized sample at {@code
-     * keyAddr}/{@code keyLen}. {@code handle} is the registered instance
-     * handle, or 16 zero bytes (NIL) to let the core derive it from the key.
+     * Unregisters the instance identified by the serialized sample at {@code keyAddr}/{@code
+     * keyLen}. {@code handle} is the registered instance handle, or 16 zero bytes (NIL) to let the
+     * core derive it from the key.
      */
     public static int datawriterUnregisterInstance(
             long writer, long keyAddr, long keyLen, byte[] handle) {
@@ -4507,18 +4785,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Disposes the instance identified by the serialized sample at {@code
-     * keyAddr}/{@code keyLen}. {@code handle} is the registered instance
-     * handle, or 16 zero bytes (NIL) to let the core derive it from the key.
+     * Disposes the instance identified by the serialized sample at {@code keyAddr}/{@code keyLen}.
+     * {@code handle} is the registered instance handle, or 16 zero bytes (NIL) to let the core
+     * derive it from the key.
      */
     public static int datawriterDispose(long writer, long keyAddr, long keyLen, byte[] handle) {
         return Ffi.int2dds_datawriter_dispose(writer, keyAddr, keyLen, handle);
     }
 
     /**
-     * Looks up the instance handle for the serialized sample at {@code
-     * keyAddr}/{@code keyLen}, writing it to {@code handleOut}. All-zero on
-     * an unknown instance.
+     * Looks up the instance handle for the serialized sample at {@code keyAddr}/{@code keyLen},
+     * writing it to {@code handleOut}. All-zero on an unknown instance.
      */
     public static int datawriterLookupInstance(
             long writer, long keyAddr, long keyLen, byte[] handleOut) {
@@ -4526,9 +4803,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Looks up the instance handle for the serialized sample at {@code
-     * keyAddr}/{@code keyLen} on a datareader, writing it to {@code
-     * handleOut}. All-zero on an unknown instance.
+     * Looks up the instance handle for the serialized sample at {@code keyAddr}/{@code keyLen} on a
+     * datareader, writing it to {@code handleOut}. All-zero on an unknown instance.
      */
     public static int datareaderLookupInstance(
             long reader, long keyAddr, long keyLen, byte[] handleOut) {
@@ -4536,29 +4812,31 @@ public final class FfiAccess {
     }
 
     /**
-     * Fetches the serialized key bytes for the instance {@code handle} on
-     * {@code writer} into {@code keyBuf}, writing the required size to {@code
-     * keySizeOut}. {@code RET_BUFFER_TOO_SMALL} when {@code keyCapacity} is
-     * too small; the grow-and-retry is the caller's job.
+     * Fetches the serialized key bytes for the instance {@code handle} on {@code writer} into
+     * {@code keyBuf}, writing the required size to {@code keySizeOut}. {@code RET_BUFFER_TOO_SMALL}
+     * when {@code keyCapacity} is too small; the grow-and-retry is the caller's job.
      */
     public static int datawriterGetKeyValue(
             long writer, byte[] handle, long keyBuf, long keyCapacity, long keySizeOut) {
-        return Ffi.int2dds_datawriter_get_key_value(writer, handle, keyBuf, keyCapacity, keySizeOut);
+        return Ffi.int2dds_datawriter_get_key_value(
+                writer, handle, keyBuf, keyCapacity, keySizeOut);
     }
 
     /**
-     * Fetches the serialized key bytes for the instance {@code handle} on
-     * {@code reader}. Same buffer/grow contract as {@link
-     * #datawriterGetKeyValue}.
+     * Fetches the serialized key bytes for the instance {@code handle} on {@code reader}. Same
+     * buffer/grow contract as {@link #datawriterGetKeyValue}.
      */
     public static int datareaderGetKeyValue(
             long reader, byte[] handle, long keyBuf, long keyCapacity, long keySizeOut) {
-        return Ffi.int2dds_datareader_get_key_value(reader, handle, keyBuf, keyCapacity, keySizeOut);
+        return Ffi.int2dds_datareader_get_key_value(
+                reader, handle, keyBuf, keyCapacity, keySizeOut);
     }
 
     // --- DomainParticipantFactory QoS / lookup ---
 
-    /** The factory's {@code autoenable_created_entities} flag, written to {@code out[0]} on success. */
+    /**
+     * The factory's {@code autoenable_created_entities} flag, written to {@code out[0]} on success.
+     */
     public static int participantFactoryGetQos(long factory, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_domain_participant_factory_get_qos(factory, directBufferAddress(slot));
@@ -4574,19 +4852,23 @@ public final class FfiAccess {
         return Ffi.int2dds_domain_participant_factory_set_qos(factory, autoenableCreatedEntities);
     }
 
-    /** Sets the factory's default participant QoS; {@code qos == 0L} resets it to the built-in default. */
+    /**
+     * Sets the factory's default participant QoS; {@code qos == 0L} resets it to the built-in
+     * default.
+     */
     public static int participantFactorySetDefaultParticipantQos(long factory, long qos) {
         return Ffi.int2dds_domain_participant_factory_set_default_participant_qos(factory, qos);
     }
 
     /**
-     * Copies the factory's default participant QoS into a new handle, written to
-     * {@code handleOut[0]} on success and released with {@link #destroyParticipantQos}.
+     * Copies the factory's default participant QoS into a new handle, written to {@code
+     * handleOut[0]} on success and released with {@link #destroyParticipantQos}.
      */
     public static int participantFactoryGetDefaultParticipantQos(long factory, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_domain_participant_factory_get_default_participant_qos(
-                factory, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_domain_participant_factory_get_default_participant_qos(
+                        factory, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
@@ -4595,15 +4877,16 @@ public final class FfiAccess {
     }
 
     /**
-     * Looks up a participant on {@code domainId}. On success writes a new handle
-     * aliasing the existing participant, or {@code 0L} when there is none, to
-     * {@code handleOut[0]}. The alias is released with {@link #deleteParticipant},
-     * which deletes the participant for every holder.
+     * Looks up a participant on {@code domainId}. On success writes a new handle aliasing the
+     * existing participant, or {@code 0L} when there is none, to {@code handleOut[0]}. The alias is
+     * released with {@link #deleteParticipant}, which deletes the participant for every holder.
      */
-    public static int participantFactoryLookupParticipant(long factory, int domainId, long[] handleOut) {
+    public static int participantFactoryLookupParticipant(
+            long factory, int domainId, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_domain_participant_factory_lookup_participant(
-                factory, domainId, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_domain_participant_factory_lookup_participant(
+                        factory, domainId, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
@@ -4612,9 +4895,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Text properties whose names start with {@code prefix}, as alternating
-     * name/value UTF-8 entries; an empty array means none or an error. Passthrough
-     * to {@link FfiHandwritten}.
+     * Text properties whose names start with {@code prefix}, as alternating name/value UTF-8
+     * entries; an empty array means none or an error. Passthrough to {@link FfiHandwritten}.
      */
     public static byte[][] participantQosPropertiesWithPrefix(long qos, byte[] prefix) {
         return FfiHandwritten.participantQosPropertiesWithPrefix(qos, prefix);
@@ -4622,21 +4904,27 @@ public final class FfiAccess {
 
     // --- DomainParticipant QoS: property helpers ---
 
-    /** Adds or overwrites one binary property entry; {@code dataAddr} may be 0 when {@code dataLen} is 0. */
+    /**
+     * Adds or overwrites one binary property entry; {@code dataAddr} may be 0 when {@code dataLen}
+     * is 0.
+     */
     public static int participantQosAddBinaryProperty(
             long qos, byte[] name, long dataAddr, long dataLen, boolean propagate) {
-        return Ffi.int2dds_participant_qos_add_binary_property(qos, name, dataAddr, dataLen, propagate);
+        return Ffi.int2dds_participant_qos_add_binary_property(
+                qos, name, dataAddr, dataLen, propagate);
     }
 
     /**
-     * Copies the text property {@code name} into {@code outBuf} without a NUL and
-     * writes its byte length to {@code lenOut[0]}, on {@code RET_OK} and on {@code
-     * RET_BUFFER_TOO_SMALL} alike. {@code RET_NO_DATA} when the name is absent.
+     * Copies the text property {@code name} into {@code outBuf} without a NUL and writes its byte
+     * length to {@code lenOut[0]}, on {@code RET_OK} and on {@code RET_BUFFER_TOO_SMALL} alike.
+     * {@code RET_NO_DATA} when the name is absent.
      */
-    public static int participantQosFindProperty(long qos, byte[] name, byte[] outBuf, long[] lenOut) {
+    public static int participantQosFindProperty(
+            long qos, byte[] name, byte[] outBuf, long[] lenOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_qos_find_property(
-                qos, name, outBuf, outBuf.length, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_qos_find_property(
+                        qos, name, outBuf, outBuf.length, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0 || rc == DdsException.RET_BUFFER_TOO_SMALL) {
             lenOut[0] = slot.getLong(0);
@@ -4656,12 +4944,16 @@ public final class FfiAccess {
         return Ffi.int2dds_participant_delete_contained_entities(participant);
     }
 
-    /** Deletes every datawriter created through {@code publisher}. Returns the C ABI status code. */
+    /**
+     * Deletes every datawriter created through {@code publisher}. Returns the C ABI status code.
+     */
     public static int publisherDeleteContainedEntities(long publisher) {
         return Ffi.int2dds_publisher_delete_contained_entities(publisher);
     }
 
-    /** Deletes every datareader created through {@code subscriber}. Returns the C ABI status code. */
+    /**
+     * Deletes every datareader created through {@code subscriber}. Returns the C ABI status code.
+     */
     public static int subscriberDeleteContainedEntities(long subscriber) {
         return Ffi.int2dds_subscriber_delete_contained_entities(subscriber);
     }
@@ -4669,14 +4961,15 @@ public final class FfiAccess {
     // --- Builtin subscriber (DCPSPublication) ---
 
     /**
-     * The participant's builtin subscriber as a new handle, written to {@code
-     * handleOut[0]} on success. The C ABI has no release for it: {@link
-     * #deleteSubscriber} refuses a builtin subscriber with {@code
-     * RET_PRECONDITION_NOT_MET}, so callers keep one handle per participant.
+     * The participant's builtin subscriber as a new handle, written to {@code handleOut[0]} on
+     * success. The C ABI has no release for it: {@link #deleteSubscriber} refuses a builtin
+     * subscriber with {@code RET_PRECONDITION_NOT_MET}, so callers keep one handle per participant.
      */
     public static int participantGetBuiltinSubscriber(long participant, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_participant_get_builtin_subscriber(participant, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_participant_get_builtin_subscriber(
+                        participant, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
@@ -4685,17 +4978,17 @@ public final class FfiAccess {
     }
 
     /**
-     * Takes one DCPSPublication sample through the builtin subscriber, blocking up
-     * to {@code timeoutMs} (negative = infinite) for one whose topic name equals
-     * {@code topicNameFilter} ({@code null} accepts any). {@code RET_DYNAMIC_TIMEOUT}
-     * when none arrives. The box written to {@code dataOut[0]} is released with
-     * {@link #pubDataDestroy}.
+     * Takes one DCPSPublication sample through the builtin subscriber, blocking up to {@code
+     * timeoutMs} (negative = infinite) for one whose topic name equals {@code topicNameFilter}
+     * ({@code null} accepts any). {@code RET_DYNAMIC_TIMEOUT} when none arrives. The box written to
+     * {@code dataOut[0]} is released with {@link #pubDataDestroy}.
      */
     public static int subscriberTakePublicationData(
             long builtinSub, byte[] topicNameFilter, int timeoutMs, long[] dataOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_subscriber_take_publication_data(
-                builtinSub, topicNameFilter, timeoutMs, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_subscriber_take_publication_data(
+                        builtinSub, topicNameFilter, timeoutMs, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             dataOut[0] = slot.getLong(0);
@@ -4704,14 +4997,15 @@ public final class FfiAccess {
     }
 
     /**
-     * Clones the TypeObject a publication advertised into a new handle written to
-     * {@code out[0]}, released with {@link #typeObjectDestroy}. {@code
-     * RET_DYNAMIC_FIELD_NOT_FOUND} when the publication carried none.
+     * Clones the TypeObject a publication advertised into a new handle written to {@code out[0]},
+     * released with {@link #typeObjectDestroy}. {@code RET_DYNAMIC_FIELD_NOT_FOUND} when the
+     * publication carried none.
      */
     public static int pubDataTakeTypeObject(long data, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_publication_builtin_topic_data_take_type_object(
-                data, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_publication_builtin_topic_data_take_type_object(
+                        data, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -4727,8 +5021,8 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads the {@code INT2DDS_MULTICAST_TTL} override into {@code ttlOut[0]} and
-     * whether one is set into {@code hasValueOut[0]}. Both native outs are one byte.
+     * Reads the {@code INT2DDS_MULTICAST_TTL} override into {@code ttlOut[0]} and whether one is
+     * set into {@code hasValueOut[0]}. Both native outs are one byte.
      */
     public static int envGetMulticastTtl(int[] ttlOut, boolean[] hasValueOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -4747,7 +5041,10 @@ public final class FfiAccess {
         return Ffi.int2dds_env_set_qos_profile(path);
     }
 
-    /** Sets {@code DDS_DEFAULT_QOS_PROFILE}, the {@code "Library::Profile"} default-QoS creation draws from. */
+    /**
+     * Sets {@code DDS_DEFAULT_QOS_PROFILE}, the {@code "Library::Profile"} default-QoS creation
+     * draws from.
+     */
     public static int envSetDefaultQosProfile(byte[] profile) {
         return Ffi.int2dds_env_set_default_qos_profile(profile);
     }
@@ -4765,11 +5062,10 @@ public final class FfiAccess {
     // --- DataReader: loaned serialized take ---
 
     /**
-     * Takes the next sample without copying: on {@code RET_OK} the native
-     * addresses receive the payload pointer, its size, the valid-data flag (one
-     * byte) and the loan handle. A non-zero loan must be returned exactly once
-     * with {@link #datareaderReturnSerializedLoan}; the payload is readable only
-     * until then. {@code RET_NO_DATA} when the cache is empty.
+     * Takes the next sample without copying: on {@code RET_OK} the native addresses receive the
+     * payload pointer, its size, the valid-data flag (one byte) and the loan handle. A non-zero
+     * loan must be returned exactly once with {@link #datareaderReturnSerializedLoan}; the payload
+     * is readable only until then. {@code RET_NO_DATA} when the cache is empty.
      */
     public static int datareaderTakeSerializedLoaned(
             long reader, long dataOut, long actualSizeOut, long validDataOut, long loanOut) {
@@ -4777,7 +5073,9 @@ public final class FfiAccess {
                 reader, dataOut, actualSizeOut, validDataOut, loanOut);
     }
 
-    /** Returns a loan from {@link #datareaderTakeSerializedLoaned}; a {@code 0L} loan is ignored. */
+    /**
+     * Returns a loan from {@link #datareaderTakeSerializedLoaned}; a {@code 0L} loan is ignored.
+     */
     public static int datareaderReturnSerializedLoan(long loan) {
         return Ffi.int2dds_datareader_return_serialized_loan(loan);
     }
@@ -4785,9 +5083,8 @@ public final class FfiAccess {
     // --- Topic name getters ---
 
     /**
-     * Copies the topic name, NUL-terminated, into {@code nameOut}. {@code
-     * RET_BUFFER_TOO_SMALL} without a size report when it does not fit, so the
-     * caller grows and retries.
+     * Copies the topic name, NUL-terminated, into {@code nameOut}. {@code RET_BUFFER_TOO_SMALL}
+     * without a size report when it does not fit, so the caller grows and retries.
      */
     public static int topicGetName(long topic, byte[] nameOut) {
         return Ffi.int2dds_topic_get_name(topic, nameOut, nameOut.length);
@@ -4801,16 +5098,21 @@ public final class FfiAccess {
     // --- Topic from a TypeObject ---
 
     /**
-     * Creates a topic advertising {@code typeObj}, which is cloned natively and
-     * stays owned by the caller. {@code qos} may be {@code 0L}. Same {@code (rc,
-     * long[] handleOut)} shape as {@link #createTopic}; released with {@link
-     * #deleteTopic}.
+     * Creates a topic advertising {@code typeObj}, which is cloned natively and stays owned by the
+     * caller. {@code qos} may be {@code 0L}. Same {@code (rc, long[] handleOut)} shape as {@link
+     * #createTopic}; released with {@link #deleteTopic}.
      */
-    public static int createTopicWithTypeObject(long participant, byte[] topicName, byte[] typeName,
-            long typeObj, long qos, long[] handleOut) {
+    public static int createTopicWithTypeObject(
+            long participant,
+            byte[] topicName,
+            byte[] typeName,
+            long typeObj,
+            long qos,
+            long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_create_topic_with_type_object(
-                participant, topicName, typeName, typeObj, qos, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_create_topic_with_type_object(
+                        participant, topicName, typeName, typeObj, qos, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
@@ -4821,14 +5123,16 @@ public final class FfiAccess {
     // --- TypeInfo: union / bitset / map ---
 
     /**
-     * Creates a union type-info builder switching on the scalar {@code
-     * discriminatorType} (an {@code INT2DDS_FIELD_*} kind; string kinds are
-     * rejected). Same {@code (rc, long[] out)} shape as {@link #typeInfoCreateEnum}.
+     * Creates a union type-info builder switching on the scalar {@code discriminatorType} (an
+     * {@code INT2DDS_FIELD_*} kind; string kinds are rejected). Same {@code (rc, long[] out)} shape
+     * as {@link #typeInfoCreateEnum}.
      */
-    public static int typeInfoCreateUnion(byte[] typeName, int extensibility, int discriminatorType, long[] out) {
+    public static int typeInfoCreateUnion(
+            byte[] typeName, int extensibility, int discriminatorType, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        int rc = Ffi.int2dds_type_info_create_union(
-                typeName, extensibility, discriminatorType, directBufferAddress(slot));
+        int rc =
+                Ffi.int2dds_type_info_create_union(
+                        typeName, extensibility, discriminatorType, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -4836,7 +5140,10 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Creates a bitset type-info builder. Same {@code (rc, long[] out)} shape as {@link #typeInfoCreateEnum}. */
+    /**
+     * Creates a bitset type-info builder. Same {@code (rc, long[] out)} shape as {@link
+     * #typeInfoCreateEnum}.
+     */
     public static int typeInfoCreateBitset(byte[] typeName, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_type_info_create_bitset(typeName, directBufferAddress(slot));
@@ -4847,29 +5154,48 @@ public final class FfiAccess {
         return rc;
     }
 
-    /** Appends a {@code bitfield<bitcount>} held in the integer kind {@code holderType} to a bitset builder. */
-    public static int typeInfoAddBitfield(long typeInfo, byte[] fieldName, int bitcount, int holderType) {
+    /**
+     * Appends a {@code bitfield<bitcount>} held in the integer kind {@code holderType} to a bitset
+     * builder.
+     */
+    public static int typeInfoAddBitfield(
+            long typeInfo, byte[] fieldName, int bitcount, int holderType) {
         return Ffi.int2dds_type_info_add_bitfield(typeInfo, fieldName, bitcount, holderType);
     }
 
-    /** Attaches the case label {@code label} to the already-added union member {@code memberName}. */
+    /**
+     * Attaches the case label {@code label} to the already-added union member {@code memberName}.
+     */
     public static int typeInfoAddUnionLabel(long typeInfo, byte[] memberName, int label) {
         return Ffi.int2dds_type_info_add_union_label(typeInfo, memberName, label);
     }
 
     /**
-     * Appends a {@code map<K, V>} field of scalar kinds. The bounds apply to
-     * string kinds only ({@code 0} = unbounded); {@code bound} is the map's own.
+     * Appends a {@code map<K, V>} field of scalar kinds. The bounds apply to string kinds only
+     * ({@code 0} = unbounded); {@code bound} is the map's own.
      */
-    public static int typeInfoAddMapField(long typeInfo, byte[] fieldName, int keyType, int keyBound,
-            int valueType, int valueBound, int bound, int flags) {
+    public static int typeInfoAddMapField(
+            long typeInfo,
+            byte[] fieldName,
+            int keyType,
+            int keyBound,
+            int valueType,
+            int valueBound,
+            int bound,
+            int flags) {
         return Ffi.int2dds_type_info_add_map_field(
                 typeInfo, fieldName, keyType, keyBound, valueType, valueBound, bound, flags);
     }
 
     /** Appends a {@code map<K, Nested>} field; {@code valueTypeInfo} is borrowed, not consumed. */
-    public static int typeInfoAddMapOfNestedField(long typeInfo, byte[] fieldName, int keyType,
-            int keyBound, long valueTypeInfo, int bound, int flags) {
+    public static int typeInfoAddMapOfNestedField(
+            long typeInfo,
+            byte[] fieldName,
+            int keyType,
+            int keyBound,
+            long valueTypeInfo,
+            int bound,
+            int flags) {
         return Ffi.int2dds_type_info_add_map_of_nested_field(
                 typeInfo, fieldName, keyType, keyBound, valueTypeInfo, bound, flags);
     }

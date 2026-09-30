@@ -2,19 +2,18 @@ package kr.co.intellectus.int2dds.xtypes;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import java.nio.ByteOrder;
 import kr.co.intellectus.int2dds.cdr.CdrWriter;
 import kr.co.intellectus.int2dds.cdr.Extensibility;
 import kr.co.intellectus.int2dds.core.DomainParticipant;
-import java.nio.ByteOrder;
 import org.junit.jupiter.api.Test;
 
 /**
- * End-to-end proof of the four new {@link TypeInfo} complex-field builders
- * (bounded string, fixed array of primitives, array of nested structs,
- * sequence of nested structs), mirroring {@link DynamicDataTest}'s
- * build-with-{@link TypeInfo} / encode-with-{@link CdrWriter} /
- * decode-with-{@link DomainParticipant#dynamicDataFromSample} / read-with-
- * {@link DynamicData} pattern.
+ * End-to-end proof of the four new {@link TypeInfo} complex-field builders (bounded string, fixed
+ * array of primitives, array of nested structs, sequence of nested structs), mirroring {@link
+ * DynamicDataTest}'s build-with-{@link TypeInfo} / encode-with-{@link CdrWriter} /
+ * decode-with-{@link DomainParticipant#dynamicDataFromSample} / read-with- {@link DynamicData}
+ * pattern.
  */
 class ComplexTypeBuilderTest {
 
@@ -24,14 +23,12 @@ class ComplexTypeBuilderTest {
     }
 
     /**
-     * A fixed-size array carries no length prefix on the wire -- unlike a
-     * sequence, which writes a uint32 count via {@link CdrWriter#writeSeqHeader}.
-     * The array's elements are simply written back-to-back (see {@code
-     * deserialize_value_xcdr2}'s {@code Array} arm in {@code
-     * dds/src/xtypes/dynamic_serialization.rs}, which reads exactly {@code
-     * total_size} elements with no preceding length). Indexed reads (e.g.
-     * {@code "vals[0]"}) are supported by the same dotted/indexed path
-     * resolution {@code getMember}/{@code getI32} document.
+     * A fixed-size array carries no length prefix on the wire -- unlike a sequence, which writes a
+     * uint32 count via {@link CdrWriter#writeSeqHeader}. The array's elements are simply written
+     * back-to-back (see {@code deserialize_value_xcdr2}'s {@code Array} arm in {@code
+     * dds/src/xtypes/dynamic_serialization.rs}, which reads exactly {@code total_size} elements
+     * with no preceding length). Indexed reads (e.g. {@code "vals[0]"}) are supported by the same
+     * dotted/indexed path resolution {@code getMember}/{@code getI32} document.
      */
     @Test
     void fixedArrayOfPrimitivesRoundTrips() {
@@ -43,8 +40,11 @@ class ComplexTypeBuilderTest {
                 int[] vals = {10, 20, 30};
 
                 byte[] serialized;
-                try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
-                        ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                try (CdrWriter w =
+                        CdrWriter.acquire(
+                                Extensibility.APPENDABLE,
+                                ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                false)) {
                     int token = w.dheaderBegin();
                     for (int v : vals) {
                         w.writeI32(v);
@@ -74,8 +74,11 @@ class ComplexTypeBuilderTest {
                 String label = "bounded";
 
                 byte[] serialized;
-                try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
-                        ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                try (CdrWriter w =
+                        CdrWriter.acquire(
+                                Extensibility.APPENDABLE,
+                                ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                false)) {
                     int token = w.dheaderBegin();
                     w.writeString(label);
                     w.dheaderFinalize(token);
@@ -92,12 +95,11 @@ class ComplexTypeBuilderTest {
     }
 
     /**
-     * A sequence of nested structs: the sequence itself gets a uint32 length
-     * ({@link CdrWriter#writeSeqHeader}), then each {@code Inner} element is
-     * written per its own extensibility -- {@code Inner} is FINAL here, so
-     * (mirroring {@code getMemberReadsANestedStructField}'s Point) no
-     * per-element DHEADER, just its members inline. {@code getMember} resolves
-     * the same dotted/indexed path as the scalar getters, so {@code
+     * A sequence of nested structs: the sequence itself gets a uint32 length ({@link
+     * CdrWriter#writeSeqHeader}), then each {@code Inner} element is written per its own
+     * extensibility -- {@code Inner} is FINAL here, so (mirroring {@code
+     * getMemberReadsANestedStructField}'s Point) no per-element DHEADER, just its members inline.
+     * {@code getMember} resolves the same dotted/indexed path as the scalar getters, so {@code
      * "items[0]"} reaches the first element's {@link DynamicData}.
      */
     @Test
@@ -113,8 +115,11 @@ class ComplexTypeBuilderTest {
                     int[] xs = {5, 9};
 
                     byte[] serialized;
-                    try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
-                            ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                    try (CdrWriter w =
+                            CdrWriter.acquire(
+                                    Extensibility.APPENDABLE,
+                                    ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                    false)) {
                         int token = w.dheaderBegin();
                         w.writeSeqHeader(xs.length);
                         for (int x : xs) {

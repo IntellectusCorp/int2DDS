@@ -1,5 +1,7 @@
 package kr.co.intellectus.int2dds.internal;
 
+import java.nio.charset.Charset;
+import java.util.function.ToIntFunction;
 import kr.co.intellectus.int2dds.exceptions.DdsAlreadyDeletedException;
 import kr.co.intellectus.int2dds.exceptions.DdsBufferTooSmallException;
 import kr.co.intellectus.int2dds.exceptions.DdsErrorException;
@@ -16,21 +18,17 @@ import kr.co.intellectus.int2dds.exceptions.DdsPreconditionNotMetException;
 import kr.co.intellectus.int2dds.exceptions.DdsTimeoutException;
 import kr.co.intellectus.int2dds.exceptions.DdsUnsupportedException;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import java.nio.charset.Charset;
-import java.util.function.ToIntFunction;
 
 /**
  * Turns {@code Int2DdsRet} values into exceptions.
  *
- * <p>The numeric values switched on below are {@link DdsException}'s
- * {@code RET_*} constants, transcribed from the {@code INT2DDS_RET_*}
- * constants in {@code ffi/src/error.rs} — the single source of truth for
- * this mapping, and the only place the numbers are written down. If a code is added there, add a
- * case here — the fallback keeps working but loses the specific type. A
- * handful of codes in that file (the {@code INT2DDS_RET_DYNAMIC_*} family,
- * 200-204, for dynamic-type reflection) have no dedicated exception type yet
- * and intentionally fall through to the {@code default} case, which still
- * reports the real code.
+ * <p>The numeric values switched on below are {@link DdsException}'s {@code RET_*} constants,
+ * transcribed from the {@code INT2DDS_RET_*} constants in {@code ffi/src/error.rs} — the single
+ * source of truth for this mapping, and the only place the numbers are written down. If a code is
+ * added there, add a case here — the fallback keeps working but loses the specific type. A handful
+ * of codes in that file (the {@code INT2DDS_RET_DYNAMIC_*} family, 200-204, for dynamic-type
+ * reflection) have no dedicated exception type yet and intentionally fall through to the {@code
+ * default} case, which still reports the real code.
  */
 public final class ReturnCodes {
 
@@ -47,8 +45,10 @@ public final class ReturnCodes {
         throw toException(ret);
     }
 
-    /** True for OK, false for NO_DATA, throws for anything else.
-     *  Read and take need to report "nothing available" without an exception. */
+    /**
+     * True for OK, false for NO_DATA, throws for anything else. Read and take need to report
+     * "nothing available" without an exception.
+     */
     public static boolean checkOrNoData(int ret) {
         if (ret == DdsException.RET_OK) {
             return true;
@@ -62,24 +62,22 @@ public final class ReturnCodes {
     /**
      * The native layer's last error message for this thread, or an empty string.
      *
-     * <p>The FFI ({@code ffi/src/last_error.rs}) reserves the buffer's last byte
-     * for a NUL terminator, so an N-byte buffer only ever receives N-1 message
-     * bytes, and it always returns the message's full pre-truncation length. A
-     * retry therefore needs a buffer one byte larger than that full length, not
-     * equal to it.
+     * <p>The FFI ({@code ffi/src/last_error.rs}) reserves the buffer's last byte for a NUL
+     * terminator, so an N-byte buffer only ever receives N-1 message bytes, and it always returns
+     * the message's full pre-truncation length. A retry therefore needs a buffer one byte larger
+     * than that full length, not equal to it.
      */
     public static String lastErrorMessage() {
         return readMessage(FfiAccess::lastErrorMessage);
     }
 
     /**
-     * Buffer-growth logic behind {@link #lastErrorMessage()}, factored out so it
-     * can be tested against a stub that mimics the native contract without a
-     * message long enough to trip it actually existing in the FFI today.
+     * Buffer-growth logic behind {@link #lastErrorMessage()}, factored out so it can be tested
+     * against a stub that mimics the native contract without a message long enough to trip it
+     * actually existing in the FFI today.
      *
-     * @param reader mirrors {@code FfiAccess.lastErrorMessage(byte[])}: writes as
-     *     much of the message plus a NUL as fits, always returns the message's
-     *     full pre-truncation byte length
+     * @param reader mirrors {@code FfiAccess.lastErrorMessage(byte[])}: writes as much of the
+     *     message plus a NUL as fits, always returns the message's full pre-truncation byte length
      */
     static String readMessage(ToIntFunction<byte[]> reader) {
         byte[] buf = new byte[FIRST_TRY_BYTES];
@@ -137,8 +135,7 @@ public final class ReturnCodes {
             case DdsException.RET_BUFFER_TOO_SMALL:
                 return new DdsBufferTooSmallException();
             default:
-                return new DdsException(
-                        "DDS operation failed with unknown code " + ret + ".", ret);
+                return new DdsException("DDS operation failed with unknown code " + ret + ".", ret);
         }
     }
 }

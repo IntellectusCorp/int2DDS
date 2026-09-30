@@ -6,9 +6,9 @@ import java.util.Objects;
 /**
  * Reader data lifecycle QoS policy.
  *
- * <p>Both durations may be null. The C ABI setters take a number and have no
- * way to express "unset", so a null becomes {@code Long.MAX_VALUE} for each —
- * the same fallback the C# binding uses.
+ * <p>Both durations may be null. The C ABI setters take a number and have no way to express
+ * "unset", so a null becomes {@code Long.MAX_VALUE} for each — the same fallback the C# binding
+ * uses.
  */
 public class ReaderDataLifecycle {
 

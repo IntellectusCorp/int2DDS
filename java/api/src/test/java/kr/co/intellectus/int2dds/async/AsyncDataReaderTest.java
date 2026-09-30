@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.concurrent.TimeUnit;
 import kr.co.intellectus.int2dds.core.DataReader;
 import kr.co.intellectus.int2dds.core.DataWriter;
 import kr.co.intellectus.int2dds.core.DomainParticipant;
@@ -13,16 +14,15 @@ import kr.co.intellectus.int2dds.core.Sample;
 import kr.co.intellectus.int2dds.core.Subscriber;
 import kr.co.intellectus.int2dds.core.Topic;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * End-to-end proof that {@link AsyncDataReader} actually delivers data
- * across the async wait/take path, not just against a mocked reader.
+ * End-to-end proof that {@link AsyncDataReader} actually delivers data across the async wait/take
+ * path, not just against a mocked reader.
  *
- * <p>Two participants in the same domain -- the pattern {@code
- * MatchedEndpointsTest}/{@code DiscoveryTest} settled on, since matching
- * does not appear to loop back within a single participant.
+ * <p>Two participants in the same domain -- the pattern {@code MatchedEndpointsTest}/{@code
+ * DiscoveryTest} settled on, since matching does not appear to loop back within a single
+ * participant.
  */
 class AsyncDataReaderTest {
 
@@ -78,7 +78,8 @@ class AsyncDataReaderTest {
             Topic<ConformanceRecord> topic =
                     p.createTopic("AsyncDataReaderEmptyTopic", new ConformanceRecord());
             Subscriber sub = p.createSubscriber();
-            DataReader<ConformanceRecord> reader = sub.createDataReader(topic, ConformanceRecord::new);
+            DataReader<ConformanceRecord> reader =
+                    sub.createDataReader(topic, ConformanceRecord::new);
 
             try (AsyncDataReader<ConformanceRecord> asyncReader = new AsyncDataReader<>(reader)) {
                 Sample<ConformanceRecord> sample = asyncReader.takeAsync().get();

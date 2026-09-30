@@ -1,8 +1,8 @@
 package kr.co.intellectus.int2dds.status;
 
 /**
- * Immutable DDS status bitmask. The bit values match the core's
- * {@code StatusKind} numbering ({@code dds/src/dcps/infrastructure/status.rs}).
+ * Immutable DDS status bitmask. The bit values match the core's {@code StatusKind} numbering
+ * ({@code dds/src/dcps/infrastructure/status.rs}).
  */
 public final class StatusMask {
     public static final int SUBSCRIPTION_MATCHED = 1 << 14;

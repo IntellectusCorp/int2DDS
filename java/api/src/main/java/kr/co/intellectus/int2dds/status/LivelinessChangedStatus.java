@@ -5,9 +5,8 @@ import java.util.Arrays;
 /**
  * Immutable snapshot of a DataReader's LIVELINESS_CHANGED status.
  *
- * <p>Constructed from the native trampoline via the {@code (IIII[B)V}
- * constructor; the field order matches the core's
- * {@code Int2DdsLivelinessChangedStatus}.
+ * <p>Constructed from the native trampoline via the {@code (IIII[B)V} constructor; the field order
+ * matches the core's {@code Int2DdsLivelinessChangedStatus}.
  */
 public final class LivelinessChangedStatus {
 
@@ -17,16 +16,21 @@ public final class LivelinessChangedStatus {
     private final int notAliveCountChange;
     private final byte[] lastPublicationHandle;
 
-    public LivelinessChangedStatus(int aliveCount, int notAliveCount,
-            int aliveCountChange, int notAliveCountChange, byte[] lastPublicationHandle) {
+    public LivelinessChangedStatus(
+            int aliveCount,
+            int notAliveCount,
+            int aliveCountChange,
+            int notAliveCountChange,
+            byte[] lastPublicationHandle) {
         this.aliveCount = aliveCount;
         this.notAliveCount = notAliveCount;
         this.aliveCountChange = aliveCountChange;
         this.notAliveCountChange = notAliveCountChange;
         // Defensive copy: the caller's array must not alias this snapshot.
-        this.lastPublicationHandle = lastPublicationHandle == null
-                ? new byte[0]
-                : Arrays.copyOf(lastPublicationHandle, lastPublicationHandle.length);
+        this.lastPublicationHandle =
+                lastPublicationHandle == null
+                        ? new byte[0]
+                        : Arrays.copyOf(lastPublicationHandle, lastPublicationHandle.length);
     }
 
     /** Current count of alive matched DataWriters. */

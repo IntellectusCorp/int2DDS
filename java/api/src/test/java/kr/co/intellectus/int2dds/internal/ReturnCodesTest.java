@@ -10,7 +10,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import kr.co.intellectus.int2dds.exceptions.DdsAlreadyDeletedException;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
-import kr.co.intellectus.int2dds.exceptions.DdsNoDataException;
 import kr.co.intellectus.int2dds.exceptions.DdsTimeoutException;
 import org.junit.jupiter.api.Test;
 
@@ -52,8 +51,8 @@ class ReturnCodesTest {
 
     @Test
     void alreadyDeletedMapsToItsOwnType() {
-        assertThrows(DdsAlreadyDeletedException.class,
-                () -> ReturnCodes.check(RET_ALREADY_DELETED));
+        assertThrows(
+                DdsAlreadyDeletedException.class, () -> ReturnCodes.check(RET_ALREADY_DELETED));
     }
 
     @Test
@@ -65,7 +64,9 @@ class ReturnCodesTest {
         for (int code : KNOWN_CODES) {
             DdsException e = assertThrows(DdsException.class, () -> ReturnCodes.check(code));
             assertEquals(code, e.getCode(), "code round-trips onto the exception");
-            assertNotEquals(DdsException.class, e.getClass(),
+            assertNotEquals(
+                    DdsException.class,
+                    e.getClass(),
                     "code " + code + " fell through to the generic type");
             assertTrue(seen.add(e.getClass()), "two codes share one type: " + e.getClass());
         }

@@ -3,24 +3,23 @@ package kr.co.intellectus.int2dds.xtypes;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import kr.co.intellectus.int2dds.cdr.CdrWriter;
-import kr.co.intellectus.int2dds.cdr.Extensibility;
-import kr.co.intellectus.int2dds.core.DomainParticipant;
-import kr.co.intellectus.int2dds.exceptions.DdsException;
 import java.io.IOException;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import kr.co.intellectus.int2dds.cdr.CdrWriter;
+import kr.co.intellectus.int2dds.cdr.Extensibility;
+import kr.co.intellectus.int2dds.core.DomainParticipant;
+import kr.co.intellectus.int2dds.exceptions.DdsException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * De-risk test for the XmlTypeRegistry completion increment: {@code
- * fromFile}/{@code loadFile}/{@code getTypeObject}/{@code typeName}. Reuses
- * {@link DynamicWriteTest}'s Telemetry XML and {@link DynamicDataTest}'s
- * CdrWriter encoding approach to prove the XML-to-TypeObject-to-decode bridge
- * end to end, not just that the calls return OK.
+ * De-risk test for the XmlTypeRegistry completion increment: {@code fromFile}/{@code
+ * loadFile}/{@code getTypeObject}/{@code typeName}. Reuses {@link DynamicWriteTest}'s Telemetry XML
+ * and {@link DynamicDataTest}'s CdrWriter encoding approach to prove the
+ * XML-to-TypeObject-to-decode bridge end to end, not just that the calls return OK.
  */
 class XmlRegistryCompleteTest {
 
@@ -33,22 +32,24 @@ class XmlRegistryCompleteTest {
 
     // Same layout as DynamicWriteTest.XML (default extensibility = appendable,
     // per dds/src/config/xml/parser.rs's extensibility_attr).
-    private static final String TELEMETRY_XML = "<types>\n"
-            + " <struct name=\"Telemetry\">\n"
-            + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
-            + "  <member name=\"temperature\" type=\"float32\"/>\n"
-            + "  <member name=\"active\" type=\"boolean\"/>\n"
-            + "  <member name=\"label\" type=\"string\"/>\n"
-            + "  <member name=\"count\" type=\"int64\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String TELEMETRY_XML =
+            "<types>\n"
+                    + " <struct name=\"Telemetry\">\n"
+                    + "  <member name=\"id\" type=\"uint32\" key=\"true\"/>\n"
+                    + "  <member name=\"temperature\" type=\"float32\"/>\n"
+                    + "  <member name=\"active\" type=\"boolean\"/>\n"
+                    + "  <member name=\"label\" type=\"string\"/>\n"
+                    + "  <member name=\"count\" type=\"int64\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     // A different struct so fromFile/loadFile's typeCount grows from 1 to 2.
-    private static final String OTHER_XML = "<types>\n"
-            + " <struct name=\"OtherRecord\">\n"
-            + "  <member name=\"x\" type=\"int32\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String OTHER_XML =
+            "<types>\n"
+                    + " <struct name=\"OtherRecord\">\n"
+                    + "  <member name=\"x\" type=\"int32\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     private static int testDomain() {
         return Integer.parseInt(System.getProperty("int2dds.test.domain", "137"));
@@ -68,8 +69,11 @@ class XmlRegistryCompleteTest {
                 long count = -100L;
 
                 byte[] serialized;
-                try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
-                        ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
+                try (CdrWriter w =
+                        CdrWriter.acquire(
+                                Extensibility.APPENDABLE,
+                                ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN,
+                                false)) {
                     int token = w.dheaderBegin();
                     w.writeU32(id);
                     w.writeF32(temperature);
@@ -89,8 +93,8 @@ class XmlRegistryCompleteTest {
                 }
             }
 
-            DdsException e = assertThrows(DdsException.class,
-                    () -> registry.getTypeObject("NoSuchType"));
+            DdsException e =
+                    assertThrows(DdsException.class, () -> registry.getTypeObject("NoSuchType"));
             assertEquals(RET_DYNAMIC_FIELD_NOT_FOUND, e.getCode());
         } finally {
             p.close();

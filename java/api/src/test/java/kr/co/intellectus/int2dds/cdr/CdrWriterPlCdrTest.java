@@ -19,8 +19,10 @@ class CdrWriterPlCdrTest {
     }
 
     private static int leInt(byte[] b, int at) {
-        return (b[at] & 0xFF) | ((b[at + 1] & 0xFF) << 8)
-                | ((b[at + 2] & 0xFF) << 16) | ((b[at + 3] & 0xFF) << 24);
+        return (b[at] & 0xFF)
+                | ((b[at + 1] & 0xFF) << 8)
+                | ((b[at + 2] & 0xFF) << 16)
+                | ((b[at + 3] & 0xFF) << 24);
     }
 
     @Test
@@ -125,8 +127,17 @@ class CdrWriterPlCdrTest {
         // reserved header bytes unconditionally, regardless of what a prior
         // sample left behind in the slot.
         try (CdrWriter dirty = CdrWriter.acquire(Extensibility.MUTABLE, true, false)) {
-            dirty.writeBytes(new byte[] {(byte) 0xEE, (byte) 0xEE, (byte) 0xEE, (byte) 0xEE,
-                    (byte) 0xEE, (byte) 0xEE, (byte) 0xEE, (byte) 0xEE});
+            dirty.writeBytes(
+                    new byte[] {
+                        (byte) 0xEE,
+                        (byte) 0xEE,
+                        (byte) 0xEE,
+                        (byte) 0xEE,
+                        (byte) 0xEE,
+                        (byte) 0xEE,
+                        (byte) 0xEE,
+                        (byte) 0xEE
+                    });
         }
         try (CdrWriter w = CdrWriter.acquire(Extensibility.MUTABLE, true, false)) {
             int h = w.memberV1Begin(5);

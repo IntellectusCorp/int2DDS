@@ -1,5 +1,6 @@
 package kr.co.intellectus.int2dds.examples;
 
+import java.util.List;
 import kr.co.intellectus.int2dds.conditions.Condition;
 import kr.co.intellectus.int2dds.conditions.StatusCondition;
 import kr.co.intellectus.int2dds.conditions.WaitSet;
@@ -12,27 +13,24 @@ import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.Reliability;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.status.StatusMask;
-import java.util.List;
 
 /**
  * Subscribes to the {@link HelloWorld} samples {@link HelloWorldPub} writes.
  *
- * <p>The read-path half of the HelloWorld pair: {@link HelloWorldPub}'s class
- * doc noted that conditions were not yet available on this branch and it
- * therefore could not wait for a subscriber. This example demonstrates the
- * idiomatic DDS wait-for-data pattern that was missing then — a {@link
- * WaitSet} with the reader's {@link StatusCondition} enabled for {@link
- * StatusMask#DATA_AVAILABLE}, {@link WaitSet#await} blocking the thread until
- * data arrives, and {@link DataReader#take} draining the cache once woken.
- * That means this example blocks between samples rather than busy-polling.
+ * <p>The read-path half of the HelloWorld pair: {@link HelloWorldPub}'s class doc noted that
+ * conditions were not yet available on this branch and it therefore could not wait for a
+ * subscriber. This example demonstrates the idiomatic DDS wait-for-data pattern that was missing
+ * then — a {@link WaitSet} with the reader's {@link StatusCondition} enabled for {@link
+ * StatusMask#DATA_AVAILABLE}, {@link WaitSet#await} blocking the thread until data arrives, and
+ * {@link DataReader#take} draining the cache once woken. That means this example blocks between
+ * samples rather than busy-polling.
  *
- * <p>Uses the same topic name ({@code hello_world_topic}) and type ({@code
- * HelloWorld}) as {@link HelloWorldPub}, so it interoperates on the wire with
- * the Java, C# and Rust publishers alike.
+ * <p>Uses the same topic name ({@code hello_world_topic}) and type ({@code HelloWorld}) as {@link
+ * HelloWorldPub}, so it interoperates on the wire with the Java, C# and Rust publishers alike.
  *
- * <p>Run with {@code -d}/{@code --domain <id>} (default 0) and {@code
- * --reliable} (default BEST_EFFORT), the same flags {@link HelloWorldPub}
- * takes — pass the same reliability on both sides for the two to match.
+ * <p>Run with {@code -d}/{@code --domain <id>} (default 0) and {@code --reliable} (default
+ * BEST_EFFORT), the same flags {@link HelloWorldPub} takes — pass the same reliability on both
+ * sides for the two to match.
  */
 public final class HelloWorldSub {
 
@@ -63,10 +61,12 @@ public final class HelloWorldSub {
             System.out.println("Created topic: " + topic.name() + " (" + topic.typeName() + ")");
 
             Subscriber subscriber = participant.createSubscriber();
-            ReliabilityKind kind = reliable ? ReliabilityKind.RELIABLE : ReliabilityKind.BEST_EFFORT;
+            ReliabilityKind kind =
+                    reliable ? ReliabilityKind.RELIABLE : ReliabilityKind.BEST_EFFORT;
             DataReaderQos qos = new DataReaderQos();
             qos.setReliability(new Reliability(kind));
-            DataReader<HelloWorld> reader = subscriber.createDataReader(topic, HelloWorld::new, qos);
+            DataReader<HelloWorld> reader =
+                    subscriber.createDataReader(topic, HelloWorld::new, qos);
             System.out.println("Created subscriber and data reader");
 
             try (WaitSet waitSet = new WaitSet();
@@ -93,7 +93,11 @@ public final class HelloWorldSub {
                                 continue;
                             }
                             System.out.println(
-                                    "Received: index=" + data.index + ", message='" + data.message + "'");
+                                    "Received: index="
+                                            + data.index
+                                            + ", message='"
+                                            + data.message
+                                            + "'");
                         }
                     }
                 } finally {

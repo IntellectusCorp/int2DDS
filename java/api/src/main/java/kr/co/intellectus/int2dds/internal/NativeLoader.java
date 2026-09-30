@@ -1,6 +1,5 @@
 package kr.co.intellectus.int2dds.internal;
 
-import kr.co.intellectus.int2dds.internal.ffi.FfiHandwritten;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -9,16 +8,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Locale;
+import kr.co.intellectus.int2dds.internal.ffi.FfiHandwritten;
 
 /**
- * Locates and loads {@code int2dds_java}, then verifies that the native
- * library's product version matches this JAR's.
+ * Locates and loads {@code int2dds_java}, then verifies that the native library's product version
+ * matches this JAR's.
  *
  * <p>Search order:
+ *
  * <ol>
- *   <li>{@code INT2DDS_JAVA_LIB} — an absolute path, for local development</li>
- *   <li>a bundled copy inside this JAR, extracted to a temp directory</li>
- *   <li>{@code java.library.path}</li>
+ *   <li>{@code INT2DDS_JAVA_LIB} — an absolute path, for local development
+ *   <li>a bundled copy inside this JAR, extracted to a temp directory
+ *   <li>{@code java.library.path}
  * </ol>
  */
 public final class NativeLoader {
@@ -52,8 +53,10 @@ public final class NativeLoader {
     static void verifyVersion(String jar, String nativeVer) {
         if (!jar.equals(nativeVer)) {
             throw new NativeLoadException(
-                    "int2DDS version mismatch: JAR is " + jar
-                            + " but the native library is " + nativeVer
+                    "int2DDS version mismatch: JAR is "
+                            + jar
+                            + " but the native library is "
+                            + nativeVer
                             + ". Rebuild the native library with "
                             + "'cargo build --release -p int2dds-java'.");
         }
@@ -74,9 +77,8 @@ public final class NativeLoader {
     /**
      * Loads the library from an explicit path.
      *
-     * <p>Separated from {@link #doLoad()} so the missing-file branch is testable
-     * without setting an environment variable, which Java cannot do to its own
-     * process.
+     * <p>Separated from {@link #doLoad()} so the missing-file branch is testable without setting an
+     * environment variable, which Java cannot do to its own process.
      */
     static void loadFrom(String path) {
         File f = new File(path);
@@ -122,16 +124,20 @@ public final class NativeLoader {
         } catch (UnsatisfiedLinkError e) {
             throw new NativeLoadException(
                     "could not load int2dds_java. Set INT2DDS_JAVA_LIB to the "
-                            + "absolute path of " + fileName
-                            + ", or put its directory on java.library.path.", e);
+                            + "absolute path of "
+                            + fileName
+                            + ", or put its directory on java.library.path.",
+                    e);
         }
     }
 
     private static String platformDir() {
         String os = System.getProperty("os.name", "linux").toLowerCase(Locale.ROOT);
         String arch = System.getProperty("os.arch", "amd64").toLowerCase(Locale.ROOT);
-        String o = os.contains("win") ? "windows"
-                : (os.contains("mac") || os.contains("darwin")) ? "macos" : "linux";
+        String o =
+                os.contains("win")
+                        ? "windows"
+                        : (os.contains("mac") || os.contains("darwin")) ? "macos" : "linux";
         String a = (arch.contains("aarch64") || arch.contains("arm64")) ? "aarch64" : "x86_64";
         return o + "-" + a;
     }

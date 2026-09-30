@@ -18,12 +18,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use syn::{FnArg, Item, Pat, ReturnType, Visibility};
 
-/// The exact size of the exported C ABI surface. Ground truth is the dynamic
-/// symbol table of the built cdylib. Intentionally exact: an FFI change must
-/// force a deliberate update here, and this is the ONLY count that needs one —
-/// every other guard derives from the parsed surface.
-pub const EXPECTED_FFI_FUNCTIONS: usize = 462;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: String,
@@ -322,17 +316,6 @@ mod tests {
             fns.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{name} must be found"));
         let params = f.params.iter().map(|p| (p.name.as_str(), p.ty.as_str())).collect();
         (params, f.ret.as_str())
-    }
-
-    #[test]
-    fn finds_every_exported_ffi_function() {
-        let fns = parse_ffi_dir(ffi_dir()).expect("parse must succeed");
-        // Ground truth is the dynamic symbol table of the built cdylib:
-        //   nm -D --defined-only target/release/libint2dds_ffi.so | grep -c ' T int2dds_'
-        // reports 462, including int2dds_participant_set_endpoint_discovery_callback.
-        // This assertion is intentionally exact so an FFI change forces a
-        // deliberate update here.
-        assert_eq!(fns.len(), EXPECTED_FFI_FUNCTIONS, "exported FFI function count changed");
     }
 
     #[test]

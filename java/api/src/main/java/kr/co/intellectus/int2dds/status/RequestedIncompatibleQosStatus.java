@@ -3,9 +3,8 @@ package kr.co.intellectus.int2dds.status;
 /**
  * Immutable snapshot of a DataReader's REQUESTED_INCOMPATIBLE_QOS status.
  *
- * <p>Constructed from the native trampoline via the {@code (IIII)V}
- * constructor; the field order matches the core's
- * {@code Int2DdsRequestedIncompatibleQosStatus}.
+ * <p>Constructed from the native trampoline via the {@code (IIII)V} constructor; the field order
+ * matches the core's {@code Int2DdsRequestedIncompatibleQosStatus}.
  */
 public final class RequestedIncompatibleQosStatus {
 
@@ -14,8 +13,8 @@ public final class RequestedIncompatibleQosStatus {
     private final int lastPolicyId;
     private final int policiesCount;
 
-    public RequestedIncompatibleQosStatus(int totalCount, int totalCountChange,
-            int lastPolicyId, int policiesCount) {
+    public RequestedIncompatibleQosStatus(
+            int totalCount, int totalCountChange, int lastPolicyId, int policiesCount) {
         this.totalCount = totalCount;
         this.totalCountChange = totalCountChange;
         this.lastPolicyId = lastPolicyId;

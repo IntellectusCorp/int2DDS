@@ -1,8 +1,8 @@
 package kr.co.intellectus.int2dds.conditions;
 
 /**
- * View-state bit values for {@link ReadCondition} masks. Matches the
- * core's {@code ViewStateKind} ({@code dds/src/dcps/subscription/sample_info.rs}).
+ * View-state bit values for {@link ReadCondition} masks. Matches the core's {@code ViewStateKind}
+ * ({@code dds/src/dcps/subscription/sample_info.rs}).
  */
 public final class ViewState {
     public static final int NEW = 0x0001;

@@ -146,10 +146,8 @@ class CdrRoundTripTest {
     @Test
     void aTruncatedStringLengthUnderflowsRatherThanReadingGarbage() {
         // Length prefix claims 100 bytes, buffer holds 2.
-        CdrReader r = CdrReader.of(new byte[] {
-                0x00, 0x01, 0x00, 0x00,
-                0x64, 0x00, 0x00, 0x00,
-                'a', 'b'});
+        CdrReader r =
+                CdrReader.of(new byte[] {0x00, 0x01, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 'a', 'b'});
         assertThrows(CdrUnderflowException.class, r::readString);
     }
 
@@ -162,14 +160,21 @@ class CdrRoundTripTest {
         // CdrUnderflowException. Only the guard mentions the unit count.
         byte[] hostile = new byte[16];
         // Encapsulation header (LE XCDR1)
-        hostile[0] = 0x00; hostile[1] = 0x01;
-        hostile[2] = 0x00; hostile[3] = 0x00;
+        hostile[0] = 0x00;
+        hostile[1] = 0x01;
+        hostile[2] = 0x00;
+        hostile[3] = 0x00;
         // Length: 100,000,000 in LE
-        hostile[4] = (byte) 0x00; hostile[5] = (byte) 0xE1; hostile[6] = (byte) 0xF5; hostile[7] = (byte) 0x05;
+        hostile[4] = (byte) 0x00;
+        hostile[5] = (byte) 0xE1;
+        hostile[6] = (byte) 0xF5;
+        hostile[7] = (byte) 0x05;
         CdrReader r = CdrReader.of(hostile);
         CdrUnderflowException e = assertThrows(CdrUnderflowException.class, r::readWString);
-        assertTrue(e.getMessage().contains("100000000"),
-                "Exception must be from pre-allocation guard (mentions unit count): " + e.getMessage());
+        assertTrue(
+                e.getMessage().contains("100000000"),
+                "Exception must be from pre-allocation guard (mentions unit count): "
+                        + e.getMessage());
     }
 
     @Test
@@ -179,10 +184,15 @@ class CdrRoundTripTest {
         // must catch it.
         byte[] hostile = new byte[16];
         // Encapsulation header (LE XCDR1)
-        hostile[0] = 0x00; hostile[1] = 0x01;
-        hostile[2] = 0x00; hostile[3] = 0x00;
+        hostile[0] = 0x00;
+        hostile[1] = 0x01;
+        hostile[2] = 0x00;
+        hostile[3] = 0x00;
         // Length: 0x7FFFFFFF in LE
-        hostile[4] = (byte) 0xFF; hostile[5] = (byte) 0xFF; hostile[6] = (byte) 0xFF; hostile[7] = (byte) 0x7F;
+        hostile[4] = (byte) 0xFF;
+        hostile[5] = (byte) 0xFF;
+        hostile[6] = (byte) 0xFF;
+        hostile[7] = (byte) 0x7F;
         CdrReader r = CdrReader.of(hostile);
         assertThrows(CdrUnderflowException.class, r::readString);
     }

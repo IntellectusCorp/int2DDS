@@ -45,21 +45,34 @@ jobs:
         shell: bash
         run: ./java/scripts/check-jni-drift.sh
 
-      - name: Verify the C ABI stays re-exported from the JNI library
+      - name: Verify the C ABI surface against the FFI library
         shell: bash
         run: |
-          # The JDK 22+ Panama (FFM) backend reuses this same .so, which only
+          # Ground truth for the exported C ABI is the FFI library's own
+          # dynamic symbol table.
+          cargo build --release -p int2dds-ffi -p int2dds-java
+          abi=$(nm -D --defined-only target/release/libint2dds_ffi.so \
+                | grep -c ' T int2dds_')
+
+          # An export the gen-jni parser misses drops out of the Java binding
+          # without an error.
+          parsed=$(cargo run --quiet -p int2dds-java --bin gen-jni -- --count)
+          echo "int2dds_ symbols: $abi exported, $parsed parsed by gen-jni"
+          if [ "$parsed" -ne "$abi" ]; then
+            echo "ERROR: gen-jni parsed $parsed C ABI functions, libint2dds_ffi.so exports $abi" >&2
+            exit 1
+          fi
+
+          # The JDK 22+ Panama (FFM) backend reuses the JNI .so, which only
           # works while the dependency rlib's #[no_mangle]
           # symbols reach the dynamic symbol table. They do so because the
           # forwarders reference them — a linker dead-code pass would drop them
           # again if that ever stopped being true.
-          cargo build --release -p int2dds-java
-          expected=$(cargo run --quiet -p int2dds-java --bin gen-jni -- --count)
-          count=$(nm -D --defined-only target/release/libint2dds_java.so \
-                  | grep -c ' T int2dds_')
-          echo "int2dds_ symbols exported: $count (expected $expected)"
-          if [ "$count" -ne "$expected" ]; then
-            echo "ERROR: expected $expected re-exported C ABI symbols, found $count" >&2
+          reexported=$(nm -D --defined-only target/release/libint2dds_java.so \
+                       | grep -c ' T int2dds_')
+          echo "int2dds_ symbols re-exported from the JNI library: $reexported"
+          if [ "$reexported" -ne "$abi" ]; then
+            echo "ERROR: expected $abi re-exported C ABI symbols, found $reexported" >&2
             exit 1
           fi
 

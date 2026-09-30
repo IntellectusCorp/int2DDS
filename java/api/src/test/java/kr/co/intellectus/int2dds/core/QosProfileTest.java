@@ -4,48 +4,47 @@ import static kr.co.intellectus.int2dds.core.DomainParticipantTest.testDomain;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Collections;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataWriterQos;
 import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.types.ConformanceRecord;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Collections;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises named QoS profiles end to end: {@link
- * DomainParticipantFactory#loadProfiles} loads a JSON profile file into the
- * process-wide factory singleton, then {@link Publisher#createDataWriter(Topic,
- * String)} and {@link Subscriber#createDataReader(Topic, java.util.function.Supplier,
- * String)} build entities whose QoS actually comes from the named profile
- * rather than the core's default -- verified by reading it back with {@code
- * getQos()}, not merely by the absence of a thrown exception.
+ * Exercises named QoS profiles end to end: {@link DomainParticipantFactory#loadProfiles} loads a
+ * JSON profile file into the process-wide factory singleton, then {@link
+ * Publisher#createDataWriter(Topic, String)} and {@link Subscriber#createDataReader(Topic,
+ * java.util.function.Supplier, String)} build entities whose QoS actually comes from the named
+ * profile rather than the core's default -- verified by reading it back with {@code getQos()}, not
+ * merely by the absence of a thrown exception.
  *
- * <p>The library name is unique to this test ({@code JavaTestLib_QosProfile})
- * to avoid colliding with any other test's profiles in the same factory
- * singleton.
+ * <p>The library name is unique to this test ({@code JavaTestLib_QosProfile}) to avoid colliding
+ * with any other test's profiles in the same factory singleton.
  */
 class QosProfileTest {
 
-    private static final String PROFILE_JSON = "{\n"
-            + "  \"name\": \"JavaTestLib_QosProfile\",\n"
-            + "  \"qos_profiles\": [{\n"
-            + "    \"name\": \"ReliableProfile\",\n"
-            + "    \"datawriter_qos\": {\n"
-            + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
-            + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
-            + "    },\n"
-            + "    \"datareader_qos\": {\n"
-            + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
-            + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
-            + "    }\n"
-            + "  }]\n"
-            + "}\n";
+    private static final String PROFILE_JSON =
+            "{\n"
+                    + "  \"name\": \"JavaTestLib_QosProfile\",\n"
+                    + "  \"qos_profiles\": [{\n"
+                    + "    \"name\": \"ReliableProfile\",\n"
+                    + "    \"datawriter_qos\": {\n"
+                    + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
+                    + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
+                    + "    },\n"
+                    + "    \"datareader_qos\": {\n"
+                    + "      \"reliability\": { \"kind\": \"RELIABLE_RELIABILITY_QOS\" },\n"
+                    + "      \"history\": { \"kind\": \"KEEP_LAST_HISTORY_QOS\", \"depth\": 10 }\n"
+                    + "    }\n"
+                    + "  }]\n"
+                    + "}\n";
 
     private static Path writeProfileFile() throws IOException {
         Path path = Files.createTempFile("qos-profile-", ".json");
@@ -73,8 +72,11 @@ class QosProfileTest {
             assertEquals(HistoryKind.KEEP_LAST, wQos.getHistory().getKind());
             assertEquals(10, wQos.getHistory().getDepth());
 
-            DataReader<ConformanceRecord> r = sub.createDataReader(
-                    topic, ConformanceRecord::new, "JavaTestLib_QosProfile::ReliableProfile");
+            DataReader<ConformanceRecord> r =
+                    sub.createDataReader(
+                            topic,
+                            ConformanceRecord::new,
+                            "JavaTestLib_QosProfile::ReliableProfile");
             DataReaderQos rQos = r.getQos();
             assertEquals(ReliabilityKind.RELIABLE, rQos.getReliability().getKind());
             assertEquals(HistoryKind.KEEP_LAST, rQos.getHistory().getKind());
@@ -93,15 +95,18 @@ class QosProfileTest {
                     p.createTopic("qos_profile_missing_topic", new ConformanceRecord());
             Publisher pub = p.createPublisher();
 
-            assertThrows(DdsException.class,
+            assertThrows(
+                    DdsException.class,
                     () -> pub.createDataWriter(topic, "JavaTestLib_QosProfile::NoSuchProfile"));
         }
     }
 
     @Test
     void loadProfilesRejectsANullPathElement() {
-        assertThrows(NullPointerException.class,
-                () -> DomainParticipantFactory.getInstance()
-                        .loadProfiles(java.util.Arrays.asList("some.json", null)));
+        assertThrows(
+                NullPointerException.class,
+                () ->
+                        DomainParticipantFactory.getInstance()
+                                .loadProfiles(java.util.Arrays.asList("some.json", null)));
     }
 }

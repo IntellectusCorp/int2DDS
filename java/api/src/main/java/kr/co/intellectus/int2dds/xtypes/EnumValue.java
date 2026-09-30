@@ -1,8 +1,8 @@
 package kr.co.intellectus.int2dds.xtypes;
 
 /**
- * An enum literal read from a {@link DynamicValue} via {@link
- * DynamicValue#asEnum}: its numeric value and literal name.
+ * An enum literal read from a {@link DynamicValue} via {@link DynamicValue#asEnum}: its numeric
+ * value and literal name.
  */
 public final class EnumValue {
 

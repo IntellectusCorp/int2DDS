@@ -56,15 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The JNI generator's count guards no longer hardcode the FFI surface size in five
-  places and the CI symbol check in a sixth. Four of them now derive from the parsed
-  surface, so adding a C ABI function requires updating exactly one constant.
+  places and the CI symbol check in a sixth. They now derive from the parsed surface,
+  and CI checks the parsed surface against the symbol table of `libint2dds_ffi.so`,
+  so adding a C ABI function requires no count update in the generator.
 - Status callbacks were lost when the binding was loaded by an application class
   loader (fat JAR, servlet container): the DDS thread resolved the status classes
   through the system class loader on every callback. Classes and method IDs are now
   resolved once, on the Java thread that installs the listener.
 - `./gradlew :bench:jmh` looked for `libint2dds_java.so` on every platform. All
   Gradle tasks now share one platform-aware native library path.
-- Stale counts in `EXPECTED_FFI_FUNCTIONS` and `JarLayoutTest` (456 → 462, 455 → 461);
+- Stale count in `JarLayoutTest` (455 → 461);
   `NativeLoaderTest` reads the expected version from the build instead of a literal.
 
 ## [0.1.7] - 2026-09-23

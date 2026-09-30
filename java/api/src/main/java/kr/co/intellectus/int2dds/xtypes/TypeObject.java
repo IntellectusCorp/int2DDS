@@ -1,21 +1,20 @@
 package kr.co.intellectus.int2dds.xtypes;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.Charset;
 import kr.co.intellectus.int2dds.cdr.Extensibility;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.charset.Charset;
 
 /**
- * A built XTypes TypeObject — the type description
- * {@link kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample}
- * decodes a serialized sample against. Produced by {@link
- * TypeInfo#toTypeObject()}; a distinct native allocation from the builder
- * that produced it, so both must be released independently.
+ * A built XTypes TypeObject — the type description {@link
+ * kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample} decodes a serialized
+ * sample against. Produced by {@link TypeInfo#toTypeObject()}; a distinct native allocation from
+ * the builder that produced it, so both must be released independently.
  */
 public final class TypeObject implements AutoCloseable {
 
@@ -26,10 +25,10 @@ public final class TypeObject implements AutoCloseable {
     }
 
     /**
-     * Wraps an already-created native TypeObject handle. Public, in the same
-     * style as {@link DynamicData#fromHandle}, so callers outside this
-     * package (namely {@code DomainParticipant}) can hand back a handle
-     * produced by a bridge such as {@link FfiAccess#participantWaitForTypeObject}.
+     * Wraps an already-created native TypeObject handle. Public, in the same style as {@link
+     * DynamicData#fromHandle}, so callers outside this package (namely {@code DomainParticipant})
+     * can hand back a handle produced by a bridge such as {@link
+     * FfiAccess#participantWaitForTypeObject}.
      */
     public static TypeObject fromHandle(long rawHandle) {
         return new TypeObject(rawHandle);
@@ -41,11 +40,9 @@ public final class TypeObject implements AutoCloseable {
     }
 
     /**
-     * The native pointer. Public — unlike the package-private {@code handle()}
-     * convention elsewhere — because {@link
-     * kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample}
-     * lives in a different package and needs it to call {@link
-     * FfiAccess#dynamicDataFromSample}.
+     * The native pointer. Public — unlike the package-private {@code handle()} convention elsewhere
+     * — because {@link kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample}
+     * lives in a different package and needs it to call {@link FfiAccess#dynamicDataFromSample}.
      */
     public long handle() {
         return handle.value();
@@ -63,8 +60,8 @@ public final class TypeObject implements AutoCloseable {
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
     /**
-     * The number of struct members. Requires a struct TypeObject -- throws
-     * {@code DdsException} (unsupported-type code) for any other kind.
+     * The number of struct members. Requires a struct TypeObject -- throws {@code DdsException}
+     * (unsupported-type code) for any other kind.
      */
     public int memberCount() {
         long h = handle();
@@ -76,8 +73,8 @@ public final class TypeObject implements AutoCloseable {
     }
 
     /**
-     * The member name at {@code index}. Requires a struct TypeObject; throws
-     * for an out-of-range index or a non-struct TypeObject.
+     * The member name at {@code index}. Requires a struct TypeObject; throws for an out-of-range
+     * index or a non-struct TypeObject.
      */
     public String memberName(int index) {
         long h = handle();
@@ -89,12 +86,11 @@ public final class TypeObject implements AutoCloseable {
     }
 
     /**
-     * The index of the member named {@code name}. Requires a struct
-     * TypeObject. Throws {@code DdsException} for an unknown name -- the
-     * native {@code RET_DYNAMIC_FIELD_NOT_FOUND} code, surfaced generically
-     * through {@link ReturnCodes#check} since that family has no dedicated
-     * exception type yet -- so callers wanting a non-throwing lookup should
-     * catch {@code DdsException} rather than compare against a sentinel.
+     * The index of the member named {@code name}. Requires a struct TypeObject. Throws {@code
+     * DdsException} for an unknown name -- the native {@code RET_DYNAMIC_FIELD_NOT_FOUND} code,
+     * surfaced generically through {@link ReturnCodes#check} since that family has no dedicated
+     * exception type yet -- so callers wanting a non-throwing lookup should catch {@code
+     * DdsException} rather than compare against a sentinel.
      */
     public int findMember(String name) {
         long h = handle();
@@ -106,9 +102,8 @@ public final class TypeObject implements AutoCloseable {
     }
 
     /**
-     * Per-member info (member id, {@link FieldType} kind, flags) at {@code
-     * index}. Requires a struct TypeObject; throws for an out-of-range index
-     * or a non-struct TypeObject.
+     * Per-member info (member id, {@link FieldType} kind, flags) at {@code index}. Requires a
+     * struct TypeObject; throws for an out-of-range index or a non-struct TypeObject.
      */
     public MemberInfo memberInfo(int index) {
         long h = handle();
@@ -123,10 +118,7 @@ public final class TypeObject implements AutoCloseable {
         return new MemberInfo(memberId, kind, flags);
     }
 
-    /**
-     * The struct's extensibility. Requires a struct TypeObject -- throws for
-     * any other kind.
-     */
+    /** The struct's extensibility. Requires a struct TypeObject -- throws for any other kind. */
     public Extensibility extensibility() {
         long h = handle();
         int[] out = new int[1];

@@ -22,16 +22,21 @@ class CdrWriterBufferTest {
 
     @Test
     void encapsulationIdSelectsOnExtensibilityAndVersion() {
-        assertArrayEquals(new byte[] {0x00, 0x00, 0x00, 0x00},
-                bytesOf(Extensibility.APPENDABLE, false, false));   // CDR_BE
-        assertArrayEquals(new byte[] {0x00, 0x03, 0x00, 0x00},
-                bytesOf(Extensibility.MUTABLE, true, false));       // PL_CDR_LE
-        assertArrayEquals(new byte[] {0x00, 0x07, 0x00, 0x00},
-                bytesOf(Extensibility.FINAL, true, true));          // CDR2_LE
-        assertArrayEquals(new byte[] {0x00, 0x09, 0x00, 0x00},
-                bytesOf(Extensibility.APPENDABLE, true, true));     // D_CDR2_LE
-        assertArrayEquals(new byte[] {0x00, 0x0B, 0x00, 0x00},
-                bytesOf(Extensibility.MUTABLE, true, true));        // PL_CDR2_LE
+        assertArrayEquals(
+                new byte[] {0x00, 0x00, 0x00, 0x00},
+                bytesOf(Extensibility.APPENDABLE, false, false)); // CDR_BE
+        assertArrayEquals(
+                new byte[] {0x00, 0x03, 0x00, 0x00},
+                bytesOf(Extensibility.MUTABLE, true, false)); // PL_CDR_LE
+        assertArrayEquals(
+                new byte[] {0x00, 0x07, 0x00, 0x00},
+                bytesOf(Extensibility.FINAL, true, true)); // CDR2_LE
+        assertArrayEquals(
+                new byte[] {0x00, 0x09, 0x00, 0x00},
+                bytesOf(Extensibility.APPENDABLE, true, true)); // D_CDR2_LE
+        assertArrayEquals(
+                new byte[] {0x00, 0x0B, 0x00, 0x00},
+                bytesOf(Extensibility.MUTABLE, true, true)); // PL_CDR2_LE
     }
 
     @Test
@@ -54,7 +59,7 @@ class CdrWriterBufferTest {
         // The FFI write takes payload and key together, so a single per-thread
         // buffer is not enough.
         try (CdrWriter payload = CdrWriter.acquire(Extensibility.FINAL, true, true);
-             CdrWriter key = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
+                CdrWriter key = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
             assertNotEquals(payload.address(), key.address());
         }
     }
@@ -119,7 +124,8 @@ class CdrWriterBufferTest {
     @Test
     void growthPastTheCapIsRejected() {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
-            assertThrows(CdrOverflowException.class,
+            assertThrows(
+                    CdrOverflowException.class,
                     () -> w.writeBytes(new byte[CdrWriter.MAX_CAPACITY + 1]));
         }
     }

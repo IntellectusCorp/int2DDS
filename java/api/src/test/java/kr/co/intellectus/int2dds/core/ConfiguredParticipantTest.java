@@ -7,83 +7,83 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Collections;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.xtypes.DynamicData;
 import kr.co.intellectus.int2dds.xtypes.DynamicDataReader;
 import kr.co.intellectus.int2dds.xtypes.DynamicDataWriter;
 import kr.co.intellectus.int2dds.xtypes.DynamicTypeSupport;
 import kr.co.intellectus.int2dds.xtypes.XmlTypeRegistry;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Collections;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the declarative "participant tree from XML config" path end to
- * end: {@link DomainParticipantFactory#loadProfiles} loads a {@code
- * domain_library} + {@code domain_participant_library} pair from an XML
- * file, then {@link DomainParticipantFactory#createParticipantFromConfig}
- * builds the whole tree it declares, and its datawriter/datareader are
- * fetched by name off the returned {@link ConfiguredParticipant}.
+ * Exercises the declarative "participant tree from XML config" path end to end: {@link
+ * DomainParticipantFactory#loadProfiles} loads a {@code domain_library} + {@code
+ * domain_participant_library} pair from an XML file, then {@link
+ * DomainParticipantFactory#createParticipantFromConfig} builds the whole tree it declares, and its
+ * datawriter/datareader are fetched by name off the returned {@link ConfiguredParticipant}.
  *
- * <p>The library, type and topic names are unique to this test ({@code CP}
- * prefix) to avoid colliding with any other test's profiles or types in the
- * same process-wide factory singleton.
+ * <p>The library, type and topic names are unique to this test ({@code CP} prefix) to avoid
+ * colliding with any other test's profiles or types in the same process-wide factory singleton.
  *
- * <p>The XML declares one participant ({@code App}) with both the publisher
- * and the subscriber, matching the shape a real config file would use. But
- * per {@code MatchedEndpointsTest}'s own note, matching does not loop back
- * within a single participant in this implementation, so a second
- * participant ({@code App2}, subscriber-only, in the same library) is
- * declared purely to prove the round trip actually communicates -- the
- * {@code App} tree alone already proves fetch-by-name, caching and
- * teardown.
+ * <p>The XML declares one participant ({@code App}) with both the publisher and the subscriber,
+ * matching the shape a real config file would use. But per {@code MatchedEndpointsTest}'s own note,
+ * matching does not loop back within a single participant in this implementation, so a second
+ * participant ({@code App2}, subscriber-only, in the same library) is declared purely to prove the
+ * round trip actually communicates -- the {@code App} tree alone already proves fetch-by-name,
+ * caching and teardown.
  */
 class ConfiguredParticipantTest {
 
-    private static final String XML = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-            + "<dds>\n"
-            + "  <types>\n"
-            + "    <struct name=\"CPSimpleData\" extensibility=\"final\">\n"
-            + "      <member name=\"id\" type=\"int32\" key=\"true\"/>\n"
-            + "      <member name=\"value\" type=\"int32\"/>\n"
-            + "    </struct>\n"
-            + "  </types>\n"
-            + "  <domain_library name=\"CPDL\">\n"
-            + "    <domain name=\"D0\" domain_id=\"" + testDomain() + "\">\n"
-            + "      <register_type name=\"CPSimpleDataType\" type_ref=\"CPSimpleData\"/>\n"
-            + "      <topic name=\"CPSimpleTopic\" register_type_ref=\"CPSimpleDataType\"/>\n"
-            + "    </domain>\n"
-            + "  </domain_library>\n"
-            + "  <domain_participant_library name=\"CPPL\">\n"
-            + "    <domain_participant name=\"App\" domain_ref=\"CPDL::D0\">\n"
-            + "      <publisher name=\"pub\">\n"
-            + "        <data_writer name=\"writer\" topic_ref=\"CPSimpleTopic\"/>\n"
-            + "      </publisher>\n"
-            + "      <subscriber name=\"sub\">\n"
-            + "        <data_reader name=\"reader\" topic_ref=\"CPSimpleTopic\"/>\n"
-            + "      </subscriber>\n"
-            + "    </domain_participant>\n"
-            + "    <domain_participant name=\"App2\" domain_ref=\"CPDL::D0\">\n"
-            + "      <subscriber name=\"sub\">\n"
-            + "        <data_reader name=\"reader\" topic_ref=\"CPSimpleTopic\"/>\n"
-            + "      </subscriber>\n"
-            + "    </domain_participant>\n"
-            + "  </domain_participant_library>\n"
-            + "</dds>\n";
+    private static final String XML =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    + "<dds>\n"
+                    + "  <types>\n"
+                    + "    <struct name=\"CPSimpleData\" extensibility=\"final\">\n"
+                    + "      <member name=\"id\" type=\"int32\" key=\"true\"/>\n"
+                    + "      <member name=\"value\" type=\"int32\"/>\n"
+                    + "    </struct>\n"
+                    + "  </types>\n"
+                    + "  <domain_library name=\"CPDL\">\n"
+                    + "    <domain name=\"D0\" domain_id=\""
+                    + testDomain()
+                    + "\">\n"
+                    + "      <register_type name=\"CPSimpleDataType\" type_ref=\"CPSimpleData\"/>\n"
+                    + "      <topic name=\"CPSimpleTopic\" register_type_ref=\"CPSimpleDataType\"/>\n"
+                    + "    </domain>\n"
+                    + "  </domain_library>\n"
+                    + "  <domain_participant_library name=\"CPPL\">\n"
+                    + "    <domain_participant name=\"App\" domain_ref=\"CPDL::D0\">\n"
+                    + "      <publisher name=\"pub\">\n"
+                    + "        <data_writer name=\"writer\" topic_ref=\"CPSimpleTopic\"/>\n"
+                    + "      </publisher>\n"
+                    + "      <subscriber name=\"sub\">\n"
+                    + "        <data_reader name=\"reader\" topic_ref=\"CPSimpleTopic\"/>\n"
+                    + "      </subscriber>\n"
+                    + "    </domain_participant>\n"
+                    + "    <domain_participant name=\"App2\" domain_ref=\"CPDL::D0\">\n"
+                    + "      <subscriber name=\"sub\">\n"
+                    + "        <data_reader name=\"reader\" topic_ref=\"CPSimpleTopic\"/>\n"
+                    + "      </subscriber>\n"
+                    + "    </domain_participant>\n"
+                    + "  </domain_participant_library>\n"
+                    + "</dds>\n";
 
     // The matching struct, loaded into a standalone registry to build a
     // writable DynamicData for the configured writer -- the same pattern
     // DynamicPubSubTest uses, with a registry independent of the one the
     // factory loaded via loadProfiles.
-    private static final String TYPES_XML = "<types>\n"
-            + " <struct name=\"CPSimpleData\" extensibility=\"final\">\n"
-            + "  <member name=\"id\" type=\"int32\" key=\"true\"/>\n"
-            + "  <member name=\"value\" type=\"int32\"/>\n"
-            + " </struct>\n"
-            + "</types>\n";
+    private static final String TYPES_XML =
+            "<types>\n"
+                    + " <struct name=\"CPSimpleData\" extensibility=\"final\">\n"
+                    + "  <member name=\"id\" type=\"int32\" key=\"true\"/>\n"
+                    + "  <member name=\"value\" type=\"int32\"/>\n"
+                    + " </struct>\n"
+                    + "</types>\n";
 
     private static Path writeConfigFile() throws IOException {
         Path path = Files.createTempFile("configured-participant-", ".xml");
@@ -99,10 +99,12 @@ class ConfiguredParticipantTest {
                 .loadProfiles(Collections.singletonList(configPath.toString()));
 
         // HARD GATE: the whole tree must build from the loaded library.
-        try (ConfiguredParticipant app = DomainParticipantFactory.getInstance()
-                        .createParticipantFromConfig("CPPL::App");
-                ConfiguredParticipant app2 = DomainParticipantFactory.getInstance()
-                        .createParticipantFromConfig("CPPL::App2")) {
+        try (ConfiguredParticipant app =
+                        DomainParticipantFactory.getInstance()
+                                .createParticipantFromConfig("CPPL::App");
+                ConfiguredParticipant app2 =
+                        DomainParticipantFactory.getInstance()
+                                .createParticipantFromConfig("CPPL::App2")) {
             assertNotNull(app);
             assertNotNull(app2);
 

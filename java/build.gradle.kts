@@ -1,5 +1,6 @@
 plugins {
     java
+    id("com.diffplug.spotless") version "7.0.2" apply false
 }
 
 allprojects {
@@ -22,6 +23,23 @@ subprojects {
     apply(plugin = "java")
 
     repositories { mavenCentral() }
+
+    // `./gradlew spotlessApply` formats, `spotlessCheck` verifies. Kept out of
+    // `check` until the tree is formatted. Generated sources are excluded: CI
+    // diffs them against their generators' output.
+    apply(plugin = "com.diffplug.spotless")
+    configure<com.diffplug.gradle.spotless.SpotlessExtension> {
+        isEnforceCheck = false
+        java {
+            target("src/**/*.java")
+            targetExclude(
+                "**/internal/ffi/Ffi.java",
+                "**/types/CdrGolden.java",
+                "**/examples/HelloWorld.java"
+            )
+            googleJavaFormat("1.25.2").aosp()
+        }
+    }
 
     // A single JAR must run on JDK 8 through 25. Compiling with --release 8
     // makes the bytecode and the API surface both Java 8 compatible, verified

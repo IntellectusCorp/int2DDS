@@ -1,5 +1,9 @@
 package kr.co.intellectus.int2dds.internal;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.Charset;
+import java.time.Duration;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
 import kr.co.intellectus.int2dds.qos.DataRepresentation;
@@ -36,46 +40,37 @@ import kr.co.intellectus.int2dds.qos.TopicQos;
 import kr.co.intellectus.int2dds.qos.TransportPriority;
 import kr.co.intellectus.int2dds.qos.UserData;
 import kr.co.intellectus.int2dds.qos.WriterDataLifecycle;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.charset.Charset;
-import java.time.Duration;
 
 /**
- * Writes QoS objects onto native QoS handles, and reads writer/reader QoS
- * back off them.
+ * Writes QoS objects onto native QoS handles, and reads writer/reader QoS back off them.
  *
- * <p>Only non-null policies are applied. A null means "leave it to the core",
- * which keeps the DDS defaults defined in exactly one place — the Rust core —
- * instead of duplicating them here where they could drift.
+ * <p>Only non-null policies are applied. A null means "leave it to the core", which keeps the DDS
+ * defaults defined in exactly one place — the Rust core — instead of duplicating them here where
+ * they could drift.
  *
- * <p>Every policy named in the container field table has a matching native
- * setter and is marshalled here; none are omitted. {@code Property} is the
- * one exception to the "set_" naming pattern — the FFI exposes it as {@code
- * int2dds_participant_qos_add_property}, called once per entry, rather than a
- * single "set" call.
+ * <p>Every policy named in the container field table has a matching native setter and is marshalled
+ * here; none are omitted. {@code Property} is the one exception to the "set_" naming pattern — the
+ * FFI exposes it as {@code int2dds_participant_qos_add_property}, called once per entry, rather
+ * than a single "set" call.
  *
- * <p>Calls go through {@link FfiAccess} rather than the generated {@code Ffi}
- * class directly: {@code Ffi}'s native declarations are package-visible to
- * {@code kr.co.intellectus.int2dds.internal.ffi} only, and this class lives one
- * package up, so {@link FfiAccess} is the only way in.
+ * <p>Calls go through {@link FfiAccess} rather than the generated {@code Ffi} class directly:
+ * {@code Ffi}'s native declarations are package-visible to {@code
+ * kr.co.intellectus.int2dds.internal.ffi} only, and this class lives one package up, so {@link
+ * FfiAccess} is the only way in.
  *
  * <h2>Null means opposite things going in versus coming out</h2>
  *
- * <p>On the way in (the {@code apply*} methods), null means "leave it to the
- * core" — the field is simply not sent. On the way out ({@link
- * #readWriterQos} / {@link #readReaderQos}), null means "no getter exists for
- * this policy" — the FFI cannot report what was set. A caller who reads a QoS
- * back and passes it forward unchanged would silently drop every set-only
- * policy below, because each one reads back as null regardless of what was
- * actually configured on the handle.
+ * <p>On the way in (the {@code apply*} methods), null means "leave it to the core" — the field is
+ * simply not sent. On the way out ({@link #readWriterQos} / {@link #readReaderQos}), null means "no
+ * getter exists for this policy" — the FFI cannot report what was set. A caller who reads a QoS
+ * back and passes it forward unchanged would silently drop every set-only policy below, because
+ * each one reads back as null regardless of what was actually configured on the handle.
  *
  * <h2>Set-only, no getter — not round-trip verifiable</h2>
  *
- * <p>The FFI has 44 QoS setters and 28 getters (not the same shape: one
- * getter, {@code int2dds_participant_qos_get_properties_with_prefix}, has no
- * corresponding setter, so the gap below is 17 entries rather than the 44-28
- * arithmetic difference of 16). Output of:
+ * <p>The FFI has 44 QoS setters and 28 getters (not the same shape: one getter, {@code
+ * int2dds_participant_qos_get_properties_with_prefix}, has no corresponding setter, so the gap
+ * below is 17 entries rather than the 44-28 arithmetic difference of 16). Output of:
  *
  * <pre>{@code
  * comm -23 \
@@ -103,10 +98,9 @@ import java.time.Duration;
  * int2dds_topic_qos_transport_priority
  * </pre>
  *
- * <p>None of these seventeen policies can be round-trip verified; a test can
- * only assert the setter call returned OK. If the FFI ever grows a getter for
- * one of them, this list — and {@link #readWriterQos} / {@link
- * #readReaderQos} — should be updated to match.
+ * <p>None of these seventeen policies can be round-trip verified; a test can only assert the setter
+ * call returned OK. If the FFI ever grows a getter for one of them, this list — and {@link
+ * #readWriterQos} / {@link #readReaderQos} — should be updated to match.
  */
 public final class QosMarshal {
 
@@ -116,24 +110,27 @@ public final class QosMarshal {
 
     public static void applyParticipantQos(long h, ParticipantQos q) {
         if (q.getUserData() != null) {
-            applyUserData(q.getUserData(), (addr, len) -> FfiAccess.participantQosSetUserData(h, addr, len));
+            applyUserData(
+                    q.getUserData(),
+                    (addr, len) -> FfiAccess.participantQosSetUserData(h, addr, len));
         }
         if (q.getProperty() != null) {
             for (PropertyEntry e : q.getProperty().getEntries()) {
                 if (e.isBinary()) {
                     applyBinaryProperty(h, e);
                 } else {
-                    ReturnCodes.check(FfiAccess.participantQosAddProperty(
-                            h, utf8(e.getName()), utf8(e.getValue()), e.isPropagate()));
+                    ReturnCodes.check(
+                            FfiAccess.participantQosAddProperty(
+                                    h, utf8(e.getName()), utf8(e.getValue()), e.isPropagate()));
                 }
             }
         }
     }
 
     /**
-     * Reads back a participant QoS handle's text properties. {@code UserData} has
-     * no getter and stays null; binary entries and {@code propagate} flags are not
-     * reported, so every entry reads back as text with {@code propagate == false}.
+     * Reads back a participant QoS handle's text properties. {@code UserData} has no getter and
+     * stays null; binary entries and {@code propagate} flags are not reported, so every entry reads
+     * back as text with {@code propagate == false}.
      */
     public static ParticipantQos readParticipantQos(long h) {
         byte[][] flat = FfiAccess.participantQosPropertiesWithPrefix(h, new byte[0]);
@@ -148,46 +145,60 @@ public final class QosMarshal {
 
     public static void applyPublisherQos(long h, PublisherQos q) {
         if (q.getPartition() != null) {
-            applyPartition(q.getPartition(), (names, count) ->
-                    FfiAccess.publisherQosSetPartition(h, names, count));
+            applyPartition(
+                    q.getPartition(),
+                    (names, count) -> FfiAccess.publisherQosSetPartition(h, names, count));
         }
     }
 
     public static void applySubscriberQos(long h, SubscriberQos q) {
         if (q.getPartition() != null) {
-            applyPartition(q.getPartition(), (names, count) ->
-                    FfiAccess.subscriberQosSetPartition(h, names, count));
+            applyPartition(
+                    q.getPartition(),
+                    (names, count) -> FfiAccess.subscriberQosSetPartition(h, names, count));
         }
     }
 
     public static void applyTopicQos(long h, TopicQos q) {
         if (q.getReliability() != null) {
-            ReturnCodes.check(FfiAccess.topicQosSetReliability(
-                    h, q.getReliability().getKind().value(), q.getReliability().maxBlockingTimeNs()));
+            ReturnCodes.check(
+                    FfiAccess.topicQosSetReliability(
+                            h,
+                            q.getReliability().getKind().value(),
+                            q.getReliability().maxBlockingTimeNs()));
         }
         if (q.getDurability() != null) {
             ReturnCodes.check(
                     FfiAccess.topicQosSetDurability(h, q.getDurability().getKind().value()));
         }
         if (q.getHistory() != null) {
-            ReturnCodes.check(FfiAccess.topicQosSetHistory(
-                    h, q.getHistory().getKind().value(), q.getHistory().getDepth()));
+            ReturnCodes.check(
+                    FfiAccess.topicQosSetHistory(
+                            h, q.getHistory().getKind().value(), q.getHistory().getDepth()));
         }
         if (q.getDeadline() != null) {
             ReturnCodes.check(FfiAccess.topicQosSetDeadline(h, q.getDeadline().periodNs()));
         }
         if (q.getLiveliness() != null) {
-            ReturnCodes.check(FfiAccess.topicQosSetLiveliness(
-                    h, q.getLiveliness().getKind().value(), q.getLiveliness().leaseDurationNs()));
+            ReturnCodes.check(
+                    FfiAccess.topicQosSetLiveliness(
+                            h,
+                            q.getLiveliness().getKind().value(),
+                            q.getLiveliness().leaseDurationNs()));
         }
         if (q.getDestinationOrder() != null) {
-            ReturnCodes.check(FfiAccess.topicQosSetDestinationOrder(
-                    h, q.getDestinationOrder().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.topicQosSetDestinationOrder(
+                            h, q.getDestinationOrder().getKind().value()));
         }
         if (q.getResourceLimits() != null) {
             ResourceLimits rl = q.getResourceLimits();
-            ReturnCodes.check(FfiAccess.topicQosSetResourceLimits(
-                    h, rl.getMaxSamples(), rl.getMaxInstances(), rl.getMaxSamplesPerInstance()));
+            ReturnCodes.check(
+                    FfiAccess.topicQosSetResourceLimits(
+                            h,
+                            rl.getMaxSamples(),
+                            rl.getMaxInstances(),
+                            rl.getMaxSamplesPerInstance()));
         }
         if (q.getTransportPriority() != null) {
             ReturnCodes.check(
@@ -197,72 +208,91 @@ public final class QosMarshal {
             ReturnCodes.check(FfiAccess.topicQosSetLifespan(h, q.getLifespan().durationNs()));
         }
         if (q.getOwnership() != null) {
-            ReturnCodes.check(FfiAccess.topicQosSetOwnership(h, q.getOwnership().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.topicQosSetOwnership(h, q.getOwnership().getKind().value()));
         }
         if (q.getDataRepresentation() != null) {
-            ReturnCodes.check(FfiAccess.topicQosSetDataRepresentation(
-                    h, q.getDataRepresentation().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.topicQosSetDataRepresentation(
+                            h, q.getDataRepresentation().getKind().value()));
         }
     }
 
     public static void applyWriterQos(long h, DataWriterQos q) {
         if (q.getReliability() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetReliability(
-                    h, q.getReliability().getKind().value(), q.getReliability().maxBlockingTimeNs()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetReliability(
+                            h,
+                            q.getReliability().getKind().value(),
+                            q.getReliability().maxBlockingTimeNs()));
         }
         if (q.getDurability() != null) {
             ReturnCodes.check(
                     FfiAccess.writerQosSetDurability(h, q.getDurability().getKind().value()));
         }
         if (q.getHistory() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetHistory(
-                    h, q.getHistory().getKind().value(), q.getHistory().getDepth()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetHistory(
+                            h, q.getHistory().getKind().value(), q.getHistory().getDepth()));
         }
         if (q.getOwnership() != null) {
             ReturnCodes.check(
                     FfiAccess.writerQosSetOwnership(h, q.getOwnership().getKind().value()));
         }
         if (q.getOwnershipStrength() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetOwnershipStrength(
-                    h, q.getOwnershipStrength().getValue()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetOwnershipStrength(
+                            h, q.getOwnershipStrength().getValue()));
         }
         if (q.getResourceLimits() != null) {
             ResourceLimits rl = q.getResourceLimits();
-            ReturnCodes.check(FfiAccess.writerQosSetResourceLimits(
-                    h, rl.getMaxSamples(), rl.getMaxInstances(), rl.getMaxSamplesPerInstance()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetResourceLimits(
+                            h,
+                            rl.getMaxSamples(),
+                            rl.getMaxInstances(),
+                            rl.getMaxSamplesPerInstance()));
         }
         if (q.getLifespan() != null) {
             ReturnCodes.check(FfiAccess.writerQosSetLifespan(h, q.getLifespan().durationNs()));
         }
         if (q.getDestinationOrder() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetDestinationOrder(
-                    h, q.getDestinationOrder().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetDestinationOrder(
+                            h, q.getDestinationOrder().getKind().value()));
         }
         if (q.getLatencyBudget() != null) {
             ReturnCodes.check(
                     FfiAccess.writerQosSetLatencyBudget(h, q.getLatencyBudget().durationNs()));
         }
         if (q.getTransportPriority() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetTransportPriority(
-                    h, q.getTransportPriority().getValue()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetTransportPriority(
+                            h, q.getTransportPriority().getValue()));
         }
         if (q.getUserData() != null) {
-            applyUserData(q.getUserData(), (addr, len) -> FfiAccess.writerQosSetUserData(h, addr, len));
+            applyUserData(
+                    q.getUserData(), (addr, len) -> FfiAccess.writerQosSetUserData(h, addr, len));
         }
         if (q.getWriterDataLifecycle() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetWriterDataLifecycle(
-                    h, q.getWriterDataLifecycle().isAutodisposeUnregisteredInstances()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetWriterDataLifecycle(
+                            h, q.getWriterDataLifecycle().isAutodisposeUnregisteredInstances()));
         }
         if (q.getDataRepresentation() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetDataRepresentation(
-                    h, q.getDataRepresentation().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetDataRepresentation(
+                            h, q.getDataRepresentation().getKind().value()));
         }
         if (q.getDeadline() != null) {
             ReturnCodes.check(FfiAccess.writerQosSetDeadline(h, q.getDeadline().periodNs()));
         }
         if (q.getLiveliness() != null) {
-            ReturnCodes.check(FfiAccess.writerQosSetLiveliness(
-                    h, q.getLiveliness().getKind().value(), q.getLiveliness().leaseDurationNs()));
+            ReturnCodes.check(
+                    FfiAccess.writerQosSetLiveliness(
+                            h,
+                            q.getLiveliness().getKind().value(),
+                            q.getLiveliness().leaseDurationNs()));
         }
         if (q.getDataFrag() != null) {
             ReturnCodes.check(FfiAccess.writerQosSetDataFrag(h, q.getDataFrag()));
@@ -271,16 +301,20 @@ public final class QosMarshal {
 
     public static void applyReaderQos(long h, DataReaderQos q) {
         if (q.getReliability() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetReliability(
-                    h, q.getReliability().getKind().value(), q.getReliability().maxBlockingTimeNs()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetReliability(
+                            h,
+                            q.getReliability().getKind().value(),
+                            q.getReliability().maxBlockingTimeNs()));
         }
         if (q.getDurability() != null) {
             ReturnCodes.check(
                     FfiAccess.readerQosSetDurability(h, q.getDurability().getKind().value()));
         }
         if (q.getHistory() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetHistory(
-                    h, q.getHistory().getKind().value(), q.getHistory().getDepth()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetHistory(
+                            h, q.getHistory().getKind().value(), q.getHistory().getDepth()));
         }
         if (q.getOwnership() != null) {
             ReturnCodes.check(
@@ -288,56 +322,67 @@ public final class QosMarshal {
         }
         if (q.getResourceLimits() != null) {
             ResourceLimits rl = q.getResourceLimits();
-            ReturnCodes.check(FfiAccess.readerQosSetResourceLimits(
-                    h, rl.getMaxSamples(), rl.getMaxInstances(), rl.getMaxSamplesPerInstance()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetResourceLimits(
+                            h,
+                            rl.getMaxSamples(),
+                            rl.getMaxInstances(),
+                            rl.getMaxSamplesPerInstance()));
         }
         if (q.getDestinationOrder() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetDestinationOrder(
-                    h, q.getDestinationOrder().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetDestinationOrder(
+                            h, q.getDestinationOrder().getKind().value()));
         }
         if (q.getTimeBasedFilter() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetTimeBasedFilter(
-                    h, q.getTimeBasedFilter().minimumSeparationNs()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetTimeBasedFilter(
+                            h, q.getTimeBasedFilter().minimumSeparationNs()));
         }
         if (q.getLatencyBudget() != null) {
             ReturnCodes.check(
                     FfiAccess.readerQosSetLatencyBudget(h, q.getLatencyBudget().durationNs()));
         }
         if (q.getUserData() != null) {
-            applyUserData(q.getUserData(), (addr, len) -> FfiAccess.readerQosSetUserData(h, addr, len));
+            applyUserData(
+                    q.getUserData(), (addr, len) -> FfiAccess.readerQosSetUserData(h, addr, len));
         }
         if (q.getReaderDataLifecycle() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetReaderDataLifecycle(
-                    h,
-                    q.getReaderDataLifecycle().autopurgeNowriterNs(),
-                    q.getReaderDataLifecycle().autopurgeDisposedNs()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetReaderDataLifecycle(
+                            h,
+                            q.getReaderDataLifecycle().autopurgeNowriterNs(),
+                            q.getReaderDataLifecycle().autopurgeDisposedNs()));
         }
         if (q.getDataRepresentation() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetDataRepresentation(
-                    h, q.getDataRepresentation().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetDataRepresentation(
+                            h, q.getDataRepresentation().getKind().value()));
         }
         if (q.getDeadline() != null) {
             ReturnCodes.check(FfiAccess.readerQosSetDeadline(h, q.getDeadline().periodNs()));
         }
         if (q.getLiveliness() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetLiveliness(
-                    h, q.getLiveliness().getKind().value(), q.getLiveliness().leaseDurationNs()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetLiveliness(
+                            h,
+                            q.getLiveliness().getKind().value(),
+                            q.getLiveliness().leaseDurationNs()));
         }
         if (q.getLifespanReference() != null) {
-            ReturnCodes.check(FfiAccess.readerQosSetLifespanReference(
-                    h, q.getLifespanReference().getKind().value()));
+            ReturnCodes.check(
+                    FfiAccess.readerQosSetLifespanReference(
+                            h, q.getLifespanReference().getKind().value()));
         }
     }
 
     /**
      * Reads back the DataWriter policies the FFI exposes getters for.
      *
-     * <p>Policies with no getter — see the set-only list in this class's
-     * javadoc — stay null in the result. A null here means "not readable, no
-     * getter exists," which is the opposite of what null means in {@link
-     * #applyWriterQos}, where it means "leave it to the core." A caller that
-     * reads a QoS back and passes it forward unchanged would silently drop
-     * every set-only policy.
+     * <p>Policies with no getter — see the set-only list in this class's javadoc — stay null in the
+     * result. A null here means "not readable, no getter exists," which is the opposite of what
+     * null means in {@link #applyWriterQos}, where it means "leave it to the core." A caller that
+     * reads a QoS back and passes it forward unchanged would silently drop every set-only policy.
      */
     public static DataWriterQos readWriterQos(long h) {
         DataWriterQos q = new DataWriterQos();
@@ -346,8 +391,10 @@ public final class QosMarshal {
         long addr = FfiAccess.directBufferAddress(slot);
 
         ReturnCodes.check(FfiAccess.writerQosGetReliability(h, addr, addr + 8));
-        q.setReliability(new Reliability(
-                ReliabilityKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+        q.setReliability(
+                new Reliability(
+                        ReliabilityKind.fromValue(slot.getInt(0)),
+                        Duration.ofNanos(slot.getLong(8))));
 
         ReturnCodes.check(FfiAccess.writerQosGetDurability(h, addr));
         q.setDurability(new Durability(DurabilityKind.fromValue(slot.getInt(0))));
@@ -362,8 +409,7 @@ public final class QosMarshal {
         q.setOwnershipStrength(new OwnershipStrength(slot.getInt(0)));
 
         ReturnCodes.check(FfiAccess.writerQosGetResourceLimits(h, addr, addr + 4, addr + 8));
-        q.setResourceLimits(
-                new ResourceLimits(slot.getInt(0), slot.getInt(4), slot.getInt(8)));
+        q.setResourceLimits(new ResourceLimits(slot.getInt(0), slot.getInt(4), slot.getInt(8)));
 
         ReturnCodes.check(FfiAccess.writerQosGetLifespan(h, addr));
         q.setLifespan(new Lifespan(Duration.ofNanos(slot.getLong(0))));
@@ -388,12 +434,13 @@ public final class QosMarshal {
         q.setDeadline(new Deadline(Duration.ofNanos(slot.getLong(0))));
 
         ReturnCodes.check(FfiAccess.writerQosGetLiveliness(h, addr, addr + 8));
-        q.setLiveliness(new Liveliness(
-                LivelinessKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+        q.setLiveliness(
+                new Liveliness(
+                        LivelinessKind.fromValue(slot.getInt(0)),
+                        Duration.ofNanos(slot.getLong(8))));
 
         ReturnCodes.check(FfiAccess.writerQosGetDataFrag(h, addr));
         q.setDataFrag(slot.getInt(0));
-
 
         // One slot address feeds every getter above. The ordinary later
         // slot.getInt/getLong reads are what keep it reachable in practice,
@@ -407,12 +454,10 @@ public final class QosMarshal {
     /**
      * Reads back the DataReader policies the FFI exposes getters for.
      *
-     * <p>Policies with no getter — see the set-only list in this class's
-     * javadoc — stay null in the result. A null here means "not readable, no
-     * getter exists," which is the opposite of what null means in {@link
-     * #applyReaderQos}, where it means "leave it to the core." A caller that
-     * reads a QoS back and passes it forward unchanged would silently drop
-     * every set-only policy.
+     * <p>Policies with no getter — see the set-only list in this class's javadoc — stay null in the
+     * result. A null here means "not readable, no getter exists," which is the opposite of what
+     * null means in {@link #applyReaderQos}, where it means "leave it to the core." A caller that
+     * reads a QoS back and passes it forward unchanged would silently drop every set-only policy.
      */
     public static DataReaderQos readReaderQos(long h) {
         DataReaderQos q = new DataReaderQos();
@@ -421,8 +466,10 @@ public final class QosMarshal {
         long addr = FfiAccess.directBufferAddress(slot);
 
         ReturnCodes.check(FfiAccess.readerQosGetReliability(h, addr, addr + 8));
-        q.setReliability(new Reliability(
-                ReliabilityKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+        q.setReliability(
+                new Reliability(
+                        ReliabilityKind.fromValue(slot.getInt(0)),
+                        Duration.ofNanos(slot.getLong(8))));
 
         ReturnCodes.check(FfiAccess.readerQosGetDurability(h, addr));
         q.setDurability(new Durability(DurabilityKind.fromValue(slot.getInt(0))));
@@ -434,8 +481,7 @@ public final class QosMarshal {
         q.setOwnership(new Ownership(OwnershipKind.fromValue(slot.getInt(0))));
 
         ReturnCodes.check(FfiAccess.readerQosGetResourceLimits(h, addr, addr + 4, addr + 8));
-        q.setResourceLimits(
-                new ResourceLimits(slot.getInt(0), slot.getInt(4), slot.getInt(8)));
+        q.setResourceLimits(new ResourceLimits(slot.getInt(0), slot.getInt(4), slot.getInt(8)));
 
         ReturnCodes.check(FfiAccess.readerQosGetDestinationOrder(h, addr));
         q.setDestinationOrder(new DestinationOrder(DestinationOrderKind.fromValue(slot.getInt(0))));
@@ -447,8 +493,9 @@ public final class QosMarshal {
         q.setLatencyBudget(new LatencyBudget(Duration.ofNanos(slot.getLong(0))));
 
         ReturnCodes.check(FfiAccess.readerQosGetReaderDataLifecycle(h, addr, addr + 8));
-        q.setReaderDataLifecycle(new ReaderDataLifecycle(
-                Duration.ofNanos(slot.getLong(0)), Duration.ofNanos(slot.getLong(8))));
+        q.setReaderDataLifecycle(
+                new ReaderDataLifecycle(
+                        Duration.ofNanos(slot.getLong(0)), Duration.ofNanos(slot.getLong(8))));
 
         ReturnCodes.check(FfiAccess.readerQosGetDataRepresentation(h, addr));
         q.setDataRepresentation(
@@ -458,12 +505,14 @@ public final class QosMarshal {
         q.setDeadline(new Deadline(Duration.ofNanos(slot.getLong(0))));
 
         ReturnCodes.check(FfiAccess.readerQosGetLiveliness(h, addr, addr + 8));
-        q.setLiveliness(new Liveliness(
-                LivelinessKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+        q.setLiveliness(
+                new Liveliness(
+                        LivelinessKind.fromValue(slot.getInt(0)),
+                        Duration.ofNanos(slot.getLong(8))));
 
         ReturnCodes.check(FfiAccess.readerQosGetLifespanReference(h, addr));
-        q.setLifespanReference(new LifespanReference(LifespanReferenceKind.fromValue(slot.getInt(0))));
-
+        q.setLifespanReference(
+                new LifespanReference(LifespanReferenceKind.fromValue(slot.getInt(0))));
 
         // One slot address feeds every getter above. The ordinary later
         // slot.getInt/getLong reads are what keep it reachable in practice,
@@ -485,17 +534,15 @@ public final class QosMarshal {
     }
 
     /**
-     * Copies {@code ud}'s bytes into a direct buffer and hands its address to
-     * {@code setter}. Nothing about the raw address itself keeps the buffer
-     * reachable for the setter call's duration -- see {@link
-     * NativeKeepAlive}'s own doc -- so this fences {@code buf} explicitly
-     * immediately afterward, the same fence every {@code FfiAccess} bridge
-     * that hands a direct buffer's address to native code uses.
+     * Copies {@code ud}'s bytes into a direct buffer and hands its address to {@code setter}.
+     * Nothing about the raw address itself keeps the buffer reachable for the setter call's
+     * duration -- see {@link NativeKeepAlive}'s own doc -- so this fences {@code buf} explicitly
+     * immediately afterward, the same fence every {@code FfiAccess} bridge that hands a direct
+     * buffer's address to native code uses.
      *
-     * <p>The status code is held in a local and checked <em>after</em> the
-     * fence, not folded into the call. Checking first would throw past the
-     * fence on failure, leaving the one path with no later use of {@code buf}
-     * unfenced -- which is the path the fence exists for.
+     * <p>The status code is held in a local and checked <em>after</em> the fence, not folded into
+     * the call. Checking first would throw past the fence on failure, leaving the one path with no
+     * later use of {@code buf} unfenced -- which is the path the fence exists for.
      */
     private static void applyUserData(UserData ud, ByteBufferSetter setter) {
         byte[] data = ud.getData();
@@ -510,10 +557,16 @@ public final class QosMarshal {
     /** Same direct-buffer hand-off as {@link #applyUserData}, for one binary property entry. */
     private static void applyBinaryProperty(long h, PropertyEntry e) {
         byte[] data = e.getBinaryValue();
-        ByteBuffer buf = ByteBuffer.allocateDirect(Math.max(1, data.length)).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(Math.max(1, data.length)).order(ByteOrder.nativeOrder());
         buf.put(data);
-        int rc = FfiAccess.participantQosAddBinaryProperty(
-                h, utf8(e.getName()), FfiAccess.directBufferAddress(buf), data.length, e.isPropagate());
+        int rc =
+                FfiAccess.participantQosAddBinaryProperty(
+                        h,
+                        utf8(e.getName()),
+                        FfiAccess.directBufferAddress(buf),
+                        data.length,
+                        e.isPropagate());
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
     }

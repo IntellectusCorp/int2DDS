@@ -1,16 +1,15 @@
 package kr.co.intellectus.int2dds.xtypes;
 
+import java.nio.charset.Charset;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
-import java.nio.charset.Charset;
 
 /**
- * Loads XTypes struct descriptions from XML and hands back a {@link
- * DynamicTypeSupport} per named type, the entry point for the dynamic write
- * path. NativeCleaner-managed like {@link TypeInfo}.
+ * Loads XTypes struct descriptions from XML and hands back a {@link DynamicTypeSupport} per named
+ * type, the entry point for the dynamic write path. NativeCleaner-managed like {@link TypeInfo}.
  */
 public final class XmlTypeRegistry implements AutoCloseable {
 
@@ -84,9 +83,8 @@ public final class XmlTypeRegistry implements AutoCloseable {
     }
 
     /**
-     * Looks up a loaded type's top-level {@link TypeObject} by name, the
-     * handle {@link kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample}
-     * decodes against.
+     * Looks up a loaded type's top-level {@link TypeObject} by name, the handle {@link
+     * kr.co.intellectus.int2dds.core.DomainParticipant#dynamicDataFromSample} decodes against.
      */
     public TypeObject getTypeObject(String name) {
         long h = handle();

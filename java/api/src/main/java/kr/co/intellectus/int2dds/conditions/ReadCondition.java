@@ -5,19 +5,17 @@ import kr.co.intellectus.int2dds.internal.ReturnCodes;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 
 /**
- * A condition tied to a {@code DataReader}'s cached samples matching a set of
- * sample/view/instance state masks.
+ * A condition tied to a {@code DataReader}'s cached samples matching a set of sample/view/instance
+ * state masks.
  *
- * <p>Obtained from {@code DataReader.createReadCondition(...)}: each call
- * mints a new native box, so this wraps its own handle rather than one
- * shared with the reader.
+ * <p>Obtained from {@code DataReader.createReadCondition(...)}: each call mints a new native box,
+ * so this wraps its own handle rather than one shared with the reader.
  */
 public class ReadCondition extends Condition {
     /**
-     * Wraps a read-condition handle already minted by the native layer
-     * (e.g. by {@code int2dds_datareader_create_readcondition}). Meant for
-     * the entity {@code createReadCondition()} factory, not for wrapping an
-     * arbitrary handle.
+     * Wraps a read-condition handle already minted by the native layer (e.g. by {@code
+     * int2dds_datareader_create_readcondition}). Meant for the entity {@code createReadCondition()}
+     * factory, not for wrapping an arbitrary handle.
      */
     public ReadCondition(long rawHandle) {
         super(rawHandle, ReadCondition::deleteAlways);
