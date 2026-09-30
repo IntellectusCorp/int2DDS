@@ -183,6 +183,8 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         }
         // end lifespan
 
+        self.release_leading_end_coherent_sets()?;
+
         let removed = self.ensure_capacity(a_change.instance_handle())?;
 
         // Release evicted change back to pool for buffer reuse.
@@ -544,22 +546,34 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(())
     }
 
-    // Removes and returns the oldest sample from all instances. End Coherent Set markers ahead
-    // of it are removed on the way; a marker reaches the front only after its set members are gone.
+    // Removes and returns the oldest sample from all instances, releasing the End Coherent Set
+    // markers ahead of it on the way.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        loop {
-            let Some(oldest_change) = self.changes.first().cloned() else {
-                return Err(DdsError::Error("No changes found to remove".to_string()));
-            };
-            self.remove_change(oldest_change.clone())?;
+        self.release_leading_end_coherent_sets()?;
 
-            if oldest_change.is_end_coherent_set() {
-                // The caller only releases the returned sample, so the marker is released here.
-                self.pool.try_release(oldest_change);
-                continue;
-            }
-            return Ok(oldest_change);
+        let Some(oldest_change) = self.changes.first().cloned() else {
+            return Err(DdsError::Error("No changes found to remove".to_string()));
+        };
+        self.remove_change(oldest_change.clone())?;
+
+        Ok(oldest_change)
+    }
+
+    // Removes every End Coherent Set marker at the front of the history. A marker is stored
+    // after its set members, so one at the front has none of them left.
+    fn release_leading_end_coherent_sets(&mut self) -> DdsResult<()> {
+        while let Some(marker) =
+            self.changes.first().cloned().filter(|change| change.is_end_coherent_set())
+        {
+            debug!(
+                "[history] releasing end coherent set marker seq={}",
+                marker.sequence_number().to_i64()
+            );
+            self.remove_change(marker.clone())?;
+            self.pool.try_release(marker);
         }
+
+        Ok(())
     }
 
     // Returns the oldest acknowledged change from the given change vector.
@@ -865,6 +879,39 @@ mod tests {
 
         assert_eq!(stored_sequence_numbers(&cache_guard), vec![5, 6]);
         assert_eq!(cache_guard.sample_count().unwrap(), 2);
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    // Per-instance eviction only walks the instance map, which holds no End Coherent Set marker.
+    // The marker still has to go once the samples it closes are gone.
+    #[test]
+    fn per_instance_eviction_releases_the_end_coherent_set_marker_left_behind() {
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: false },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_millis(100),
+            },
+            ..Default::default()
+        };
+        let (participant, data_writer) = create_datawriter(writer_qos);
+        let datawriter_cache = data_writer.get_datawriter_cache().unwrap();
+        let mut cache_guard = datawriter_cache.lock().unwrap();
+        let instance = InstanceHandle::new([1; 16]);
+
+        // [1 ECS] -> [ECS 3]: evicting sample 1 per instance leaves the marker with no samples.
+        cache_guard.add_change_with_cleanup(create_change(1, instance), false).unwrap();
+        cache_guard.add_end_coherent_set(create_end_coherent_set(2)).unwrap();
+        cache_guard.add_change_with_cleanup(create_change(3, instance), false).unwrap();
+        assert_eq!(stored_sequence_numbers(&cache_guard), vec![2, 3]);
+
+        cache_guard.add_change_with_cleanup(create_change(4, instance), false).unwrap();
+
+        assert_eq!(stored_sequence_numbers(&cache_guard), vec![4]);
+        assert_eq!(cache_guard.sample_count().unwrap(), 1);
 
         drop(cache_guard);
         participant.delete_contained_entities().unwrap();
