@@ -1103,7 +1103,16 @@ impl Subscriber {
         }
 
         // Nested calls only deepen the current block. A new block starts at depth 0 -> 1.
-        self.access_depth.fetch_add(1, Ordering::AcqRel);
+        let previous_depth = self.access_depth.fetch_add(1, Ordering::AcqRel);
+
+        if previous_depth == 0 {
+            if let Some(subscriber_history_cache) = self.subscriber_history_cache()? {
+                subscriber_history_cache
+                    .lock()
+                    .map_err(|e| DdsError::Error(e.to_string()))?
+                    .open_access_block();
+            }
+        }
 
         Ok(())
     }
@@ -1133,8 +1142,34 @@ impl Subscriber {
         {
             // Depth was 0: no matching begin_access.
             Err(_) => Err(DdsError::PreconditionNotMet),
+            // Depth 1 -> 0: the outermost end hands over what the block held back.
+            Ok(1) => self.close_access_block_and_commit_held_changes(),
+            // Depth 2+ -> 1+: nested end, the block stays open.
             Ok(_) => Ok(()),
         }
+    }
+
+    // Reopens the gate and stores everything it held back while the block was open.
+    fn close_access_block_and_commit_held_changes(&self) -> DdsResult<()> {
+        let Some(subscriber_history_cache) = self.subscriber_history_cache()? else {
+            return Ok(());
+        };
+
+        let participant = self.get_participant()?.get_rtps_participant()?;
+
+        let mut cache =
+            subscriber_history_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        cache.close_access_block();
+
+        let released = cache.flush_pending_changes();
+        let available = participant
+            .commit_released_samples(released)
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        drop(cache);
+
+        participant.notify_available_changes(available);
+
+        Ok(())
     }
 
     pub fn notify_datareaders(&self) -> DdsResult<()> {

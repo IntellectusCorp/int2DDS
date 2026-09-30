@@ -275,13 +275,23 @@ impl PublisherProxy {
 pub(crate) struct SubscriberHistoryCache {
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     publishers: HashMap<Guid, PublisherProxy>,
+    is_access_block_open: bool,
 }
 
 impl SubscriberHistoryCache {
     pub(crate) fn new(
         remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     ) -> Self {
-        Self { remote_publications, publishers: HashMap::new() }
+        Self { remote_publications, publishers: HashMap::new(), is_access_block_open: false }
+    }
+
+    // Holds back everything the gate would let through until the block closes.
+    pub(crate) fn open_access_block(&mut self) {
+        self.is_access_block_open = true;
+    }
+
+    pub(crate) fn close_access_block(&mut self) {
+        self.is_access_block_open = false;
     }
 
     // Takes one sample destined for a reader. A sample whose group position the writer already
@@ -332,8 +342,12 @@ impl SubscriberHistoryCache {
     }
 
     // Takes out everything the gate now lets through, across every remote Publisher. The caller
-    // holds one lock over the event that changed the state and this call.
+    // holds one lock over the event that changed the state, this call and the storing.
     pub(crate) fn flush_pending_changes(&mut self) -> Vec<PendingSample> {
+        if self.is_access_block_open {
+            return Vec::new();
+        }
+
         let mut released = Vec::new();
 
         for publisher_guid in self.publishers.keys().copied().collect::<Vec<Guid>>() {

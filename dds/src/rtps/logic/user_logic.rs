@@ -2400,7 +2400,8 @@ impl UserLogic {
                 let prepared = cache_guard.prepare_changes_to_commit(change, true);
                 drop(cache_guard);
 
-                // One lock over the hand-off and the gate, so no event slips in between them.
+                // One lock over the hand-off, the gate and the storing, so no event slips in
+                // between them.
                 let reader_id = reader.guid().entity_id();
                 let mut subscriber_history_cache = subscriber_history_cache
                     .lock()
@@ -2412,9 +2413,11 @@ impl UserLogic {
                     subscriber_history_cache.add_change(reader_id, change, apply_filter)?
                 }
                 let released = subscriber_history_cache.flush_pending_changes();
+                let participant = self.get_upgraded_participant()?;
+                let available = participant.commit_released_samples(released)?;
                 drop(subscriber_history_cache);
 
-                self.get_upgraded_participant()?.commit_released_samples(released)?;
+                participant.notify_available_changes(available);
             }
         }
 
@@ -2468,7 +2471,8 @@ impl UserLogic {
         };
         drop(cache_guard);
 
-        // One lock over the hand-off and the gate, so no event slips in between them.
+        // One lock over the hand-off, the gate and the storing, so no event slips in between
+        // them.
         let reader_id = reader.guid().entity_id();
         let mut subscriber_history_cache = subscriber_history_cache
             .lock()
@@ -2482,9 +2486,11 @@ impl UserLogic {
         subscriber_history_cache.add_change(reader_id, marker, false)?;
 
         let released = subscriber_history_cache.flush_pending_changes();
+        let participant = self.get_upgraded_participant()?;
+        let available = participant.commit_released_samples(released)?;
         drop(subscriber_history_cache);
 
-        self.get_upgraded_participant()?.commit_released_samples(released)?;
+        participant.notify_available_changes(available);
 
         Ok(())
     }
@@ -2529,9 +2535,11 @@ impl UserLogic {
             cache.record_heartbeat_group_info(remote_writer_guid, group_info)?;
 
             let released = cache.flush_pending_changes();
+            let participant = self.get_upgraded_participant()?;
+            let available = participant.commit_released_samples(released)?;
             drop(cache);
 
-            self.get_upgraded_participant()?.commit_released_samples(released)?;
+            participant.notify_available_changes(available);
         }
 
         Ok(())
@@ -2554,9 +2562,11 @@ impl UserLogic {
             cache.record_gap_group_info(remote_writer_guid, group_info, filtered_count)?;
 
             let released = cache.flush_pending_changes();
+            let participant = self.get_upgraded_participant()?;
+            let available = participant.commit_released_samples(released)?;
             drop(cache);
 
-            self.get_upgraded_participant()?.commit_released_samples(released)?;
+            participant.notify_available_changes(available);
         }
 
         Ok(())

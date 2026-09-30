@@ -284,8 +284,11 @@ impl Participant {
     }
 
     // Stores samples the Subscriber HistoryCache released, each reader's share under that
-    // reader's cache lock in one go, then notifies what became available.
-    pub(crate) fn commit_released_samples(&self, released: Vec<PendingSample>) -> RtpsResult<()> {
+    // reader's cache lock in one go, and hands back what became available.
+    pub(crate) fn commit_released_samples(
+        &self,
+        released: Vec<PendingSample>,
+    ) -> RtpsResult<Vec<(ReaderCallbackLease, Vec<Arc<CacheChange>>)>> {
         let mut changes_per_reader: HashMap<EntityId, Vec<(CacheChange, bool)>> = HashMap::new();
         for sample in released {
             changes_per_reader
@@ -293,6 +296,8 @@ impl Participant {
                 .or_default()
                 .push((sample.change, sample.apply_filter));
         }
+
+        let mut available_per_reader = Vec::new();
 
         for (reader_id, changes) in changes_per_reader {
             // A reader deleted while its share was held has nowhere to put it.
@@ -311,12 +316,23 @@ impl Participant {
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
                 .commit_changes_to_datareader_cache(changes)?;
 
-            for change in available {
+            available_per_reader.push((lease, available));
+        }
+
+        Ok(available_per_reader)
+    }
+
+    // Tells each reader what became available. Runs outside the Subscriber HistoryCache lock
+    // because it calls into user listeners.
+    pub(crate) fn notify_available_changes(
+        &self,
+        available_per_reader: Vec<(ReaderCallbackLease, Vec<Arc<CacheChange>>)>,
+    ) {
+        for (lease, changes) in available_per_reader {
+            for change in changes {
                 lease.on_change(change);
             }
         }
-
-        Ok(())
     }
 
     // Tells every Subscriber HistoryCache that a remote writer lost or regained liveliness and
@@ -332,9 +348,10 @@ impl Participant {
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
             cache.set_writer_liveliness(writer_guid, is_alive);
             let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
             drop(cache);
 
-            self.commit_released_samples(released)?;
+            self.notify_available_changes(available);
         }
 
         Ok(())
@@ -347,9 +364,10 @@ impl Participant {
                 .lock()
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
             let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
             drop(cache);
 
-            self.commit_released_samples(released)?;
+            self.notify_available_changes(available);
         }
 
         Ok(())
@@ -367,9 +385,10 @@ impl Participant {
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
             cache.remove_matched_writer(writer_guid);
             let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
             drop(cache);
 
-            self.commit_released_samples(released)?;
+            self.notify_available_changes(available);
         }
 
         Ok(())
@@ -956,9 +975,10 @@ impl Participant {
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
             cache.remove_reader(entity_id);
             let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
             drop(cache);
 
-            self.commit_released_samples(released)?;
+            self.notify_available_changes(available);
         }
 
         // The reader is gone, so any reassembly still addressed to it can never complete and
