@@ -125,6 +125,66 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    // The inline QoS of a fragmented sample belongs on its first DATA_FRAG submessage only.
+    #[test]
+    fn only_the_first_data_frag_carries_the_group_presentation_inline_qos() {
+        use crate::common::instance_handle::InstanceHandle;
+        use crate::rtps::entities::history::cache_change::PresentationInfo;
+
+        let writer_guid = Guid::new(LOCAL_PREFIX, EntityId::PARTICIPANT);
+        let mut cache_change = CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid,
+            InstanceHandle::NIL,
+            SequenceNumber::from_i64(7),
+            vec![0xAB; 8],
+            None,
+        );
+        cache_change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(SequenceNumber::from_i64(7)),
+            group_seq_num: Some(SequenceNumber::from_i64(11)),
+            group_coherent_set: Some(SequenceNumber::from_i64(9)),
+            writer_group_info: None,
+        });
+
+        let inline_qos_of_fragment = |fragment_starting_num: u32| {
+            let mut send_buffer = Vec::new();
+            MessageCreator::create_data_frag_msg(
+                &cache_change,
+                Guid::new(DST_PREFIX, EntityId::PARTICIPANT),
+                EntityId::UNKNOWN,
+                writer_guid.entity_id(),
+                fragment_starting_num,
+                1,
+                4,
+                8,
+                &[0xAB; 4],
+                None,
+                Utc::now(),
+                &mut send_buffer,
+            )
+            .expect("DATA_FRAG must serialize");
+
+            let addr = "127.0.0.1:7400".parse().unwrap();
+            let mut receiver = MessageReceiver::new(DST_PREFIX, &addr);
+            receiver.init(&Bytes::copy_from_slice(&send_buffer)).unwrap();
+
+            receiver.parse_submessages().into_iter().find_map(|submessage| match submessage {
+                TypedSubmessage::DataFrag(_, data_frag) => Some(data_frag.inline_qos()),
+                _ => None,
+            })
+        };
+
+        let first = inline_qos_of_fragment(1).expect("the first DATA_FRAG must be parsed back");
+        let first = first.expect("the first DATA_FRAG must carry inline QoS");
+        assert_eq!(first.get_coherent_set(), Some(SequenceNumber::from_i64(7)));
+        assert_eq!(first.get_group_seq_num(), Some(SequenceNumber::from_i64(11)));
+        assert_eq!(first.get_group_coherent_set(), Some(SequenceNumber::from_i64(9)));
+
+        let second = inline_qos_of_fragment(2).expect("the second DATA_FRAG must be parsed back");
+        assert_eq!(second, None, "repeating the inline QoS on later fragments is redundant");
+    }
+
     // Env is process-global: serialize every INT2DDS_MAX_MESSAGE_SIZE mutation.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -566,20 +626,7 @@ impl MessageCreator {
                 }
             }
 
-            // Attach per-sample coherent/group presentation metadata.
-            let inline = cache_change.presentation_info();
-            if let Some(sn) = inline.coherent_set {
-                param_list.set_coherent_set(sn);
-            }
-            if let Some(sn) = inline.group_seq_num {
-                param_list.set_group_seq_num(sn);
-            }
-            if let Some(sn) = inline.group_coherent_set {
-                param_list.set_group_coherent_set(sn);
-            }
-            if let Some(writer_set) = inline.writer_group_info {
-                param_list.set_writer_group_info(writer_set.to_bytes().to_vec());
-            }
+            Self::add_presentation_parameters(&mut param_list, cache_change);
 
             if !param_list.parameters().is_empty() {
                 data_header_flag.add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA);
@@ -595,6 +642,25 @@ impl MessageCreator {
                 data.octets_to_next_header(),
             ),
             body: SubmessageBody::Data(data),
+        }
+    }
+
+    // Per-sample coherent and group presentation metadata, carried by a DATA and by the first
+    // DATA_FRAG of a sample.
+    fn add_presentation_parameters(param_list: &mut ParameterList, cache_change: &CacheChange) {
+        let presentation_info = cache_change.presentation_info();
+
+        if let Some(sn) = presentation_info.coherent_set {
+            param_list.set_coherent_set(sn);
+        }
+        if let Some(sn) = presentation_info.group_seq_num {
+            param_list.set_group_seq_num(sn);
+        }
+        if let Some(sn) = presentation_info.group_coherent_set {
+            param_list.set_group_coherent_set(sn);
+        }
+        if let Some(writer_set) = presentation_info.writer_group_info {
+            param_list.set_writer_group_info(writer_set.to_bytes().to_vec());
         }
     }
 
@@ -641,6 +707,18 @@ impl MessageCreator {
         );
 
         data_frag.add_serialized_data(SubmessagePayload::Borrowed(fragment_data));
+
+        // Only the first fragment of a sample carries its inline QoS.
+        if fragment_starting_num == 1 {
+            let mut param_list = ParameterList::default();
+            Self::add_presentation_parameters(&mut param_list, cache_change);
+
+            if !param_list.parameters().is_empty() {
+                data_frag_header_flag
+                    .add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA_FRAG);
+                data_frag.set_inline_qos_list(param_list);
+            }
+        }
 
         let data_frag_submessage = Submessage {
             header: SubmessageHeader::new(
