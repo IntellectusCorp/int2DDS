@@ -24,8 +24,7 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
 /**
- * Measures the two write-path questions Tasks 4-7 could not, because no write path existed yet — S1
- * and V1, see {@code docs/superpowers/specs/2026-08-05-java-core-write-design.md} §5.4.
+ * Measures two write-path questions, S1 and V1.
  *
  * <p><b>S1 — what does pooling the encoder buffer buy?</b> {@link CdrWriter} pools a direct {@link
  * ByteBuffer} per thread ({@link CdrWriter#acquire}/{@link CdrWriter#close}). {@link
@@ -73,8 +72,7 @@ import org.openjdk.jmh.infra.Blackhole;
  * inside it, and the encode's stores remained just as eliminable as before. The gap that
  * measurement actually reported was indistinguishable from the allocation cost of the three {@code
  * ByteBuffer} objects {@link CdrWriter#buffer()} builds on every call ({@code
- * duplicate().asReadOnlyBuffer().slice()}) — see {@code
- * docs/superpowers/specs/2026-07-30-java-value-types-design.md} §8.2's own account.
+ * duplicate().asReadOnlyBuffer().slice()}).
  *
  * <p>Both encode-only arms here instead do a real bulk {@code get} of the encoded range into a
  * scratch {@code byte[]}, then {@code bh.consume(scratch[0])} — consuming a primitive {@code byte}

@@ -1,4 +1,4 @@
-package kr.co.intellectus.int2dds.internal;
+package kr.co.intellectus.int2dds.exceptions;
 
 /** Thrown when the int2DDS native library cannot be located, loaded, or verified. */
 public class NativeLoadException extends RuntimeException {

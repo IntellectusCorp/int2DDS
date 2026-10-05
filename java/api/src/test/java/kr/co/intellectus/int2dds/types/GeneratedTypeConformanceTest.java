@@ -12,8 +12,11 @@ import java.nio.charset.Charset;
 import kr.co.intellectus.int2dds.cdr.CdrReader;
 import kr.co.intellectus.int2dds.cdr.CdrWriter;
 import kr.co.intellectus.int2dds.cdr.Extensibility;
+import kr.co.intellectus.int2dds.core.DomainParticipant;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
+import kr.co.intellectus.int2dds.xtypes.DynamicData;
+import kr.co.intellectus.int2dds.xtypes.DynamicValue;
 import kr.co.intellectus.int2dds.xtypes.TypeInfo;
 import kr.co.intellectus.int2dds.xtypes.TypeObject;
 import org.junit.jupiter.api.AfterEach;
@@ -100,10 +103,42 @@ class GeneratedTypeConformanceTest {
         g.wstrArr = new String[] {"𝄞", "arr"};
         g.unboundedWstr = "센서 é中 𝄞";
         g.boundedWstr = "wide";
+        g.color = CdrGoldenColor.BLUE;
+        g.point = point(Integer.MIN_VALUE, -Double.MAX_VALUE);
+        g.inner = inner(Integer.MIN_VALUE, -1234.5d, "센서 é中");
+        g.i64Seq = new long[] {Long.MIN_VALUE, -1L, Long.MAX_VALUE};
+        g.f64Arr = new double[] {-Double.MAX_VALUE, 0.0d, Double.MIN_VALUE};
+        // Three bytes, so whatever follows has to realign.
+        g.byteSeq = new byte[] {(byte) 0xFF, 0, (byte) 0x80};
+        g.strSeq = new String[] {"센서", "", "é中"};
+        g.colorSeq =
+                new CdrGoldenColor[] {
+                    CdrGoldenColor.BLUE, CdrGoldenColor.RED, CdrGoldenColor.GREEN
+                };
+        g.innerSeq = new CdrGoldenInner[] {inner(1, 1.5d, "a"), inner(-2, -2.5d, "")};
+        g.pointArr = new CdrGoldenPoint[] {point(3, 3.5d), point(-4, -4.5d)};
         return g;
     }
 
-    /** The other end of the range: zeros, false, and two empty strings. */
+    private static CdrGoldenPoint point(int x, double y) {
+        CdrGoldenPoint p = new CdrGoldenPoint();
+        p.x = x;
+        p.y = y;
+        return p;
+    }
+
+    private static CdrGoldenInner inner(int x, double y, String label) {
+        CdrGoldenInner in = new CdrGoldenInner();
+        in.x = x;
+        in.y = y;
+        in.label = label;
+        return in;
+    }
+
+    /**
+     * The other end of the range: zeros, false, and two empty strings. The enum, nested structs and
+     * collections keep their defaults, so every sequence is empty.
+     */
     private static CdrGolden zeros() {
         CdrGolden g = new CdrGolden();
         g.id = 0;
@@ -152,6 +187,16 @@ class GeneratedTypeConformanceTest {
         g.wstrArr = new String[] {"a", "bb"};
         g.unboundedWstr = "wide hello";
         g.boundedWstr = "w";
+        g.color = CdrGoldenColor.GREEN;
+        g.point = point(7, 0.25d);
+        g.inner = inner(-7, 1e300, "inner");
+        g.i64Seq = new long[] {-1_000_000_000_000L};
+        g.f64Arr = new double[] {1.5d, -2.5d, 1e300};
+        g.byteSeq = new byte[] {(byte) 0xAB};
+        g.strSeq = new String[] {"one"};
+        g.colorSeq = new CdrGoldenColor[] {CdrGoldenColor.GREEN};
+        g.innerSeq = new CdrGoldenInner[] {inner(9, 9.5d, "nine")};
+        g.pointArr = new CdrGoldenPoint[] {point(1, 1.0d), point(2, 2.0d)};
         return g;
     }
 
@@ -303,7 +348,108 @@ class GeneratedTypeConformanceTest {
         }
     }
 
+    /**
+     * The enum, nested-struct and collection members. The flat getters cannot read an enum or a
+     * length, so the sample is decoded whole into a {@link DynamicData}.
+     */
+    private void assertCoreDecodesAggregates(
+            DomainParticipant p, CdrGolden g, boolean littleEndian, boolean xcdr2, String what) {
+        byte[] bytes;
+        try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, littleEndian, xcdr2)) {
+            g.serializeCdr(w);
+            bytes = w.toBytes();
+        }
+        try (DynamicData d = p.dynamicDataFromSample(bytes, typeObjectOwner)) {
+            assertEquals(g.color.value(), coreEnum(d, "color"), what + ": color");
+
+            assertCorePoint(g.point, d, "point", what);
+            assertCoreInner(g.inner, d, "inner", what);
+
+            assertEquals(g.i64Seq.length, d.getLength("i64_seq"), what + ": i64_seq length");
+            for (int i = 0; i < g.i64Seq.length; i++) {
+                String at = "i64_seq[" + i + "]";
+                assertEquals(g.i64Seq[i], d.getI64(at), what + ": " + at);
+            }
+
+            assertEquals(g.f64Arr.length, d.getLength("f64_arr"), what + ": f64_arr length");
+            for (int i = 0; i < g.f64Arr.length; i++) {
+                String at = "f64_arr[" + i + "]";
+                assertEquals(g.f64Arr[i], d.getF64(at), 0.0d, what + ": " + at);
+            }
+
+            assertEquals(g.byteSeq.length, d.getLength("byte_seq"), what + ": byte_seq length");
+            for (int i = 0; i < g.byteSeq.length; i++) {
+                String at = "byte_seq[" + i + "]";
+                assertEquals(g.byteSeq[i] & 0xFF, d.getU8(at), what + ": " + at);
+            }
+
+            assertEquals(g.strSeq.length, d.getLength("str_seq"), what + ": str_seq length");
+            for (int i = 0; i < g.strSeq.length; i++) {
+                String at = "str_seq[" + i + "]";
+                assertEquals(g.strSeq[i], d.getString(at), what + ": " + at);
+            }
+
+            assertEquals(g.colorSeq.length, d.getLength("color_seq"), what + ": color_seq length");
+            for (int i = 0; i < g.colorSeq.length; i++) {
+                String at = "color_seq[" + i + "]";
+                assertEquals(g.colorSeq[i].value(), coreEnum(d, at), what + ": " + at);
+            }
+
+            assertEquals(g.innerSeq.length, d.getLength("inner_seq"), what + ": inner_seq length");
+            for (int i = 0; i < g.innerSeq.length; i++) {
+                assertCoreInner(g.innerSeq[i], d, "inner_seq[" + i + "]", what);
+            }
+
+            assertEquals(g.pointArr.length, d.getLength("point_arr"), what + ": point_arr length");
+            for (int i = 0; i < g.pointArr.length; i++) {
+                assertCorePoint(g.pointArr[i], d, "point_arr[" + i + "]", what);
+            }
+        }
+    }
+
+    private static int coreEnum(DynamicData d, String path) {
+        try (DynamicValue v = d.getValue(path)) {
+            return v.asEnum().value();
+        }
+    }
+
+    private static void assertCorePoint(
+            CdrGoldenPoint want, DynamicData d, String at, String what) {
+        assertEquals(want.x, d.getI32(at + ".x"), what + ": " + at + ".x");
+        assertEquals(want.y, d.getF64(at + ".y"), 0.0d, what + ": " + at + ".y");
+    }
+
+    private static void assertCoreInner(
+            CdrGoldenInner want, DynamicData d, String at, String what) {
+        assertEquals(want.x, d.getI32(at + ".x"), what + ": " + at + ".x");
+        assertEquals(want.y, d.getF64(at + ".y"), 0.0d, what + ": " + at + ".y");
+        assertEquals(want.label, d.getString(at + ".label"), what + ": " + at + ".label");
+    }
+
     // --- the tests ---------------------------------------------------------
+
+    @Test
+    void theCoreDecodesEnumsNestedStructsAndCollections() {
+        DomainParticipant p =
+                new DomainParticipant(
+                        Integer.parseInt(System.getProperty("int2dds.test.domain", "137")));
+        try {
+            for (CdrGolden g : cases()) {
+                for (boolean littleEndian : new boolean[] {true, false}) {
+                    for (boolean xcdr2 : new boolean[] {true, false}) {
+                        assertCoreDecodesAggregates(
+                                p,
+                                g,
+                                littleEndian,
+                                xcdr2,
+                                "le=" + littleEndian + " xcdr2=" + xcdr2);
+                    }
+                }
+            }
+        } finally {
+            p.close();
+        }
+    }
 
     @Test
     void theCoreDecodesEveryFieldUnderXcdr2() {
@@ -388,9 +534,9 @@ class GeneratedTypeConformanceTest {
         // A description that stopped at the last @key (bounded_str, index 11)
         // would be advertised as a smaller type that full-type peers reject.
         assertTrue(typeInfo.hasKey(), "CdrGolden is keyed");
-        assertEquals(20, typeObjectOwner.memberCount());
+        assertEquals(30, typeObjectOwner.memberCount());
         assertEquals("id", typeObjectOwner.memberName(0));
-        assertEquals("bounded_wstr", typeObjectOwner.memberName(19));
+        assertEquals("point_arr", typeObjectOwner.memberName(29));
     }
 
     private static void assertFieldsEqual(CdrGolden a, CdrGolden b, String what) {
@@ -414,5 +560,32 @@ class GeneratedTypeConformanceTest {
         assertArrayEquals(a.wstrArr, b.wstrArr, what + ": wstr_arr");
         assertEquals(a.unboundedWstr, b.unboundedWstr, what + ": unbounded_wstr");
         assertEquals(a.boundedWstr, b.boundedWstr, what + ": bounded_wstr");
+        assertEquals(a.color, b.color, what + ": color");
+        assertPointsEqual(a.point, b.point, what + ": point");
+        assertInnersEqual(a.inner, b.inner, what + ": inner");
+        assertArrayEquals(a.i64Seq, b.i64Seq, what + ": i64_seq");
+        assertArrayEquals(a.f64Arr, b.f64Arr, 0.0d, what + ": f64_arr");
+        assertArrayEquals(a.byteSeq, b.byteSeq, what + ": byte_seq");
+        assertArrayEquals(a.strSeq, b.strSeq, what + ": str_seq");
+        assertArrayEquals(a.colorSeq, b.colorSeq, what + ": color_seq");
+        assertEquals(a.innerSeq.length, b.innerSeq.length, what + ": inner_seq length");
+        for (int i = 0; i < a.innerSeq.length; i++) {
+            assertInnersEqual(a.innerSeq[i], b.innerSeq[i], what + ": inner_seq[" + i + "]");
+        }
+        assertEquals(a.pointArr.length, b.pointArr.length, what + ": point_arr length");
+        for (int i = 0; i < a.pointArr.length; i++) {
+            assertPointsEqual(a.pointArr[i], b.pointArr[i], what + ": point_arr[" + i + "]");
+        }
+    }
+
+    private static void assertPointsEqual(CdrGoldenPoint a, CdrGoldenPoint b, String what) {
+        assertEquals(a.x, b.x, what + ".x");
+        assertEquals(a.y, b.y, 0.0d, what + ".y");
+    }
+
+    private static void assertInnersEqual(CdrGoldenInner a, CdrGoldenInner b, String what) {
+        assertEquals(a.x, b.x, what + ".x");
+        assertEquals(a.y, b.y, 0.0d, what + ".y");
+        assertEquals(a.label, b.label, what + ".label");
     }
 }

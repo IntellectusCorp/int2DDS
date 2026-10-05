@@ -34,7 +34,7 @@ subprojects {
             target("src/**/*.java")
             targetExclude(
                 "**/internal/ffi/Ffi.java",
-                "**/types/CdrGolden.java",
+                "**/types/CdrGolden*.java",
                 "**/examples/HelloWorld.java"
             )
             googleJavaFormat("1.25.2").aosp()

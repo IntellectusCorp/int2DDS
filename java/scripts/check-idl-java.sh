@@ -2,7 +2,7 @@
 # Two phases:
 #   1. the Java backend's output for the whole IDL corpus compiles
 #      (string snapshots cannot catch a syntax error; javac can), and
-#   2. the committed CdrGolden.java still matches what the generator emits.
+#   2. the committed CdrGolden*.java still match what the generator emits.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -36,27 +36,35 @@ if ! javac -Xlint:all -d "$OUT/classes" -cp "$API_CLASSES" "${SOURCES[@]}"; then
 fi
 echo "Phase 1 OK: generated Java for the IDL corpus compiles."
 
-# Phase 2. CdrGolden.java is generated but committed, because
-# GeneratedTypeConformanceTest hands its bytes to the core. Regenerate in
-# place and let git decide whether the committed copy is still current.
+# Phase 2. The CdrGolden classes are generated but committed, because
+# GeneratedTypeConformanceTest hands their bytes to the core. Regenerate in
+# place and let git decide whether the committed copies are still current.
 GOLDEN_IDL="idl/input/CdrGolden.idl"
-GOLDEN_JAVA="java/api/src/test/java/kr/co/intellectus/int2dds/types/CdrGolden.java"
+GOLDEN_DIR="java/api/src/test/java/kr/co/intellectus/int2dds/types"
+GOLDEN_JAVA=(
+  "$GOLDEN_DIR/CdrGolden.java"
+  "$GOLDEN_DIR/CdrGoldenColor.java"
+  "$GOLDEN_DIR/CdrGoldenInner.java"
+  "$GOLDEN_DIR/CdrGoldenPoint.java"
+)
 GOLDEN_CMD="./target/debug/int2dds-idl $GOLDEN_IDL -j java/api/src/test/java \
 --java-package kr.co.intellectus.int2dds.types"
 
 # An untracked file has an empty `git diff`, which would pass vacuously.
-if ! git ls-files --error-unmatch "$GOLDEN_JAVA" >/dev/null 2>&1; then
-  echo "ERROR: $GOLDEN_JAVA is not tracked; the drift check cannot see it." >&2
-  exit 1
-fi
+for f in "${GOLDEN_JAVA[@]}"; do
+  if ! git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+    echo "ERROR: $f is not tracked; the drift check cannot see it." >&2
+    exit 1
+  fi
+done
 
 "$BIN" "$GOLDEN_IDL" -j java/api/src/test/java \
     --java-package kr.co.intellectus.int2dds.types >/dev/null
 
-if ! git diff --quiet -- "$GOLDEN_JAVA"; then
-  echo "ERROR: the committed $GOLDEN_JAVA is stale." >&2
+if ! git diff --quiet -- "${GOLDEN_JAVA[@]}"; then
+  echo "ERROR: the committed CdrGolden classes are stale." >&2
   echo "Run: $GOLDEN_CMD" >&2
-  git --no-pager diff -- "$GOLDEN_JAVA" >&2
+  git --no-pager diff -- "${GOLDEN_JAVA[@]}" >&2
   exit 1
 fi
-echo "Phase 2 OK: the committed CdrGolden.java matches the generator."
+echo "Phase 2 OK: the committed CdrGolden classes match the generator."

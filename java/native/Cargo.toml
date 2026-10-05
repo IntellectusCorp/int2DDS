@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "gen-jni"
-path = "src/bin/gen-jni.rs"
+path = "src/bin/gen-jni/main.rs"
 
 [dependencies]
 int2dds-ffi = { path = "../../ffi" }

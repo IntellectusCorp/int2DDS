@@ -281,7 +281,7 @@ pub fn parse_ffi_dir(dir: &Path) -> Result<Vec<FfiFn>, String> {
                             )
                         })?;
                     let binds: HashMap<String, TokenStream> =
-                        arm.params.iter().cloned().zip(args.into_iter()).collect();
+                        arm.params.iter().cloned().zip(args).collect();
                     let expanded = substitute(arm.body.clone(), &binds);
                     let parsed = syn::parse2::<syn::File>(expanded)
                         .map_err(|e| format!("{name}!: expansion does not parse: {e}"))?;

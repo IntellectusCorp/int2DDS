@@ -6,9 +6,11 @@
 //! Deliberately a separate binary rather than a build script: writing into the
 //! source tree from `build.rs` would dirty the working tree on every build.
 
-use int2dds_java::gen::{
+mod gen;
+
+use gen::{
     emit_java::emit_java, emit_java_panama::emit_java_panama, emit_rust::emit_rust,
-    parse::parse_ffi_dir,
+    parse::parse_ffi_dir, typemap::generatable_count,
 };
 use std::path::{Path, PathBuf};
 
@@ -69,7 +71,7 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("write java22: {e}"))?;
     rustfmt(&rust_path)?;
 
-    let generated = fns.iter().filter(|f| int2dds_java::gen::typemap::is_generatable(f)).count();
+    let generated = generatable_count(&fns);
     println!(
         "parsed {total} FFI functions; generated {generated}; not generated {}",
         total - generated

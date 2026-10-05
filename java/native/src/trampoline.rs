@@ -21,8 +21,7 @@
 //! out of the map *while holding the registry lock*; a clear removes the id
 //! under the same lock. Either the trampoline gets a live clone that outlives
 //! the callback, or the id is already gone and it returns without calling —
-//! never a use-after-free. See
-//! `.superpowers/sdd/listener-lifecycle-investigation.md`.
+//! never a use-after-free.
 //!
 //! # Shared scaffold
 //! Every trampoline funnels through [`run_trampoline`]: registry lookup with

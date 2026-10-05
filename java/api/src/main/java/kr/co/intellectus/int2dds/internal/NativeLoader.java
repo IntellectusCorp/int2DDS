@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Locale;
+import kr.co.intellectus.int2dds.exceptions.NativeLoadException;
 import kr.co.intellectus.int2dds.internal.ffi.FfiHandwritten;
 
 /**

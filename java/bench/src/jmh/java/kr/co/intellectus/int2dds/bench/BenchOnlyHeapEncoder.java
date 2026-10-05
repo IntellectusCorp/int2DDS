@@ -6,16 +6,16 @@ import java.nio.ByteBuffer;
  * A minimal, bench-only CDR encoder over a heap {@code byte[]}.
  *
  * <p><b>This class exists only to answer benchmark question V1</b> for {@link WritePathBenchmark} —
- * "direct {@code ByteBuffer} or {@code byte[]} plus a staging copy?" (see that class's own Javadoc,
- * and §5.4 of {@code docs/superpowers/specs/2026-08-05-java-core-write-design.md}). It encodes only
- * the three fields the benchmark's record needs — an {@code int}, a {@code double}, an ASCII {@code
- * String} — wrapped in the same DHEADER and 4-byte encapsulation header {@link
- * kr.co.intellectus.int2dds.cdr.CdrWriter} produces for an APPENDABLE, XCDR2, little-endian sample
- * (see {@code encode}'s own doc for the byte-for-byte mapping). <b>It is not a second production
- * CDR encoder</b>: no other primitive, no big-endian path, no non-ASCII string path, no XCDR1 path
- * — because the one benchmark that owns it needs none of those. If the byte[]-plus-copy design this
- * class stands in for turns out to win, porting an actual {@code byte[]}-backed {@code CdrWriter}
- * is a separate decision this class does not make and is not evidence for.
+ * "direct {@code ByteBuffer} or {@code byte[]} plus a staging copy?" (see that class's own
+ * Javadoc). It encodes only the three fields the benchmark's record needs — an {@code int}, a
+ * {@code double}, an ASCII {@code String} — wrapped in the same DHEADER and 4-byte encapsulation
+ * header {@link kr.co.intellectus.int2dds.cdr.CdrWriter} produces for an APPENDABLE, XCDR2,
+ * little-endian sample (see {@code encode}'s own doc for the byte-for-byte mapping). <b>It is not a
+ * second production CDR encoder</b>: no other primitive, no big-endian path, no non-ASCII string
+ * path, no XCDR1 path — because the one benchmark that owns it needs none of those. If the
+ * byte[]-plus-copy design this class stands in for turns out to win, porting an actual {@code
+ * byte[]}-backed {@code CdrWriter} is a separate decision this class does not make and is not
+ * evidence for.
  *
  * <p>Deliberately not {@code CdrWriter}-shaped: no {@code acquire()}/{@code close()}, no
  * thread-local pool. A single instance is created once per benchmark trial and reused across
