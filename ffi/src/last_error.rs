@@ -18,6 +18,17 @@ pub(crate) fn clear_last_error() {
     LAST_ERROR.with(|slot| *slot.borrow_mut() = None);
 }
 
+/// Clear the calling thread's last-error message from the C ABI. Lets a host
+/// binding reset the thread-local before an operation whose error state it
+/// wants to read in isolation.
+///
+/// # Safety
+/// Callable from any thread under the C ABI; touches only that thread's slot.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_clear_last_error() {
+    clear_last_error();
+}
+
 /// Copy the calling thread's last error message (UTF-8, NUL-terminated) into `buf`.
 /// Returns the full message byte length, excluding the NUL.
 ///
