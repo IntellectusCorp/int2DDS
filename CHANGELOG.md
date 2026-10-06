@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The hook seams are cleaned up
+
+### Removed
+
+- **Breaking:** the five `__int2dds_hook_set_*` registration symbols
+
 ## [0.1.8] - 2026-10-06
 
 The IDL compiler emits Java, and the Java binding ships a documented build.
