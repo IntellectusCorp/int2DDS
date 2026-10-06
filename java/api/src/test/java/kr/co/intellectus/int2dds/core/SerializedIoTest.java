@@ -90,15 +90,20 @@ class SerializedIoTest {
             Subscriber sub = p.createSubscriber();
             DataReader<ConformanceRecord> r = sub.createDataReader(topic, ConformanceRecord::new);
 
-            // Establish the match and drain the connection with the ordinary
-            // typed path, so the buffer below starts from an empty cache.
+            // Wait for the match first, then write each sample exactly once:
+            // a write-until-take loop leaves extra in-flight samples that land
+            // after the take and break the hasData() checks below.
+            pollUntil(
+                    () ->
+                            w.getPublicationMatchedStatus().currentCount() > 0
+                                    && r.getSubscriptionMatchedStatus().currentCount() > 0);
             ConformanceRecord warm = new ConformanceRecord();
             warm.id = 1;
             warm.label = "warm";
+            w.write(warm);
             long deadline = System.nanoTime() + DATA_TIMEOUT_NANOS;
             Sample<ConformanceRecord> matched = null;
             while (System.nanoTime() < deadline) {
-                w.write(warm);
                 matched = r.take();
                 if (matched != null) {
                     break;
@@ -138,10 +143,10 @@ class SerializedIoTest {
             sent2.id = 3;
             sent2.value = 6.5;
             sent2.label = "removing";
+            w.write(sent2);
             byte[] c = null;
             deadline = System.nanoTime() + DATA_TIMEOUT_NANOS;
             while (System.nanoTime() < deadline) {
-                w.write(sent2);
                 c = r.takeSerialized();
                 if (c != null) {
                     break;
