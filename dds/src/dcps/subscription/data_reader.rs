@@ -34,13 +34,14 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
 };
 
 use super::{
     data_reader_listener::DataReaderListener,
+    loaned_samples::{decode_once, LoanToken, LoanedSample, LoanedSamples},
     qos::DataReaderQos,
     query_condition::QueryCondition,
     read_condition::ReadCondition,
@@ -150,6 +151,7 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
     fn is_builtin(&self) -> bool;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_readconditions(&self) -> DdsResult<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>;
+    fn has_outstanding_loans(&self) -> bool;
     fn delete_readcondition_internal(
         &self,
         condition: Arc<dyn ReadConditionTrait + Send + Sync>,
@@ -161,6 +163,12 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
 }
 
 // #[derive(Clone)]
+/// A sample chosen by a read or take, before it is shaped into a result.
+pub(crate) struct Selected {
+    pub(crate) change: Option<Arc<CacheChange>>,
+    pub(crate) info: SampleInfo,
+}
+
 pub struct DataReader<Foo> {
     // Indicates whether this entity is a built-in entity.
     //
@@ -200,6 +208,7 @@ pub struct DataReader<Foo> {
     status_callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
     _phantom: PhantomData<fn() -> Foo>, // Temporary
     datareader_cache: Arc<Mutex<DataReaderHistoryCache<Foo>>>,
+    outstanding_loans: Arc<AtomicUsize>,
 }
 
 impl<Foo> Debug for DataReader<Foo> {
@@ -275,6 +284,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             status_callback: self.status_callback.clone(),
             _phantom: self._phantom,
             datareader_cache: self.datareader_cache.clone(),
+            outstanding_loans: self.outstanding_loans.clone(),
         }
     }
 }
@@ -590,6 +600,10 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
 }
 
 impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
+    pub(crate) fn outstanding_loan_count(&self) -> usize {
+        self.outstanding_loans.load(Ordering::Acquire)
+    }
+
     /// Retrieves the key values for a data instance identified by its handle.
     ///
     /// This operation returns a data instance with only the key fields populated. The non-key
@@ -2191,6 +2205,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 qos.ownership.kind,
                 qos.destination_order.kind,
             ))),
+            outstanding_loans: Arc::new(AtomicUsize::new(0)),
         };
 
         let reader_arc = Arc::new(reader.clone());
@@ -2359,25 +2374,45 @@ impl<Foo: DdsType> DataReader<Foo> {
         )
     }
 
-    // TODO
-    pub fn return_loan(&self) -> DdsResult<Vec<DataSample<Foo>>> {
-        // in: data_values: <Foo>[], sample_infos: SampleInfo[]
-        // out: DdsError_t, data_values: <Foo>[], sample_infos: SampleInfo[]
-        self.is_enabled()?;
-        /*
-            When calling read or take with a collection of max_len=0,
-            the DataReader "loans" its internal buffer to provide zero-copy access.
-            For this, the arguments of the read and take functions should be changed as follows:
-            pub fn read_with_params(
-                &self,
-                data_values: &mut Vec<DataSample<Foo>>, // For max_len check
-                sample_infos: &mut Vec<SampleInfo>,
-                // ...
-            )
-            Due to Rust's characteristics, receiving &mut T as an argument complicates ownership and lifetime management.
-            Additionally, receiving pointers as arguments requires unsafe blocks.
-        */
-        Err(DdsError::Unsupported)
+    /// Ends a loan from `read_loaned`/`take_loaned` and their variants. Dropping the
+    /// loan does the same; a loan from another reader is `PreconditionNotMet`.
+    pub fn return_loan(&self, loan: LoanedSamples<Foo>) -> DdsResult<()> {
+        if loan.reader() != self.guid {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        drop(loan);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_or_take_loaned(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        direct_sample_states: Option<&[SampleStateKind]>,
+        direct_view_states: Option<&[ViewStateKind]>,
+        direct_instance_states: Option<&[InstanceStateKind]>,
+        condition: Option<&Arc<dyn ReadConditionTrait + Send + Sync>>,
+        single_instance: bool,
+        exact: bool,
+        take: bool,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let selected = self.select_samples(
+            max_samples,
+            handle,
+            direct_sample_states,
+            direct_view_states,
+            direct_instance_states,
+            condition,
+            single_instance,
+            exact,
+            take,
+        )?;
+        let samples = selected
+            .into_iter()
+            .map(|s| LoanedSample::new(s.change, s.info, self.type_support.clone()))
+            .collect();
+        Ok(LoanedSamples::new(samples, LoanToken::new(self.guid, self.outstanding_loans.clone())))
     }
 
     pub fn read_next_sample(&self) -> DdsResult<DataSample<Foo>> {
@@ -2568,6 +2603,217 @@ impl<Foo: DdsType> DataReader<Foo> {
         let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
         self.owns_read_condition(&condition_trait)?;
         self.read_or_take(
+            max_samples,
+            previous_handle,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            true,
+            false,
+            true,
+        )
+    }
+
+    /// `read` that loans the samples instead of copying them (DDS v1.4 2.2.2.5.3.8 rule 3).
+    pub fn read_loaned(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_loaned(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            false,
+            false,
+            true,
+        )
+    }
+
+    pub fn read_instance_loaned(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            true,
+            false,
+        )
+    }
+
+    pub fn take_instance_loaned(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            true,
+            true,
+        )
+    }
+
+    pub fn read_next_instance_loaned(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            previous_handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_next_instance_loaned(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            previous_handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            false,
+            true,
+        )
+    }
+
+    pub fn read_w_condition_loaned<T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>>(
+        &self,
+        max_samples: i32,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_w_condition_loaned<T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>>(
+        &self,
+        max_samples: i32,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            false,
+            false,
+            true,
+        )
+    }
+
+    pub fn read_next_instance_w_condition_loaned<
+        T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>,
+    >(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
+            max_samples,
+            previous_handle,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            true,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_next_instance_w_condition_loaned<
+        T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>,
+    >(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
             max_samples,
             previous_handle,
             None,
@@ -2954,6 +3200,33 @@ impl<Foo: DdsType> DataReader<Foo> {
         exact: bool,
         take: bool,
     ) -> DdsResult<Vec<DataSample<Foo>>> {
+        let selected = self.select_samples(
+            max_samples,
+            handle,
+            direct_sample_states,
+            direct_view_states,
+            direct_instance_states,
+            condition,
+            single_instance,
+            exact,
+            take,
+        )?;
+        Ok(selected.into_iter().map(|s| self.to_data_sample(s)).collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_samples(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        direct_sample_states: Option<&[SampleStateKind]>,
+        direct_view_states: Option<&[ViewStateKind]>,
+        direct_instance_states: Option<&[InstanceStateKind]>,
+        condition: Option<&Arc<dyn ReadConditionTrait + Send + Sync>>,
+        single_instance: bool,
+        exact: bool,
+        take: bool,
+    ) -> DdsResult<Vec<Selected>> {
         log::debug!(
             "read_or_take called: max_samples={}, handle={}, single_instance={}, exact={}, take={}",
             max_samples,
@@ -2997,7 +3270,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.set_read_communication_status(false)?;
-        let mut result_samples: Vec<DataSample<Foo>> = Vec::new();
+        let mut result_samples: Vec<Selected> = Vec::new();
         // TODO: The size of the collection may be additionally limited by the PRESENTATION QoS policy (2.2.3.6).
         let mut remaining_samples = if max_samples == -1 { i32::MAX } else { max_samples };
 
@@ -3085,16 +3358,20 @@ impl<Foo: DdsType> DataReader<Foo> {
             }
             log::trace!("Change {} passed state mask filters", idx);
 
-            // 2. Create DataSample - use optimized version with pre-fetched instance_infos
-            match self.change_to_data_sample_with_infos(
+            // 2. Build the SampleInfo with the pre-fetched instance_infos
+            match self.sample_info_with_infos(
                 change,
                 change.instance_handle(),
                 sample_state,
-                Some(&instance_infos),
+                &instance_infos,
             ) {
-                Ok(data_sample) => {
+                Ok(sample_info) => {
                     if let Some(qc_expr) = &qc_expression {
-                        if !qc_expr.evaluate(&data_sample.data()?, &qc_parameters)? {
+                        if !sample_info.valid_data {
+                            return Err(DdsError::NoData);
+                        }
+                        let data: &Foo = decode_once(change, self.type_support.as_ref())?;
+                        if !qc_expr.evaluate(data, &qc_parameters)? {
                             log::trace!(
                                 "Skipping change {}: QueryCondition expression failed",
                                 idx
@@ -3111,7 +3388,8 @@ impl<Foo: DdsType> DataReader<Foo> {
                     } else {
                         self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
                     }
-                    result_samples.push(data_sample);
+                    result_samples
+                        .push(Selected { change: Some(change.clone()), info: sample_info });
                     remaining_samples -= 1;
                 }
                 Err(_) => {
@@ -3131,12 +3409,12 @@ impl<Foo: DdsType> DataReader<Foo> {
             if exact { Some(handle) } else { None },
             remaining_samples,
         )? {
-            result_samples.push(DataSample::new(None, sample_info, None));
+            result_samples.push(Selected { change: None, info: sample_info });
         }
 
         // 2.2.2.5.1.8 Interpretation of the SampleInfo view_state
         for sample in &result_samples {
-            self.mark_instance_as_viewed(sample.sample_info().instance_handle);
+            self.mark_instance_as_viewed(sample.info.instance_handle);
         }
 
         self.prune_read_samples_to_cache(&changes);
@@ -3263,17 +3541,6 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_state: SampleStateKind,
         cached_instance_infos: Option<&HashMap<InstanceHandle, InstanceInfo>>,
     ) -> DdsResult<DataSample<Foo>> {
-        // Check if change has valid data based on its kind
-        let has_valid_data = match change.kind() {
-            ChangeKind::Alive | ChangeKind::AliveFiltered => true,
-            ChangeKind::NotAliveDisposed
-            | ChangeKind::NotAliveUnregistered
-            | ChangeKind::NotAliveDisposedUnregistered => false,
-        };
-
-        let data = if has_valid_data { Some(change.data_bytes()) } else { None };
-
-        // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
         let instance_infos = match cached_instance_infos {
             Some(infos) => infos,
@@ -3282,18 +3549,34 @@ impl<Foo: DdsType> DataReader<Foo> {
                 &owned_instance_infos
             }
         };
+        let sample_info =
+            self.sample_info_with_infos(change, instance_handle, sample_state, instance_infos)?;
+        Ok(self.to_data_sample(Selected { change: Some(change.clone()), info: sample_info }))
+    }
 
+    fn sample_info_with_infos(
+        &self,
+        change: &Arc<CacheChange>,
+        instance_handle: InstanceHandle,
+        sample_state: SampleStateKind,
+        instance_infos: &HashMap<InstanceHandle, InstanceInfo>,
+    ) -> DdsResult<SampleInfo> {
+        let has_valid_data = match change.kind() {
+            ChangeKind::Alive | ChangeKind::AliveFiltered => true,
+            ChangeKind::NotAliveDisposed
+            | ChangeKind::NotAliveUnregistered
+            | ChangeKind::NotAliveDisposedUnregistered => false,
+        };
         let info = instance_infos
             .get(&instance_handle)
             .ok_or(DdsError::Error("Instance not found".to_string()))?;
-
-        let sample_info = SampleInfo {
+        Ok(SampleInfo {
             sample_state,
             view_state: info.view_state,
             instance_state: info.instance_state,
             disposed_generation_count: info.disposed_generation_count,
             no_writers_generation_count: info.no_writers_generation_count,
-            sample_rank: 0, // Will be updated later
+            sample_rank: 0,
             generation_rank: 0,
             absolute_generation_rank: 0,
             source_timestamp: (*change.source_timestamp().as_ref().ok_or(DdsError::Error(
@@ -3303,8 +3586,17 @@ impl<Foo: DdsType> DataReader<Foo> {
             instance_handle,
             publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
             valid_data: has_valid_data,
-        };
-        Ok(DataSample::new(data, sample_info, Some(self.type_support.clone())))
+        })
+    }
+
+    fn to_data_sample(&self, selected: Selected) -> DataSample<Foo> {
+        match selected.change {
+            Some(change) => {
+                let data = if selected.info.valid_data { Some(change.data_bytes()) } else { None };
+                DataSample::new(data, selected.info, Some(self.type_support.clone()))
+            }
+            None => DataSample::new(None, selected.info, None),
+        }
     }
 
     /// Sort changes according to ORDER BY fields
@@ -3359,13 +3651,11 @@ impl<Foo: DdsType> DataReader<Foo> {
     }
 
     // Calculate sample_rank for all samples (based on sorted order)
-    fn update_all_sample_ranks(&self, samples: &mut [DataSample<Foo>]) {
+    fn update_all_sample_ranks(&self, samples: &mut [Selected]) {
         let total_samples = samples.len();
-        // Calculate sample_rank in sorted order
-        // samples[0] = oldest sample → highest rank
-        // samples[last] = newest sample → rank 0
+        // samples[0] = oldest sample -> highest rank; samples[last] = newest -> rank 0
         for (i, sample) in samples.iter_mut().enumerate() {
-            sample.sample_info.sample_rank = (total_samples - 1 - i) as i32;
+            sample.info.sample_rank = (total_samples - 1 - i) as i32;
         }
     }
 
@@ -3809,6 +4099,10 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
 }
 
 impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
+    fn has_outstanding_loans(&self) -> bool {
+        self.outstanding_loan_count() > 0
+    }
+
     fn disable(&self) -> DdsResult<()> {
         self.set_listener(None, StatusMask::default())
     }

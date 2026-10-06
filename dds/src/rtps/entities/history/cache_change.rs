@@ -4,8 +4,11 @@
 //! stored in reader or writer history caches. Changes include the sequence number,
 //! data payload, instance handle, and metadata.
 
+use std::any::Any;
 use std::collections::HashSet;
+use std::fmt;
 use std::num::NonZeroU16;
+use std::sync::OnceLock;
 
 use bytes::Bytes;
 
@@ -75,6 +78,47 @@ pub(crate) struct PresentationInfo {
     pub group_coherent_set: Option<SequenceNumber>, // PID_GROUP_COHERENT_SET (group set's first seq)
 }
 
+/// The reader's decoded sample; set once and never modified afterwards.
+#[derive(Default)]
+pub(crate) struct DecodedCell(OnceLock<Box<dyn Any + Send + Sync>>);
+
+impl DecodedCell {
+    pub(crate) fn get(&self) -> Option<&(dyn Any + Send + Sync)> {
+        self.0.get().map(|b| b.as_ref())
+    }
+
+    /// Returns the stored value: `value` unless another caller set the cell first.
+    pub(crate) fn get_or_set(&self, value: Box<dyn Any + Send + Sync>) -> &(dyn Any + Send + Sync) {
+        self.0.get_or_init(|| value).as_ref()
+    }
+
+    fn clear(&mut self) {
+        self.0 = OnceLock::new();
+    }
+}
+
+// A clone is a separate change; it decodes on its own.
+impl Clone for DecodedCell {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+// Derived from the payload, so it never distinguishes two changes.
+impl PartialEq for DecodedCell {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for DecodedCell {}
+
+impl fmt::Debug for DecodedCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.get().is_some() { "DecodedCell(set)" } else { "DecodedCell(empty)" })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheChange {
     kind: ChangeKind,
@@ -94,6 +138,7 @@ pub(crate) struct CacheChange {
     fragment_size: u32,
     writer_ownership_strength: Option<i32>, // Set only when it's writer cache && Ownership QoS is EXCLUSIVE, CacheChange should be split to reader & writer cache in the future
     lifespan_duration: Option<Duration>,
+    decoded: DecodedCell,
 }
 impl std::fmt::Display for CacheChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,6 +203,7 @@ impl CacheChange {
             total_fragments: 0,
             fragment_size: 0,
             lifespan_duration: None,
+            decoded: DecodedCell::default(),
         }
     }
 
@@ -178,6 +224,7 @@ impl CacheChange {
             total_fragments: 0,
             fragment_size: 0,
             lifespan_duration: None,
+            decoded: DecodedCell::default(),
         }
     }
 
@@ -209,6 +256,7 @@ impl CacheChange {
         self.total_fragments = 0;
         self.fragment_size = 0;
         self.lifespan_duration = None;
+        self.decoded.clear();
     }
 
     pub(crate) fn kind(&self) -> ChangeKind {
@@ -253,6 +301,10 @@ impl CacheChange {
 
     pub(crate) fn data_value(&self) -> &[u8] {
         self.data_payload.as_slice()
+    }
+
+    pub(crate) fn decoded(&self) -> &DecodedCell {
+        &self.decoded
     }
 
     // A payload-less Alive Data carrying no coherent set id (or UNKNOWN) closes
@@ -561,5 +613,33 @@ mod tests {
         let mut change = packed_change();
         change.apply_fragmentation(65_000, 0);
         assert_eq!(change.fragments_per_submessage(65_000).get(), 1);
+    }
+
+    fn addr<T: ?Sized>(r: &T) -> *const () {
+        r as *const T as *const ()
+    }
+
+    #[test]
+    fn decoded_cell_is_set_once_and_emptied_by_clone_and_reset() {
+        let mut change = CacheChange::empty();
+        assert!(change.decoded().get().is_none());
+
+        let first = addr(change.decoded().get_or_set(Box::new(7u32)));
+        let second = change.decoded().get_or_set(Box::new(9u32));
+        assert_eq!(second.downcast_ref::<u32>(), Some(&7));
+        assert_eq!(addr(second), first);
+
+        let cloned = change.clone();
+        assert!(cloned.decoded().get().is_none());
+        assert_eq!(cloned, change);
+
+        change.reset(
+            ChangeKind::Alive,
+            Guid::UNKNOWN,
+            InstanceHandle::NIL,
+            SequenceNumber::UNKNOWN,
+            None,
+        );
+        assert!(change.decoded().get().is_none());
     }
 }
