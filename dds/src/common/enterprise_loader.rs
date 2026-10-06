@@ -54,7 +54,7 @@ unsafe impl Sync for Enterprise {}
 
 enum LoadState {
     Loaded(Enterprise),
-    Absent(Vec<String>),
+    Absent,
     Failed(String),
 }
 
@@ -88,32 +88,55 @@ fn candidate_paths() -> (Vec<PathBuf>, bool) {
 
 fn try_load() -> LoadState {
     let (paths, explicit) = candidate_paths();
-    let mut tried: Vec<String> = Vec::new();
-    // Subset of `tried` that existed on disk, as opposed to simply not being there.
-    let mut rejected: Vec<String> = Vec::new();
-    for path in &paths {
-        match unsafe { Library::new(path) } {
-            Ok(library) => match resolve_entries(library, path) {
-                Ok(e) => return LoadState::Loaded(e),
-                Err(why) => {
-                    tried.push(why.clone());
-                    rejected.push(why);
-                }
-            },
-            Err(e) => {
-                let msg = format!("{}: {e}", path.display());
-                tried.push(msg.clone());
-                if path.exists() {
-                    rejected.push(msg);
-                }
-            }
+    decide(&paths, explicit)
+}
+
+/// The loader contract, applied to an already computed candidate list.
+fn decide(paths: &[PathBuf], explicit: bool) -> LoadState {
+    let mut failures: Vec<(&Path, String)> = Vec::new();
+    for path in paths {
+        // Default search only: no file (or a directory of that name) means no library.
+        if !explicit && !path.is_file() {
+            continue;
+        }
+        // SAFETY: loading runs the library's initialisers; every candidate is a full path.
+        let outcome = unsafe { Library::new(path) }
+            .map_err(|e| format!("{}: {e}", path.display()))
+            .and_then(|library| resolve_entries(library, path));
+        match outcome {
+            Ok(e) => return LoadState::Loaded(e),
+            Err(why) => failures.push((path, why)),
         }
     }
     if explicit {
+        let tried: Vec<String> = failures.into_iter().map(|(_, why)| why).collect();
         LoadState::Failed(explicit_failure_message(&tried))
+    } else if !failures.is_empty() {
+        LoadState::Failed(unusable_library_message(&failures))
     } else {
-        LoadState::Absent(rejected)
+        LoadState::Absent
     }
+}
+
+fn unusable_library_message(failures: &[(&Path, String)]) -> String {
+    let mut m = String::from("An enterprise library was found but could not be used.\nTried:\n");
+    for (_, why) in failures {
+        m.push_str(&format!("  {why}\n"));
+    }
+    m.push_str(&format!(
+        "Replace it with an enterprise library built for this core (ABI version \
+         {EXPECTED_ABI_VERSION}), or remove it to run open-core behaviour:\n"
+    ));
+    for (path, _) in failures {
+        #[cfg(windows)]
+        {
+            m.push_str(&format!("  PowerShell : Remove-Item '{}'\n", path.display()));
+            m.push_str(&format!("  cmd.exe    : del \"{}\"\n", path.display()));
+        }
+        #[cfg(unix)]
+        m.push_str(&format!("  bash/zsh   : rm '{}'\n", path.display()));
+    }
+    m
 }
 
 fn explicit_failure_message(tried: &[String]) -> String {
@@ -197,13 +220,10 @@ fn state() -> &'static LoadState {
         let s = try_load();
         match &s {
             LoadState::Loaded(_) => {}
-            LoadState::Absent(reasons) if reasons.is_empty() => log::info!(
+            LoadState::Absent => log::info!(
                 "[enterprise] no enterprise library next to the executable; \
                  running open-core behaviour"
             ),
-            LoadState::Absent(reasons) => {
-                log::warn!("[enterprise] enterprise library not loaded: {}", reasons.join("; "))
-            }
             LoadState::Failed(why) => log::error!("[enterprise] {why}"),
         }
         s
@@ -223,12 +243,12 @@ pub(crate) fn is_loaded() -> bool {
     enterprise().is_some()
 }
 
-/// Fail-open when no library is present; refuse when `INT2DDS_ENTERPRISE_PATH`
-/// was set and the library could not be loaded.
+/// Fail-open only when no library is present (contract row 2); every load
+/// failure refuses participant creation.
 pub(crate) fn participant_gate() -> DdsResult<()> {
     let ee = match state() {
         LoadState::Loaded(e) => e,
-        LoadState::Absent(_) => return Ok(()),
+        LoadState::Absent => return Ok(()),
         LoadState::Failed(why) => return Err(DdsError::Error(why.clone())),
     };
     let mut result = GateResult::default();
@@ -381,5 +401,49 @@ mod tests {
             paths.iter().all(|p| p.parent().is_some_and(|d| !d.as_os_str().is_empty())),
             "every candidate must be a complete path: {paths:?}"
         );
+    }
+
+    fn library_in(dir: &Path) -> PathBuf {
+        dir.join(LIBRARY_NAME)
+    }
+
+    #[test]
+    fn row2_empty_directory_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(decide(&[library_in(dir.path())], false), LoadState::Absent));
+    }
+
+    #[test]
+    fn row2_directory_with_the_library_name_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = library_in(dir.path());
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(decide(&[path], false), LoadState::Absent));
+    }
+
+    #[test]
+    fn row3_unusable_file_fails_with_replace_or_remove_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = library_in(dir.path());
+        std::fs::write(&path, b"not a shared library").unwrap();
+        let LoadState::Failed(m) = decide(&[path.clone()], false) else {
+            panic!("an unusable library file must be a hard failure");
+        };
+        assert!(m.contains(&path.display().to_string()), "path missing: {m}");
+        assert!(m.contains("Replace it"), "replace guidance missing: {m}");
+        assert!(m.contains("remove it"), "remove guidance missing: {m}");
+    }
+
+    #[test]
+    fn row6_explicit_path_without_library_keeps_the_shell_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = library_in(dir.path());
+        let LoadState::Failed(m) = decide(&[path.clone()], true) else {
+            panic!("an explicit path that loads nothing must be a hard failure");
+        };
+        assert!(m.contains("INT2DDS_ENTERPRISE_PATH is set"), "{m}");
+        assert!(m.contains("Point it at the library file or the directory holding it"), "{m}");
+        assert!(m.contains(&path.display().to_string()), "{m}");
+        assert!(m.contains(LIBRARY_NAME), "{m}");
     }
 }
