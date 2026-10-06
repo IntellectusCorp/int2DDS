@@ -2,7 +2,7 @@
 
 use libloading::{Library, Symbol};
 use socket2::Socket;
-use std::ffi::CStr;
+use std::ffi::{CStr, OsString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -86,13 +86,24 @@ fn candidate_paths() -> (Vec<PathBuf>, bool) {
     (out, false)
 }
 
+const LICENSE_VARS: [&str; 2] = ["INT2DDS_LICENSE", "INT2DDS_LICENSE_FILE"];
+
+/// License variables holding a non-blank value; the license loader reads blank text as no license.
+fn license_signals(get: impl Fn(&str) -> Option<OsString>) -> Vec<&'static str> {
+    LICENSE_VARS
+        .into_iter()
+        .filter(|key| get(key).is_some_and(|v| !v.to_string_lossy().trim().is_empty()))
+        .collect()
+}
+
 fn try_load() -> LoadState {
     let (paths, explicit) = candidate_paths();
-    decide(&paths, explicit)
+    let signals = license_signals(|key| std::env::var_os(key));
+    decide(&paths, explicit, &signals)
 }
 
 /// The loader contract, applied to an already computed candidate list.
-fn decide(paths: &[PathBuf], explicit: bool) -> LoadState {
+fn decide(paths: &[PathBuf], explicit: bool, license_signals: &[&str]) -> LoadState {
     let mut failures: Vec<(&Path, String)> = Vec::new();
     for path in paths {
         // Default search only: no file (or a directory of that name) means no library.
@@ -113,6 +124,8 @@ fn decide(paths: &[PathBuf], explicit: bool) -> LoadState {
         LoadState::Failed(explicit_failure_message(&tried))
     } else if !failures.is_empty() {
         LoadState::Failed(unusable_library_message(&failures))
+    } else if !license_signals.is_empty() {
+        LoadState::Failed(license_without_library_message(paths, license_signals))
     } else {
         LoadState::Absent
     }
@@ -136,6 +149,44 @@ fn unusable_library_message(failures: &[(&Path, String)]) -> String {
         #[cfg(unix)]
         m.push_str(&format!("  bash/zsh   : rm '{}'\n", path.display()));
     }
+    m
+}
+
+fn license_without_library_message(paths: &[PathBuf], signals: &[&str]) -> String {
+    let mut m = format!(
+        "{} is set, but no enterprise library was found.\nLooked for:\n",
+        signals.join(" and ")
+    );
+    if paths.is_empty() {
+        m.push_str("  (the executable's directory could not be determined)\n");
+    }
+    for p in paths {
+        m.push_str(&format!("  {}\n", p.display()));
+    }
+    m.push_str(&format!(
+        "Put {LIBRARY_NAME} next to the executable, or point INT2DDS_ENTERPRISE_PATH at it:\n"
+    ));
+    #[cfg(windows)]
+    {
+        m.push_str("  PowerShell : $env:INT2DDS_ENTERPRISE_PATH = 'C:\\path\\to\\dir'\n");
+        m.push_str("  cmd.exe    : set INT2DDS_ENTERPRISE_PATH=C:\\path\\to\\dir\n");
+    }
+    #[cfg(unix)]
+    m.push_str("  bash/zsh   : export INT2DDS_ENTERPRISE_PATH=/path/to/dir\n");
+    m.push_str(
+        "To run open-core behaviour without the library, clear the license variables as well:\n",
+    );
+    #[cfg(windows)]
+    {
+        m.push_str(
+            "  PowerShell : Remove-Item Env:INT2DDS_LICENSE, Env:INT2DDS_LICENSE_FILE \
+             -ErrorAction SilentlyContinue\n",
+        );
+        m.push_str("  cmd.exe    : set INT2DDS_LICENSE=\n");
+        m.push_str("  cmd.exe    : set INT2DDS_LICENSE_FILE=\n");
+    }
+    #[cfg(unix)]
+    m.push_str("  bash/zsh   : unset INT2DDS_LICENSE INT2DDS_LICENSE_FILE\n");
     m
 }
 
@@ -351,12 +402,16 @@ pub(crate) fn heartbeat_period(default_period: f64) -> f64 {
 mod tests {
     use super::*;
 
-    /// `INT2DDS_ENTERPRISE_PATH` may well be exported in the shell `cargo test`
-    /// runs from. Clear it before anything touches the loader, which caches its
+    /// The enterprise path and license variables may be exported in the shell `cargo test`
+    /// runs from. Clear them before anything touches the loader, which caches its
     /// answer for the whole process.
     fn open_core_env() {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| unsafe { std::env::remove_var("INT2DDS_ENTERPRISE_PATH") });
+        ONCE.call_once(|| {
+            for key in ["INT2DDS_ENTERPRISE_PATH"].into_iter().chain(LICENSE_VARS) {
+                unsafe { std::env::remove_var(key) };
+            }
+        });
     }
 
     #[test]
@@ -410,7 +465,7 @@ mod tests {
     #[test]
     fn row2_empty_directory_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(decide(&[library_in(dir.path())], false), LoadState::Absent));
+        assert!(matches!(decide(&[library_in(dir.path())], false, &[]), LoadState::Absent));
     }
 
     #[test]
@@ -418,7 +473,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = library_in(dir.path());
         std::fs::create_dir(&path).unwrap();
-        assert!(matches!(decide(&[path], false), LoadState::Absent));
+        assert!(matches!(decide(&[path], false, &[]), LoadState::Absent));
     }
 
     #[test]
@@ -426,7 +481,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = library_in(dir.path());
         std::fs::write(&path, b"not a shared library").unwrap();
-        let LoadState::Failed(m) = decide(&[path.clone()], false) else {
+        let LoadState::Failed(m) = decide(&[path.clone()], false, &[]) else {
             panic!("an unusable library file must be a hard failure");
         };
         assert!(m.contains(&path.display().to_string()), "path missing: {m}");
@@ -438,12 +493,44 @@ mod tests {
     fn row6_explicit_path_without_library_keeps_the_shell_guidance() {
         let dir = tempfile::tempdir().unwrap();
         let path = library_in(dir.path());
-        let LoadState::Failed(m) = decide(&[path.clone()], true) else {
+        let LoadState::Failed(m) = decide(&[path.clone()], true, &[]) else {
             panic!("an explicit path that loads nothing must be a hard failure");
         };
         assert!(m.contains("INT2DDS_ENTERPRISE_PATH is set"), "{m}");
         assert!(m.contains("Point it at the library file or the directory holding it"), "{m}");
         assert!(m.contains(&path.display().to_string()), "{m}");
         assert!(m.contains(LIBRARY_NAME), "{m}");
+    }
+
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| OsString::from(v))
+    }
+
+    #[test]
+    fn license_signal_names_each_non_blank_variable() {
+        let env = [("INT2DDS_LICENSE_FILE", "/opt/int2dds.lic")];
+        assert_eq!(license_signals(env_of(&env)), vec!["INT2DDS_LICENSE_FILE"]);
+    }
+
+    #[test]
+    fn row2_blank_license_values_are_not_a_signal() {
+        let env = [("INT2DDS_LICENSE", ""), ("INT2DDS_LICENSE_FILE", " \t ")];
+        let signals = license_signals(env_of(&env));
+        assert!(signals.is_empty(), "{signals:?}");
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(decide(&[library_in(dir.path())], false, &signals), LoadState::Absent));
+    }
+
+    #[test]
+    fn row4_license_without_library_fails_with_license_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = library_in(dir.path());
+        let LoadState::Failed(m) = decide(&[path.clone()], false, &["INT2DDS_LICENSE"]) else {
+            panic!("a license signal without a library must be a hard failure");
+        };
+        assert!(m.contains("INT2DDS_LICENSE is set"), "{m}");
+        assert!(m.contains(&path.display().to_string()), "{m}");
+        assert!(m.contains("INT2DDS_ENTERPRISE_PATH"), "{m}");
+        assert!(m.contains("clear the license variables"), "{m}");
     }
 }
