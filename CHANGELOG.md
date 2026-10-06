@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-06
+
+The IDL compiler emits Java, and the Java binding ships a documented build.
+
 ### Added
 
 - Java code generation in `int2dds-idl` (`-j`/`--java <DIR>`, `--java-package <PKG>`).
@@ -429,7 +433,8 @@ repository were migrated together.
 - Unused C code-generation output in `idl` and unused declarations in the
   `hello_world` FFI example header.
 
-[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.7...HEAD
+[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.4...v0.1.5
