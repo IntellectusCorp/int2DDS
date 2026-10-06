@@ -81,7 +81,7 @@ impl Socket {
                 ),
             }
         } else if crate::common::enterprise_loader::is_loaded() {
-            log::warn!(
+            log::debug!(
                 "enterprise library is loaded but neither INT2DDS_NETWORK_INTERFACE nor \
                  INT2DDS_NETWORK_IP is set; using default auto-detection"
             );
