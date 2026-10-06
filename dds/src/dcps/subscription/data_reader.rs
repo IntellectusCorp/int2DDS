@@ -3367,8 +3367,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             ) {
                 Ok(sample_info) => {
                     if let Some(qc_expr) = &qc_expression {
+                        // 2.2.4.5: a QueryCondition matches only samples whose data satisfies it.
                         if !sample_info.valid_data {
-                            return Err(DdsError::NoData);
+                            continue;
                         }
                         let data: &Foo = decode_once(change, self.type_support.as_ref())?;
                         if !qc_expr.evaluate(data, &qc_parameters)? {
@@ -3800,6 +3801,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                         change.instance_handle(),
                         sample_state,
                     )?;
+                    if !data.sample_info().valid_data {
+                        continue;
+                    }
                     if query_condition.evaluate_expression(&data.data()?).unwrap_or(false) {
                         return Ok(true);
                     }
