@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arc-swap",
  "bitflags 2.13.1",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-derive"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "md5",
  "proc-macro2",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-ffi"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bytes",
  "cbindgen",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-idl"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "dialoguer",
  "int2dds",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-java"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "int2dds-ffi",
  "jni",
@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "int2dds-rpc"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "int2dds",
  "int2dds-derive",
