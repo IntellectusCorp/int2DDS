@@ -307,14 +307,42 @@ pub(crate) fn participant_gate() -> DdsResult<()> {
     // came from the library whose ABI version we verified at load time.
     let code = unsafe { (ee.entries.guard)(&mut result) };
     if code != 0 {
-        return Err(DdsError::Error(format!("participant creation refused (code {code})")));
+        let m = refusal_message(code);
+        log::error!("[enterprise] {m}");
+        return Err(DdsError::Error(m));
     }
-    if result.days > 0 {
-        log::warn!("int2dds license expires in {} day(s)", result.days);
-    } else if result.days < 0 {
-        log::warn!("int2dds license EXPIRED {} day(s) ago (grace period)", -result.days);
+    if let Some((level, m)) = expiry_notice(result.days) {
+        log::log!(level, "{m}");
     }
     Ok(())
+}
+
+/// Refusal text for a guard code; the table mirrors `guard_detailed_now` in the
+/// enterprise library, which only hands back the number.
+fn refusal_message(code: i32) -> String {
+    let reason = match code {
+        1 => "no license found (INT2DDS_LICENSE_FILE, INT2DDS_LICENSE or int2dds.lic)",
+        2 => "license is malformed or its signature does not verify",
+        3 => "license expired and its grace period is over",
+        4 => "license is locked to a different machine",
+        5 => "this machine's tier is below the license's (is the license state folder writable?)",
+        6 => "clock rollback detected",
+        7 => "license is not valid yet",
+        _ => "unknown reason",
+    };
+    format!("participant creation refused (code {code}): {reason}")
+}
+
+/// Grace is logged as an error so release builds, which keep only error, still show it.
+fn expiry_notice(days: i32) -> Option<(log::Level, String)> {
+    match days {
+        d if d > 0 => Some((log::Level::Warn, format!("int2dds license expires in {d} day(s)"))),
+        d if d < 0 => Some((
+            log::Level::Error,
+            format!("int2dds license EXPIRED {} day(s) ago (grace period)", -d),
+        )),
+        _ => None,
+    }
 }
 
 /// `None` means the core uses its own detection.
@@ -519,6 +547,28 @@ mod tests {
         assert!(signals.is_empty(), "{signals:?}");
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(decide(&[library_in(dir.path())], false, &signals), LoadState::Absent));
+    }
+
+    #[test]
+    fn refusal_message_names_code_and_reason() {
+        let m = refusal_message(5);
+        assert!(m.starts_with("participant creation refused (code 5): "), "{m}");
+        assert!(m.contains("state folder"), "{m}");
+        for code in 1..=7 {
+            assert!(!refusal_message(code).ends_with(": "), "code {code} has no reason");
+        }
+        assert!(refusal_message(42).contains("unknown"), "{}", refusal_message(42));
+    }
+
+    #[test]
+    fn grace_is_an_error_so_release_builds_still_show_it() {
+        let (level, m) = expiry_notice(-3).unwrap();
+        assert_eq!(level, log::Level::Error);
+        assert!(m.contains("EXPIRED 3 day(s) ago"), "{m}");
+        let (level, m) = expiry_notice(10).unwrap();
+        assert_eq!(level, log::Level::Warn);
+        assert!(m.contains("expires in 10 day(s)"), "{m}");
+        assert!(expiry_notice(0).is_none());
     }
 
     #[test]
