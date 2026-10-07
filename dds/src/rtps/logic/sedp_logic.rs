@@ -3821,8 +3821,11 @@ mod tests {
             participant.guid(),
         ));
 
-        let subscriber_history_cache =
-            Arc::new(Mutex::new(SubscriberHistoryCache::new(participant.remote_publications())));
+        let subscriber_history_cache = Arc::new(Mutex::new(SubscriberHistoryCache::new(
+            participant.remote_publications(),
+            true,
+            true,
+        )));
         let subscriber_guid = Guid::new(
             participant.guid().prefix(),
             EntityId::new([0xB0, 0x00, 0x00], EntityKind::USER_DEFINED_READER_GROUP),

@@ -159,7 +159,11 @@ impl PublisherProxy {
 
     // Hands over the samples held under one group sequence number and records how far the group
     // and each of their writers got.
-    fn release_group_seq_num(&mut self, group_seq_num: SequenceNumber) -> Vec<PendingSample> {
+    fn release_group_seq_num(
+        &mut self,
+        group_seq_num: SequenceNumber,
+        is_coherent_access: bool,
+    ) -> Vec<PendingSample> {
         // Every copy under this position leaves together, one per reader.
         let Some(samples) = self.ordered_pending_changes.remove(&group_seq_num) else {
             return Vec::new();
@@ -189,13 +193,15 @@ impl PublisherProxy {
                 continue;
             }
 
+            // Without coherent access the Subscriber has no coherent set, so a member stands on
+            // its own and leaves at its own position.
             match sample.change.presentation_info().group_coherent_set {
-                Some(group_coherent_set) => self
+                Some(group_coherent_set) if is_coherent_access => self
                     .coherent_pending_changes
                     .entry(group_coherent_set)
                     .or_default()
                     .push(sample),
-                None => released.push(sample),
+                _ => released.push(sample),
             }
         }
 
@@ -394,17 +400,23 @@ pub(crate) struct SubscriberHistoryCache {
     publishers: HashMap<Guid, PublisherProxy>,
     // What each reader of this Subscriber may hold here, from its RESOURCE_LIMITS max_samples.
     reader_max_samples: HashMap<EntityId, usize>,
+    is_ordered_access: bool,
+    is_coherent_access: bool,
     is_access_block_open: bool,
 }
 
 impl SubscriberHistoryCache {
     pub(crate) fn new(
         remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
+        is_ordered_access: bool,
+        is_coherent_access: bool,
     ) -> Self {
         Self {
             remote_publications,
             publishers: HashMap::new(),
             reader_max_samples: HashMap::new(),
+            is_ordered_access,
+            is_coherent_access,
             is_access_block_open: false,
         }
     }
@@ -565,6 +577,7 @@ impl SubscriberHistoryCache {
         // Only a hole needs the discovered writer set, so it is computed at the first hole and
         // reused for the rest of this walk.
         let mut discovered_writer_set: Option<GroupDigest> = None;
+        let is_coherent_access = self.is_coherent_access;
 
         loop {
             let Some(proxy) = self.publishers.get(&publisher_guid) else {
@@ -604,7 +617,7 @@ impl SubscriberHistoryCache {
             }
 
             // Releasing this position may make the next one pass on order alone.
-            released.extend(proxy.release_group_seq_num(group_seq_num));
+            released.extend(proxy.release_group_seq_num(group_seq_num, is_coherent_access));
         }
 
         released
@@ -884,7 +897,7 @@ mod tests {
 
     // One matched writer of one Publisher, seen by one reader.
     fn cache_with_one_matched_writer() -> SubscriberHistoryCache {
-        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()));
+        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()), true, true);
         cache
             .add_matched_writer(reader_id(1), writer_guid(1), publisher_guid())
             .expect("registered");
@@ -967,7 +980,7 @@ mod tests {
 
     #[test]
     fn refuses_a_writer_that_announced_no_publisher() {
-        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()));
+        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()), true, true);
 
         let result = cache.add_matched_writer(reader_id(1), writer_guid(1), Guid::UNKNOWN);
 
@@ -1168,6 +1181,33 @@ mod tests {
         let released = cache.flush_pending_changes();
 
         assert_eq!(released_group_seq_nums(&released), vec![1, 2]);
+    }
+
+    // A Subscriber that did not request coherent access has no coherent set, so a member of the
+    // Publisher's set leaves at its own position and the marker still only takes its position.
+    #[test]
+    fn releases_the_members_of_a_group_coherent_set_one_by_one_without_coherent_access() {
+        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()), true, false);
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(1), publisher_guid())
+            .expect("registered");
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 1, 1, 1), true)
+            .expect("accepted");
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![1]);
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 2, 2, 1), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(1), end_coherent_set(writer_guid(1), 3, 3, 1), true)
+            .expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![2]);
     }
 
     // Both writers of the set mark its end at the same group position, so that one position
@@ -1838,7 +1878,7 @@ mod tests {
         remote_publications.insert("first".to_string(), first_topic);
         remote_publications.insert("second".to_string(), second_topic);
 
-        let cache = SubscriberHistoryCache::new(remote_publications);
+        let cache = SubscriberHistoryCache::new(remote_publications, true, true);
 
         assert_eq!(
             cache.discovered_writer_set(publisher_guid()),

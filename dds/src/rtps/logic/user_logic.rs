@@ -6687,8 +6687,11 @@ mod tests {
             participant.guid(),
         ));
 
-        let subscriber_history_cache =
-            Arc::new(Mutex::new(SubscriberHistoryCache::new(participant.remote_publications())));
+        let subscriber_history_cache = Arc::new(Mutex::new(SubscriberHistoryCache::new(
+            participant.remote_publications(),
+            true,
+            true,
+        )));
         subscriber_history_cache
             .lock()
             .expect("subscriber history cache lock")
