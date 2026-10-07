@@ -492,6 +492,25 @@ mod tests {
         ReaderHistoryCache::new(owner, None)
     }
 
+    // A dispose of a member of the group coherent set named by `group_coherent_set`. It carries
+    // the key as its payload.
+    fn disposed_coherent_member(seq: i64, group_coherent_set: i64) -> CacheChange {
+        let mut change = CacheChange::new(
+            ChangeKind::NotAliveDisposed,
+            writer_guid(),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(seq),
+            vec![0u8; 4],
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            group_coherent_set: Some(SequenceNumber::from_i64(group_coherent_set)),
+            ..PresentationInfo::default()
+        });
+
+        change
+    }
+
     // An End Coherent Set marker at the given seq, closing the group coherent set named by
     // `group_coherent_set`. `coherent_set` is the writer's own first seq in the set, absent when
     // the writer wrote nothing in it.
@@ -527,6 +546,20 @@ mod tests {
         assert_eq!(end_coherent_set(1, 10, None).ended_group_coherent_set(), ten);
         // A set member carries a payload, so it is never a marker.
         assert_eq!(coherent_member(10).ended_group_coherent_set(), None);
+        // A dispose of a set member carries the key as its payload, so it is not one either.
+        assert_eq!(disposed_coherent_member(11, 10).ended_group_coherent_set(), None);
+    }
+
+    // The group cursor owns the markers, so a reader cache that knows nothing of group coherent
+    // sets stores none of them.
+    #[test]
+    fn prepare_drops_an_end_coherent_set_marker() {
+        let mut cache = reader_cache();
+
+        let prepared = cache.prepare_changes_to_commit(end_coherent_set(13, 10, Some(10)), true);
+
+        assert!(prepared.is_empty());
+        assert!(cache.changes.is_empty());
     }
 
     // A reader that never buffers a set still receives the markers of a GROUP Publisher.

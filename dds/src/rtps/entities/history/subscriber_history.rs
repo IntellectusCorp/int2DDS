@@ -1147,6 +1147,32 @@ mod tests {
         assert_eq!(released_group_seq_nums(&released), vec![2, 3]);
     }
 
+    // The set waits behind the hole at group sequence number 1, which belongs to a writer this
+    // Subscriber never discovered. The Heartbeat that covers the hole releases the marker, and the
+    // set is judged and handed over there.
+    #[test]
+    fn hands_over_a_group_coherent_set_once_a_heartbeat_covers_the_hole_before_it() {
+        let mut cache = cache_with_one_matched_writer();
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 1, 2, 2), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 2, 3, 2), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(1), end_coherent_set(writer_guid(1), 3, 4, 2), true)
+            .expect("accepted");
+
+        assert!(cache.flush_pending_changes().is_empty(), "the hole at 1 holds the set back");
+
+        cache
+            .record_heartbeat_group_info(writer_guid(1), heartbeat_group_info(4, 2, 4))
+            .expect("writer registered");
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![2, 3]);
+    }
+
     // Writer 1 never completed its portion, so the set goes and the group resumes from the
     // position its End Coherent Set holds. Nothing of the set is left in either box.
     #[test]
