@@ -3736,4 +3736,160 @@ mod tests {
             );
         }
     }
+
+    /// The per-peer SPDP timer is what keeps a peer's lease on us alive when the announcement is
+    /// a broadcast, and a duplicate when the announcement already goes to each known peer.
+    #[test]
+    fn discovery_repeats_spdp_to_a_peer_only_when_the_transport_does_not_announce_to_it() {
+        use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
+        use crate::rtps::transport::TcpConfig;
+
+        struct SpdpToPeerRecorder {
+            inner: Arc<dyn TransportPlugin>,
+            sent_at: Arc<Mutex<Vec<Instant>>>,
+        }
+
+        impl TransportPlugin for SpdpToPeerRecorder {
+            fn send(&self, data: &[u8], target: &SendTarget) -> std::io::Result<()> {
+                if let SendTarget::SEDPDiscovery(_) = target {
+                    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+                    let mut receiver = MessageReceiver::new([0u8; 12], &addr);
+                    receiver.init(&bytes::Bytes::copy_from_slice(data)).expect("parse datagram");
+                    let is_spdp = receiver.parse_submessages().iter().any(|submessage| {
+                        matches!(submessage, TypedSubmessage::Data(_, data)
+                            if data.writer_id == EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER)
+                    });
+                    if is_spdp {
+                        self.sent_at.lock().expect("send times").push(Instant::now());
+                    }
+                }
+                self.inner.send(data, target)
+            }
+            fn can_handle(&self, locator: &Locator) -> bool {
+                self.inner.can_handle(locator)
+            }
+            fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+                self.inner.advertised_metatraffic_unicast_locators()
+            }
+            fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+                self.inner.advertised_default_unicast_locators()
+            }
+            fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn port(&self) -> u16 {
+                self.inner.port()
+            }
+            fn participant_id(&self) -> u32 {
+                self.inner.participant_id()
+            }
+            fn close(&self) {
+                self.inner.close()
+            }
+            fn announces_to_each_known_peer(&self) -> bool {
+                self.inner.announces_to_each_known_peer()
+            }
+        }
+
+        let spdp_to_peer_after_discovery =
+            |make_inner: &dyn Fn(GuidPrefix) -> Arc<dyn TransportPlugin>| -> Vec<StdDuration> {
+                let participant =
+                    Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+                let sent_at = Arc::new(Mutex::new(Vec::new()));
+                let transport = Arc::new(SpdpToPeerRecorder {
+                    inner: make_inner(participant.guid().prefix()),
+                    sent_at: Arc::clone(&sent_at),
+                });
+                let sedp_logic = SedpLogic::new(participant.clone(), transport.clone());
+                // The sending task drops every message unless all three logics are present. The
+                // SPDP logic is never started, so its own periodic announcement stays out of this.
+                participant.set_spdp_logic(Arc::new(Some(
+                    crate::rtps::logic::spdp_logic::SpdpLogic::new(
+                        participant.clone(),
+                        transport.clone(),
+                        Vec::new(),
+                    ),
+                )));
+                participant.set_sedp_logic(Arc::new(Some(sedp_logic.clone())));
+                participant.set_user_logic(Arc::new(Some(
+                    crate::rtps::logic::user_logic::UserLogic::new(
+                        participant.clone(),
+                        transport.clone(),
+                    ),
+                )));
+                SendingHandler::get_instance(participant.clone(), Some(transport.port()));
+
+                let remote_prefix = [7u8; 12];
+                let mut remote = SPDPDiscoveredParticipantData::new(
+                    0,
+                    remote_prefix,
+                    Participant::init_builtin_endpoints(),
+                );
+                remote.add_metatraffic_unicast_locator(Locator::from_tcp_v4(
+                    Ipv4Addr::LOCALHOST,
+                    7410,
+                ));
+                let discovered = Instant::now();
+                sedp_logic
+                    .handle_discovered_participant_data(
+                        remote,
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7410),
+                    )
+                    .expect("discovery is handled");
+
+                thread::sleep(StdDuration::from_millis(2600));
+
+                transport.close();
+                TimerHandler::get_instance(participant.guid().prefix())
+                    .lock()
+                    .expect("timer handler")
+                    .terminate();
+                let sent = sent_at.lock().expect("send times").clone();
+                sent.iter().map(|at| at.duration_since(discovered)).collect()
+            };
+
+        // What discovery sends lands well inside the first second and the per-peer timer first
+        // fires at 2 s, so one second tells the two apart.
+        let first_second = |sent: &[StdDuration]| sent.iter().any(|at| at.as_secs() < 1);
+        let timed_repeats =
+            |sent: &[StdDuration]| sent.iter().filter(|at| at.as_secs() >= 1).count();
+
+        let tcp = spdp_to_peer_after_discovery(&|prefix| {
+            Arc::new(
+                TcpTransportPlugin::new(
+                    0,
+                    0,
+                    "127.0.0.1".to_string(),
+                    vec!["127.0.0.1".to_string()],
+                    prefix,
+                    TcpConfig {
+                        initial_peers: vec!["127.0.0.1:7400".parse().unwrap()],
+                        bind_port: Some(0),
+                        ..TcpConfig::default()
+                    },
+                )
+                .expect("tcp plugin"),
+            )
+        });
+        assert!(first_second(&tcp), "TCP still sends the peer our SPDP on discovery: {tcp:?}");
+        assert_eq!(
+            timed_repeats(&tcp),
+            0,
+            "the TCP announcement already reaches the peer every period: {tcp:?}"
+        );
+
+        let broadcast = spdp_to_peer_after_discovery(&|_| Arc::new(CountingTransport::default()));
+        assert!(first_second(&broadcast), "the peer is sent our SPDP on discovery: {broadcast:?}");
+        assert!(
+            timed_repeats(&broadcast) > 0,
+            "a broadcast cannot tell who heard it, so the peer needs its own timed SPDP: \
+             {broadcast:?}"
+        );
+    }
 }
