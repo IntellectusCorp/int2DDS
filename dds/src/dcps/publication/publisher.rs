@@ -80,6 +80,8 @@ pub struct Publisher {
     guid: Guid,
     qos: Arc<ArcSwap<PublisherQos>>,
     update_lock: Arc<Mutex<()>>,
+    // Serializes taking a sequence number and a group sequence number as one step.
+    gsn_allocation_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn PublisherListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<PublisherQos>>>,
@@ -199,6 +201,7 @@ impl Publisher {
             is_builtin,
             qos: Arc::new(ArcSwap::from_pointee(qos)),
             update_lock: Arc::new(Mutex::new(())),
+            gsn_allocation_lock: Arc::new(Mutex::new(())),
             guid: handle.to_guid(),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
@@ -1006,6 +1009,10 @@ impl Publisher {
 
     // Ask every attached writer to close its open coherent set; returns the first error.
     fn end_writer_coherent_sets(&self) -> DdsResult<()> {
+        // Holds off writes on this publisher for the whole close.
+        let _allocation =
+            self.gsn_allocation_lock.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
         // Under GROUP scope every writer's End Coherent Set marker shares one group sequence
         // number and the same group inline QoS; other scopes pass None.
         let mut presentation_info = None;
@@ -1070,6 +1077,10 @@ impl Publisher {
 
     pub(crate) fn get_last_group_seq_num_arc(&self) -> Arc<AtomicI64> {
         Arc::clone(&self.last_group_seq_num)
+    }
+
+    pub(crate) fn get_gsn_allocation_lock_arc(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.gsn_allocation_lock)
     }
 
     pub(crate) fn get_writer_set_arc(&self) -> Arc<RwLock<GroupDigest>> {
