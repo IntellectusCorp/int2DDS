@@ -442,13 +442,22 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         };
 
         // Common: Connect datareader cache to RTPS reader cache
-        {
+        let max_samples = {
             let reader_cache = rtps_reader.reader_cache();
-            reader_cache
+            let mut cache_guard =
+                reader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache_guard.set_datareader_cache(Arc::downgrade(&self.datareader_cache)
+                as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
+
+            cache_guard.max_samples()
+        };
+
+        // The group order holds this reader's samples before they are stored, under the same limit.
+        if let Some(subscriber_history_cache) = self.get_subscriber()?.subscriber_history_cache()? {
+            subscriber_history_cache
                 .lock()
                 .map_err(|e| DdsError::Error(e.to_string()))?
-                .set_datareader_cache(Arc::downgrade(&self.datareader_cache)
-                    as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
+                .register_reader(self.guid.entity_id(), max_samples);
         }
 
         Ok(())
@@ -7302,7 +7311,7 @@ pub(crate) mod tests {
         // set may be buffered on the reader.
         assert_eq!(is_relevant, Some(false), "sn5 should be received via GAP, not DATA");
         assert_eq!(
-            reader_cache.lock().unwrap().pending_coherent_len(writer_guid),
+            reader_cache.lock().unwrap().coherent_pending_change_count_for_writer(writer_guid),
             0,
             "no member of the GAPped set should be buffered"
         );

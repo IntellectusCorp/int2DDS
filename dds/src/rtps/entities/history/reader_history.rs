@@ -65,8 +65,8 @@ pub struct ReaderHistoryCache {
     pool: CacheChangePool,
     // Open coherent sets per remote writer, held back until each set completes.
     coherent_pending: HashMap<Guid, PendingCoherentSet>,
-    // Max buffered members per open set (reader max_samples); oversized sets are discarded.
-    coherent_pending_cap: usize,
+    // The reader's RESOURCE_LIMITS max_samples, usize::MAX when unlimited.
+    max_samples: usize,
 }
 
 impl HistoryCache for ReaderHistoryCache {
@@ -134,7 +134,7 @@ impl ReaderHistoryCache {
             // Steady-state size converges to history depth.
             pool: CacheChangePool::with_capacity(0),
             coherent_pending: HashMap::new(),
-            coherent_pending_cap: usize::MAX,
+            max_samples: usize::MAX,
         }
     }
 
@@ -142,9 +142,9 @@ impl ReaderHistoryCache {
         self.pool.acquire()
     }
 
-    // Number of members buffered for a remote writer's currently open coherent set.
+    // Pending coherent set changes buffered for one remote writer's open set.
     #[cfg(test)]
-    pub(crate) fn pending_coherent_len(&self, writer_guid: Guid) -> usize {
+    pub(crate) fn coherent_pending_change_count_for_writer(&self, writer_guid: Guid) -> usize {
         self.coherent_pending.get(&writer_guid).map_or(0, |set| set.changes.len())
     }
 
@@ -168,9 +168,11 @@ impl ReaderHistoryCache {
         // changes are retained; with cap 0 the pool drops everything.
         if let Some(cache) = self.datareader_cache.as_ref().and_then(|w| w.upgrade()) {
             if let Ok(guard) = cache.lock() {
-                let depth = guard.get_max_samples().max(0) as usize;
-                self.pool.set_cap(depth.min(MAX_POOL_CAP));
-                self.coherent_pending_cap = if depth > 0 { depth } else { usize::MAX };
+                let max_samples = guard.get_max_samples();
+
+                self.pool.set_cap((max_samples.max(0) as usize).min(MAX_POOL_CAP));
+                // LENGTH_UNLIMITED reaches here as a non-positive count.
+                self.max_samples = if max_samples > 0 { max_samples as usize } else { usize::MAX };
             }
         }
     }
@@ -370,29 +372,38 @@ impl ReaderHistoryCache {
         }
     }
 
-    // Buffer a coherent member until its set closes. An oversized set keeps its entry with no
-    // members, so closing it reports Incomplete.
+    // Buffer a coherent member until its set closes. Past the reader's max_samples the arriving
+    // portion keeps its entry with no members, so closing it reports Incomplete.
     fn buffer_coherent_member(
         &mut self,
         writer_guid: Guid,
         set_id: SequenceNumber,
         change: CacheChange,
     ) {
-        let cap = self.coherent_pending_cap;
+        let cap = self.max_samples;
+        let coherent_pending_change_count = self.coherent_pending_change_count();
+
         let pending = self
             .coherent_pending
             .entry(writer_guid)
             .or_insert_with(|| PendingCoherentSet { set_start_sn: set_id, changes: Vec::new() });
         pending.changes.push(change);
-        if pending.changes.len() > cap {
+
+        if coherent_pending_change_count >= cap {
             debug!(
-                "Discarding coherent set {} from writer {}: exceeds max_samples {}",
+                "Discarding coherent set {} from writer {}: the reader already buffers \
+                 max_samples {}",
                 set_id.to_i64(),
                 writer_guid,
                 cap
             );
             pending.changes.clear();
         }
+    }
+
+    // Pending coherent set changes buffered for every remote writer with an open set.
+    fn coherent_pending_change_count(&self) -> usize {
+        self.coherent_pending.values().map(|pending| pending.changes.len()).sum()
     }
 
     // Close a writer's open coherent set and return its members ready for commit (coherent
@@ -431,6 +442,10 @@ impl ReaderHistoryCache {
                 })
                 .collect(),
         )
+    }
+
+    pub(crate) fn max_samples(&self) -> usize {
+        self.max_samples
     }
 
     // True when the attached DCPS reader requests coherent access (INSTANCE or TOPIC scope).
@@ -592,7 +607,7 @@ mod tests {
         let mut cache = reader_cache();
         let guid = writer_guid();
         let set_id = SequenceNumber::from_i64(10);
-        cache.coherent_pending_cap = 2;
+        cache.max_samples = 2;
 
         for seq in [10, 11, 12] {
             cache.buffer_coherent_member(guid, set_id, coherent_member(seq));

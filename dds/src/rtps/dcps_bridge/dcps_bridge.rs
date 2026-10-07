@@ -432,6 +432,16 @@ impl DcpsBridge {
 
             Arc::new(stateful_reader)
         } else {
+            // A best effort reader tracks no Heartbeat or Gap, so it cannot meet the group order
+            // conditions and is left out of it.
+            if subscriber_history_cache.is_some() {
+                debug!(
+                    "Reader {} is best effort, so the group order of Subscriber {} skips it",
+                    datareader_guid,
+                    subscriber_guid.to_hex_string()
+                );
+            }
+
             Arc::new(StatelessReader::new(
                 datareader_guid,
                 topic_kind,
