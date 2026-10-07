@@ -11,7 +11,8 @@
 //! - Blocking behavior for reliability max_blocking_time
 
 use std::{
-    collections::HashMap,
+    borrow::Cow,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, Weak},
     thread,
 };
@@ -183,7 +184,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         }
         // end lifespan
 
-        self.release_leading_end_coherent_sets()?;
+        self.release_end_coherent_sets_without_members()?;
 
         let removed = self.ensure_capacity(a_change.instance_handle())?;
 
@@ -491,10 +492,18 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         &mut self,
         changes: &Vec<Arc<CacheChange>>,
     ) -> DdsResult<Arc<CacheChange>> {
+        // Skips the End Coherent Sets, which sample_count leaves out of the limit being freed.
+        let candidate_changes: Cow<'_, Vec<Arc<CacheChange>>> = match self.end_coherent_set_count {
+            0 => Cow::Borrowed(changes),
+            _ => Cow::Owned(
+                changes.iter().filter(|change| !change.is_end_coherent_set()).cloned().collect(),
+            ),
+        };
+
         let start_time = std::time::Instant::now();
 
         loop {
-            let oldest_acked_change = self.get_first_acked_change_from_vec(changes)?;
+            let oldest_acked_change = self.get_first_acked_change_from_vec(&candidate_changes)?;
 
             match oldest_acked_change {
                 // Remove the first acknowledged change and exit
@@ -546,12 +555,13 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(())
     }
 
-    // Removes and returns the oldest sample from all instances, releasing the End Coherent Set
-    // markers ahead of it on the way.
+    // Removes and returns the oldest sample from all instances, skipping the End Coherent Sets
+    // that sample_count leaves out of the limit being freed.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        self.release_leading_end_coherent_sets()?;
+        let oldest_change =
+            self.changes.iter().find(|change| !change.is_end_coherent_set()).cloned();
 
-        let Some(oldest_change) = self.changes.first().cloned() else {
+        let Some(oldest_change) = oldest_change else {
             return Err(DdsError::Error("No changes found to remove".to_string()));
         };
         self.remove_change(oldest_change.clone())?;
@@ -559,21 +569,60 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(oldest_change)
     }
 
-    // Removes every End Coherent Set marker at the front of the history. A marker is stored
-    // after its set members, so one at the front has none of them left.
-    fn release_leading_end_coherent_sets(&mut self) -> DdsResult<()> {
-        while let Some(marker) =
-            self.changes.first().cloned().filter(|change| change.is_end_coherent_set())
-        {
+    // Removes every acknowledged End Coherent Set whose set no longer has a member stored.
+    // History and the resource limits never remove one, only these two conditions do.
+    fn release_end_coherent_sets_without_members(&mut self) -> DdsResult<()> {
+        if self.end_coherent_set_count == 0 {
+            return Ok(());
+        }
+
+        let stored_group_coherent_sets: HashSet<SequenceNumber> = self
+            .changes
+            .iter()
+            .filter(|change| !change.is_end_coherent_set())
+            .filter_map(|change| change.presentation_info().group_coherent_set)
+            .collect();
+
+        let abandoned_end_coherent_sets: Vec<Arc<CacheChange>> = self
+            .changes
+            .iter()
+            .filter(|change| change.is_end_coherent_set())
+            .filter(|end_coherent_set| {
+                end_coherent_set.ended_group_coherent_set().is_some_and(|group_coherent_set| {
+                    !stored_group_coherent_sets.contains(&group_coherent_set)
+                })
+            })
+            .filter(|end_coherent_set| self.is_change_acked_by_all(end_coherent_set))
+            .cloned()
+            .collect();
+
+        for end_coherent_set in abandoned_end_coherent_sets {
             debug!(
-                "[history] releasing end coherent set marker seq={}",
-                marker.sequence_number().to_i64()
+                "[history] releasing end coherent set {:?} at seq={}",
+                end_coherent_set
+                    .ended_group_coherent_set()
+                    .map(|group_coherent_set| group_coherent_set.to_i64()),
+                end_coherent_set.sequence_number().to_i64()
             );
-            self.remove_change(marker.clone())?;
-            self.pool.try_release(marker);
+            self.remove_change(end_coherent_set.clone())?;
+            self.pool.try_release(end_coherent_set);
         }
 
         Ok(())
+    }
+
+    // True when every matched reader acknowledged the change. A best effort writer keeps no
+    // reader state, so there is nothing left to acknowledge it.
+    fn is_change_acked_by_all(&self, change: &Arc<CacheChange>) -> bool {
+        let Ok(rtps_writer) = self.get_upgraded_rtps_writer() else {
+            return true;
+        };
+
+        let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() else {
+            return true;
+        };
+
+        stateful_writer.is_change_acked_by_all(change.sequence_number())
     }
 
     // Returns the oldest acknowledged change from the given change vector.
@@ -829,8 +878,8 @@ mod tests {
         let instance = InstanceHandle::new([1; 16]);
 
         // [1 2 ECS] -> [2 ECS 4] -> [ECS 4 5] -> [5 6]: the marker is skipped, not counted.
-        cache_guard.add_change_with_cleanup(create_change(1, instance), false).unwrap();
-        cache_guard.add_change_with_cleanup(create_change(2, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_coherent_member(1, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_coherent_member(2, instance), false).unwrap();
         cache_guard.add_end_coherent_set(create_end_coherent_set(3)).unwrap();
         cache_guard.add_change_with_cleanup(create_change(4, instance), false).unwrap();
         cache_guard.add_change_with_cleanup(create_change(5, instance), false).unwrap();
@@ -866,7 +915,7 @@ mod tests {
         let instance = InstanceHandle::new([1; 16]);
 
         // [1 ECS] holds one sample, so a second sample fits without evicting anything.
-        cache_guard.add_change_with_cleanup(create_change(1, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_coherent_member(1, instance), false).unwrap();
         cache_guard.add_end_coherent_set(create_end_coherent_set(2)).unwrap();
         cache_guard.add_change_with_cleanup(create_change(3, instance), false).unwrap();
         assert_eq!(stored_sequence_numbers(&cache_guard), vec![1, 2, 3]);
@@ -903,7 +952,7 @@ mod tests {
         let instance = InstanceHandle::new([1; 16]);
 
         // [1 ECS] -> [ECS 3]: evicting sample 1 per instance leaves the marker with no samples.
-        cache_guard.add_change_with_cleanup(create_change(1, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_coherent_member(1, instance), false).unwrap();
         cache_guard.add_end_coherent_set(create_end_coherent_set(2)).unwrap();
         cache_guard.add_change_with_cleanup(create_change(3, instance), false).unwrap();
         assert_eq!(stored_sequence_numbers(&cache_guard), vec![2, 3]);
@@ -933,6 +982,24 @@ mod tests {
             vec![1],
             None,
         ))
+    }
+
+    // A sample of the group coherent set that create_end_coherent_set closes.
+    fn create_coherent_member(seq: i64, handle: InstanceHandle) -> Arc<CacheChange> {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            Guid::UNKNOWN,
+            handle,
+            SequenceNumber::from_i64(seq),
+            vec![1],
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            group_coherent_set: Some(SequenceNumber::from_i64(1)),
+            ..Default::default()
+        });
+
+        Arc::new(change)
     }
 
     fn create_datawriter(
