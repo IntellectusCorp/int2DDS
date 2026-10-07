@@ -470,6 +470,10 @@ impl SubscriberHistoryCache {
         };
         let group_coherent_set = change.presentation_info().group_coherent_set;
 
+        // Without ordered access only a coherent set keeps its group position. A sample outside
+        // every set is committed on arrival.
+        let is_bypassing_group_order = !self.is_ordered_access && group_coherent_set.is_none();
+
         let proxy = self.find_publisher_proxy_of_writer_mut(writer_guid)?;
 
         // A portion that completed after its set was discarded, and the markers of the other
@@ -527,6 +531,14 @@ impl SubscriberHistoryCache {
 
         if has_writer_released_this_gsn {
             proxy.ready.push(sample);
+            return Ok(());
+        }
+
+        if is_bypassing_group_order {
+            proxy.ready.push(sample);
+            proxy.last_committed_gsn =
+                Some(max(proxy.last_committed_gsn.unwrap_or(SequenceNumber::ZERO), group_seq_num));
+
             return Ok(());
         }
 
@@ -1208,6 +1220,54 @@ mod tests {
         let released = cache.flush_pending_changes();
 
         assert_eq!(released_group_seq_nums(&released), vec![2]);
+    }
+
+    // One matched writer of one Publisher, for a Subscriber that asked for coherent access alone.
+    fn cache_without_ordered_access() -> SubscriberHistoryCache {
+        let mut cache = SubscriberHistoryCache::new(Arc::new(DashMap::new()), false, true);
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(1), publisher_guid())
+            .expect("registered");
+
+        cache
+    }
+
+    // Without ordered access a sample outside every coherent set is committed on arrival, even
+    // with a group sequence number below it missing.
+    #[test]
+    fn releases_a_sample_outside_a_group_coherent_set_without_the_group_order() {
+        let mut cache = cache_without_ordered_access();
+
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(2)), true).expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![2]);
+        assert!(pending_group_sequence_numbers(&cache).is_empty());
+    }
+
+    // A bypassed position counts as committed, so the set above it passes on order alone instead
+    // of asking for a proof that no writer holds the position below.
+    #[test]
+    fn advances_the_last_committed_position_over_a_bypassed_sample() {
+        let mut cache = cache_without_ordered_access();
+
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(1)), true).expect("accepted");
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![1]);
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 2, 2, 2), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 3, 3, 2), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(1), end_coherent_set(writer_guid(1), 4, 4, 2), true)
+            .expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![2, 3]);
     }
 
     // Both writers of the set mark its end at the same group position, so that one position
