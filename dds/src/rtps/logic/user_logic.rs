@@ -2410,8 +2410,9 @@ impl UserLogic {
                 // A rejected sample is dropped on its own. The rest of the batch and the gate
                 // still run.
                 for (change, apply_filter) in prepared {
-                    subscriber_history_cache.add_change(reader_id, change, apply_filter)?
+                    let _ = subscriber_history_cache.add_change(reader_id, change, apply_filter);
                 }
+
                 let released = subscriber_history_cache.flush_pending_changes();
                 let participant = self.get_upgraded_participant()?;
                 let available = participant.commit_released_samples(released)?;
@@ -2491,11 +2492,11 @@ impl UserLogic {
             .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
 
         // The portion joins the group order under its own positions, and the marker takes the
-        // position the set ends at.
+        // position the set ends at. A rejected one is dropped on its own.
         for member in members {
-            subscriber_history_cache.add_change(reader_id, member, false)?;
+            let _ = subscriber_history_cache.add_change(reader_id, member, false);
         }
-        subscriber_history_cache.add_change(reader_id, marker, false)?;
+        let _ = subscriber_history_cache.add_change(reader_id, marker, false);
 
         let released = subscriber_history_cache.flush_pending_changes();
         let participant = self.get_upgraded_participant()?;
