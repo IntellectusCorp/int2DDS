@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Assemble the tarball published to IntellectusCorp/int2dds_ffi_vendor releases.
 #
-# Usage: .github/scripts/ci/stage-ffi-vendor.sh <version> <artifact_root> <out_dir>
+# Usage: .github/scripts/ci/stage-ffi-vendor.sh <version> <artifact_root> <out_dir> [linux|windows]
 #
 # This is NOT one of the 24 int2DDS release assets. The vendor repository is a
 # separate release host consumed by the ROS 2 vendor package in
@@ -34,9 +34,88 @@ version="${1:?usage: stage-ffi-vendor.sh <version> <artifact_root> <out_dir>}"
 artifact_root="${2:?}"
 out_dir="${3:?}"
 
+os="${4:-linux}"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+
+# Windows: the same layout as a zip, built from the per-architecture zips that
+# stage-native.ps1 produces. The vendor package picks
+# "windows-<arch>/int2dds_ffi.dll" and links "windows-<arch>/int2dds_ffi.lib".
+#
+#   int2dds-ffi-<version>-windows.zip
+#   ├── int2dds-ffi.h
+#   ├── int2dds-ffi.manifest.yaml
+#   ├── LICENSE
+#   ├── windows-x86_64/     int2dds_ffi.dll, int2dds_ffi.lib
+#   └── windows-aarch64/
+#
+# macOS is left out on purpose: ROS 2 lists macOS as Tier 3 only.
+if [ "$os" = "windows" ]; then
+  stage="$work/int2dds-ffi-${version}-windows"
+  mkdir -p "$stage" "$out_dir"
+  manifest="$stage/int2dds-ffi.manifest.yaml"
+  {
+    echo "name: int2dds-ffi"
+    echo "version: ${version}"
+    echo "git_commit: $(git -C "$repo_root" rev-parse --short HEAD)"
+    echo "build_date: \"$(date -u +%Y-%m-%d)\""
+    echo "api_header: int2dds-ffi.h"
+    echo "license: Apache-2.0"
+    echo "artifacts:"
+  } > "$manifest"
+
+  for entry in "windows-x86_64|amd64|x86_64-pc-windows-msvc" "windows-aarch64|arm64|aarch64-pc-windows-msvc"; do
+    dist="${entry%%|*}"; rest="${entry#*|}"
+    arch="${rest%%|*}"; triple="${rest#*|}"
+
+    archive="$(find "$artifact_root" -type f -name "int2dds-${version}-${dist}.zip" | head -1)"
+    [ -n "$archive" ] || { echo "ERROR: no archive for ${dist} under ${artifact_root}" >&2; exit 1; }
+
+    unpacked="$work/unpacked/$dist"
+    mkdir -p "$unpacked"
+    unzip -q "$archive" -d "$unpacked"
+    src="$unpacked/int2dds-${version}-${dist}"
+    [ -d "$src" ] || { echo "ERROR: ${archive} does not contain int2dds-${version}-${dist}/" >&2; exit 1; }
+
+    mkdir -p "$stage/$dist"
+    cp "$src/bin/int2dds_ffi.dll"     "$stage/$dist/int2dds_ffi.dll"
+    cp "$src/lib/int2dds_ffi.dll.lib" "$stage/$dist/int2dds_ffi.lib"
+
+    # manifest.txt comes from PowerShell, so tolerate a BOM and CRLF line ends.
+    sha="$(tr -d '\r' < "$src/manifest.txt" | grep -o 'sha256: *[0-9a-f]\{64\}' | head -1 | sed 's/^sha256: *//')"
+    [ -n "$sha" ] || { echo "ERROR: ${dist}: manifest.txt has no sha256" >&2; exit 1; }
+    actual="$(sha256sum "$stage/$dist/int2dds_ffi.dll" | cut -d' ' -f1)"
+    [ "$sha" = "$actual" ] \
+      || { echo "ERROR: ${dist}: int2dds_ffi.dll sha256 ${actual} does not match manifest.txt ${sha}" >&2; exit 1; }
+
+    {
+      echo "  - os: windows"
+      echo "    arch: ${arch}"
+      echo "    triple: ${triple}"
+      echo "    file: ${dist}/int2dds_ffi.dll"
+      echo "    sha256: ${sha}"
+      echo "    import_lib: ${dist}/int2dds_ffi.lib"
+    } >> "$manifest"
+
+    [ -f "$stage/int2dds-ffi.h" ] || cp "$src/include/int2dds-ffi.h" "$stage/"
+    [ -f "$stage/LICENSE" ]       || cp "$src/LICENSE"               "$stage/"
+  done
+
+  for required in int2dds-ffi.h LICENSE int2dds-ffi.manifest.yaml; do
+    [ -f "$stage/$required" ] || { echo "ERROR: ${required} missing from the staged tree" >&2; exit 1; }
+  done
+
+  # Files at the archive root, as in the Linux tarball.
+  archive="$(cd "$out_dir" && pwd)/int2dds-ffi-${version}-windows.zip"
+  rm -f "$archive"
+  (cd "$stage" && zip -qr "$archive" .)
+
+  echo "== manifest =="; cat "$manifest"
+  echo "== archive contents =="; unzip -l "$archive"
+  exit 0
+fi
 
 stage="$work/int2dds-ffi-${version}-linux"
 mkdir -p "$stage" "$out_dir"
