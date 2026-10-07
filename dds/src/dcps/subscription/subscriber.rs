@@ -1219,12 +1219,18 @@ impl Subscriber {
         Ok(self.qos.load().presentation.coherent_access)
     }
 
-    // None unless the access scope is GROUP. Created on first use, once the participant's
-    // discovery data is reachable, and shared by every reader created afterwards.
+    // None unless the access scope is GROUP and either coherent or ordered access is requested.
+    // Created on first use, once the participant's discovery data is reachable, and shared by
+    // every reader created afterwards.
     pub(crate) fn subscriber_history_cache(
         &self,
     ) -> DdsResult<Option<Arc<Mutex<SubscriberHistoryCache>>>> {
-        if self.qos.load().presentation.access_scope != PresentationQosAccessScopeKind::Group {
+        let presentation = self.qos.load().presentation;
+        let is_group_order_requested = presentation.access_scope
+            == PresentationQosAccessScopeKind::Group
+            && (presentation.coherent_access || presentation.ordered_access);
+
+        if !is_group_order_requested {
             return Ok(None);
         }
 
@@ -2551,6 +2557,42 @@ mod tests {
         assert!(remaining.is_empty());
 
         subscriber.end_access().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    // GROUP is the scope of whichever of the two flags is set, so with neither set the Subscriber
+    // owes no group order and keeps no cache for it.
+    #[test]
+    fn test_group_access_scope_alone_keeps_no_subscriber_history_cache() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let scope_only_qos = SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let subscriber =
+            participant.create_subscriber(scope_only_qos, None, StatusMask::default()).unwrap();
+
+        assert!(subscriber.subscriber_history_cache().unwrap().is_none());
+
+        let ordered_subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+
+        assert!(ordered_subscriber.subscriber_history_cache().unwrap().is_some());
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
