@@ -639,6 +639,11 @@ impl SubscriberHistoryCache {
             }
             proxy.ordered_pending_changes.retain(|_, samples| !samples.is_empty());
 
+            for members in proxy.coherent_pending_changes.values_mut() {
+                members.retain(|sample| sample.reader_id != reader_id);
+            }
+            proxy.coherent_pending_changes.retain(|_, members| !members.is_empty());
+
             proxy.writers.retain(|_, writer| {
                 writer.reader_ids.remove(&reader_id);
                 !writer.reader_ids.is_empty()
@@ -660,7 +665,9 @@ impl SubscriberHistoryCache {
     }
 
     fn held_sample_count(proxy: &PublisherProxy) -> usize {
-        proxy.ready.len() + proxy.ordered_pending_changes.values().map(Vec::len).sum::<usize>()
+        proxy.ready.len()
+            + proxy.ordered_pending_changes.values().map(Vec::len).sum::<usize>()
+            + proxy.coherent_pending_changes.values().map(Vec::len).sum::<usize>()
     }
 
     // The digest a writer of this Publisher announces covers every writer attached to it, so the
@@ -1145,6 +1152,62 @@ mod tests {
         let released = cache.flush_pending_changes();
 
         assert_eq!(released_group_seq_nums(&released), vec![2, 3]);
+    }
+
+    // A deleted reader's share of a set that is still waiting for its marker can no longer be
+    // committed, so only the remaining reader's share leaves with the set.
+    #[test]
+    fn drops_a_removed_readers_share_of_a_waiting_group_coherent_set() {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(2), writer_guid(1), publisher_guid())
+            .expect("registered");
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 1, 1, 1), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(2), coherent_member(writer_guid(1), 1, 1, 1), true)
+            .expect("accepted");
+        assert!(cache.flush_pending_changes().is_empty(), "both shares wait for the marker");
+
+        cache.remove_reader(reader_id(2));
+
+        cache
+            .add_change(reader_id(1), end_coherent_set(writer_guid(1), 2, 2, 1), true)
+            .expect("accepted");
+
+        let released = cache.flush_pending_changes();
+
+        // The removed reader's share is gone, and the remaining reader's share is handed over.
+        assert_eq!(released_group_seq_nums(&released), vec![1]);
+        assert_eq!(released[0].reader_id, reader_id(1));
+    }
+
+    // Writer 1 leaves before marking the end of the set. Its members stay in the set box, and the
+    // End Coherent Set of the writer still matched judges the set and takes them out with it.
+    #[test]
+    fn completes_a_group_coherent_set_after_one_of_its_writers_is_unmatched() {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(2), publisher_guid())
+            .expect("registered");
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 1, 1, 1), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(2), 1, 2, 1), true)
+            .expect("accepted");
+        assert!(cache.flush_pending_changes().is_empty(), "the members wait for a marker");
+
+        cache.remove_matched_writer(writer_guid(1));
+
+        cache
+            .add_change(reader_id(1), end_coherent_set(writer_guid(2), 2, 3, 1), true)
+            .expect("accepted");
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![1, 2]);
     }
 
     // The set waits behind the hole at group sequence number 1, which belongs to a writer this
