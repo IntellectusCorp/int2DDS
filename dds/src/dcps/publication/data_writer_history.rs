@@ -583,7 +583,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             .filter_map(|change| change.presentation_info().group_coherent_set)
             .collect();
 
-        let abandoned_end_coherent_sets: Vec<Arc<CacheChange>> = self
+        let end_coherent_sets_to_release: Vec<Arc<CacheChange>> = self
             .changes
             .iter()
             .filter(|change| change.is_end_coherent_set())
@@ -596,7 +596,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             .cloned()
             .collect();
 
-        for end_coherent_set in abandoned_end_coherent_sets {
+        for end_coherent_set in end_coherent_sets_to_release {
             debug!(
                 "[history] releasing end coherent set {:?} at seq={}",
                 end_coherent_set
