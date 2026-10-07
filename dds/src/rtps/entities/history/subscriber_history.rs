@@ -211,11 +211,8 @@ impl PublisherProxy {
     // Discards every set whose id is at or below a position no writer will fill. That position
     // falls inside such a set, so the set lost a member or its End Coherent Set.
     fn discard_group_coherent_sets_below(&mut self, group_seq_num: GroupSequenceNumber) {
-        let is_irrelevant_to_every_writer =
-            self.writers.values().all(|writer| writer.is_group_seq_num_irrelevant(group_seq_num));
-
-        // No writer owed the position, so no set lost anything by it being skipped.
-        if is_irrelevant_to_every_writer {
+        // No registered writer owed the position, so no set is missing a member because of it.
+        if self.is_group_seq_num_irrelevant_to_every_writer(group_seq_num) {
             return;
         }
 
@@ -228,6 +225,15 @@ impl PublisherProxy {
         for group_coherent_set in group_coherent_sets_to_discard {
             self.discard_group_coherent_set(group_coherent_set, None);
         }
+    }
+
+    // True when writers are registered and every one of them reports the position irrelevant.
+    fn is_group_seq_num_irrelevant_to_every_writer(
+        &self,
+        group_seq_num: GroupSequenceNumber,
+    ) -> bool {
+        !self.writers.is_empty()
+            && self.writers.values().all(|writer| writer.is_group_seq_num_irrelevant(group_seq_num))
     }
 
     // Hands over a group coherent set once every position it spans either arrived or was never
@@ -254,12 +260,7 @@ impl PublisherProxy {
             }
 
             // Only a position no matched writer owed us may be missing from the set.
-            let is_irrelevant_to_every_writer = self
-                .writers
-                .values()
-                .all(|writer| writer.is_group_seq_num_irrelevant(group_seq_num));
-
-            if !is_irrelevant_to_every_writer {
+            if !self.is_group_seq_num_irrelevant_to_every_writer(group_seq_num) {
                 debug!(
                     "SHC discarding group coherent set {}: group sequence number {} was lost",
                     group_coherent_set.to_i64(),
@@ -369,6 +370,11 @@ impl PublisherProxy {
         group_seq_num: SequenceNumber,
         discovered_writer_set: GroupDigest,
     ) -> bool {
+        // No writer is registered, so the position is absent from all of them.
+        if self.writers.is_empty() {
+            return true;
+        }
+
         // Only DataWriters that have not lost their liveliness are taken into consideration.
         let mut alive_writers = self.writers.values().filter(|writer| writer.is_alive).peekable();
 
@@ -1010,6 +1016,46 @@ mod tests {
 
         assert!(cache.publishers[&publisher_guid()].writers.is_empty());
         assert_eq!(pending_group_sequence_numbers(&cache), vec![7]);
+    }
+
+    // A set that lost a member to an unmatched writer is not whole, so it is discarded instead of
+    // handed over without that member.
+    #[test]
+    fn discards_a_group_coherent_set_whose_member_left_with_an_unmatched_writer() {
+        let mut cache = cache_with_one_matched_writer();
+        cache
+            .add_matched_writer(reader_id(1), writer_guid(2), publisher_guid())
+            .expect("registered");
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 1, 1, 1), true)
+            .expect("accepted");
+        cache
+            .add_change(reader_id(1), end_coherent_set(writer_guid(1), 2, 3, 1), true)
+            .expect("accepted");
+
+        // Writer 2 owed group sequence number 2 and never sent it.
+        cache.remove_matched_writer(writer_guid(1));
+        cache.remove_matched_writer(writer_guid(2));
+
+        assert!(cache.flush_pending_changes().is_empty());
+        assert!(cache.publishers[&publisher_guid()].coherent_pending_changes.is_empty());
+    }
+
+    // Nothing arrives from a Publisher whose writers are all unmatched, so the positions below a
+    // held sample stay empty and the sample leaves.
+    #[test]
+    fn releases_held_samples_once_every_writer_of_the_publisher_is_unmatched() {
+        let mut cache = cache_with_one_matched_writer();
+        cache.add_change(reader_id(1), change(writer_guid(1), 1, Some(7)), true).expect("accepted");
+
+        assert!(cache.flush_pending_changes().is_empty(), "the empty positions below hold it");
+
+        cache.remove_matched_writer(writer_guid(1));
+
+        let released = cache.flush_pending_changes();
+
+        assert_eq!(released_group_seq_nums(&released), vec![7]);
     }
 
     // A writer stays while another reader of this Subscriber still matches it.
