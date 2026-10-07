@@ -145,9 +145,10 @@ pub struct DataWriter<Foo> {
     is_builtin: bool,
     guid: Guid,
     qos: Arc<ArcSwap<DataWriterQos>>,
-    // Serializes set_qos so that (cache store + update_rtps_entity) executes
-    // as a unit. get_qos reads are lock-free via ArcSwap.
+    // Serializes set_qos so the cache store and update_rtps_entity run as one step.
     update_lock: Arc<Mutex<()>>,
+    // The owning publisher's lock, shared by every writer attached to it.
+    gsn_allocation_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<DataWriterQos>>>,
@@ -220,6 +221,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             guid: self.guid,
             qos: self.qos.clone(),
             update_lock: self.update_lock.clone(),
+            gsn_allocation_lock: self.gsn_allocation_lock.clone(),
             listener: self.listener.clone(),
             mask: self.mask.clone(),
             status_condition: self.status_condition.clone(),
@@ -515,6 +517,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             guid,
             qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
             update_lock: Arc::new(Mutex::new(())),
+            gsn_allocation_lock: publisher.get_gsn_allocation_lock_arc(),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
@@ -1025,15 +1028,21 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
 
         let rtps_writer = self.get_rtps_writer()?;
-        let seq_num = rtps_writer.allocate_sequence_number();
-        loan.change.reset(
-            ChangeKind::Alive,
-            rtps_writer.guid(),
-            instance_handle,
-            seq_num,
-            Some(timestamp.into()),
-        );
-        self.set_presentation_info(&mut loan.change, seq_num)?;
+        {
+            let _allocation =
+                self.gsn_allocation_lock.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            let seq_num = rtps_writer.allocate_sequence_number();
+            loan.change.reset(
+                ChangeKind::Alive,
+                rtps_writer.guid(),
+                instance_handle,
+                seq_num,
+                Some(timestamp.into()),
+            );
+            self.set_presentation_info(&mut loan.change, seq_num)?;
+        }
+
         unsafe {
             loan.change.data_mut().set_len(actual_size);
         }
@@ -1479,12 +1488,19 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             cache.acquire_change()
         };
 
-        // 2. Allocate sequence number
-        let seq_num = rtps_writer.allocate_sequence_number();
+        // 2. Allocate the sequence number and the group sequence number together
+        let seq_num = {
+            let _allocation =
+                self.gsn_allocation_lock.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        // 3. Reset metadata + fill the reused buffer
-        change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
-        self.set_presentation_info(&mut change, seq_num)?;
+            let seq_num = rtps_writer.allocate_sequence_number();
+            change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
+            self.set_presentation_info(&mut change, seq_num)?;
+
+            seq_num
+        };
+
+        // 3. Fill the reused buffer
         fill(change.data_mut())?;
         let max_message_size = crate::common::env::get_max_message_size();
         change
