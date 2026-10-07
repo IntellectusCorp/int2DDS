@@ -370,7 +370,8 @@ impl ReaderHistoryCache {
         }
     }
 
-    // Buffer a coherent member until its set closes; an oversized set is discarded whole.
+    // Buffer a coherent member until its set closes. An oversized set keeps its entry with no
+    // members, so closing it reports Incomplete.
     fn buffer_coherent_member(
         &mut self,
         writer_guid: Guid,
@@ -390,7 +391,7 @@ impl ReaderHistoryCache {
                 writer_guid,
                 cap
             );
-            self.coherent_pending.remove(&writer_guid);
+            pending.changes.clear();
         }
     }
 
@@ -549,6 +550,24 @@ mod tests {
         assert_eq!(prepared.len(), 1);
         assert!(prepared[0].1);
         assert!(cache.changes.is_empty());
+    }
+
+    // An oversized portion loses its members where they are buffered, and closing it reports
+    // the portion incomplete so the group cursor hears about it.
+    #[test]
+    fn closing_an_oversized_portion_reports_it_incomplete() {
+        let mut cache = reader_cache();
+        let guid = writer_guid();
+        let set_id = SequenceNumber::from_i64(10);
+        cache.coherent_pending_cap = 2;
+
+        for seq in [10, 11, 12] {
+            cache.buffer_coherent_member(guid, set_id, coherent_member(seq));
+        }
+
+        let closed = cache.close_and_take_coherent_set(guid, SequenceNumber::from_i64(13));
+
+        assert!(matches!(closed, CoherentSetCloseResult::Incomplete), "got {closed:?}");
     }
 
     #[test]

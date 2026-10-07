@@ -2432,6 +2432,11 @@ impl UserLogic {
         marker: CacheChange,
         group_coherent_set: SequenceNumber,
     ) -> RtpsResult<()> {
+        let subscriber_history_cache = reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .and_then(StatefulReader::subscriber_history_cache);
+
         let reader_cache = reader.reader_cache();
         let mut cache_guard = reader_cache
             .lock()
@@ -2440,22 +2445,29 @@ impl UserLogic {
         let closed_result =
             cache_guard.close_and_take_coherent_set(marker.writer_guid(), marker.sequence_number());
 
-        // The rest of the set is dropped where the group cursor lives, once 5-12 wires it.
         if matches!(closed_result, CoherentSetCloseResult::Incomplete) {
+            drop(cache_guard);
+
             debug!(
                 "[UserLogic] Reader {} discarded its portion of group coherent set {}",
                 reader.guid(),
                 group_coherent_set.to_i64()
             );
-            return Ok(());
+
+            // Outside GROUP access scope this writer's portion was the whole set, so dropping
+            // it is all there is to do.
+            let Some(subscriber_history_cache) = subscriber_history_cache else {
+                return Ok(());
+            };
+
+            return self.discard_group_coherent_set(
+                subscriber_history_cache,
+                &marker,
+                group_coherent_set,
+            );
         }
 
         let members = closed_result.into_complete_members();
-
-        let subscriber_history_cache = reader
-            .as_any()
-            .downcast_ref::<StatefulReader>()
-            .and_then(StatefulReader::subscriber_history_cache);
 
         // Outside GROUP access scope this writer's portion is the whole set, so it is stored here.
         let Some(subscriber_history_cache) = subscriber_history_cache else {
@@ -2485,6 +2497,47 @@ impl UserLogic {
         }
         subscriber_history_cache.add_change(reader_id, marker, false)?;
 
+        let released = subscriber_history_cache.flush_pending_changes();
+        let participant = self.get_upgraded_participant()?;
+        let available = participant.commit_released_samples(released)?;
+        drop(subscriber_history_cache);
+
+        participant.notify_available_changes(available);
+
+        Ok(())
+    }
+
+    // Hands a group coherent set no reader can complete to the group cursor and stores whatever
+    // the jump releases.
+    fn discard_group_coherent_set(
+        &self,
+        subscriber_history_cache: &Arc<Mutex<SubscriberHistoryCache>>,
+        marker: &CacheChange,
+        group_coherent_set: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let Some(end_group_seq_num) = marker.presentation_info().group_seq_num else {
+            return Err(RtpsError::new(
+                RtpsErrorCode::GroupSequenceNumberNotSet,
+                format!(
+                    "End Coherent Set of group coherent set {} from writer {} carries no group \
+                     sequence number",
+                    group_coherent_set.to_i64(),
+                    marker.writer_guid()
+                ),
+            ));
+        };
+
+        let mut subscriber_history_cache = subscriber_history_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        subscriber_history_cache.discard_group_coherent_set(
+            marker.writer_guid(),
+            group_coherent_set,
+            end_group_seq_num,
+        )?;
+
+        // Jumping the cursor past the set can let the samples written after it through.
         let released = subscriber_history_cache.flush_pending_changes();
         let participant = self.get_upgraded_participant()?;
         let available = participant.commit_released_samples(released)?;
