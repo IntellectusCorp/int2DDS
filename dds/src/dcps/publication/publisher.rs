@@ -400,9 +400,7 @@ impl Publisher {
                 .or_insert_with(Vec::new)
                 .push(weak_writer.clone());
         }
-        if self.is_group_access_scope()? {
-            self.refresh_writer_set()?;
-        }
+        self.refresh_writer_set()?;
 
         Ok(datawriter)
     }
@@ -613,9 +611,7 @@ impl Publisher {
                 }
             }
         }
-        if self.is_group_access_scope()? {
-            self.refresh_writer_set()?;
-        }
+        self.refresh_writer_set()?;
 
         // Close the writer to new API calls and drain in-flight ones before the rtps writer is
         // torn down, so no admitted write is aborted or loses its sample.
@@ -987,10 +983,19 @@ impl Publisher {
         Ok(*self.writer_set.read().map_err(|e| DdsError::Error(e.to_string()))?)
     }
 
-    // Recompute the writerSet digest from the entity ids of every attached writer.
-    fn refresh_writer_set(&self) -> DdsResult<()> {
+    // Recompute the writerSet digest from the entity ids of the writers announced in discovery.
+    // A writer with no rtps writer has no publication in discovery, so it is left out.
+    pub(crate) fn refresh_writer_set(&self) -> DdsResult<()> {
+        if !self.is_group_access_scope()? {
+            return Ok(());
+        }
+
         let mut writer_entity_ids = Vec::new();
         for writer in self.get_datawriters_internal()? {
+            if !writer.has_rtps_writer() {
+                continue;
+            }
+
             writer_entity_ids.push(writer.get_instance_handle()?.to_guid().entity_id());
         }
 
