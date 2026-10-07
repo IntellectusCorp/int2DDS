@@ -27,6 +27,7 @@
 //! | [`TypeConsistencyEnforcementQosPolicy`] | Type consistency enforcement for DDS-XTypes | DataReader |
 //! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
 //! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
+//! | [`PresentationQosPolicy`] | Coherent/ordered access for change groups | Publisher, Subscriber |
 //!
 //! ## int2DDS Extension QoS Policies
 //!
@@ -42,7 +43,6 @@
 //! | Policy | Description | Applicable to |
 //! |--------|-------------|---------------|
 //! | [`UserDataQosPolicy`] | Arbitrary user data attached to entity | DomainParticipant, DataWriter, DataReader |
-//! | [`PresentationQosPolicy`] | Coherent/ordered access for change groups | Publisher, Subscriber |
 //! | [`LatencyBudgetQosPolicy`] | Acceptable delivery delay hint | DataWriter, DataReader, Topic |
 //! | [`TransportPriorityQosPolicy`] | Transport priority for delivery | DataWriter, Topic |
 //! | [`TimeBasedFilterQosPolicy`] | Minimum separation between samples | DataReader |
@@ -712,12 +712,24 @@ impl PresentationQosAccessScopeKind {
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
 ///
-/// **Note**: This QoS policy is currently unsupported.
+/// `coherent_access` and `ordered_access` are independent. `access_scope` is the granularity of
+/// whichever of the two is enabled, and enabling one says nothing about the other: coherent
+/// access alone asks for atomicity, ordered access alone asks for order.
 ///
 /// # Values (access_scope)
 /// - `Instance`: Changes are coherent/ordered at instance level (default)
 /// - `Topic`: Changes are coherent/ordered at topic level
 /// - `Group`: Changes are coherent/ordered at group (Publisher/Subscriber) level
+///
+/// # Group access scope
+///
+/// A Subscriber with `access_scope = Group` must bracket its sample access in
+/// `begin_access` / `end_access`, except inside its own `on_data_on_readers` callback. Only a
+/// `Reliable` DataReader takes part in the group order. Samples held back before they reach a
+/// reader's history are bounded by that reader's [`ResourceLimitsQosPolicy`].
+///
+/// # Default
+/// `access_scope` is `Instance`, `coherent_access` and `ordered_access` are `false`.
 #[derive(DdsType, ConstDefault, Copy, Eq)]
 #[dds_type(crate_path = "crate")]
 pub struct PresentationQosPolicy {
@@ -1705,6 +1717,23 @@ impl QosPolicy for DurabilityQosPolicy {
 /// - With `KeepLast(depth)`: The `depth` value overrides `max_samples_per_instance`.
 /// - With `KeepAll`: The `max_samples_per_instance` value is used as the actual limit.
 /// - `max_samples` is capped at `max_instances × max_samples_per_instance`.
+///
+/// # Interaction with PresentationQosPolicy
+///
+/// Either of two PRESENTATION settings adds a holding area that a reader's samples pass through
+/// before they are stored. Each area enforces the same effective `max_samples` as the history,
+/// independently of the other:
+///
+/// 1. **coherent_access**: Holds the members of a coherent set until that set closes.
+///    One `max_samples` for the reader, counted across all remote DataWriters.
+///
+/// 2. **access_scope = Group**: Holds every sample until the group order hands it over, a closed
+///    coherent set as a single unit. One `max_samples` for the reader, counted across all remote
+///    Publishers.
+///
+/// A reader's samples in flight can therefore reach `max_samples` per area in addition to those
+/// stored. When an area is full, the arriving sample is dropped. If it belongs to a coherent
+/// set, the whole set is dropped with it, because an incomplete set is never stored.
 ///
 /// # Default
 /// All limits are `LENGTH_UNLIMITED`.
