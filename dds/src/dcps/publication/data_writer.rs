@@ -123,6 +123,7 @@ pub trait DataWriterBase: DomainEntity + Send + Any {
 }
 
 pub(crate) trait DataWriterInternal: DataWriterBase {
+    fn has_rtps_writer(&self) -> bool;
     fn disable(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataWriterInternal<Qos = DataWriterQos> + Send>;
     fn as_any(&self) -> &dyn Any;
@@ -295,6 +296,13 @@ impl<Foo: 'static + Clone> DomainEntity for DataWriter<Foo> {}
 impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
     fn enable_rtps_entities(&self) -> DdsResult<()> {
         let publisher = self.get_publisher()?;
+
+        // Under GROUP scope the writer set is fixed while a coherent set is open, and enabling
+        // announces this writer into it.
+        if publisher.is_group_access_scope()? && publisher.in_coherent_changes() {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
         let participant = publisher.get_participant()?;
         let topic = self.get_topic()?;
         let writer_qos = self.get_qos_arc()?;
@@ -372,6 +380,9 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
                 }));
             }
         }
+
+        // This writer is now announced in discovery, so it joins the writerSet digest.
+        publisher.refresh_writer_set()?;
 
         Ok(())
     }
@@ -2515,6 +2526,10 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
 }
 
 impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
+    fn has_rtps_writer(&self) -> bool {
+        self.get_rtps_writer().is_ok()
+    }
+
     fn clone_boxed(&self) -> Box<dyn DataWriterInternal<Qos = DataWriterQos> + Send> {
         Box::new(self.clone())
     }
@@ -2565,8 +2580,12 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
             return Ok(());
         }
 
+        // A writer with no rtps writer announced nothing, so it has no end to mark.
+        let Ok(rtps_writer) = self.get_rtps_writer() else {
+            return Ok(());
+        };
+
         let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
-        let rtps_writer = self.get_rtps_writer()?;
         let mut change = {
             let mut cache =
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -3908,6 +3927,127 @@ mod tests {
             SequenceNumber::from_i64(gap_start),
             SequenceNumber::from_i64(gap_end),
         )
+    }
+
+    // A writer that is not enabled has no publication in discovery, so a receiver comparing the
+    // announced writerSet against what it discovered must not see it.
+    #[test]
+    fn the_writer_set_counts_only_the_writers_announced_in_discovery() {
+        use crate::infrastructure::qos_policy::PresentationQosAccessScopeKind;
+        use crate::rtps::common::guid::GroupDigest;
+
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "WriterSetTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        publisher_qos.entity_factory.autoenable_created_entities = false;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+        let first_writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let second_writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let writer_set = || *publisher.get_writer_set_arc().read().unwrap();
+        let entity_id_of = |writer: &DataWriter<TestData>| {
+            writer.get_instance_handle().unwrap().to_guid().entity_id()
+        };
+
+        assert_eq!(writer_set(), GroupDigest::EMPTY, "neither writer is announced yet");
+
+        first_writer.enable().unwrap();
+        assert_eq!(writer_set(), GroupDigest::from_entity_ids(&[entity_id_of(&first_writer)]));
+
+        second_writer.enable().unwrap();
+        assert_eq!(
+            writer_set(),
+            GroupDigest::from_entity_ids(&[
+                entity_id_of(&first_writer),
+                entity_id_of(&second_writer)
+            ])
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    // Enabling a writer announces it into the writer set, which has to stay fixed for as long as
+    // a coherent set is open.
+    #[test]
+    fn enabling_a_writer_while_a_coherent_set_is_open_is_refused() {
+        use crate::infrastructure::qos_policy::PresentationQosAccessScopeKind;
+
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "WriterSetLockTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        publisher_qos.presentation.coherent_access = true;
+        publisher_qos.entity_factory.autoenable_created_entities = false;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        publisher.begin_coherent_changes().unwrap();
+        assert_eq!(writer.enable(), Err(DdsError::PreconditionNotMet));
+
+        publisher.end_coherent_changes().unwrap();
+        writer.enable().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
