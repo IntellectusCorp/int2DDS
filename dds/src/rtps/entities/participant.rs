@@ -1150,10 +1150,30 @@ impl Participant {
             }
         }
 
-        // Close transport connections to the now-unmatched peer so its per-peer
-        // resources are released promptly, rather than lingering until OS keepalive.
+        // Release the unmatched peer's connections now rather than at OS keepalive, except at an
+        // address another known participant still lives at: a peer restarted on the same port
+        // under a new prefix would lose its connection.
         if let (Some(transport), Some(locators)) = (self.transport.get(), peer_locators) {
-            transport.disconnect_peer(&locators);
+            let still_used: Vec<Locator> = self
+                .remote_participant_proxy_datas
+                .lock()
+                .map(|datas| {
+                    datas
+                        .iter()
+                        .flat_map(|data| {
+                            data.metatraffic_unicast_locator_list()
+                                .iter()
+                                .chain(data.default_unicast_locator_list().iter())
+                                .cloned()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let released: Vec<Locator> =
+                locators.into_iter().filter(|locator| !still_used.contains(locator)).collect();
+            if !released.is_empty() {
+                transport.disconnect_peer(&released);
+            }
         }
 
         info!("Successfully unmatched with remote participant: {}", terminated_participant_guid);
@@ -1459,5 +1479,97 @@ mod tests {
             Some(dispose_sn),
             "the advertised range has to reach the dispose"
         );
+    }
+
+    /// A peer that crashes and restarts on the same port is discovered under a new prefix before
+    /// the old prefix's lease runs out. Disconnecting that address when the old prefix expires
+    /// takes it off the announcement list and closes the connection the new peer is using.
+    #[test]
+    fn unmatching_a_participant_leaves_an_address_another_known_participant_lives_at() {
+        use crate::rtps::transport::plugin::{MessageSource, SendTarget};
+        use std::net::Ipv4Addr;
+
+        #[derive(Default)]
+        struct DisconnectRecorder {
+            disconnected: Mutex<Vec<Locator>>,
+        }
+
+        impl TransportPlugin for DisconnectRecorder {
+            fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn can_handle(&self, _locator: &Locator) -> bool {
+                true
+            }
+            fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+                Vec::new()
+            }
+            fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+                Vec::new()
+            }
+            fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn port(&self) -> u16 {
+                0
+            }
+            fn participant_id(&self) -> u32 {
+                0
+            }
+            fn close(&self) {}
+            fn disconnect_peer(&self, locators: &[Locator]) {
+                self.disconnected.lock().expect("disconnected").extend_from_slice(locators);
+            }
+        }
+
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(DisconnectRecorder::default());
+        let _ = participant.transport.set(transport.clone());
+
+        let remote_at = |prefix: GuidPrefix, port: u32| {
+            let locator = Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, port);
+            let mut data = SPDPDiscoveredParticipantData::new(
+                0,
+                prefix,
+                Participant::init_builtin_endpoints(),
+            );
+            data.add_metatraffic_unicast_locator(locator.clone());
+            data.add_default_unicast_locator(locator.clone());
+            participant.add_remote_participant_proxy_data(data);
+            locator
+        };
+        let alone = remote_at([1u8; 12], 7420);
+        let restarted_from = remote_at([2u8; 12], 7410);
+        let restarted_as = remote_at([3u8; 12], 7410);
+        assert_eq!(restarted_from, restarted_as);
+
+        participant
+            .unmatch_with_remote_participant(&Guid::new([1u8; 12], EntityId::PARTICIPANT))
+            .expect("unmatch");
+        let disconnected = transport.disconnected.lock().expect("disconnected").clone();
+        assert!(
+            disconnected.contains(&alone),
+            "an address nobody else lives at is released: {disconnected:?}"
+        );
+
+        participant
+            .unmatch_with_remote_participant(&Guid::new([2u8; 12], EntityId::PARTICIPANT))
+            .expect("unmatch");
+        let disconnected = transport.disconnected.lock().expect("disconnected").clone();
+        assert!(
+            !disconnected.contains(&restarted_as),
+            "the restarted peer still lives at this address: {disconnected:?}"
+        );
+
+        TimerHandler::get_instance(participant.guid().prefix())
+            .lock()
+            .expect("timer handler")
+            .terminate();
     }
 }
