@@ -163,10 +163,15 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
 }
 
 // #[derive(Clone)]
-/// A sample chosen by a read or take, before it is shaped into a result.
-pub(crate) struct Selected {
-    pub(crate) change: Option<Arc<CacheChange>>,
-    pub(crate) info: SampleInfo,
+/// A read or take result element whose `SampleInfo` is finalized after selection.
+pub(crate) trait SelectedSample {
+    fn info_mut(&mut self) -> &mut SampleInfo;
+}
+
+impl<Foo> SelectedSample for DataSample<Foo> {
+    fn info_mut(&mut self) -> &mut SampleInfo {
+        &mut self.sample_info
+    }
 }
 
 pub struct DataReader<Foo> {
@@ -2375,10 +2380,14 @@ impl<Foo: DdsType> DataReader<Foo> {
     }
 
     /// Ends a loan from `read_loaned`/`take_loaned` and their variants. Dropping the
-    /// loan does the same; a loan from another reader is `PreconditionNotMet`.
-    pub fn return_loan(&self, loan: LoanedSamples<Foo>) -> DdsResult<()> {
+    /// loan does the same. A loan from another reader is handed back, still valid,
+    /// with `PreconditionNotMet`.
+    pub fn return_loan(
+        &self,
+        loan: LoanedSamples<Foo>,
+    ) -> Result<(), (DdsError, LoanedSamples<Foo>)> {
         if loan.reader() != self.guid {
-            return Err(DdsError::PreconditionNotMet);
+            return Err((DdsError::PreconditionNotMet, loan));
         }
         drop(loan);
         Ok(())
@@ -2407,12 +2416,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             single_instance,
             exact,
             take,
+            |change, info| LoanedSample::new(change.cloned(), info, self.type_support.clone()),
         )?;
-        let samples = selected
-            .into_iter()
-            .map(|s| LoanedSample::new(s.change, s.info, self.type_support.clone()))
-            .collect();
-        Ok(LoanedSamples::new(samples, LoanToken::new(self.guid, self.outstanding_loans.clone())))
+        Ok(LoanedSamples::new(selected, LoanToken::new(self.guid, self.outstanding_loans.clone())))
     }
 
     pub fn read_next_sample(&self) -> DdsResult<DataSample<Foo>> {
@@ -3200,7 +3206,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         exact: bool,
         take: bool,
     ) -> DdsResult<Vec<DataSample<Foo>>> {
-        let selected = self.select_samples(
+        self.select_samples(
             max_samples,
             handle,
             direct_sample_states,
@@ -3210,12 +3216,12 @@ impl<Foo: DdsType> DataReader<Foo> {
             single_instance,
             exact,
             take,
-        )?;
-        Ok(selected.into_iter().map(|s| self.to_data_sample(s)).collect())
+            |change, info| self.to_data_sample(change, info),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn select_samples(
+    fn select_samples<R: SelectedSample>(
         &self,
         max_samples: i32,
         handle: InstanceHandle,
@@ -3226,7 +3232,8 @@ impl<Foo: DdsType> DataReader<Foo> {
         single_instance: bool,
         exact: bool,
         take: bool,
-    ) -> DdsResult<Vec<Selected>> {
+        shape: impl Fn(Option<&Arc<CacheChange>>, SampleInfo) -> R,
+    ) -> DdsResult<Vec<R>> {
         log::debug!(
             "read_or_take called: max_samples={}, handle={}, single_instance={}, exact={}, take={}",
             max_samples,
@@ -3270,7 +3277,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.set_read_communication_status(false)?;
-        let mut result_samples: Vec<Selected> = Vec::new();
+        let mut result_samples: Vec<R> = Vec::new();
         // TODO: The size of the collection may be additionally limited by the PRESENTATION QoS policy (2.2.3.6).
         let mut remaining_samples = if max_samples == -1 { i32::MAX } else { max_samples };
 
@@ -3389,8 +3396,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     } else {
                         self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
                     }
-                    result_samples
-                        .push(Selected { change: Some(change.clone()), info: sample_info });
+                    result_samples.push(shape(Some(change), sample_info));
                     remaining_samples -= 1;
                 }
                 Err(_) => {
@@ -3410,12 +3416,12 @@ impl<Foo: DdsType> DataReader<Foo> {
             if exact { Some(handle) } else { None },
             remaining_samples,
         )? {
-            result_samples.push(Selected { change: None, info: sample_info });
+            result_samples.push(shape(None, sample_info));
         }
 
         // 2.2.2.5.1.8 Interpretation of the SampleInfo view_state
-        for sample in &result_samples {
-            self.mark_instance_as_viewed(sample.info.instance_handle);
+        for sample in &mut result_samples {
+            self.mark_instance_as_viewed(sample.info_mut().instance_handle);
         }
 
         self.prune_read_samples_to_cache(&changes);
@@ -3552,7 +3558,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         };
         let sample_info =
             self.sample_info_with_infos(change, instance_handle, sample_state, instance_infos)?;
-        Ok(self.to_data_sample(Selected { change: Some(change.clone()), info: sample_info }))
+        Ok(self.to_data_sample(Some(change), sample_info))
     }
 
     fn sample_info_with_infos(
@@ -3590,13 +3596,17 @@ impl<Foo: DdsType> DataReader<Foo> {
         })
     }
 
-    fn to_data_sample(&self, selected: Selected) -> DataSample<Foo> {
-        match selected.change {
+    fn to_data_sample(
+        &self,
+        change: Option<&Arc<CacheChange>>,
+        info: SampleInfo,
+    ) -> DataSample<Foo> {
+        match change {
             Some(change) => {
-                let data = if selected.info.valid_data { Some(change.data_bytes()) } else { None };
-                DataSample::new(data, selected.info, Some(self.type_support.clone()))
+                let data = if info.valid_data { Some(change.data_bytes()) } else { None };
+                DataSample::new(data, info, Some(self.type_support.clone()))
             }
-            None => DataSample::new(None, selected.info, None),
+            None => DataSample::new(None, info, None),
         }
     }
 
@@ -3652,11 +3662,11 @@ impl<Foo: DdsType> DataReader<Foo> {
     }
 
     // Calculate sample_rank for all samples (based on sorted order)
-    fn update_all_sample_ranks(&self, samples: &mut [Selected]) {
+    fn update_all_sample_ranks<R: SelectedSample>(&self, samples: &mut [R]) {
         let total_samples = samples.len();
         // samples[0] = oldest sample -> highest rank; samples[last] = newest -> rank 0
         for (i, sample) in samples.iter_mut().enumerate() {
-            sample.info.sample_rank = (total_samples - 1 - i) as i32;
+            sample.info_mut().sample_rank = (total_samples - 1 - i) as i32;
         }
     }
 

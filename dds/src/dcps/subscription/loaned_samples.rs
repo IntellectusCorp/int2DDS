@@ -96,6 +96,12 @@ impl<Foo: DdsType> LoanedSample<Foo> {
     }
 }
 
+impl<Foo> crate::subscription::data_reader::SelectedSample for LoanedSample<Foo> {
+    fn info_mut(&mut self) -> &mut SampleInfo {
+        &mut self.info
+    }
+}
+
 impl<Foo> fmt::Debug for LoanedSample<Foo> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LoanedSample").field("info", &self.info).finish()
