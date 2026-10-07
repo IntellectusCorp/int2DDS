@@ -70,8 +70,7 @@ impl WriterGsnInfo {
             .highest_gsn_in_subscriber_history_cache
             .is_some_and(|arrived| arrived >= group_seq_num);
         // Or a Gap message with Gap.gapEndGSN.value >= GSN-1
-        let has_declared_unavailable =
-            self.highest_gap_end_gsn.is_some_and(|gap_end| gap_end >= previous);
+        let has_declared_unavailable = self.has_declared_group_seq_num_unavailable(previous);
         // Or a Heartbeat with Heartbeat.currentGSN.value >= GSN and GSN-1 not in [firstGSN, lastGSN]
         let has_never_held = self.has_never_held_group_seq_num(previous);
 
@@ -79,11 +78,20 @@ impl WriterGsnInfo {
     }
 
     // This writer counted the given position filtered, or never held it at all, so that position
-    // is no part of what this Subscriber was owed.
+    // is no part of what this Subscriber was owed. A Gap that declared an unfiltered position
+    // unavailable says the writer did hold it, which rules the announcement out as evidence.
     fn is_group_seq_num_irrelevant(&self, group_seq_num: GroupSequenceNumber) -> bool {
-        let is_filtered = self.filtered_group_seq_nums.contains(&group_seq_num);
+        if self.filtered_group_seq_nums.contains(&group_seq_num) {
+            return true;
+        }
 
-        is_filtered || self.has_never_held_group_seq_num(group_seq_num)
+        self.has_never_held_group_seq_num(group_seq_num)
+            && !self.has_declared_group_seq_num_unavailable(group_seq_num)
+    }
+
+    // A Gap of this writer declared the given position unavailable, so the writer did hold it.
+    fn has_declared_group_seq_num_unavailable(&self, group_seq_num: GroupSequenceNumber) -> bool {
+        self.highest_gap_end_gsn.is_some_and(|gap_end| gap_end >= group_seq_num)
     }
 
     // The latest Heartbeat of this writer puts the group past the given position and leaves it
@@ -117,7 +125,7 @@ pub(crate) struct PublisherProxy {
     ordered_pending_changes: BTreeMap<GroupSequenceNumber, Vec<PendingSample>>,
     // Members of a group coherent set the gate let through, held until its marker follows.
     coherent_pending_changes: BTreeMap<GroupCoherentSetId, Vec<PendingSample>>,
-    // The newest group coherent set this cache gave up on.
+    // The newest group coherent set this cache discarded.
     highest_discarded_group_coherent_set: Option<GroupCoherentSetId>,
     ready: Vec<PendingSample>,
     writers: HashMap<Guid, WriterGsnInfo>,
@@ -194,6 +202,28 @@ impl PublisherProxy {
         released
     }
 
+    // Discards every set whose id is at or below a position no writer will fill. That position
+    // falls inside such a set, so the set lost a member or its End Coherent Set.
+    fn discard_group_coherent_sets_below(&mut self, group_seq_num: GroupSequenceNumber) {
+        let is_irrelevant_to_every_writer =
+            self.writers.values().all(|writer| writer.is_group_seq_num_irrelevant(group_seq_num));
+
+        // No writer owed the position, so no set lost anything by it being skipped.
+        if is_irrelevant_to_every_writer {
+            return;
+        }
+
+        let group_coherent_sets_to_discard: Vec<GroupCoherentSetId> = self
+            .coherent_pending_changes
+            .range(..=group_seq_num)
+            .map(|(group_coherent_set, _)| *group_coherent_set)
+            .collect();
+
+        for group_coherent_set in group_coherent_sets_to_discard {
+            self.discard_group_coherent_set(group_coherent_set, None);
+        }
+    }
+
     // Hands over a group coherent set once every position it spans either arrived or was never
     // ours to receive.
     fn take_relevant_coherent_set(
@@ -242,7 +272,7 @@ impl PublisherProxy {
         members
     }
 
-    // Gives up on a group coherent set and moves the group and every writer of this Publisher
+    // Discards a group coherent set and moves the group and every writer of this Publisher
     // past the position its End Coherent Set holds.
     fn discard_group_coherent_set(
         &mut self,
@@ -272,7 +302,7 @@ impl PublisherProxy {
         }
         self.ordered_pending_changes.retain(|_, samples| !samples.is_empty());
 
-        // Move the group cursor to the End Coherent Set. A set given up on before its marker
+        // Move the group cursor to the End Coherent Set. A set discarded before its marker
         // arrived moves it when that marker reaches add_change.
         if let Some(end_group_seq_num) = end_group_seq_num {
             self.last_committed_gsn = Some(max(
@@ -430,7 +460,7 @@ impl SubscriberHistoryCache {
 
         let proxy = self.find_publisher_proxy_of_writer_mut(writer_guid)?;
 
-        // A portion that completed after its set was given up on, and the markers of the other
+        // A portion that completed after its set was discarded, and the markers of the other
         // writers of that set, arrive here with the group cursor already past them.
         if let Some(group_coherent_set) = group_coherent_set {
             if proxy
@@ -438,7 +468,7 @@ impl SubscriberHistoryCache {
                 .is_some_and(|highest| group_coherent_set <= highest)
             {
                 // The End Coherent Set still carries the position the group resumes from, which a
-                // set given up on before its marker arrived has yet to be told.
+                // set discarded before its marker arrived has yet to be told.
                 if change.ended_group_coherent_set().is_some() {
                     proxy.discard_group_coherent_set(group_coherent_set, Some(group_seq_num));
                 }
@@ -454,7 +484,7 @@ impl SubscriberHistoryCache {
         }
 
         // The reader can store no more than its max_samples, so anything held past that is
-        // already lost. A set that cannot be held whole is given up on instead.
+        // already lost. A set that cannot be held whole is discarded instead.
         if pending_sample_count >= max_samples {
             debug!(
                 "SHC dropped sample {} for reader {}: it already holds max_samples {}",
@@ -492,7 +522,7 @@ impl SubscriberHistoryCache {
         Ok(())
     }
 
-    // Gives up on a group coherent set one writer could not complete. The set is the whole span
+    // Discards a group coherent set one writer could not complete. The set is the whole span
     // up to its End Coherent Set, so the group order resumes from that position.
     pub(crate) fn discard_group_coherent_set(
         &mut self,
@@ -547,6 +577,7 @@ impl SubscriberHistoryCache {
             };
 
             // Samples arriving in order pass here and never touch the discovered writer set.
+            let mut hole_left_behind = None;
             if !proxy.is_next_in_group_order(group_seq_num) {
                 let writer_set = *discovered_writer_set
                     .get_or_insert_with(|| self.discovered_writer_set(publisher_guid));
@@ -560,11 +591,17 @@ impl SubscriberHistoryCache {
                 if !proxy.is_group_seq_num_absent_from_all_writers(group_seq_num, writer_set) {
                     break;
                 }
+
+                hole_left_behind = Some(group_seq_num.previous());
             }
 
             let Some(proxy) = self.publishers.get_mut(&publisher_guid) else {
                 break;
             };
+
+            if let Some(hole_left_behind) = hole_left_behind {
+                proxy.discard_group_coherent_sets_below(hole_left_behind);
+            }
 
             // Releasing this position may make the next one pass on order alone.
             released.extend(proxy.release_group_seq_num(group_seq_num));
@@ -1251,8 +1288,41 @@ mod tests {
         assert_eq!(pending_group_sequence_numbers(&cache), vec![11, 12]);
     }
 
-    // A set whose members would pass that bound can never be committed whole, so it is given up
-    // on at once. Its End Coherent Set still moves the group cursor when it arrives.
+    // The sample written after the set passes the gate on the hole at 11 being declared gone, and
+    // the set that hole falls inside can never be handed over.
+    #[test]
+    fn discards_a_group_coherent_set_whose_hole_the_gate_passed() {
+        let mut cache = cache_with_one_matched_writer();
+        set_last_committed_group_seq_num(&mut cache, 9);
+
+        cache
+            .add_change(reader_id(1), coherent_member(writer_guid(1), 5, 10, 10), true)
+            .expect("accepted");
+        assert!(cache.flush_pending_changes().is_empty(), "the member waits for the marker");
+
+        // The writer held 11 and declared it gone, so the set lost either a member or its marker.
+        cache
+            .record_heartbeat_group_info(writer_guid(1), heartbeat_group_info(12, 12, 12))
+            .expect("writer registered");
+        cache
+            .record_gap_group_info(writer_guid(1), gap_group_info(11, 11), None)
+            .expect("writer registered");
+        cache
+            .add_change(reader_id(1), change(writer_guid(1), 6, Some(12)), true)
+            .expect("accepted");
+
+        assert_eq!(released_group_seq_nums(&cache.flush_pending_changes()), vec![12]);
+
+        let proxy = &cache.publishers[&publisher_guid()];
+        assert_eq!(
+            proxy.highest_discarded_group_coherent_set,
+            Some(SequenceNumber::from_i64(10)),
+            "the set is discarded"
+        );
+    }
+
+    // A set whose members would pass that bound can never be committed whole, so it is discarded
+    // at once. Its End Coherent Set still moves the group cursor when it arrives.
     #[test]
     fn discards_a_group_coherent_set_the_reader_cannot_hold() {
         let mut cache = cache_with_one_matched_writer();
@@ -1269,7 +1339,7 @@ mod tests {
                 .expect("accepted");
         }
 
-        assert!(pending_group_sequence_numbers(&cache).is_empty(), "the set is given up on");
+        assert!(pending_group_sequence_numbers(&cache).is_empty(), "the set is discarded");
 
         cache
             .add_change(reader_id(1), end_coherent_set(writer_guid(1), 4, 14, 11), true)
