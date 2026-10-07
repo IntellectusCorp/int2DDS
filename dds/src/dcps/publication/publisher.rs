@@ -946,7 +946,7 @@ impl Publisher {
         let previous_depth = self.coherent_depth.fetch_add(1, Ordering::AcqRel);
 
         // The set's first sample takes the next group sequence number to be issued.
-        if previous_depth == 0 {
+        if previous_depth == 0 && self.in_coherent_changes() {
             let mut state =
                 self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             state.coherent_set_start = Some(SequenceNumber::from_i64(state.last_group_seq_num + 1));
@@ -1009,6 +1009,11 @@ impl Publisher {
 
     // Ask every attached writer to close its open coherent set; returns the first error.
     fn end_writer_coherent_sets(&self) -> DdsResult<()> {
+        // Without coherent access there is no set to close and no End Coherent Set to send.
+        if !self.qos.load().presentation.coherent_access {
+            return Ok(());
+        }
+
         // Holds off writes on this publisher for the whole close.
         let _allocation =
             self.gsn_allocation_lock.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1055,8 +1060,10 @@ impl Publisher {
     }
 
     // True while a coherent set is open (begin called without matching end).
+    // True while a coherent set is open on a Publisher that offers coherent access.
     pub(crate) fn in_coherent_changes(&self) -> bool {
-        self.coherent_depth.load(Ordering::Acquire) > 0
+        self.qos.load().presentation.coherent_access
+            && self.coherent_depth.load(Ordering::Acquire) > 0
     }
 
     // Issue the next group sequence number; strictly increasing per publisher, starting at 1.
@@ -1576,9 +1583,10 @@ mod tests {
                 StatusMask::default(),
             )
             .unwrap();
-        let publisher = participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.coherent_access = true;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
 
         assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 1);
         assert_eq!(publisher.get_group_coherent_set_start().unwrap(), None);
