@@ -326,6 +326,11 @@ typedef struct Int2DdsDynamicValue Int2DdsDynamicValue;
 typedef struct Int2DdsGuardCondition Int2DdsGuardCondition;
 
 /**
+ * Samples loaned from a DataReader's cache. Released only by `int2dds_datareader_return_loan`.
+ */
+typedef struct Int2DdsLoanedSamples Int2DdsLoanedSamples;
+
+/**
  * Opaque handle to a DomainParticipant
  */
 typedef struct Int2DdsParticipant Int2DdsParticipant;
@@ -2440,6 +2445,188 @@ void int2dds_clear_last_error(void);
  * `buf` must be null or point to at least `buf_len` writable bytes.
  */
 int32_t int2dds_last_error_message(char *buf, int32_t buf_len);
+
+/**
+ * Loan samples from the cache without removing them. `NO_DATA` with a null loan when
+ * nothing matches. A state mask of 0 selects ANY.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `loan_out` a valid pointer
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_loaned(const struct Int2DdsDataReader *reader,
+                                          int32_t max_samples,
+                                          uint32_t sample_state_mask,
+                                          uint32_t view_state_mask,
+                                          uint32_t instance_state_mask,
+                                          struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_loaned(const struct Int2DdsDataReader *reader,
+                                          int32_t max_samples,
+                                          uint32_t sample_state_mask,
+                                          uint32_t view_state_mask,
+                                          uint32_t instance_state_mask,
+                                          struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * Loan samples matching a Read/QueryCondition without removing them.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `condition` a condition created from it,
+ *   `loan_out` a valid pointer
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                      const struct Int2DdsReadCondition *condition,
+                                                      int32_t max_samples,
+                                                      struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_w_condition_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_w_condition_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                      const struct Int2DdsReadCondition *condition,
+                                                      int32_t max_samples,
+                                                      struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_loaned` limited to the instance `handle`. A NULL or all-zero
+ * (NIL) handle is `INVALID_ARGUMENT`.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `loan_out` a valid pointer
+ * - `handle` must be null or point to a 16-byte instance handle
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                   const uint8_t (*handle)[16],
+                                                   int32_t max_samples,
+                                                   uint32_t sample_state_mask,
+                                                   uint32_t view_state_mask,
+                                                   uint32_t instance_state_mask,
+                                                   struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_instance_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_instance_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                   const uint8_t (*handle)[16],
+                                                   int32_t max_samples,
+                                                   uint32_t sample_state_mask,
+                                                   uint32_t view_state_mask,
+                                                   uint32_t instance_state_mask,
+                                                   struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_instance_loaned` for the next instance after `previous_handle`
+ * that has matching samples. A NULL or NIL handle starts from the first instance.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_instance_loaned`
+ */
+Int2DdsRet int2dds_datareader_read_next_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                        const uint8_t (*previous_handle)[16],
+                                                        int32_t max_samples,
+                                                        uint32_t sample_state_mask,
+                                                        uint32_t view_state_mask,
+                                                        uint32_t instance_state_mask,
+                                                        struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_next_instance_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_instance_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_next_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                        const uint8_t (*previous_handle)[16],
+                                                        int32_t max_samples,
+                                                        uint32_t sample_state_mask,
+                                                        uint32_t view_state_mask,
+                                                        uint32_t instance_state_mask,
+                                                        struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_next_instance_loaned` with a Read/QueryCondition instead of
+ * state masks.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `condition` a condition created from it,
+ *   `loan_out` a valid pointer
+ * - `previous_handle` must be null or point to a 16-byte instance handle
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_next_instance_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                                    const uint8_t (*previous_handle)[16],
+                                                                    const struct Int2DdsReadCondition *condition,
+                                                                    int32_t max_samples,
+                                                                    struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_next_instance_w_condition_loaned` that removes the samples from
+ * the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_next_instance_w_condition_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_next_instance_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                                    const uint8_t (*previous_handle)[16],
+                                                                    const struct Int2DdsReadCondition *condition,
+                                                                    int32_t max_samples,
+                                                                    struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * Number of elements in a loan; 0 for null.
+ *
+ * # Safety
+ * - `loan` must be null or a loan not yet returned
+ */
+uintptr_t int2dds_loaned_samples_length(const struct Int2DdsLoanedSamples *loan);
+
+/**
+ * SampleInfo of element `index`.
+ *
+ * # Safety
+ * - `loan` must be a loan not yet returned, `info_out` a valid pointer
+ */
+Int2DdsRet int2dds_loaned_samples_get_info(const struct Int2DdsLoanedSamples *loan,
+                                           uintptr_t index,
+                                           struct Int2DdsSampleInfo *info_out);
+
+/**
+ * Lends the serialized bytes of element `index`; valid until the loan is returned.
+ * `NO_DATA` with a null pointer for an element without data.
+ *
+ * # Safety
+ * - `loan` must be a loan not yet returned; `data_out` and `size_out` valid pointers
+ */
+Int2DdsRet int2dds_loaned_samples_get_data(const struct Int2DdsLoanedSamples *loan,
+                                           uintptr_t index,
+                                           const uint8_t **data_out,
+                                           uintptr_t *size_out);
+
+/**
+ * Returns `loan` to `reader` and frees it. A loan from another reader is left valid
+ * and owned by the caller (`PRECONDITION_NOT_MET`). A null loan is a no-op.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `loan` must be null or a loan not yet returned; it must not be used after `OK`
+ */
+Int2DdsRet int2dds_datareader_return_loan(const struct Int2DdsDataReader *reader,
+                                          struct Int2DdsLoanedSamples *loan);
 
 /**
  * Create a DomainParticipant

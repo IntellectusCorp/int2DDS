@@ -360,7 +360,12 @@ fn return_loan_rejects_a_loan_from_another_reader() {
     f.write(&[shape(0, 1)], 1);
     let loan = f.readers[0].read_loaned(10, ANY_SAMPLE, ANY_VIEW, ANY_INSTANCE).unwrap();
 
-    assert!(matches!(f.readers[1].return_loan(loan), Err(DdsError::PreconditionNotMet)));
+    let (err, loan) = f.readers[1].return_loan(loan).unwrap_err();
+
+    assert!(matches!(err, DdsError::PreconditionNotMet));
+    assert_eq!(f.readers[0].outstanding_loan_count(), 1);
+    assert_eq!(loan[0].data().unwrap().size, 1);
+    f.readers[0].return_loan(loan).unwrap();
     assert_eq!(f.readers[0].outstanding_loan_count(), 0);
     f.finish();
 }
