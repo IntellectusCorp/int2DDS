@@ -1240,9 +1240,13 @@ impl Subscriber {
 
         let remote_publications =
             self.get_participant()?.get_rtps_participant()?.remote_publications();
-        let cache = self
-            .subscriber_history_cache
-            .get_or_init(|| Arc::new(Mutex::new(SubscriberHistoryCache::new(remote_publications))));
+        let cache = self.subscriber_history_cache.get_or_init(|| {
+            Arc::new(Mutex::new(SubscriberHistoryCache::new(
+                remote_publications,
+                presentation.ordered_access,
+                presentation.coherent_access,
+            )))
+        });
 
         Ok(Some(Arc::clone(cache)))
     }
