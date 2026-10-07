@@ -116,6 +116,13 @@ pub(crate) trait TransportPlugin: Send + Sync {
         None
     }
 
+    /// Whether the periodic SPDP announcement already goes, one by one, to every participant
+    /// discovered so far. A transport that broadcasts instead cannot tell who heard it, so the
+    /// discovery layer repeats the announcement to each known peer on top.
+    fn announces_to_each_known_peer(&self) -> bool {
+        false
+    }
+
     /// Take ownership of the discovery multicast message source.
     ///
     /// Returns `None` if the transport does not support multicast (e.g., TCP).

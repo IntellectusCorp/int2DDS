@@ -405,6 +405,12 @@ impl SedpLogic {
         }
     }
 
+    /// Whether each discovered peer needs our SPDP on its own timer, besides the periodic
+    /// announcement.
+    pub(crate) fn repeats_spdp_to_each_peer(&self) -> bool {
+        !self.transport.announces_to_each_known_peer()
+    }
+
     pub(crate) fn wake_listening_threads(&self) {
         if let Some(waker) = self.multicast_listening_waker.get() {
             let _ = waker.wake();

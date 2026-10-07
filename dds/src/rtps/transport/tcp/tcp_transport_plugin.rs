@@ -521,6 +521,12 @@ impl TransportPlugin for TcpTransportPlugin {
         Some(STREAM_UNBOUNDED_RECEIVE_BYTES)
     }
 
+    /// Every address a discovery or user-data send reaches is confirmed into the announcement
+    /// list, and a confirmed address is announced to on every round.
+    fn announces_to_each_known_peer(&self) -> bool {
+        true
+    }
+
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { .. } => {

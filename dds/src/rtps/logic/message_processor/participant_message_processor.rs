@@ -374,17 +374,19 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             // it does not know yet.
             sending_handler.push_message_and_wake(MessageType::SedpHistoryPush(remote_prefix));
 
-            let _ = sedp_logic.register_periodic_send_timer(
-                remote_prefix,
-                EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
-                period,
-                MessageType::PeriodicParticipantDataUnicast(
-                    None,
+            if sedp_logic.repeats_spdp_to_each_peer() {
+                let _ = sedp_logic.register_periodic_send_timer(
+                    remote_prefix,
+                    EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
                     period,
-                    spdp_discovered_participant_data.clone(),
-                    spdp_payload,
-                ),
-            );
+                    MessageType::PeriodicParticipantDataUnicast(
+                        None,
+                        period,
+                        spdp_discovered_participant_data.clone(),
+                        spdp_payload,
+                    ),
+                );
+            }
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
