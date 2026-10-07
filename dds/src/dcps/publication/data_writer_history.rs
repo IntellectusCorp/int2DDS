@@ -493,7 +493,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         changes: &Vec<Arc<CacheChange>>,
     ) -> DdsResult<Arc<CacheChange>> {
         // Skips the End Coherent Sets, which sample_count leaves out of the limit being freed.
-        let candidate_changes: Cow<'_, Vec<Arc<CacheChange>>> = match self.end_coherent_set_count {
+        let candidate_changes: Cow<'_, [Arc<CacheChange>]> = match self.end_coherent_set_count {
             0 => Cow::Borrowed(changes),
             _ => Cow::Owned(
                 changes.iter().filter(|change| !change.is_end_coherent_set()).cloned().collect(),
@@ -629,7 +629,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     #[allow(clippy::ptr_arg)]
     fn get_first_acked_change_from_vec(
         &self,
-        changes: &Vec<Arc<CacheChange>>,
+        changes: &[Arc<CacheChange>],
     ) -> DdsResult<Option<Arc<CacheChange>>> {
         let rtps_writer = self.get_upgraded_rtps_writer()?;
         let stateful_writer = rtps_writer

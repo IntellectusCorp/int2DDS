@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     cmp::max,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -597,19 +595,17 @@ impl SubscriberHistoryCache {
         let mut discovered_writer_set: Option<GroupDigest> = None;
         let is_coherent_access = self.is_coherent_access;
 
-        loop {
-            let Some(proxy) = self.publishers.get(&publisher_guid) else {
-                break;
-            };
+        // The lowest held position blocks every position above it.
+        while let Some((group_seq_num, is_next_in_group_order)) =
+            self.publishers.get(&publisher_guid).and_then(|proxy| {
+                let group_seq_num = proxy.lowest_pending_group_seq_num()?;
 
-            // The lowest held position blocks every position above it.
-            let Some(group_seq_num) = proxy.lowest_pending_group_seq_num() else {
-                break;
-            };
-
+                Some((group_seq_num, proxy.is_next_in_group_order(group_seq_num)))
+            })
+        {
             // Samples arriving in order pass here and never touch the discovered writer set.
             let mut hole_left_behind = None;
-            if !proxy.is_next_in_group_order(group_seq_num) {
+            if !is_next_in_group_order {
                 let writer_set = *discovered_writer_set
                     .get_or_insert_with(|| self.discovered_writer_set(publisher_guid));
 

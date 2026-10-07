@@ -1493,16 +1493,23 @@ impl SedpLogic {
         }
 
         // A GROUP access scope reader also registers the writer under its Publisher for the
-        // group gate. A writer that announced no Publisher is refused, logged where it is made.
+        // group gate. An unregistered writer has every sample of it dropped by the gate.
         if let Some(subscriber_history_cache) = reader.subscriber_history_cache() {
             let publisher_guid =
                 publication_builtin_topic_data.group_guid().unwrap_or(Guid::UNKNOWN);
             if let Ok(mut cache) = subscriber_history_cache.lock() {
-                let _ = cache.add_matched_writer(
+                if let Err(error) = cache.add_matched_writer(
                     reader.guid().entity_id(),
                     endpoint_guid,
                     publisher_guid,
-                );
+                ) {
+                    log::warn!(
+                        "Reader {} takes no sample of writer {} under the group order: {}",
+                        reader.guid(),
+                        endpoint_guid,
+                        error
+                    );
+                }
             }
         }
 
