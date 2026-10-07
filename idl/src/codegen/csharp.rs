@@ -150,6 +150,7 @@ impl<'a> CsGen<'a> {
     fn emit_bitmask(&mut self, b: &ResolvedBitmask) {
         let name = naming::to_pascal_case(&b.name);
         let (cs_type, _, _, suffix) = Self::bitmask_backing_info(b.bit_bound);
+        self.line(&format!("[DdsBitmask(\"{}\", {})]", b.qualified_name, b.bit_bound));
         self.line("[Flags]");
         self.line(&format!("public enum {} : {}", name, cs_type));
         self.line("{");
@@ -178,9 +179,13 @@ impl<'a> CsGen<'a> {
             ("ulong", "ReadU64", "WriteU64")
         };
 
+        self.line(&format!("[DdsType(\"{}\", 0, false)]", b.qualified_name));
+        self.line("[DdsBitset]");
         self.line(&format!("public class {}", class_name));
         self.line("{");
         self.indent += 1;
+
+        self.emit_bitset_type_info_metadata(b);
 
         // Properties for each bitfield
         for f in &b.fields {
@@ -373,9 +378,20 @@ impl<'a> CsGen<'a> {
         let disc_read = self.discriminant_read_method(&u.discriminant_type).to_string();
         let disc_write = self.discriminant_write_method(&u.discriminant_type).to_string();
 
+        self.line(&format!(
+            "[DdsType(\"{}\", {}, false)]",
+            u.qualified_name,
+            super::extensibility_code(u.extensibility)
+        ));
+        self.line(&format!(
+            "[DdsUnion({})]",
+            super::field_type_code(&super::discriminator_kind(&u.discriminant_type)).unwrap_or(5)
+        ));
         self.line(&format!("public class {}", class_name));
         self.line("{");
         self.indent += 1;
+
+        self.emit_union_type_info_metadata(u);
 
         // Discriminator property
         self.line(&format!("public {} Discriminator {{ get; set; }}", disc_cs_type));
@@ -579,41 +595,17 @@ impl<'a> CsGen<'a> {
         self.line("");
     }
 
-    /// FFI INT2DDS_FIELD_* constant for a scalar/string/char type; None for composite types.
-    fn field_constant(ty: &ResolvedType) -> Option<i32> {
-        Some(match ty {
-            ResolvedType::Bool => 0,
-            ResolvedType::U8 => 1,   // BYTE (octet)
-            ResolvedType::Char => 2, // CHAR8
-            ResolvedType::I8 => 3,
-            ResolvedType::I16 => 4,
-            ResolvedType::I32 => 5,
-            ResolvedType::I64 => 6,
-            ResolvedType::UInt8 => 7, // UINT8
-            ResolvedType::U16 => 8,
-            ResolvedType::U32 => 9,
-            ResolvedType::U64 => 10,
-            ResolvedType::F32 => 11,
-            ResolvedType::F64 => 12,
-            ResolvedType::String { .. } => 13,
-            ResolvedType::WChar => 14, // CHAR16
-            ResolvedType::WString { .. } => 15,
-            _ => return None,
-        })
-    }
-
     /// A member is advertisable byte-correctly when its type is a primitive/string, an enum, a
-    /// (non-@external) nested struct that is itself recursively advertisable, or a sequence/array
-    /// whose element is one of those (single-level). Bitmask, map, union, and nested collections
-    /// are excluded (they fall back to the name-based keyed path).
+    /// bitmask, a bitset, a nested struct or union that is itself recursively advertisable, a
+    /// sequence/array of one of those (single-level), or a map with a scalar key and such a
+    /// value. An `@external` nested struct is advertised like any other nested struct,
+    /// carrying the EXTERNAL member flag exactly as the Rust derive does for `Box<T>`. Nested
+    /// collections, enum-keyed maps and cyclic nested-type references are excluded.
     fn member_advertisable(
         &self,
         m: &ResolvedMember,
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
-        if m.is_external && matches!(m.resolved_type, ResolvedType::Struct(_)) {
-            return false;
-        }
         self.type_advertisable(&m.resolved_type, visited)
     }
 
@@ -624,47 +616,69 @@ impl<'a> CsGen<'a> {
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
         match ty {
-            ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+            ResolvedType::Struct(name) => self.named_advertisable(name, visited),
             ResolvedType::Enum(_) => true,
+            ResolvedType::Bitmask(name) => self.find_bitmask(name).is_some(),
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                match element.as_ref() {
-                    ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
-                    ResolvedType::Enum(_) => true,
-                    other => Self::field_constant(other).is_some(),
-                }
+                self.element_advertisable(element, visited)
             }
-            other => Self::field_constant(other).is_some(),
+            ResolvedType::Map { key, value, .. } => {
+                super::field_type_code(key).is_some() && self.element_advertisable(value, visited)
+            }
+            other => super::field_type_code(other).is_some(),
         }
     }
 
-    /// The generated CLR class name (PascalCase) for an advertisable named element
-    /// (Struct/Enum), else None. Used to gate collection elements and emit nested refs.
+    /// A collection element or map value is advertisable when it is a leaf type (not
+    /// another collection) that is itself advertisable.
+    fn element_advertisable(
+        &self,
+        ty: &ResolvedType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        !matches!(
+            ty,
+            ResolvedType::Sequence { .. } | ResolvedType::Array { .. } | ResolvedType::Map { .. }
+        ) && self.type_advertisable(ty, visited)
+    }
+
+    /// The generated CLR type name (PascalCase) for an advertisable named element
+    /// (struct/union/bitset/enum/bitmask), else None. Used to gate collection elements and
+    /// emit nested refs.
     fn element_class_name(ty: &ResolvedType) -> Option<String> {
         match ty {
-            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
-                let simple = name.rsplit("::").next().unwrap_or(name);
-                Some(naming::to_pascal_case(simple))
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) | ResolvedType::Bitmask(name) => {
+                Some(cs_type_ref(name))
             }
             _ => None,
         }
     }
 
-    /// A named struct is advertisable when it exists in the model and all of its members are
-    /// recursively advertisable. `visited` guards against @external-induced type cycles.
-    fn struct_advertisable(
+    /// A named struct, union or bitset is advertisable when it exists in the model and all
+    /// of its members are recursively advertisable. `visited` guards against
+    /// @external-induced type cycles.
+    fn named_advertisable(
         &self,
         name: &str,
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
         let simple = name.rsplit("::").next().unwrap_or(name);
+        if self.find_bitset(simple).is_some() {
+            return true;
+        }
         if !visited.insert(simple.to_string()) {
             return false;
         }
-        let ok = match self.find_struct(simple).cloned() {
-            Some(s) => {
-                self.collect_all_members(&s).iter().all(|m| self.member_advertisable(m, visited))
-            }
-            None => false,
+        let ok = if let Some(s) = self.find_struct(simple).cloned() {
+            self.collect_all_members(&s).iter().all(|m| self.member_advertisable(m, visited))
+        } else if let Some(u) = self.find_union(simple).cloned() {
+            u.cases
+                .iter()
+                .map(|c| &c.member.resolved_type)
+                .chain(u.default_case.iter().map(|d| &d.resolved_type))
+                .all(|ty| self.type_advertisable(ty, visited))
+        } else {
+            false
         };
         visited.remove(simple);
         ok
@@ -691,7 +705,13 @@ impl<'a> CsGen<'a> {
 
     /// One `new DdsTypeInfoField(op, name, type_const, size, flags)` initializer for a member.
     fn type_info_field_spec(m: &ResolvedMember) -> String {
-        let flags = Self::member_flags(m);
+        Self::type_info_field_spec_with_flags(m, Self::member_flags(m))
+    }
+
+    /// The `DdsTypeInfoField` initializer for a member with an explicit `INT2DDS_MEMBER_*`
+    /// flag bitmask: nested named types by `typeof`, maps by their key/value kinds, then the
+    /// scalar forms.
+    fn type_info_field_spec_with_flags(m: &ResolvedMember, flags: i32) -> String {
         match &m.resolved_type {
             ResolvedType::String { bound } => format!(
                 "new DdsTypeInfoField(\"string\", \"{}\", 0, {}u, {}),",
@@ -715,7 +735,7 @@ impl<'a> CsGen<'a> {
                         flags
                     )
                 } else {
-                    let ec = Self::field_constant(element).unwrap_or(0);
+                    let ec = super::field_type_code(element).unwrap_or(0);
                     format!(
                         "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}),",
                         m.name,
@@ -732,27 +752,111 @@ impl<'a> CsGen<'a> {
                         m.name, cls, size, flags
                     )
                 } else {
-                    let ec = Self::field_constant(element).unwrap_or(0);
+                    let ec = super::field_type_code(element).unwrap_or(0);
                     format!(
                         "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
                         m.name, ec, size, flags
                     )
                 }
             }
-            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
-                // Mirror the field-type rendering (type_to_csharp) so typeof(...) names the
-                // exact generated class (struct or enum) that declares this member.
-                let cls = cs_type_ref(name);
+            ResolvedType::Map { key, value, bound } => {
+                let kc = super::field_type_code(key).unwrap_or(0);
+                let kb = super::scalar_string_bound(key);
+                if let Some(cls) = Self::element_class_name(value) {
+                    format!(
+                        "new DdsTypeInfoField(\"map_nested\", \"{}\", {}, {}u, typeof({}), {}u, {}),",
+                        m.name,
+                        kc,
+                        kb,
+                        cls,
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                } else {
+                    format!(
+                        "new DdsTypeInfoField(\"map\", \"{}\", {}, {}u, {}, {}u, {}u, {}),",
+                        m.name,
+                        kc,
+                        kb,
+                        super::field_type_code(value).unwrap_or(0),
+                        super::scalar_string_bound(value),
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                }
+            }
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) | ResolvedType::Bitmask(name) => {
                 format!(
                     "new DdsTypeInfoField(\"nested\", \"{}\", typeof({}), {}),",
-                    m.name, cls, flags
+                    m.name,
+                    cs_type_ref(name),
+                    flags
                 )
             }
             other => {
-                let c = Self::field_constant(other).unwrap_or(0);
+                let c = super::field_type_code(other).unwrap_or(0);
                 format!("new DdsTypeInfoField(\"field\", \"{}\", {}, 0u, {}),", m.name, c, flags)
             }
         }
+    }
+
+    /// Emit the union's `DdsTypeInfoFields`: every case member (PascalCase like the Rust
+    /// variant) followed by a `label` entry per case label, and the `default:` member
+    /// flagged `INT2DDS_MEMBER_DEFAULT` under the implicit default discriminator. Omitted
+    /// when a case member cannot be advertised.
+    fn emit_union_type_info_metadata(&mut self, u: &ResolvedUnion) {
+        let mut visited = std::collections::HashSet::new();
+        if !self.named_advertisable(&u.name, &mut visited) {
+            return;
+        }
+        self.line(
+            "public static readonly DdsTypeInfoField[] DdsTypeInfoFields = new DdsTypeInfoField[]",
+        );
+        self.line("{");
+        self.indent += 1;
+        for case in &u.cases {
+            let m = super::union_case_member(&case.member);
+            self.line(&Self::type_info_field_spec_with_flags(&m, 0));
+            for label in &case.labels {
+                if let Some(value) = super::union_label_value(self.model, label) {
+                    self.line(&Self::union_label_spec(&m.name, value));
+                }
+            }
+        }
+        if let Some(dc) = &u.default_case {
+            let m = super::union_case_member(dc);
+            self.line(&Self::type_info_field_spec_with_flags(&m, super::MEMBER_DEFAULT));
+            self.line(&Self::union_label_spec(&m.name, super::union_default_label(u)));
+        }
+        self.indent -= 1;
+        self.line("};");
+        self.line("");
+    }
+
+    /// One `label` entry attaching `value` to the union member `member`.
+    fn union_label_spec(member: &str, value: i64) -> String {
+        format!("new DdsTypeInfoField(\"label\", \"{}\", {}, 0u, 0),", member, value)
+    }
+
+    /// Emit the bitset's `DdsTypeInfoFields`: one `bitfield` entry per field carrying its
+    /// holder kind and width, matching the derive's `#[dds_type(bitset)]`.
+    fn emit_bitset_type_info_metadata(&mut self, b: &ResolvedBitset) {
+        self.line(
+            "public static readonly DdsTypeInfoField[] DdsTypeInfoFields = new DdsTypeInfoField[]",
+        );
+        self.line("{");
+        self.indent += 1;
+        for f in &b.fields {
+            let holder =
+                super::field_type_code(&super::bitfield_holder_kind(f.bit_width)).unwrap_or(0);
+            self.line(&format!(
+                "new DdsTypeInfoField(\"bitfield\", \"{}\", {}, {}u, 0),",
+                f.name, holder, f.bit_width
+            ));
+        }
+        self.indent -= 1;
+        self.line("};");
+        self.line("");
     }
 
     fn emit_struct(&mut self, s: &ResolvedStruct) {
@@ -766,17 +870,11 @@ impl<'a> CsGen<'a> {
         let all_members = self.collect_all_members(s);
         let has_key = all_members.iter().any(|m| m.is_key);
 
-        let ext_int = match s.extensibility {
-            ExtensibilityKind::Final => 0,
-            ExtensibilityKind::Appendable => 1,
-            ExtensibilityKind::Mutable => 2,
-        };
-
         // DdsType attribute for runtime reflection (Topic creation uses this)
         self.line(&format!(
             "[DdsType(\"{}\", {}, {})]",
             s.qualified_name,
-            ext_int,
+            super::extensibility_code(s.extensibility),
             if has_key { "true" } else { "false" }
         ));
 
@@ -797,9 +895,6 @@ impl<'a> CsGen<'a> {
         ));
         self.line("");
 
-        // XTypes TypeObject advertisement metadata (flat types only). The runtime reflects
-        // this and advertises a conformant TypeObject during discovery (matching the Rust
-        // derive). Nested/named types are omitted and fall back to name-based matching.
         self.emit_type_info_metadata(&all_members);
 
         // Properties (all members including inherited)
@@ -1603,6 +1698,18 @@ impl<'a> CsGen<'a> {
         self.model.enums.iter().chain(self.model.imported.enums.iter()).find(|e| e.name == simple)
     }
 
+    /// Locate a union declared in this file by leaf name.
+    fn find_union(&self, name: &str) -> Option<&ResolvedUnion> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.unions.iter().find(|u| u.name == simple)
+    }
+
+    /// Locate a bitset declared in this file by leaf name.
+    fn find_bitset(&self, name: &str) -> Option<&ResolvedBitset> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.bitsets.iter().find(|b| b.name == simple)
+    }
+
     // ---- Helpers ----
 
     fn line(&mut self, s: &str) {
@@ -1663,6 +1770,31 @@ mod tests {
         assert!(code.contains(r#"new DdsTypeInfoField("seq", "payload", 7, 0u, 0),"#), "{}", code);
         // octet -> INT2DDS_FIELD_BYTE = 1 (distinct from uint8's 7)
         assert!(code.contains(r#"new DdsTypeInfoField("field", "raw", 1, 0u, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_external_nested_struct() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Inner {
+                long v;
+            };
+            @final
+            struct Outer {
+                @key long id;
+                @external Inner ext;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Outer.idl", &CSharpOptions::default());
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "ext", typeof(Inner), 8),"#),
+            "{}",
+            code
+        );
     }
 
     #[test]
@@ -1731,14 +1863,164 @@ mod tests {
     fn test_type_info_metadata_omitted_for_unsupported_members() {
         let defs = parse_idl(
             r#"
-            struct Widget { map<long, long> m; long x; };
+            enum Kind { A, B };
+            struct Widget { map<Kind, long> m; long x; };
             "#,
         )
         .unwrap();
         let model = resolve(defs).unwrap();
         let code = generate(&model, "Widget.idl", &CSharpOptions::default());
-        // Widget has a map member -> not advertisable -> advertisement metadata omitted.
+        // An enum-keyed map has no scalar key kind -> not advertisable -> metadata omitted.
         assert!(!code.contains("DdsTypeInfoFields"), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_map_members() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Value { long code; };
+            @final
+            struct Table {
+                @key long id;
+                map<string, long> counts;
+                map<long, Value> values;
+                map<string<8>, double, 10> bounded;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Table.idl", &CSharpOptions::default());
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("map", "counts", 13, 0u, 5, 0u, 0u, 0),"#),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                r#"new DdsTypeInfoField("map_nested", "values", 5, 0u, typeof(Value), 0u, 0),"#
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("map", "bounded", 13, 8u, 12, 0u, 10u, 0),"#),
+            "{}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_bitmask_members() {
+        let defs = parse_idl(
+            r#"
+            @bit_bound(8)
+            bitmask Perm { READ, WRITE, @position(5) EXEC };
+            struct Holder { @key long id; Perm p; sequence<Perm> ps; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &CSharpOptions::default());
+        assert!(code.contains(r#"[DdsBitmask("Perm", 8)]"#), "{}", code);
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "p", typeof(Perm), 0),"#),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("seq_nested", "ps", typeof(Perm), 0u, 0),"#),
+            "{}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_bitset() {
+        let defs = parse_idl(
+            r#"
+            bitset Small { bitfield<1> flag; bitfield<3> mode; };
+            bitset Wide { bitfield<12> a; bitfield<20> b; };
+            struct Holder { @key long id; Small s; Wide w; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &CSharpOptions::default());
+        assert!(code.contains("[DdsType(\"Small\", 0, false)]\n    [DdsBitset]"), "{}", code);
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("bitfield", "flag", 1, 1u, 0),"#),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("bitfield", "mode", 1, 3u, 0),"#),
+            "{}",
+            code
+        );
+        assert!(code.contains(r#"new DdsTypeInfoField("bitfield", "a", 8, 12u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("bitfield", "b", 9, 20u, 0),"#), "{}", code);
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "s", typeof(Small), 0),"#),
+            "{}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_union() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Inner { long x; };
+            union Choice switch (long) {
+                case 0:
+                case 1:
+                    long num;
+                case 2:
+                    string<16> text;
+                case 3:
+                    Inner inner;
+                default:
+                    octet other;
+            };
+            union Flag switch (boolean) {
+                case TRUE: long yes;
+                case FALSE: string no;
+            };
+            @final
+            struct Holder {
+                @key long id;
+                Choice choice;
+                Flag flag;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &CSharpOptions::default());
+        assert!(code.contains("[DdsType(\"Choice\", 1, false)]\n    [DdsUnion(5)]"), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "Num", 5, 0u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("label", "Num", 0, 0u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("label", "Num", 1, 0u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("string", "Text", 0, 16u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("label", "Text", 2, 0u, 0),"#), "{}", code);
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "Inner", typeof(Inner), 0),"#),
+            "{}",
+            code
+        );
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "Other", 1, 0u, 16),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("label", "Other", -1, 0u, 0),"#), "{}", code);
+        assert!(code.contains("[DdsType(\"Flag\", 1, false)]\n    [DdsUnion(1)]"), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("label", "Yes", 1, 0u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("label", "No", 0, 0u, 0),"#), "{}", code);
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "choice", typeof(Choice), 0),"#),
+            "{}",
+            code
+        );
     }
 
     #[test]

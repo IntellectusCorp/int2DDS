@@ -1,0 +1,49 @@
+// Conformance type: every member kind the Java backend emits, decoded by the core.
+enum CdrGoldenColor { RED, GREEN, BLUE };
+
+@extensibility(FINAL)
+struct CdrGoldenPoint {
+    long x;
+    double y;
+};
+
+@extensibility(APPENDABLE)
+struct CdrGoldenInner {
+    long x;
+    double y;
+    string label;
+};
+
+@extensibility(APPENDABLE)
+struct CdrGolden {
+    @key long id;
+    boolean bool_val;
+    int8 i8_val;
+    uint8 u8_val;
+    int16 i16_val;
+    uint16 u16_val;
+    int32 i32_val;
+    uint32 u32_val;
+    int64 i64_val;
+    uint64 u64_val;
+    string unbounded_str;
+    @key string<64> bounded_str;
+    octet byte_val;
+    char char_val;
+    float f32_val;
+    double f64_val;
+    sequence<wstring> wstr_seq;
+    wstring wstr_arr[2];
+    wstring unbounded_wstr;
+    wstring<32> bounded_wstr;
+    CdrGoldenColor color;
+    CdrGoldenPoint point;
+    CdrGoldenInner inner;
+    sequence<int64> i64_seq;
+    double f64_arr[3];
+    sequence<octet> byte_seq;
+    sequence<string> str_seq;
+    sequence<CdrGoldenColor> color_seq;
+    sequence<CdrGoldenInner> inner_seq;
+    CdrGoldenPoint point_arr[2];
+};
