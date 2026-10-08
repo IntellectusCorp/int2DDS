@@ -2511,10 +2511,11 @@ mod tests {
                 .unwrap();
         }
 
-        subscriber.begin_access().unwrap();
-
+        // Nothing reaches a reader while an access block is open, so every attempt opens its own.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let entries = loop {
+            subscriber.begin_access().unwrap();
+
             let entries = subscriber
                 .get_datareaders(
                     &[SampleStateKind::ANY_SAMPLE_STATE],
@@ -2526,6 +2527,8 @@ mod tests {
             if entries.len() == 2 {
                 break entries;
             }
+
+            subscriber.end_access().unwrap();
 
             assert!(
                 std::time::Instant::now() < deadline,
@@ -2666,12 +2669,12 @@ mod tests {
                 .unwrap();
         }
 
-        subscriber.begin_access().unwrap();
-
+        // Nothing reaches a reader while an access block is open, so every attempt opens its own.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
 
-        // Wait for both samples to arrive
         loop {
+            subscriber.begin_access().unwrap();
+
             let delivered = reader
                 .read(
                     10,
@@ -2685,6 +2688,8 @@ mod tests {
             if delivered == 2 {
                 break;
             }
+
+            subscriber.end_access().unwrap();
 
             assert!(
                 std::time::Instant::now() < deadline,
