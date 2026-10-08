@@ -2,8 +2,7 @@
 
 use libloading::{Library, Symbol};
 use socket2::Socket;
-use std::ffi::{CStr, OsString};
-use std::os::raw::c_char;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -28,7 +27,6 @@ struct GateResult {
 
 type AbiVersionFn = unsafe extern "C" fn() -> u32;
 type GuardFn = unsafe extern "C" fn(*mut GateResult) -> i32;
-type ResolveIpFn = unsafe extern "C" fn(*mut c_char, usize) -> i32;
 type DiscoveryInitFn = unsafe extern "C" fn(usize) -> i32;
 type DiscoverySendFn = unsafe extern "C" fn(usize, u16, *const u8, usize, u32) -> i32;
 type HeartbeatPeriodFn = unsafe extern "C" fn(f64) -> f64;
@@ -36,7 +34,6 @@ type HeartbeatPeriodFn = unsafe extern "C" fn(f64) -> f64;
 struct Entries {
     discovery_send: DiscoverySendFn,
     guard: GuardFn,
-    resolve_ip: ResolveIpFn,
     discovery_init: DiscoveryInitFn,
     heartbeat_period: HeartbeatPeriodFn,
 }
@@ -256,7 +253,6 @@ fn resolve_entries(library: Library, path: &Path) -> Result<Enterprise, String> 
         let entries = Entries {
             discovery_send: entry!(DiscoverySendFn, b"int2dds_ee_discovery_send"),
             guard: entry!(GuardFn, b"int2dds_ee_guard"),
-            resolve_ip: entry!(ResolveIpFn, b"int2dds_ee_resolve_ip"),
             discovery_init: entry!(DiscoveryInitFn, b"int2dds_ee_discovery_init"),
             heartbeat_period: entry!(HeartbeatPeriodFn, b"int2dds_ee_heartbeat_period"),
         };
@@ -287,11 +283,6 @@ fn enterprise() -> Option<&'static Enterprise> {
         LoadState::Loaded(e) => Some(e),
         _ => None,
     }
-}
-
-#[inline]
-pub(crate) fn is_loaded() -> bool {
-    enterprise().is_some()
 }
 
 /// Fail-open only when no library is present (contract row 2); every load
@@ -343,21 +334,6 @@ fn expiry_notice(days: i32) -> Option<(log::Level, String)> {
         )),
         _ => None,
     }
-}
-
-/// `None` means the core uses its own detection.
-pub(crate) fn resolve_ip() -> Option<String> {
-    let ee = enterprise()?;
-    let mut buffer = [0 as c_char; 64];
-    // SAFETY: `buffer` is a live array of exactly `buffer.len()` elements.
-    let ret = unsafe { (ee.entries.resolve_ip)(buffer.as_mut_ptr(), buffer.len()) };
-    if ret != 0 {
-        log::warn!("[enterprise] resolve_ip failed with code {ret}");
-        return None;
-    }
-    // SAFETY: on success the library wrote a null-terminated string in range.
-    let s = unsafe { CStr::from_ptr(buffer.as_ptr()) };
-    Some(s.to_string_lossy().into_owned())
 }
 
 #[cfg(windows)]
@@ -449,12 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn absent_library_resolves_no_ip() {
-        open_core_env();
-        assert_eq!(resolve_ip(), None);
-    }
-
-    #[test]
     fn absent_library_keeps_default_heartbeat() {
         open_core_env();
         assert_eq!(heartbeat_period(2.0), 2.0);
@@ -467,12 +437,6 @@ mod tests {
         let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
         assert!(extended_discovery_init(&s).is_ok());
         assert!(extended_discovery_send(&s, 7400, b"x", 0).is_ok());
-    }
-
-    #[test]
-    fn absent_library_reports_not_loaded() {
-        open_core_env();
-        assert!(!is_loaded());
     }
 
     #[test]
