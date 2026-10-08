@@ -396,6 +396,10 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
 
     // Store an End Coherent Set marker without lifespan, capacity or instance bookkeeping.
     pub(crate) fn add_end_coherent_set(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()> {
+        // The only other sweep runs in add_change_with_cleanup, which a set without a write never
+        // reaches.
+        self.release_end_coherent_sets_without_members()?;
+
         // Sent changes are not retained: deliver, drop from the RTPS cache, reclaim the buffer.
         if self.purge_sent_changes {
             self.add_change_to_rtps_writer_cache(a_change.clone())?;
