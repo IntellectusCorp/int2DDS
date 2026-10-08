@@ -617,6 +617,12 @@ impl Subscriber {
             return Err(DdsError::PreconditionNotMet);
         }
 
+        // DDS v1.4 2.2.2.5.2.6: a reader with outstanding loans cannot be deleted.
+        if datareader.has_outstanding_loans() {
+            log::debug!("[delete] refusing delete_datareader: reader has outstanding loans");
+            return Err(DdsError::PreconditionNotMet);
+        }
+
         let handle = datareader.get_instance_handle()?;
         let topic_description = datareader.get_topicdescription()?;
         let topic_name = effective_topic_name(topic_description.as_ref())?;
@@ -774,6 +780,10 @@ impl Subscriber {
         {
             match self.get_datareaders_internal() {
                 Ok(readers) => {
+                    // Refuse before deleting anything, so a loan never leaves a half-emptied subscriber.
+                    if readers.iter().any(|reader| reader.has_outstanding_loans()) {
+                        return Err(DdsError::PreconditionNotMet);
+                    }
                     for reader in readers {
                         reader.delete_contained_entities()?;
                         self.try_delete_datareader(&reader)?;

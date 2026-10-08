@@ -59,6 +59,7 @@ pub mod dynamic_value;
 pub mod env;
 pub mod last_error;
 pub mod listener;
+pub mod loan;
 pub mod participant;
 pub mod publisher;
 pub mod qos;
