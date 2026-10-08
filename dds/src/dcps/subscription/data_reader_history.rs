@@ -727,7 +727,12 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             .map(|map| {
                 let mut changes: Vec<Arc<CacheChange>> = map.values().flatten().cloned().collect();
 
-                changes.sort_by_key(|change| change.presentation_info().group_seq_num);
+                // A sample without a group sequence number sorts last, not first.
+                changes.sort_by_key(|change| {
+                    let group_seq_num = change.presentation_info().group_seq_num;
+
+                    (group_seq_num.is_none(), group_seq_num)
+                });
 
                 changes
             })
