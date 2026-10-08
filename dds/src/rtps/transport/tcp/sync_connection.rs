@@ -137,6 +137,15 @@ impl OutboundConnection {
     pub(crate) fn send(&self, frame: &[u8]) -> io::Result<SendOutcome> {
         let mut state = self.lock();
 
+        // A write into a stream the peer has already closed is accepted locally
+        // and then lost, so the frame must not start on it.
+        if peer_has_closed(state.wire.socket()) {
+            let peer = state.peer();
+            return Err(self.fail(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                format!("peer {peer} has closed the connection"),
+            )));
+        }
         if let Err(error) = state.drain_pending() {
             return Err(self.fail(error));
         }
@@ -250,6 +259,22 @@ impl ConnectionState {
             Err(_) => "<disconnected>".to_string(),
         }
     }
+}
+
+/// Whether the peer has sent a FIN or a reset. Data the peer may still send,
+/// such as TLS session tickets, does not count.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_has_closed(socket: &TcpStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut poll_fd = libc::pollfd { fd: socket.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
+    // SAFETY: one valid pollfd for a socket this connection owns, zero timeout.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+    ready > 0 && poll_fd.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR) != 0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn peer_has_closed(_socket: &TcpStream) -> bool {
+    false
 }
 
 /// The socket refused the bytes for now but the connection is intact.

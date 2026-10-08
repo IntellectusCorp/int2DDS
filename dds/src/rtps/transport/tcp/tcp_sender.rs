@@ -473,6 +473,39 @@ mod tests {
         frame
     }
 
+    /// A peer that went away and came back on the same port must receive the
+    /// very first frame sent after its return. The old connection is dead even
+    /// though nothing has failed on it yet, so writing into it loses the frame.
+    #[test]
+    fn the_first_frame_after_a_peer_restarts_on_the_same_port_arrives() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let peer = listener.local_addr().expect("addr");
+        let config =
+            TcpConfig { connect_timeout: Duration::from_millis(500), ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let before = test_message(0x02, b"before the restart");
+        let after = test_message(0x02, b"after the restart");
+
+        sender.send_to(peer, TcpFrameKind::Discovery, &before).expect("first send");
+        let mut old = accept_within(&listener, Duration::from_secs(2)).expect("first connection");
+        assert_eq!(read_frame(&mut old, &before), test_framed(&before));
+
+        drop(old);
+        drop(listener);
+        let restarted = std::net::TcpListener::bind(peer).expect("same port again");
+        // Lets the old peer's FIN reach the sender's socket, as it would long
+        // before a crashed process has been started again.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let result = sender.send_to(peer, TcpFrameKind::Discovery, &after);
+        let mut new = accept_within(&restarted, Duration::from_secs(2))
+            .expect("the frame never reached the restarted peer: no connection was opened");
+        assert_eq!(read_frame(&mut new, &after), test_framed(&after));
+        result.expect("send after the restart");
+
+        sender.shutdown();
+    }
+
     /// A frame whose write fails must not be dropped: the slot is reopened and
     /// the same frame goes out on the new connection, once.
     #[test]
