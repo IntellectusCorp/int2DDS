@@ -521,6 +521,12 @@ impl TransportPlugin for TcpTransportPlugin {
         Some(STREAM_UNBOUNDED_RECEIVE_BYTES)
     }
 
+    /// Every address a discovery or user-data send reaches is confirmed into the announcement
+    /// list, and a confirmed address is announced to on every round.
+    fn announces_to_each_known_peer(&self) -> bool {
+        true
+    }
+
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { .. } => {
@@ -1233,6 +1239,64 @@ mod tests {
         assert_eq!(received.len(), 1, "the announcement must reach the peer that answers");
         assert_eq!(received[0].0, TcpFrameKind::Discovery);
         assert_eq!(received[0].1.as_ref(), test_framed(&announcement).as_slice());
+
+        sender.close();
+        receiver.close();
+    }
+
+    /// The announcement is all that keeps a discovered peer from expiring this participant, so a
+    /// guessed address must be announced to on every round once a discovery send has reached it.
+    #[test]
+    fn a_peer_reached_by_a_discovery_send_is_announced_to_every_round() {
+        let domain = next_test_domain();
+        let receiver = make_scanning_plugin(domain, None).expect("receiver");
+        // The receiver is the only slot guessed, so the first round reaches it at
+        // once on a host where an empty port takes a connect timeout to fail.
+        let send_cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec!["127.0.0.1:0".parse().unwrap()],
+            peer_search_slots: 1,
+            ..TcpConfig::default()
+        };
+        let sender = TcpTransportPlugin::new(
+            domain,
+            1,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0x55; 12],
+            send_cfg,
+        )
+        .unwrap();
+
+        let mut listener = take_listener(&receiver);
+        let locator = Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, receiver.listener_port as u32);
+        let announce = |payload: &[u8]| {
+            let announcement = test_message(BUILTIN_WRITER, payload);
+            sender.send(&announcement, &SendTarget::SPDPDiscovery { initial_peers: &[] }).unwrap();
+            announcement
+        };
+
+        let guessed_first = announce(b"guessed-1");
+        // A connection opened by the discovery send below would make the dial worker drop the
+        // queued first announcement.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sender.sender.connection_count() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let guessed_second = announce(b"guessed-2");
+        let discovery = test_message(BUILTIN_WRITER, b"sedp");
+        sender.send(&discovery, &SendTarget::SEDPDiscovery(&locator)).unwrap();
+        let reached_first = announce(b"reached-1");
+        let reached_second = announce(b"reached-2");
+
+        let received: Vec<Vec<u8>> =
+            pump(&mut listener, 4).into_iter().map(|(_, data)| data.to_vec()).collect();
+        let arrived = |message: &[u8]| received.contains(&test_framed(message));
+        assert!(arrived(&guessed_first), "the first round tries every guess");
+        assert!(!arrived(&guessed_second), "an unanswered guess is not asked again at once");
+        assert!(arrived(&discovery));
+        assert!(arrived(&reached_first), "a reached peer is announced to");
+        assert!(arrived(&reached_second), "and on every round, not on the aging schedule");
 
         sender.close();
         receiver.close();
