@@ -942,6 +942,11 @@ impl Publisher {
             Without delivering both values together, readers might misinterpret them as indicating an aircraft on a collision course.
         */
         let _operation = self.lifecycle.begin_operation()?;
+
+        // Holds off writes so that the set opens between two group sequence numbers.
+        let _allocation =
+            self.gsn_allocation_lock.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
         // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
         let previous_depth = self.coherent_depth.fetch_add(1, Ordering::AcqRel);
 
@@ -969,14 +974,7 @@ impl Publisher {
             // Depth was 0: no matching begin_coherent_changes.
             Err(_) => Err(DdsError::PreconditionNotMet),
             // Depth 1 -> 0: outermost end closes the set, writers send their end markers.
-            Ok(1) => {
-                let end_result = self.end_writer_coherent_sets();
-                self.group_seq_state
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?
-                    .coherent_set_start = None;
-                end_result
-            }
+            Ok(1) => self.end_writer_coherent_sets(),
             // Depth 2+ -> 1+: nested end, the set stays open.
             Ok(_) => Ok(()),
         }
@@ -1038,6 +1036,12 @@ impl Publisher {
                 writer_group_info: Some(writer_set),
             });
         }
+
+        // The start is cleared before the lock is released, so no later sample reads it.
+        self.group_seq_state
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .coherent_set_start = None;
 
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
