@@ -551,18 +551,16 @@ mod tests {
         change
     }
 
-    // A marker from a writer that wrote in the set carries PID_COHERENT_SET, one from a writer
-    // that wrote nothing does not. Both name the group coherent set they close.
+    // An End Coherent Set from a writer that wrote in the set carries PID_COHERENT_SET, one from a
+    // writer that wrote nothing does not. Both carry PID_GROUP_COHERENT_SET and no payload.
     #[test]
-    fn reads_the_group_coherent_set_off_an_end_coherent_set_marker() {
-        let ten = Some(SequenceNumber::from_i64(10));
-
-        assert_eq!(end_coherent_set(13, 10, Some(10)).ended_group_coherent_set(), ten);
-        assert_eq!(end_coherent_set(1, 10, None).ended_group_coherent_set(), ten);
-        // A set member carries a payload, so it is never a marker.
-        assert_eq!(coherent_member(10).ended_group_coherent_set(), None);
-        // A dispose of a set member carries the key as its payload, so it is not one either.
-        assert_eq!(disposed_coherent_member(11, 10).ended_group_coherent_set(), None);
+    fn recognizes_an_end_coherent_set_by_its_empty_payload() {
+        assert!(end_coherent_set(13, 10, Some(10)).is_end_coherent_set());
+        assert!(end_coherent_set(1, 10, None).is_end_coherent_set());
+        // A set member carries a payload.
+        assert!(!coherent_member(10).is_end_coherent_set());
+        // A dispose of a set member carries the key as its payload.
+        assert!(!disposed_coherent_member(11, 10).is_end_coherent_set());
     }
 
     // The group cursor owns the markers, so a reader cache that knows nothing of group coherent

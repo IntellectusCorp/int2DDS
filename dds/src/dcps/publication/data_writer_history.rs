@@ -592,9 +592,9 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             .iter()
             .filter(|change| change.is_end_coherent_set())
             .filter(|end_coherent_set| {
-                end_coherent_set.ended_group_coherent_set().is_some_and(|group_coherent_set| {
-                    !stored_group_coherent_sets.contains(&group_coherent_set)
-                })
+                end_coherent_set.presentation_info().group_coherent_set.is_some_and(
+                    |group_coherent_set| !stored_group_coherent_sets.contains(&group_coherent_set),
+                )
             })
             .filter(|end_coherent_set| self.is_change_acked_by_all(end_coherent_set))
             .cloned()
@@ -604,7 +604,8 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             debug!(
                 "[history] releasing end coherent set {:?} at seq={}",
                 end_coherent_set
-                    .ended_group_coherent_set()
+                    .presentation_info()
+                    .group_coherent_set
                     .map(|group_coherent_set| group_coherent_set.to_i64()),
                 end_coherent_set.sequence_number().to_i64()
             );

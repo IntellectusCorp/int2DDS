@@ -2370,8 +2370,10 @@ impl UserLogic {
     // Add a change to the reader cache and notify every change it makes available:
     // none when held (TIME_BASED_FILTER) or buffered, several when a coherent set closes.
     fn deliver_change(&self, reader: &dyn Reader, change: CacheChange) -> RtpsResult<()> {
-        if let Some(group_coherent_set) = change.ended_group_coherent_set() {
-            return self.deliver_end_coherent_set(reader, change, group_coherent_set);
+        if change.is_end_coherent_set() {
+            if let Some(group_coherent_set) = change.presentation_info().group_coherent_set {
+                return self.deliver_end_coherent_set(reader, change, group_coherent_set);
+            }
         }
 
         let subscriber_history_cache = reader
