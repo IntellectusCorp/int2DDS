@@ -296,18 +296,10 @@ impl CacheChange {
         self.presentation_info = presentation_info;
     }
 
-    // The group coherent set this change ends: an End Coherent Set marker has no payload and
-    // names the set it closes, while a member of that set carries a payload.
-    pub(crate) fn ended_group_coherent_set(&self) -> Option<SequenceNumber> {
-        if !self.data_payload.is_empty() {
-            return None;
-        }
-
-        self.presentation_info.group_coherent_set
-    }
-
+    // An End Coherent Set carries no payload and names its group coherent set, while a member of
+    // that set carries a payload.
     pub(crate) fn is_end_coherent_set(&self) -> bool {
-        self.ended_group_coherent_set().is_some()
+        self.data_payload.is_empty() && self.presentation_info.group_coherent_set.is_some()
     }
 
     pub(crate) fn sequence_number(&self) -> SequenceNumber {
