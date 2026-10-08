@@ -353,13 +353,13 @@ int2DDS supports various environment variables for configuration:
 - `INT2DDS_FORCE_LOOPBACK_MULTICAST`: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing, use together with `INT2DDS_USE_LOOPBACK_INTERFACE`
 - `INT2DDS_MULTICAST_TTL`: IPv4 multicast TTL fallback (0-255), used when `PropertyQosPolicy` has no `int2dds.transport.UDPv4.multicast_ttl` entry (default: 1)
 - `INT2DDS_INITIAL_PEERS`: Initial peer list for unicast (format: "ip:port,ip:port,...")
+- `INT2DDS_NETWORK_IP`: Pin every socket to this IPv4 address (checked first; an unusable value is ignored)
+- `INT2DDS_NETWORK_INTERFACE`: Pin every socket to the IPv4 address of this interface (e.g., "eth0", "Ethernet")
 
 ### int2DDS-feature dependent Environment Variables
 
 These variables require [int2DDS-feature](https://github.com/IntellectusCorp/int2DDS-feature-releases) binary. Place the binary in the same directory as your executable.
 
-- `INT2DDS_NETWORK_INTERFACE`: Specify network interface (e.g., "eth0", "Ethernet")
-- `INT2DDS_NETWORK_IP`: Specify network IP address directly
 - `INT2DDS_EXTENDED_DISCOVERY`: Enable extended discovery alongside multicast
 
 ### Performance Monitoring Environment Variables
