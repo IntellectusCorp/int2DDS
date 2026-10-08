@@ -996,6 +996,18 @@ public final class Ffi {
         }
     }
 
+    private static final MethodHandle MH_int2dds_datareader_read_instance_loaned = dc("int2dds_datareader_read_instance_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_read_instance_loaned(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long loan_out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datareader_read_instance_loaned.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_instance_loaned", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_datareader_read_instance_serialized_batch = dc("int2dds_datareader_read_instance_serialized_batch", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_read_instance_serialized_batch(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
@@ -1005,6 +1017,40 @@ public final class Ffi {
             return (int) MH_int2dds_datareader_read_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_read_instance_serialized_batch", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_read_loaned = dc("int2dds_datareader_read_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_read_loaned(long reader, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long loan_out) {
+        try {
+            return (int) MH_int2dds_datareader_read_loaned.invokeExact(reader, max_samples, sample_state_mask, view_state_mask, instance_state_mask, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_loaned", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_read_next_instance_loaned = dc("int2dds_datareader_read_next_instance_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_read_next_instance_loaned(long reader, byte[] previous_handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long loan_out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_previous_handle = (previous_handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (previous_handle != null) MemorySegment.copy(previous_handle, 0, __ffi_seg_previous_handle, JAVA_BYTE, 0, Math.min(previous_handle.length, 16));
+            return (int) MH_int2dds_datareader_read_next_instance_loaned.invokeExact(reader, __ffi_seg_previous_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_next_instance_loaned", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_read_next_instance_w_condition_loaned = dc("int2dds_datareader_read_next_instance_w_condition_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_read_next_instance_w_condition_loaned(long reader, byte[] previous_handle, long condition, int max_samples, long loan_out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_previous_handle = (previous_handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (previous_handle != null) MemorySegment.copy(previous_handle, 0, __ffi_seg_previous_handle, JAVA_BYTE, 0, Math.min(previous_handle.length, 16));
+            return (int) MH_int2dds_datareader_read_next_instance_w_condition_loaned.invokeExact(reader, __ffi_seg_previous_handle, condition, max_samples, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_next_instance_w_condition_loaned", __ffi_thrown);
         }
     }
 
@@ -1068,6 +1114,26 @@ public final class Ffi {
         }
     }
 
+    private static final MethodHandle MH_int2dds_datareader_read_w_condition_loaned = dc("int2dds_datareader_read_w_condition_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_read_w_condition_loaned(long reader, long condition, int max_samples, long loan_out) {
+        try {
+            return (int) MH_int2dds_datareader_read_w_condition_loaned.invokeExact(reader, condition, max_samples, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_read_w_condition_loaned", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_return_loan = dc("int2dds_datareader_return_loan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+
+    static int int2dds_datareader_return_loan(long reader, long loan) {
+        try {
+            return (int) MH_int2dds_datareader_return_loan.invokeExact(reader, loan);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_return_loan", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_datareader_return_serialized_loan = dc("int2dds_datareader_return_serialized_loan", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_return_serialized_loan(long loan) {
@@ -1098,6 +1164,18 @@ public final class Ffi {
         }
     }
 
+    private static final MethodHandle MH_int2dds_datareader_take_instance_loaned = dc("int2dds_datareader_take_instance_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_take_instance_loaned(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long loan_out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
+            return (int) MH_int2dds_datareader_take_instance_loaned.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_instance_loaned", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_datareader_take_instance_serialized_batch = dc("int2dds_datareader_take_instance_serialized_batch", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
 
     static int int2dds_datareader_take_instance_serialized_batch(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
@@ -1107,6 +1185,40 @@ public final class Ffi {
             return (int) MH_int2dds_datareader_take_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_take_instance_serialized_batch", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_take_loaned = dc("int2dds_datareader_take_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_take_loaned(long reader, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long loan_out) {
+        try {
+            return (int) MH_int2dds_datareader_take_loaned.invokeExact(reader, max_samples, sample_state_mask, view_state_mask, instance_state_mask, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_loaned", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_take_next_instance_loaned = dc("int2dds_datareader_take_next_instance_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_take_next_instance_loaned(long reader, byte[] previous_handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long loan_out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_previous_handle = (previous_handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (previous_handle != null) MemorySegment.copy(previous_handle, 0, __ffi_seg_previous_handle, JAVA_BYTE, 0, Math.min(previous_handle.length, 16));
+            return (int) MH_int2dds_datareader_take_next_instance_loaned.invokeExact(reader, __ffi_seg_previous_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_next_instance_loaned", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_take_next_instance_w_condition_loaned = dc("int2dds_datareader_take_next_instance_w_condition_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_take_next_instance_w_condition_loaned(long reader, byte[] previous_handle, long condition, int max_samples, long loan_out) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_previous_handle = (previous_handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (previous_handle != null) MemorySegment.copy(previous_handle, 0, __ffi_seg_previous_handle, JAVA_BYTE, 0, Math.min(previous_handle.length, 16));
+            return (int) MH_int2dds_datareader_take_next_instance_w_condition_loaned.invokeExact(reader, __ffi_seg_previous_handle, condition, max_samples, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_next_instance_w_condition_loaned", __ffi_thrown);
         }
     }
 
@@ -1177,6 +1289,16 @@ public final class Ffi {
             return (int) MH_int2dds_datareader_take_serialized_w_states.invokeExact(reader, buffer, buffer_capacity, actual_size_out, info_out, sample_state_mask, view_state_mask, instance_state_mask);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_take_serialized_w_states", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_datareader_take_w_condition_loaned = dc("int2dds_datareader_take_w_condition_loaned", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+
+    static int int2dds_datareader_take_w_condition_loaned(long reader, long condition, int max_samples, long loan_out) {
+        try {
+            return (int) MH_int2dds_datareader_take_w_condition_loaned.invokeExact(reader, condition, max_samples, loan_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_datareader_take_w_condition_loaned", __ffi_thrown);
         }
     }
 
@@ -3295,6 +3417,36 @@ public final class Ffi {
             return (int) MH_int2dds_load_profiles.invokeExact(__ffi_seg_paths, count);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_load_profiles", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_loaned_samples_get_data = dc("int2dds_loaned_samples_get_data", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+
+    static int int2dds_loaned_samples_get_data(long loan, long index, long data_out, long size_out) {
+        try {
+            return (int) MH_int2dds_loaned_samples_get_data.invokeExact(loan, index, data_out, size_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_loaned_samples_get_data", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_loaned_samples_get_info = dc("int2dds_loaned_samples_get_info", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+
+    static int int2dds_loaned_samples_get_info(long loan, long index, long info_out) {
+        try {
+            return (int) MH_int2dds_loaned_samples_get_info.invokeExact(loan, index, info_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_loaned_samples_get_info", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_loaned_samples_length = dc("int2dds_loaned_samples_length", FunctionDescriptor.of(JAVA_LONG, JAVA_LONG));
+
+    static long int2dds_loaned_samples_length(long loan) {
+        try {
+            return (long) MH_int2dds_loaned_samples_length.invokeExact(loan);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_loaned_samples_length", __ffi_thrown);
         }
     }
 

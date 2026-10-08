@@ -5,7 +5,7 @@ Subscriber and DataReader for receiving DDS data.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from int2dds._ffi import CData, ffi, lib
 from int2dds.core.conditions import (
@@ -16,6 +16,7 @@ from int2dds.core.conditions import (
     ReadCondition,
     StatusCondition,
 )
+from int2dds.core.loan import LoanedSamples
 from int2dds.core.listeners import (
     DataReaderListener,
     _create_reader_listener_struct,
@@ -56,6 +57,17 @@ class Sample(Generic[T]):
     valid_data: bool
     instance_handle: bytes | None = None
     instance_state: int | None = None
+
+
+def _handle_ref(handle: bytes | None) -> CData:
+    """A 16-byte instance handle as ``const uint8_t (*)[16]``; None is NULL (NIL)."""
+    if handle is None:
+        return ffi.NULL
+    if len(handle) != 16:
+        raise ValueError("instance handle must be 16 bytes")
+    ref = ffi.new("uint8_t(*)[16]")
+    ffi.memmove(ref, handle, 16)
+    return ref
 
 
 def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
@@ -904,6 +916,100 @@ class DataReader(Generic[T]):
         finally:
             if loan_out[0] != ffi.NULL:
                 lib.int2dds_datareader_return_serialized_loan(loan_out[0])
+
+    def read_loaned(self, max_samples: int = -1, sample_states: int = ANY_SAMPLE_STATE,
+                    view_states: int = ANY_VIEW_STATE,
+                    instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """Loan matching samples without copying or removing them. Empty when nothing matches."""
+        return self._loan(lib.int2dds_datareader_read_loaned, max_samples, sample_states,
+                          view_states, instance_states)
+
+    def take_loaned(self, max_samples: int = -1, sample_states: int = ANY_SAMPLE_STATE,
+                    view_states: int = ANY_VIEW_STATE,
+                    instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_loaned, max_samples, sample_states,
+                          view_states, instance_states)
+
+    def read_w_condition_loaned(self, condition: ReadCondition,
+                                max_samples: int = -1) -> LoanedSamples:
+        """read_loaned() for samples matching a Read/QueryCondition of this reader."""
+        return self._loan(lib.int2dds_datareader_read_w_condition_loaned, condition._handle,
+                          max_samples)
+
+    def take_w_condition_loaned(self, condition: ReadCondition,
+                                max_samples: int = -1) -> LoanedSamples:
+        """read_w_condition_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_w_condition_loaned, condition._handle,
+                          max_samples)
+
+    def read_instance_loaned(self, handle: bytes, max_samples: int = -1,
+                             sample_states: int = ANY_SAMPLE_STATE,
+                             view_states: int = ANY_VIEW_STATE,
+                             instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_loaned() limited to the 16-byte instance ``handle``."""
+        return self._loan(lib.int2dds_datareader_read_instance_loaned, _handle_ref(handle),
+                          max_samples, sample_states, view_states, instance_states)
+
+    def take_instance_loaned(self, handle: bytes, max_samples: int = -1,
+                             sample_states: int = ANY_SAMPLE_STATE,
+                             view_states: int = ANY_VIEW_STATE,
+                             instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_instance_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_instance_loaned, _handle_ref(handle),
+                          max_samples, sample_states, view_states, instance_states)
+
+    def read_next_instance_loaned(self, previous_handle: bytes | None, max_samples: int = -1,
+                                  sample_states: int = ANY_SAMPLE_STATE,
+                                  view_states: int = ANY_VIEW_STATE,
+                                  instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_instance_loaned() for the next instance after ``previous_handle`` that has
+        matching samples; None starts from the first instance."""
+        return self._loan(lib.int2dds_datareader_read_next_instance_loaned,
+                          _handle_ref(previous_handle), max_samples, sample_states,
+                          view_states, instance_states)
+
+    def take_next_instance_loaned(self, previous_handle: bytes | None, max_samples: int = -1,
+                                  sample_states: int = ANY_SAMPLE_STATE,
+                                  view_states: int = ANY_VIEW_STATE,
+                                  instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_next_instance_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_next_instance_loaned,
+                          _handle_ref(previous_handle), max_samples, sample_states,
+                          view_states, instance_states)
+
+    def read_next_instance_w_condition_loaned(self, previous_handle: bytes | None,
+                                              condition: ReadCondition,
+                                              max_samples: int = -1) -> LoanedSamples:
+        """read_next_instance_loaned() for samples matching a Read/QueryCondition."""
+        return self._loan(lib.int2dds_datareader_read_next_instance_w_condition_loaned,
+                          _handle_ref(previous_handle), condition._handle, max_samples)
+
+    def take_next_instance_w_condition_loaned(self, previous_handle: bytes | None,
+                                              condition: ReadCondition,
+                                              max_samples: int = -1) -> LoanedSamples:
+        """read_next_instance_w_condition_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_next_instance_w_condition_loaned,
+                          _handle_ref(previous_handle), condition._handle, max_samples)
+
+    def return_loan(self, loan: LoanedSamples) -> None:
+        """Return a loan. A loan from another reader raises DdsPreconditionNotMet and stays
+        valid; a returned loan is ignored."""
+        if loan._returned:
+            return
+        if loan._handle == ffi.NULL:
+            loan._mark_returned()
+            return
+        check_ret(lib.int2dds_datareader_return_loan(self._handle, loan._handle))
+        loan._mark_returned()
+
+    def _loan(self, native_fn: Any, *args: Any) -> LoanedSamples:
+        loan_out = ffi.new("Int2DdsLoanedSamples **")
+        ret = native_fn(self._handle, *args, loan_out)
+        if ret == INT2DDS_RET_NO_DATA:
+            return LoanedSamples(self, ffi.NULL)
+        check_ret(ret)
+        return LoanedSamples(self, loan_out[0])
 
     def get_statuscondition(self) -> StatusCondition:
         """Get the StatusCondition associated with this DataReader."""

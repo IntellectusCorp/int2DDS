@@ -5080,6 +5080,86 @@ public final class FfiAccess {
         return Ffi.int2dds_datareader_return_serialized_loan(loan);
     }
 
+    // --- DataReader: loans ---
+
+    public static int datareaderReadLoaned(
+            long reader, int maxSamples, int sampleStates, int viewStates, int instanceStates, long loanOut) {
+        return Ffi.int2dds_datareader_read_loaned(
+                reader, maxSamples, sampleStates, viewStates, instanceStates, loanOut);
+    }
+
+    public static int datareaderTakeLoaned(
+            long reader, int maxSamples, int sampleStates, int viewStates, int instanceStates, long loanOut) {
+        return Ffi.int2dds_datareader_take_loaned(
+                reader, maxSamples, sampleStates, viewStates, instanceStates, loanOut);
+    }
+
+    public static int datareaderReadWConditionLoaned(long reader, long condition, int maxSamples, long loanOut) {
+        return Ffi.int2dds_datareader_read_w_condition_loaned(reader, condition, maxSamples, loanOut);
+    }
+
+    public static int datareaderTakeWConditionLoaned(long reader, long condition, int maxSamples, long loanOut) {
+        return Ffi.int2dds_datareader_take_w_condition_loaned(reader, condition, maxSamples, loanOut);
+    }
+
+    public static int datareaderReadInstanceLoaned(
+            long reader, byte[] handle, int maxSamples, int sampleStates, int viewStates, int instanceStates,
+            long loanOut) {
+        return Ffi.int2dds_datareader_read_instance_loaned(
+                reader, handle, maxSamples, sampleStates, viewStates, instanceStates, loanOut);
+    }
+
+    public static int datareaderTakeInstanceLoaned(
+            long reader, byte[] handle, int maxSamples, int sampleStates, int viewStates, int instanceStates,
+            long loanOut) {
+        return Ffi.int2dds_datareader_take_instance_loaned(
+                reader, handle, maxSamples, sampleStates, viewStates, instanceStates, loanOut);
+    }
+
+    public static int datareaderReadNextInstanceLoaned(
+            long reader, byte[] previousHandle, int maxSamples, int sampleStates, int viewStates,
+            int instanceStates, long loanOut) {
+        return Ffi.int2dds_datareader_read_next_instance_loaned(
+                reader, previousHandle, maxSamples, sampleStates, viewStates, instanceStates, loanOut);
+    }
+
+    public static int datareaderTakeNextInstanceLoaned(
+            long reader, byte[] previousHandle, int maxSamples, int sampleStates, int viewStates,
+            int instanceStates, long loanOut) {
+        return Ffi.int2dds_datareader_take_next_instance_loaned(
+                reader, previousHandle, maxSamples, sampleStates, viewStates, instanceStates, loanOut);
+    }
+
+    public static int datareaderReadNextInstanceWConditionLoaned(
+            long reader, byte[] previousHandle, long condition, int maxSamples, long loanOut) {
+        return Ffi.int2dds_datareader_read_next_instance_w_condition_loaned(
+                reader, previousHandle, condition, maxSamples, loanOut);
+    }
+
+    public static int datareaderTakeNextInstanceWConditionLoaned(
+            long reader, byte[] previousHandle, long condition, int maxSamples, long loanOut) {
+        return Ffi.int2dds_datareader_take_next_instance_w_condition_loaned(
+                reader, previousHandle, condition, maxSamples, loanOut);
+    }
+
+    public static long loanedSamplesLength(long loan) {
+        return Ffi.int2dds_loaned_samples_length(loan);
+    }
+
+    public static int loanedSamplesGetInfo(long loan, long index, long infoOut) {
+        return Ffi.int2dds_loaned_samples_get_info(loan, index, infoOut);
+    }
+
+    /** Writes the lent payload address to {@code dataOut} and its size to {@code sizeOut}. */
+    public static int loanedSamplesGetData(long loan, long index, long dataOut, long sizeOut) {
+        return Ffi.int2dds_loaned_samples_get_data(loan, index, dataOut, sizeOut);
+    }
+
+    /** {@code RET_PRECONDITION_NOT_MET} leaves a loan from another reader valid. */
+    public static int datareaderReturnLoan(long reader, long loan) {
+        return Ffi.int2dds_datareader_return_loan(reader, loan);
+    }
+
     // --- Topic name getters ---
 
     /**

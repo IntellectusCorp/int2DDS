@@ -584,7 +584,7 @@ pub unsafe extern "C" fn int2dds_datareader_get_guid(
     INT2DDS_RET_OK
 }
 
-unsafe fn reader_handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
+pub(crate) unsafe fn reader_handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
     if handle_ptr.is_null() {
         return InstanceHandle::NIL;
     }
@@ -1315,7 +1315,7 @@ pub unsafe extern "C" fn int2dds_datareader_read_instance_serialized_batch(
 }
 
 /// A mask of 0 selects ANY, mirroring the `extensibility = -1` default sentinel.
-fn state_kinds_from_masks(
+pub(crate) fn state_kinds_from_masks(
     sample_state_mask: u32,
     view_state_mask: u32,
     instance_state_mask: u32,
