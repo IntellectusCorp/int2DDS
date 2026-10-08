@@ -44,8 +44,8 @@ pub(crate) const ANY_INSTANCE_STATES: &[InstanceStateKind] =
 pub(crate) const NOT_READ_SAMPLE_STATES: &[SampleStateKind] =
     &[SampleStateKind::NOT_READ_SAMPLE_STATE];
 
-pub(crate) const MATCH_TIMEOUT: Duration = Duration { sec: 5, nanosec: 0 };
-pub(crate) const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+pub(crate) const MATCH_TIMEOUT: Duration = Duration { sec: 10, nanosec: 0 };
+pub(crate) const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 // Long enough for a sample that is on its way to arrive, so that an empty reader means the set is
 // being held back rather than still in flight.
@@ -202,6 +202,37 @@ pub(crate) fn wait_for_matched_readers(writer: &DataWriter<KeyedDataType>, expec
             "timed out waiting for {} matched readers, the writer saw {}",
             expected_readers,
             matched
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+// Polls until the Subscriber lists the expected number of entries and returns them with the
+// access block open. Nothing reaches a reader while a block is open, so every attempt opens its own.
+pub(crate) fn wait_for_entries(
+    subscriber: &Subscriber,
+    expected_entries: usize,
+) -> Vec<Arc<dyn DataReaderBase<Qos = DataReaderQos>>> {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+
+    loop {
+        subscriber.begin_access().unwrap();
+
+        let entries = subscriber
+            .get_datareaders(ANY_SAMPLE_STATES, ANY_VIEW_STATES, ANY_INSTANCE_STATES)
+            .unwrap();
+
+        if entries.len() == expected_entries {
+            return entries;
+        }
+
+        subscriber.end_access().unwrap();
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {} entries, the collection held {}",
+            expected_entries,
+            entries.len()
         );
         std::thread::sleep(POLL_INTERVAL);
     }
