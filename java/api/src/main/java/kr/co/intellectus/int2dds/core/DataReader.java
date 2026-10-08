@@ -970,6 +970,232 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         }
     }
 
+    /**
+     * Loans matching samples without copying or removing them; close the result (or pass it to
+     * {@link #returnLoan}) to return the loan. Empty when nothing matches. {@code maxSamples} is
+     * the maximum number of samples, or {@code -1} for no limit; the other loan methods follow the
+     * same rule.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples} is neither positive nor {@code -1}
+     */
+    public LoanedSamples<T> readLoaned(
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return loan(false, maxSamples, sampleStateMask, viewStateMask, instanceStateMask);
+    }
+
+    /** {@link #readLoaned} that removes the samples from the cache. */
+    public LoanedSamples<T> takeLoaned(
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return loan(true, maxSamples, sampleStateMask, viewStateMask, instanceStateMask);
+    }
+
+    /** {@link #readLoaned} for samples matching {@code condition}, created from this reader. */
+    public LoanedSamples<T> readWithConditionLoaned(ReadCondition condition, int maxSamples) {
+        return loanWCondition(false, condition, maxSamples);
+    }
+
+    /** {@link #readWithConditionLoaned} that removes the samples from the cache. */
+    public LoanedSamples<T> takeWithConditionLoaned(ReadCondition condition, int maxSamples) {
+        return loanWCondition(true, condition, maxSamples);
+    }
+
+    /** {@link #readLoaned} limited to {@code instance}. */
+    public LoanedSamples<T> readInstanceLoaned(
+            InstanceHandle instance, int maxSamples, int sampleStateMask, int viewStateMask,
+            int instanceStateMask) {
+        Objects.requireNonNull(instance, "instance");
+        return loanInstance(
+                Scope.INSTANCE, false, instance, maxSamples, sampleStateMask, viewStateMask,
+                instanceStateMask);
+    }
+
+    /** {@link #readInstanceLoaned} that removes the samples from the cache. */
+    public LoanedSamples<T> takeInstanceLoaned(
+            InstanceHandle instance, int maxSamples, int sampleStateMask, int viewStateMask,
+            int instanceStateMask) {
+        Objects.requireNonNull(instance, "instance");
+        return loanInstance(
+                Scope.INSTANCE, true, instance, maxSamples, sampleStateMask, viewStateMask,
+                instanceStateMask);
+    }
+
+    /**
+     * {@link #readInstanceLoaned} for the next instance after {@code previous} that has matching
+     * samples; a {@code null} {@code previous} starts from the first instance.
+     */
+    public LoanedSamples<T> readNextInstanceLoaned(
+            InstanceHandle previous, int maxSamples, int sampleStateMask, int viewStateMask,
+            int instanceStateMask) {
+        return loanInstance(
+                Scope.NEXT_INSTANCE, false, previous, maxSamples, sampleStateMask, viewStateMask,
+                instanceStateMask);
+    }
+
+    /** {@link #readNextInstanceLoaned} that removes the samples from the cache. */
+    public LoanedSamples<T> takeNextInstanceLoaned(
+            InstanceHandle previous, int maxSamples, int sampleStateMask, int viewStateMask,
+            int instanceStateMask) {
+        return loanInstance(
+                Scope.NEXT_INSTANCE, true, previous, maxSamples, sampleStateMask, viewStateMask,
+                instanceStateMask);
+    }
+
+    /** {@link #readNextInstanceLoaned} for samples matching {@code condition}. */
+    public LoanedSamples<T> readNextInstanceWithConditionLoaned(
+            InstanceHandle previous, ReadCondition condition, int maxSamples) {
+        return loanNextInstanceWCondition(false, previous, condition, maxSamples);
+    }
+
+    /** {@link #readNextInstanceWithConditionLoaned} that removes the samples from the cache. */
+    public LoanedSamples<T> takeNextInstanceWithConditionLoaned(
+            InstanceHandle previous, ReadCondition condition, int maxSamples) {
+        return loanNextInstanceWCondition(true, previous, condition, maxSamples);
+    }
+
+    /**
+     * Returns {@code loan} to this reader. A loan from another reader throws {@link
+     * kr.co.intellectus.int2dds.exceptions.DdsPreconditionNotMetException} and stays valid. A
+     * returned loan is ignored.
+     */
+    public void returnLoan(LoanedSamples<T> loan) {
+        Objects.requireNonNull(loan, "loan");
+        if (loan.isReturned()) {
+            return;
+        }
+        if (loan.nativeHandle() == 0L) {
+            loan.markReturned();
+            return;
+        }
+        int rc = FfiAccess.datareaderReturnLoan(handle(), loan.nativeHandle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        loan.markReturned();
+    }
+
+    private static int requireLoanMaxSamples(int maxSamples) {
+        if (maxSamples <= 0 && maxSamples != -1) {
+            throw new IllegalArgumentException("maxSamples must be > 0 or -1: " + maxSamples);
+        }
+        return maxSamples;
+    }
+
+    private LoanedSamples<T> loan(boolean take, int maxSamples, int s, int v, int i) {
+        requireLoanMaxSamples(maxSamples);
+        long h = handle();
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc =
+                take
+                        ? FfiAccess.datareaderTakeLoaned(h, maxSamples, s, v, i, addr(slot))
+                        : FfiAccess.datareaderReadLoaned(h, maxSamples, s, v, i, addr(slot));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(slot);
+        return wrapLoan(rc, slot);
+    }
+
+    private LoanedSamples<T> loanWCondition(boolean take, ReadCondition condition, int maxSamples) {
+        requireLoanMaxSamples(maxSamples);
+        Objects.requireNonNull(condition, "condition");
+        long condH = ConditionHandleAccess.handle(condition);
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc =
+                take
+                        ? FfiAccess.datareaderTakeWConditionLoaned(handle(), condH, maxSamples, addr(slot))
+                        : FfiAccess.datareaderReadWConditionLoaned(handle(), condH, maxSamples, addr(slot));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(condition);
+        NativeKeepAlive.keepAlive(slot);
+        return wrapLoan(rc, slot);
+    }
+
+    private enum Scope {
+        INSTANCE,
+        NEXT_INSTANCE
+    }
+
+    private static byte[] handleBytes(InstanceHandle handle) {
+        return handle == null ? new byte[16] : handle.bytes();
+    }
+
+    private LoanedSamples<T> loanInstance(
+            Scope scope, boolean take, InstanceHandle instance, int maxSamples, int s, int v, int i) {
+        requireLoanMaxSamples(maxSamples);
+        long h = handle();
+        byte[] key = handleBytes(instance);
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc;
+        if (scope == Scope.INSTANCE) {
+            rc =
+                    take
+                            ? FfiAccess.datareaderTakeInstanceLoaned(h, key, maxSamples, s, v, i, addr(slot))
+                            : FfiAccess.datareaderReadInstanceLoaned(h, key, maxSamples, s, v, i, addr(slot));
+        } else {
+            rc =
+                    take
+                            ? FfiAccess.datareaderTakeNextInstanceLoaned(h, key, maxSamples, s, v, i, addr(slot))
+                            : FfiAccess.datareaderReadNextInstanceLoaned(h, key, maxSamples, s, v, i, addr(slot));
+        }
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(slot);
+        return wrapLoan(rc, slot);
+    }
+
+    private LoanedSamples<T> loanNextInstanceWCondition(
+            boolean take, InstanceHandle previous, ReadCondition condition, int maxSamples) {
+        requireLoanMaxSamples(maxSamples);
+        Objects.requireNonNull(condition, "condition");
+        long condH = ConditionHandleAccess.handle(condition);
+        byte[] key = handleBytes(previous);
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc =
+                take
+                        ? FfiAccess.datareaderTakeNextInstanceWConditionLoaned(
+                                handle(), key, condH, maxSamples, addr(slot))
+                        : FfiAccess.datareaderReadNextInstanceWConditionLoaned(
+                                handle(), key, condH, maxSamples, addr(slot));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(condition);
+        NativeKeepAlive.keepAlive(slot);
+        return wrapLoan(rc, slot);
+    }
+
+    private LoanedSamples<T> wrapLoan(int rc, ByteBuffer slot) {
+        long handle = ReturnCodes.checkOrNoData(rc) ? slot.getLong(0) : 0L;
+        LoanedSamples<T> loan = new LoanedSamples<T>(this, handle);
+        if (handle == 0L) {
+            return loan;
+        }
+        try {
+            ByteBuffer out = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+            long len = FfiAccess.loanedSamplesLength(handle);
+            for (long i = 0; i < len; i++) {
+                int irc = FfiAccess.loanedSamplesGetInfo(handle, i, addr(infoSlot));
+                NativeKeepAlive.keepAlive(infoSlot);
+                ReturnCodes.check(irc);
+                SampleInfo info = SampleInfo.decode(infoSlot);
+                ByteBuffer data = null;
+                if (info.validData()) {
+                    int drc = FfiAccess.loanedSamplesGetData(handle, i, addr(out), addr(out) + 8);
+                    NativeKeepAlive.keepAlive(out);
+                    ReturnCodes.check(drc);
+                    ByteBuffer view = FfiAccess.addressToDirectByteBuffer(out.getLong(0), out.getLong(8));
+                    if (view == null) {
+                        throw new DdsErrorException("failed to map the loaned sample buffer");
+                    }
+                    data = view.asReadOnlyBuffer();
+                }
+                loan.add(new LoanedSample(loan, info, data));
+            }
+            return loan;
+        } catch (Throwable t) {
+            try {
+                returnLoan(loan);
+            } catch (Throwable suppressed) {
+                t.addSuppressed(suppressed);
+            }
+            throw t;
+        }
+    }
+
     private byte[] nextSerialized(boolean take) {
         long h = handle();
         while (true) {

@@ -27,6 +27,7 @@ pub mod data_reader;
 pub(crate) mod data_reader_history;
 pub mod data_reader_listener;
 pub mod data_sample;
+pub mod loaned_samples;
 pub mod qos;
 pub mod query_condition;
 pub mod read_condition;
@@ -34,3 +35,6 @@ pub mod sample_info;
 pub mod subscriber;
 pub mod subscriber_listener;
 pub(crate) mod time_based_filter;
+
+#[cfg(test)]
+mod loan_tests;

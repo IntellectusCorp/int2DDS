@@ -1674,6 +1674,35 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
 }
 
 #[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1read_1instance_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    handle: JByteArray<'local>,
+    max_samples: jint,
+    sample_state_mask: jint,
+    view_state_mask: jint,
+    instance_state_mask: jint,
+    loan_out: jlong,
+) -> jint {
+    let handle_in = crate::generated_support::take_fixed::<16>(&mut env, &handle);
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_read_instance_loaned(
+            reader as usize as *const _,
+            crate::generated_support::fixed_ptr(&handle_in) as _,
+            max_samples as _,
+            sample_state_mask as _,
+            view_state_mask as _,
+            instance_state_mask as _,
+            loan_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1read_1instance_1serialized_1batch<
     'local,
 >(
@@ -1697,6 +1726,86 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
             view_state_mask as _,
             instance_state_mask as _,
             seq_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1read_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    max_samples: jint,
+    sample_state_mask: jint,
+    view_state_mask: jint,
+    instance_state_mask: jint,
+    loan_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_read_loaned(
+            reader as usize as *const _,
+            max_samples as _,
+            sample_state_mask as _,
+            view_state_mask as _,
+            instance_state_mask as _,
+            loan_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1read_1next_1instance_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    previous_handle: JByteArray<'local>,
+    max_samples: jint,
+    sample_state_mask: jint,
+    view_state_mask: jint,
+    instance_state_mask: jint,
+    loan_out: jlong,
+) -> jint {
+    let previous_handle_in = crate::generated_support::take_fixed::<16>(&mut env, &previous_handle);
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_read_next_instance_loaned(
+            reader as usize as *const _,
+            crate::generated_support::fixed_ptr(&previous_handle_in) as _,
+            max_samples as _,
+            sample_state_mask as _,
+            view_state_mask as _,
+            instance_state_mask as _,
+            loan_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1read_1next_1instance_1w_1condition_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    previous_handle: JByteArray<'local>,
+    condition: jlong,
+    max_samples: jint,
+    loan_out: jlong,
+) -> jint {
+    let previous_handle_in = crate::generated_support::take_fixed::<16>(&mut env, &previous_handle);
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_read_next_instance_w_condition_loaned(
+            reader as usize as *const _,
+            crate::generated_support::fixed_ptr(&previous_handle_in) as _,
+            condition as usize as *const _,
+            max_samples as _,
+            loan_out as usize as *mut _,
         )
     };
     __ret as _
@@ -1849,6 +1958,46 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
 }
 
 #[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1read_1w_1condition_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    condition: jlong,
+    max_samples: jint,
+    loan_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_read_w_condition_loaned(
+            reader as usize as *const _,
+            condition as usize as *const _,
+            max_samples as _,
+            loan_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1return_1loan<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    loan: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_return_loan(
+            reader as usize as *const _,
+            loan as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1return_1serialized_1loan<
     'local,
 >(
@@ -1901,6 +2050,35 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
 }
 
 #[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1take_1instance_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    handle: JByteArray<'local>,
+    max_samples: jint,
+    sample_state_mask: jint,
+    view_state_mask: jint,
+    instance_state_mask: jint,
+    loan_out: jlong,
+) -> jint {
+    let handle_in = crate::generated_support::take_fixed::<16>(&mut env, &handle);
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_take_instance_loaned(
+            reader as usize as *const _,
+            crate::generated_support::fixed_ptr(&handle_in) as _,
+            max_samples as _,
+            sample_state_mask as _,
+            view_state_mask as _,
+            instance_state_mask as _,
+            loan_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1take_1instance_1serialized_1batch<
     'local,
 >(
@@ -1924,6 +2102,86 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
             view_state_mask as _,
             instance_state_mask as _,
             seq_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1take_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    max_samples: jint,
+    sample_state_mask: jint,
+    view_state_mask: jint,
+    instance_state_mask: jint,
+    loan_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_take_loaned(
+            reader as usize as *const _,
+            max_samples as _,
+            sample_state_mask as _,
+            view_state_mask as _,
+            instance_state_mask as _,
+            loan_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1take_1next_1instance_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    previous_handle: JByteArray<'local>,
+    max_samples: jint,
+    sample_state_mask: jint,
+    view_state_mask: jint,
+    instance_state_mask: jint,
+    loan_out: jlong,
+) -> jint {
+    let previous_handle_in = crate::generated_support::take_fixed::<16>(&mut env, &previous_handle);
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_take_next_instance_loaned(
+            reader as usize as *const _,
+            crate::generated_support::fixed_ptr(&previous_handle_in) as _,
+            max_samples as _,
+            sample_state_mask as _,
+            view_state_mask as _,
+            instance_state_mask as _,
+            loan_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1take_1next_1instance_1w_1condition_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    previous_handle: JByteArray<'local>,
+    condition: jlong,
+    max_samples: jint,
+    loan_out: jlong,
+) -> jint {
+    let previous_handle_in = crate::generated_support::take_fixed::<16>(&mut env, &previous_handle);
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_take_next_instance_w_condition_loaned(
+            reader as usize as *const _,
+            crate::generated_support::fixed_ptr(&previous_handle_in) as _,
+            condition as usize as *const _,
+            max_samples as _,
+            loan_out as usize as *mut _,
         )
     };
     __ret as _
@@ -2094,6 +2352,28 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
             sample_state_mask as _,
             view_state_mask as _,
             instance_state_mask as _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1take_1w_1condition_1loaned<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    condition: jlong,
+    max_samples: jint,
+    loan_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_datareader_take_w_condition_loaned(
+            reader as usize as *const _,
+            condition as usize as *const _,
+            max_samples as _,
+            loan_out as usize as *mut _,
         )
     };
     __ret as _
@@ -5762,6 +6042,61 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
     let paths_arr = crate::generated_support::take_string_array(&mut env, &paths);
     let __ret =
         unsafe { int2dds_ffi::config::int2dds_load_profiles(paths_arr.as_ptr() as _, count as _) };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1loaned_1samples_1get_1data<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    loan: jlong,
+    index: jlong,
+    data_out: jlong,
+    size_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_loaned_samples_get_data(
+            loan as usize as *const _,
+            index as _,
+            data_out as usize as *mut _,
+            size_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1loaned_1samples_1get_1info<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    loan: jlong,
+    index: jlong,
+    info_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::loan::int2dds_loaned_samples_get_info(
+            loan as usize as *const _,
+            index as _,
+            info_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1loaned_1samples_1length<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    loan: jlong,
+) -> jlong {
+    let __ret =
+        unsafe { int2dds_ffi::loan::int2dds_loaned_samples_length(loan as usize as *const _) };
     __ret as _
 }
 
