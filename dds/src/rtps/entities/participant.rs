@@ -11,7 +11,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     net::SocketAddr,
-    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock, Weak},
 };
 
 use arc_swap::ArcSwap;
@@ -53,7 +53,11 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::{cache_change::CacheChange, history_cache::HistoryCache},
+            history::{
+                cache_change::CacheChange,
+                history_cache::HistoryCache,
+                subscriber_history::{PendingSample, SubscriberHistoryCache},
+            },
             reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterCallbackLease, WriterStore},
@@ -103,6 +107,10 @@ pub struct Participant {
 
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
+
+    // Subscriber HistoryCaches of the GROUP access scope Subscribers, keyed by Subscriber GUID.
+    // Weak so a deleted Subscriber drops out on the next walk.
+    subscriber_history_caches: Arc<Mutex<HashMap<Guid, Weak<Mutex<SubscriberHistoryCache>>>>>,
 
     // Dynamic-type registry populated from discovered TypeObjects.
     type_registry: SharedTypeRegistry,
@@ -200,6 +208,7 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
+            subscriber_history_caches: Arc::new(Mutex::new(HashMap::new())),
             type_registry: new_shared_registry(),
             working_ips,
             remote_same_host: Arc::new(DashMap::new()),
@@ -257,6 +266,147 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>> {
         self.remote_publications.clone()
+    }
+
+    // Registering the same Subscriber again replaces its entry, which every reader of that
+    // Subscriber does with the same cache.
+    pub(crate) fn register_subscriber_history_cache(
+        &self,
+        subscriber_guid: Guid,
+        subscriber_history_cache: Weak<Mutex<SubscriberHistoryCache>>,
+    ) -> RtpsResult<()> {
+        self.subscriber_history_caches
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+            .insert(subscriber_guid, subscriber_history_cache);
+
+        Ok(())
+    }
+
+    // Stores samples the Subscriber HistoryCache released, each reader's share under that
+    // reader's cache lock in one go, and hands back what became available.
+    pub(crate) fn commit_released_samples(
+        &self,
+        released: Vec<PendingSample>,
+    ) -> RtpsResult<Vec<(ReaderCallbackLease, Vec<Arc<CacheChange>>)>> {
+        let mut changes_per_reader: HashMap<EntityId, Vec<(CacheChange, bool)>> = HashMap::new();
+        for sample in released {
+            changes_per_reader
+                .entry(sample.reader_id)
+                .or_default()
+                .push((sample.change, sample.apply_filter));
+        }
+
+        let mut available_per_reader = Vec::new();
+
+        for (reader_id, changes) in changes_per_reader {
+            // A reader deleted while its share was held has nowhere to put it.
+            let Some(lease) = self.find_reader_callback_lease_from_entity_id(reader_id) else {
+                debug!(
+                    "Dropping {} released samples of deleted reader {}",
+                    changes.len(),
+                    reader_id
+                );
+                continue;
+            };
+
+            let available = lease
+                .reader_cache()
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+                .commit_changes_to_datareader_cache(changes)?;
+
+            available_per_reader.push((lease, available));
+        }
+
+        Ok(available_per_reader)
+    }
+
+    // Tells each reader what became available. Runs outside the Subscriber HistoryCache lock
+    // because it calls into user listeners.
+    pub(crate) fn notify_available_changes(
+        &self,
+        available_per_reader: Vec<(ReaderCallbackLease, Vec<Arc<CacheChange>>)>,
+    ) {
+        for (lease, changes) in available_per_reader {
+            for change in changes {
+                lease.on_change(change);
+            }
+        }
+    }
+
+    // Tells every Subscriber HistoryCache that a remote writer lost or regained liveliness and
+    // commits whatever the gate releases on it.
+    pub(crate) fn set_remote_writer_liveliness_in_subscriber_history_caches(
+        &self,
+        writer_guid: Guid,
+        is_alive: bool,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.set_writer_liveliness(writer_guid, is_alive);
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
+        Ok(())
+    }
+
+    // Runs the gate of every Subscriber HistoryCache again and commits whatever it releases.
+    pub(crate) fn flush_subscriber_history_caches(&self) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
+        Ok(())
+    }
+
+    // Tells every Subscriber HistoryCache that a remote writer is gone and commits whatever the
+    // gate releases on it.
+    pub(crate) fn remove_matched_writer_from_subscriber_history_caches(
+        &self,
+        writer_guid: Guid,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.remove_matched_writer(writer_guid);
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
+        Ok(())
+    }
+
+    // The registered caches whose Subscriber still exists. Entries of deleted Subscribers are
+    // dropped on the way.
+    fn get_upgraded_subscriber_history_caches(
+        &self,
+    ) -> RtpsResult<Vec<Arc<Mutex<SubscriberHistoryCache>>>> {
+        let mut registered = self
+            .subscriber_history_caches
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        registered.retain(|_, cache| cache.strong_count() > 0);
+
+        Ok(registered.values().filter_map(Weak::upgrade).collect())
     }
 
     pub(crate) fn set_endpoint_discovery_cb(
@@ -812,6 +962,25 @@ impl Participant {
             }
         }
 
+        // After the drain no delivery can hand this reader's samples to the group gate anymore.
+        // Its held share is dropped, which may let the next position through for the other
+        // readers of the Subscriber.
+        let subscriber_history_cache = reader_arc
+            .as_ref()
+            .and_then(|reader| reader.as_any().downcast_ref::<StatefulReader>())
+            .and_then(StatefulReader::subscriber_history_cache);
+        if let Some(subscriber_history_cache) = subscriber_history_cache {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.remove_reader(entity_id);
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
         // The reader is gone, so any reassembly still addressed to it can never complete and
         // will not be reached by the normal completion path -- only by cap-driven eviction,
         // which may not run again for a long time.
@@ -939,6 +1108,8 @@ impl Participant {
                 stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
         }
+
+        self.remove_matched_writer_from_subscriber_history_caches(writer_guid)?;
 
         Ok(())
     }

@@ -32,7 +32,7 @@ use crate::rtps::{
         submessage_header::SubmessageHeader,
         submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag},
         submessage_id::SubmessageId,
-        submessages::{data::Data, data_frag::DataFrag},
+        submessages::{data::Data, data_frag::DataFrag, gap, heartbeat},
     },
 };
 use crate::serialize::pl_cdr::InlineQosParameters;
@@ -125,6 +125,66 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    // The inline QoS of a fragmented sample belongs on its first DATA_FRAG submessage only.
+    #[test]
+    fn only_the_first_data_frag_carries_the_group_presentation_inline_qos() {
+        use crate::common::instance_handle::InstanceHandle;
+        use crate::rtps::entities::history::cache_change::PresentationInfo;
+
+        let writer_guid = Guid::new(LOCAL_PREFIX, EntityId::PARTICIPANT);
+        let mut cache_change = CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid,
+            InstanceHandle::NIL,
+            SequenceNumber::from_i64(7),
+            vec![0xAB; 8],
+            None,
+        );
+        cache_change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(SequenceNumber::from_i64(7)),
+            group_seq_num: Some(SequenceNumber::from_i64(11)),
+            group_coherent_set: Some(SequenceNumber::from_i64(9)),
+            writer_group_info: None,
+        });
+
+        let inline_qos_of_fragment = |fragment_starting_num: u32| {
+            let mut send_buffer = Vec::new();
+            MessageCreator::create_data_frag_msg(
+                &cache_change,
+                Guid::new(DST_PREFIX, EntityId::PARTICIPANT),
+                EntityId::UNKNOWN,
+                writer_guid.entity_id(),
+                fragment_starting_num,
+                1,
+                4,
+                8,
+                &[0xAB; 4],
+                None,
+                Utc::now(),
+                &mut send_buffer,
+            )
+            .expect("DATA_FRAG must serialize");
+
+            let addr = "127.0.0.1:7400".parse().unwrap();
+            let mut receiver = MessageReceiver::new(DST_PREFIX, &addr);
+            receiver.init(&Bytes::copy_from_slice(&send_buffer)).unwrap();
+
+            receiver.parse_submessages().into_iter().find_map(|submessage| match submessage {
+                TypedSubmessage::DataFrag(_, data_frag) => Some(data_frag.inline_qos()),
+                _ => None,
+            })
+        };
+
+        let first = inline_qos_of_fragment(1).expect("the first DATA_FRAG must be parsed back");
+        let first = first.expect("the first DATA_FRAG must carry inline QoS");
+        assert_eq!(first.get_coherent_set(), Some(SequenceNumber::from_i64(7)));
+        assert_eq!(first.get_group_seq_num(), Some(SequenceNumber::from_i64(11)));
+        assert_eq!(first.get_group_coherent_set(), Some(SequenceNumber::from_i64(9)));
+
+        let second = inline_qos_of_fragment(2).expect("the second DATA_FRAG must be parsed back");
+        assert_eq!(second, None, "repeating the inline QoS on later fragments is redundant");
+    }
+
     // Env is process-global: serialize every INT2DDS_MAX_MESSAGE_SIZE mutation.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -182,6 +242,7 @@ mod tests {
             reader_entity_id,
             writer_entity_id,
             &mut gap_list,
+            None,
         )
         .unwrap();
 
@@ -277,6 +338,7 @@ impl MessageCreator {
         last_sn: SequenceNumber,
         final_flag: bool,
         liveliness_flag: bool,
+        group_info: Option<heartbeat::GroupInfo>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(local_guid_prefix));
 
@@ -290,6 +352,7 @@ impl MessageCreator {
             last_sn,
             final_flag,
             liveliness_flag,
+            group_info,
         )?);
 
         match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
@@ -364,7 +427,14 @@ impl MessageCreator {
         remote_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
-        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(
+            u32,
+            SequenceNumber,
+            SequenceNumber,
+            bool,
+            bool,
+            Option<heartbeat::GroupInfo>,
+        )>,
         use_inline_qos: bool,
         content_filter_info: Option<ContentFilterInfo>,
         send_buffer: &mut Vec<u8>,
@@ -389,7 +459,7 @@ impl MessageCreator {
         rtps_message.add_submessage(data_submessage);
 
         // Add heartbeat submessage if heartbeat info is provided
-        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag)) =
+        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag, group_info)) =
             heartbeat_info
         {
             let heartbeat_submessage = SubmessageCreator::create_heartbeat_submessage(
@@ -400,6 +470,7 @@ impl MessageCreator {
                 last_sn,
                 final_flag,
                 liveliness_flag,
+                group_info,
             )?;
             rtps_message.add_submessage(heartbeat_submessage);
         }
@@ -555,17 +626,7 @@ impl MessageCreator {
                 }
             }
 
-            // Attach per-sample coherent/group presentation metadata.
-            let inline = cache_change.presentation_info();
-            if let Some(sn) = inline.coherent_set {
-                param_list.set_coherent_set(sn);
-            }
-            if let Some(sn) = inline.group_seq_num {
-                param_list.set_group_seq_num(sn);
-            }
-            if let Some(sn) = inline.group_coherent_set {
-                param_list.set_group_coherent_set(sn);
-            }
+            Self::add_presentation_parameters(&mut param_list, cache_change);
 
             if !param_list.parameters().is_empty() {
                 data_header_flag.add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA);
@@ -584,6 +645,25 @@ impl MessageCreator {
         }
     }
 
+    // Per-sample coherent and group presentation metadata, carried by a DATA and by the first
+    // DATA_FRAG of a sample.
+    fn add_presentation_parameters(param_list: &mut ParameterList, cache_change: &CacheChange) {
+        let presentation_info = cache_change.presentation_info();
+
+        if let Some(sn) = presentation_info.coherent_set {
+            param_list.set_coherent_set(sn);
+        }
+        if let Some(sn) = presentation_info.group_seq_num {
+            param_list.set_group_seq_num(sn);
+        }
+        if let Some(sn) = presentation_info.group_coherent_set {
+            param_list.set_group_coherent_set(sn);
+        }
+        if let Some(writer_set) = presentation_info.writer_group_info {
+            param_list.set_writer_group_info(writer_set.to_bytes().to_vec());
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_data_frag_msg(
         cache_change: &CacheChange,
@@ -595,7 +675,14 @@ impl MessageCreator {
         fragment_size: u16,
         sample_size: u32,
         fragment_data: &[u8],
-        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(
+            u32,
+            SequenceNumber,
+            SequenceNumber,
+            bool,
+            bool,
+            Option<heartbeat::GroupInfo>,
+        )>,
         timestamp: DateTime<Utc>,
         send_buffer: &mut Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -621,6 +708,18 @@ impl MessageCreator {
 
         data_frag.add_serialized_data(SubmessagePayload::Borrowed(fragment_data));
 
+        // Only the first fragment of a sample carries its inline QoS.
+        if fragment_starting_num == 1 {
+            let mut param_list = ParameterList::default();
+            Self::add_presentation_parameters(&mut param_list, cache_change);
+
+            if !param_list.parameters().is_empty() {
+                data_frag_header_flag
+                    .add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA_FRAG);
+                data_frag.set_inline_qos_list(param_list);
+            }
+        }
+
         let data_frag_submessage = Submessage {
             header: SubmessageHeader::new(
                 SubmessageId::DATA_FRAG,
@@ -633,7 +732,7 @@ impl MessageCreator {
         rtps_message.add_submessage(data_frag_submessage);
 
         // Add heartbeat submessage if heartbeat info is provided
-        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag)) =
+        if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag, group_info)) =
             heartbeat_info
         {
             let heartbeat_submessage = SubmessageCreator::create_heartbeat_submessage(
@@ -644,6 +743,7 @@ impl MessageCreator {
                 last_sn,
                 final_flag,
                 liveliness_flag,
+                group_info,
             )?;
             rtps_message.add_submessage(heartbeat_submessage);
         }
@@ -661,6 +761,7 @@ impl MessageCreator {
         writer_entity_id: EntityId,
         gap_start: SequenceNumber,
         gap_end: SequenceNumber,
+        group_info: Option<gap::GroupInfo>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(local_participant_guid.prefix()));
 
@@ -671,6 +772,7 @@ impl MessageCreator {
             writer_entity_id,
             gap_start,
             gap_end,
+            group_info,
         )?);
 
         let serialized_message = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?;
@@ -684,6 +786,7 @@ impl MessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
+        group_info: Option<gap::GroupInfo>,
     ) -> Result<Vec<Arc<Vec<u8>>>, Box<dyn std::error::Error>> {
         gap_list.sort();
         if gap_list.is_empty() {
@@ -718,6 +821,7 @@ impl MessageCreator {
                 reader_entity_id,
                 writer_entity_id,
                 gap_list,
+                group_info,
             )?;
             let submessage_len =
                 SUBMESSAGE_HEADER_LEN + submessage.header.submessage_length() as usize;

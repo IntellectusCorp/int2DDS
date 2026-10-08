@@ -30,6 +30,8 @@ pub struct PublicationBuiltinTopicData {
     key: BuiltinTopicKey,
     #[dds(non_serialized)] // derived from endpoint_guid prefix
     participant_key: BuiltinTopicKey,
+    #[dds(optional, id = 0x0052)] // PidGroupGuid: the owning Publisher
+    group_guid: Option<Guid>,
     #[dds(id = 0x0005)] // PidTopicName
     topic_name: String,
     #[dds(id = 0x0007)] // PidTypeName
@@ -98,6 +100,7 @@ impl PublicationBuiltinTopicData {
             endpoint_guid: empty_guid,
             key: BuiltinTopicKey { value: Self::convert_u8_to_i32_array(prefix) },
             participant_key: BuiltinTopicKey { value: Self::convert_u8_to_i32_array(prefix) },
+            group_guid: None,
             topic_name: String::new(),
             type_name: String::new(),
             durability: datawriter_qos.durability,
@@ -145,6 +148,15 @@ impl PublicationBuiltinTopicData {
         self.participant_key = BuiltinTopicKey {
             value: Self::convert_u8_to_i32_array(endpoint_guid.prefix().to_owned()),
         };
+    }
+
+    // GUID of the Publisher the writer belongs to; None when the peer did not announce one.
+    pub fn group_guid(&self) -> Option<Guid> {
+        self.group_guid
+    }
+
+    pub fn set_group_guid(&mut self, group_guid: Guid) {
+        self.group_guid = Some(group_guid);
     }
 
     pub fn unicast_locator_list(&self) -> Vec<Locator> {
@@ -378,7 +390,14 @@ impl PublicationBuiltinTopicData {
             data_representation
         );
 
-        // Handle Option<T> fields that are already Option in both source and target
+        // Handle Option<T> fields that are already Option in both source and target.
+        // PID_GROUP_ENTITY_ID names the same Publisher with only the entity id, so it is
+        // completed with the writer's own prefix.
+        publication_data.group_guid = parsed.group_guid.or_else(|| {
+            parsed
+                .group_entity_id
+                .map(|entity_id| Guid::new(publication_data.endpoint_guid.prefix(), entity_id))
+        });
         publication_data.key_hash = parsed.key_hash;
         publication_data.type_max_size_serialized = parsed.type_max_size_serialized;
         publication_data.unicast_locator_list = parsed.unicast_locator_list;
@@ -509,6 +528,77 @@ mod tests {
         assert_eq!(parsed.topic_name(), original.topic_name());
         assert_eq!(parsed.type_name(), original.type_name());
         assert_eq!(parsed.unicast_locator_list(), original.unicast_locator_list());
+    }
+
+    #[test]
+    fn publication_group_guid_roundtrips_as_pid_group_guid() {
+        let mut original = sample_publication();
+        original.set_group_guid(make_guid(0x33));
+
+        let bytes = original.to_serialized_data().to_vec();
+        assert_eq!(count_pid_occurrences(&bytes, 0x0052), 1, "PID_GROUP_GUID emitted once");
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.group_guid(), Some(make_guid(0x33)));
+
+        // DdsType::serialize must place the parameter where the PL_CDR helper does.
+        let dds_bytes = DdsType::serialize(&original).expect("serialize").to_vec();
+        assert_eq!(dds_bytes, bytes);
+    }
+
+    // Splices one parameter in front of PID_SENTINEL of a PL_CDR_LE payload.
+    fn insert_parameter_before_sentinel(mut payload: Vec<u8>, pid: u16, value: &[u8]) -> Vec<u8> {
+        let mut pos = 4usize;
+        while pos + 4 <= payload.len() {
+            let found_pid = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
+            let len = u16::from_le_bytes([payload[pos + 2], payload[pos + 3]]) as usize;
+            if found_pid == 0x0001 {
+                break;
+            }
+            pos += 4 + len;
+            pos = pos.div_ceil(4) * 4;
+        }
+
+        let mut parameter = Vec::with_capacity(4 + value.len());
+        parameter.extend_from_slice(&pid.to_le_bytes());
+        parameter.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        parameter.extend_from_slice(value);
+        payload.splice(pos..pos, parameter);
+
+        payload
+    }
+
+    // A peer may name its Publisher with PID_GROUP_ENTITY_ID alone. The prefix is the writer's own.
+    #[test]
+    fn publication_group_entity_id_completes_the_group_guid_with_the_writer_prefix() {
+        let original = sample_publication();
+        let group_entity_id = crate::rtps::common::entity_id::EntityId::new(
+            [0, 1, 0],
+            crate::rtps::common::entity_kind::EntityKind::USER_DEFINED_WRITER_GROUP,
+        );
+        let bytes = insert_parameter_before_sentinel(
+            original.to_serialized_data().to_vec(),
+            0x0053,
+            &group_entity_id.to_bytes(),
+        );
+        assert_eq!(count_pid_occurrences(&bytes, 0x0052), 0);
+
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(
+            parsed.group_guid(),
+            Some(Guid::new(original.endpoint_guid().prefix(), group_entity_id))
+        );
+    }
+
+    #[test]
+    fn publication_without_group_guid_parses_as_none() {
+        let bytes = sample_publication().to_serialized_data().to_vec();
+        assert_eq!(count_pid_occurrences(&bytes, 0x0052), 0);
+
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.group_guid(), None);
     }
 
     #[test]

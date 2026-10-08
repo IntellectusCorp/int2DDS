@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
 };
@@ -52,11 +52,18 @@ use crate::{
             EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         qos_kind::QosKind,
-        qos_policy::Qos,
+        qos_policy::{PresentationQosAccessScopeKind, Qos},
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    rtps::common::{entity_kind::EntityKind, guid::Guid},
+    rtps::{
+        common::{
+            entity_kind::EntityKind,
+            guid::{GroupDigest, Guid},
+            sequence::SequenceNumber,
+        },
+        entities::history::cache_change::PresentationInfo,
+    },
     topic::{qos::TopicQos, topic::Topic},
 };
 
@@ -73,6 +80,8 @@ pub struct Publisher {
     guid: Guid,
     qos: Arc<ArcSwap<PublisherQos>>,
     update_lock: Arc<Mutex<()>>,
+    // Serializes taking a sequence number and a group sequence number as one step.
+    gsn_allocation_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn PublisherListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<PublisherQos>>>,
@@ -90,6 +99,19 @@ pub struct Publisher {
     participant: Option<Weak<DomainParticipant>>,
     // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
     coherent_depth: Arc<AtomicU32>,
+    group_seq_state: Arc<Mutex<GroupSeqState>>,
+    // Copy of the issued counter the attached writers read without taking the state lock.
+    last_group_seq_num: Arc<AtomicI64>,
+    // writerSet of WriterGroupInfo: digest of the attached writers; shared with the writers.
+    writer_set: Arc<RwLock<GroupDigest>>,
+}
+
+// Group sequence numbers issued to attached writers, and the first one of the open coherent
+// set. One lock so that opening a set cannot cross a write that takes the number it records.
+#[derive(Default)]
+struct GroupSeqState {
+    last_group_seq_num: i64,
+    coherent_set_start: Option<SequenceNumber>,
 }
 
 impl Debug for Publisher {
@@ -179,6 +201,7 @@ impl Publisher {
             is_builtin,
             qos: Arc::new(ArcSwap::from_pointee(qos)),
             update_lock: Arc::new(Mutex::new(())),
+            gsn_allocation_lock: Arc::new(Mutex::new(())),
             guid: handle.to_guid(),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
@@ -192,6 +215,9 @@ impl Publisher {
             default_datawriter_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
             coherent_depth: Arc::new(AtomicU32::new(0)),
+            group_seq_state: Arc::new(Mutex::new(GroupSeqState::default())),
+            last_group_seq_num: Arc::new(AtomicI64::new(0)),
+            writer_set: Arc::new(RwLock::new(GroupDigest::EMPTY)),
         };
         let publisher_arc = Arc::new(publisher.clone());
         let weak_ref = Arc::downgrade(&publisher_arc);
@@ -295,6 +321,10 @@ impl Publisher {
         listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataWriter<Foo>> {
+        // Under GROUP scope the writer set is fixed while a coherent set is open.
+        if self.is_group_access_scope()? && self.in_coherent_changes() {
+            return Err(DdsError::PreconditionNotMet);
+        }
         let _ = self.cleanup_dead_writers();
 
         let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
@@ -373,6 +403,7 @@ impl Publisher {
                 .or_insert_with(Vec::new)
                 .push(weak_writer.clone());
         }
+        self.refresh_writer_set()?;
 
         Ok(datawriter)
     }
@@ -528,6 +559,10 @@ impl Publisher {
         if datawriter.get_publisher()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
         }
+        // Under GROUP scope the writer set is fixed while a coherent set is open.
+        if self.is_group_access_scope()? && self.in_coherent_changes() {
+            return Err(DdsError::PreconditionNotMet);
+        }
         let handle = datawriter.get_instance_handle()?;
         let topic_name = datawriter.get_topic()?.get_name().to_string();
         let topic_handle = datawriter.get_topic()?.get_instance_handle()?;
@@ -579,6 +614,7 @@ impl Publisher {
                 }
             }
         }
+        self.refresh_writer_set()?;
 
         // Close the writer to new API calls and drain in-flight ones before the rtps writer is
         // torn down, so no admitted write is aborted or loses its sample.
@@ -906,8 +942,20 @@ impl Publisher {
             Without delivering both values together, readers might misinterpret them as indicating an aircraft on a collision course.
         */
         let _operation = self.lifecycle.begin_operation()?;
+
+        // Holds off writes so that the set opens between two group sequence numbers.
+        let _allocation =
+            self.gsn_allocation_lock.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
         // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
-        self.coherent_depth.fetch_add(1, Ordering::AcqRel);
+        let previous_depth = self.coherent_depth.fetch_add(1, Ordering::AcqRel);
+
+        // The set's first sample takes the next group sequence number to be issued.
+        if previous_depth == 0 && self.in_coherent_changes() {
+            let mut state =
+                self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            state.coherent_set_start = Some(SequenceNumber::from_i64(state.last_group_seq_num + 1));
+        }
         Ok(())
     }
 
@@ -932,15 +980,76 @@ impl Publisher {
         }
     }
 
+    fn get_writer_set(&self) -> DdsResult<GroupDigest> {
+        Ok(*self.writer_set.read().map_err(|e| DdsError::Error(e.to_string()))?)
+    }
+
+    // Recompute the writerSet digest from the entity ids of the writers announced in discovery.
+    // A writer with no rtps writer has no publication in discovery, so it is left out.
+    pub(crate) fn refresh_writer_set(&self) -> DdsResult<()> {
+        if !self.is_group_access_scope()? {
+            return Ok(());
+        }
+
+        let mut writer_entity_ids = Vec::new();
+        for writer in self.get_datawriters_internal()? {
+            if !writer.has_rtps_writer() {
+                continue;
+            }
+
+            writer_entity_ids.push(writer.get_instance_handle()?.to_guid().entity_id());
+        }
+
+        *self.writer_set.write().map_err(|e| DdsError::Error(e.to_string()))? =
+            GroupDigest::from_entity_ids(&writer_entity_ids);
+        Ok(())
+    }
+
     // Ask every attached writer to close its open coherent set; returns the first error.
     fn end_writer_coherent_sets(&self) -> DdsResult<()> {
+        // Without coherent access there is no set to close and no End Coherent Set to send.
+        if !self.qos.load().presentation.coherent_access {
+            return Ok(());
+        }
+
+        // Holds off writes on this publisher for the whole close.
+        let _allocation =
+            self.gsn_allocation_lock.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        // Under GROUP scope every writer's End Coherent Set marker shares one group sequence
+        // number and the same group inline QoS; other scopes pass None.
+        let mut presentation_info = None;
+        if self.is_group_access_scope()? {
+            let group_seq_num = self.increment_group_seq_num()?;
+            let group_coherent_set = self.get_group_coherent_set_start()?.unwrap_or(group_seq_num);
+            let writer_set = self.get_writer_set()?;
+            log::debug!(
+                "group coherent set {} ends at gsn {} with writer set {}",
+                group_coherent_set.to_i64(),
+                group_seq_num.to_i64(),
+                writer_set
+            );
+            presentation_info = Some(PresentationInfo {
+                coherent_set: None,
+                group_seq_num: Some(group_seq_num),
+                group_coherent_set: Some(group_coherent_set),
+                writer_group_info: Some(writer_set),
+            });
+        }
+
+        // The start is cleared before the lock is released, so no later sample reads it.
+        self.group_seq_state
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .coherent_set_start = None;
+
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let mut result = Ok(());
         for weak_writers in writers_by_topic_name.values() {
             for weak_writer in weak_writers.iter() {
                 if let Some(writer) = weak_writer.upgrade() {
-                    let end_result = writer.end_coherent_set();
+                    let end_result = writer.end_coherent_set(presentation_info.as_ref());
                     if result.is_ok() {
                         result = end_result;
                     }
@@ -950,9 +1059,43 @@ impl Publisher {
         result
     }
 
+    pub(crate) fn is_group_access_scope(&self) -> DdsResult<bool> {
+        Ok(self.get_qos_arc()?.presentation.access_scope == PresentationQosAccessScopeKind::Group)
+    }
+
     // True while a coherent set is open (begin called without matching end).
+    // True while a coherent set is open on a Publisher that offers coherent access.
     pub(crate) fn in_coherent_changes(&self) -> bool {
-        self.coherent_depth.load(Ordering::Acquire) > 0
+        self.qos.load().presentation.coherent_access
+            && self.coherent_depth.load(Ordering::Acquire) > 0
+    }
+
+    // Issue the next group sequence number; strictly increasing per publisher, starting at 1.
+    pub(crate) fn increment_group_seq_num(&self) -> DdsResult<SequenceNumber> {
+        let mut state = self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        state.last_group_seq_num += 1;
+        self.last_group_seq_num.store(state.last_group_seq_num, Ordering::Release);
+
+        Ok(SequenceNumber::from_i64(state.last_group_seq_num))
+    }
+
+    // Group sequence number of the open coherent set's first sample; None outside a set.
+    pub(crate) fn get_group_coherent_set_start(&self) -> DdsResult<Option<SequenceNumber>> {
+        let state = self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        Ok(state.coherent_set_start)
+    }
+
+    pub(crate) fn get_last_group_seq_num_arc(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.last_group_seq_num)
+    }
+
+    pub(crate) fn get_gsn_allocation_lock_arc(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.gsn_allocation_lock)
+    }
+
+    pub(crate) fn get_writer_set_arc(&self) -> Arc<RwLock<GroupDigest>> {
+        Arc::clone(&self.writer_set)
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {
@@ -1400,6 +1543,181 @@ mod tests {
         factory.delete_participant(pub_participant).unwrap();
         sub_participant.delete_contained_entities().unwrap();
         factory.delete_participant(sub_participant).unwrap();
+    }
+
+    #[test]
+    fn increment_group_seq_num_starts_at_one_and_is_independent_per_publisher() {
+        use crate::test_utils::unique_domain_id;
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let first_publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let second_publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        assert_eq!(first_publisher.increment_group_seq_num().unwrap().to_i64(), 1);
+        assert_eq!(first_publisher.increment_group_seq_num().unwrap().to_i64(), 2);
+        assert_eq!(first_publisher.increment_group_seq_num().unwrap().to_i64(), 3);
+        assert_eq!(second_publisher.increment_group_seq_num().unwrap().to_i64(), 1);
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn get_group_coherent_set_start_is_the_next_gsn_at_begin_and_none_after_end() {
+        use crate::test_utils::unique_domain_id;
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.coherent_access = true;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 1);
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap(), None);
+
+        publisher.begin_coherent_changes().unwrap();
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap().map(|s| s.to_i64()), Some(2));
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 2);
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 3);
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap().map(|s| s.to_i64()), Some(2));
+        publisher.end_coherent_changes().unwrap();
+
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap(), None);
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 4);
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn group_scope_publisher_refuses_writer_changes_while_a_coherent_set_is_open() {
+        use crate::{
+            infrastructure::qos_policy::PresentationQosAccessScopeKind,
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "GroupWriterSetTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        publisher_qos.presentation.coherent_access = true;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        publisher.begin_coherent_changes().unwrap();
+        let create_result = publisher.create_datawriter::<HelloWorld>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        );
+        assert!(matches!(create_result, Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(
+            publisher.delete_datawriter(writer.clone()),
+            Err(DdsError::PreconditionNotMet)
+        ));
+        publisher.end_coherent_changes().unwrap();
+
+        publisher.delete_datawriter(writer).unwrap();
+        publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn topic_scope_publisher_allows_writer_changes_while_a_coherent_set_is_open() {
+        use crate::{
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "TopicWriterSetTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        publisher.begin_coherent_changes().unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        publisher.delete_datawriter(writer).unwrap();
+        publisher.end_coherent_changes().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
     }
 
     #[test]

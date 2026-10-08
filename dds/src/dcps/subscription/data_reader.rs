@@ -46,7 +46,7 @@ use super::{
     query_condition::QueryCondition,
     read_condition::ReadCondition,
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
-    subscriber::Subscriber,
+    subscriber::{OnDataOnReadersGuard, Subscriber},
 };
 use crate::{
     common::{
@@ -138,13 +138,22 @@ pub trait DataReaderBase: DomainEntity + Send + Any {
     fn get_topicdescription(&self) -> DdsResult<Arc<dyn TopicDescription>>;
     fn get_subscriber(&self) -> DdsResult<Subscriber>;
     fn delete_contained_entities(&self) -> DdsResult<()>;
+    // Entry point for downcasting a trait object back to its `DataReader<Foo>`.
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub(crate) trait DataReaderInternal: DataReaderBase {
     fn disable(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataReaderBase<Qos = DataReaderQos> + Send>;
-    fn as_any(&self) -> &dyn Any;
     fn notify_data_available(&self);
+    // Group sequence number of every cached sample that matches the three state masks.
+    // None for a sample that carries no group sequence number.
+    fn get_group_seq_nums_of_matching_samples(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Option<SequenceNumber>>>;
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn mark_deleted_and_await_operation_completion(&self);
@@ -419,6 +428,9 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                 .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
                 .clone();
 
+            // Resolved before the bridge guard is taken, because it reaches the bridge itself.
+            let subscriber_history_cache = subscriber.subscriber_history_cache()?;
+
             // Use Weak to avoid lifetime issues in closure
             let mut dcps_bridge = participant.get_dcps_bridge()?;
             let rtps_reader = match dcps_bridge.as_mut() {
@@ -428,6 +440,8 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                         content_filter_property,
                         Some(change_callback),
                         Some(status_callback),
+                        subscriber.guid(),
+                        subscriber_history_cache,
                     )
                     .map_err(|e| DdsError::Error(e.message))?,
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
@@ -443,13 +457,22 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         };
 
         // Common: Connect datareader cache to RTPS reader cache
-        {
+        let max_samples = {
             let reader_cache = rtps_reader.reader_cache();
-            reader_cache
+            let mut cache_guard =
+                reader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache_guard.set_datareader_cache(Arc::downgrade(&self.datareader_cache)
+                as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
+
+            cache_guard.max_samples()
+        };
+
+        // The group order holds this reader's samples before they are stored, under the same limit.
+        if let Some(subscriber_history_cache) = self.get_subscriber()?.subscriber_history_cache()? {
+            subscriber_history_cache
                 .lock()
                 .map_err(|e| DdsError::Error(e.to_string()))?
-                .set_datareader_cache(Arc::downgrade(&self.datareader_cache)
-                    as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
+                .register_reader(self.guid.entity_id(), max_samples);
         }
 
         Ok(())
@@ -1439,19 +1462,45 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // are sitting in the cache. `handle_liveliness_changed_status` uses this same order.
         self.set_read_communication_status(true)?;
 
-        // Listener
-        if let Some(listener) = self.get_listener()? {
-            listener.on_data_available(self);
-        }
         let subscriber = self.subscriber_arc()?;
-        if let Some(listener) = subscriber.get_listener()? {
-            listener.on_data_available(self);
-            listener.on_data_on_readers(&subscriber);
-        }
         let participant = subscriber.participant_arc()?;
-        if let Some(listener) = participant.get_listener()? {
-            listener.on_data_available(self);
-            listener.on_data_on_readers(&subscriber);
+
+        // on_data_on_readers is tried first and on_data_available runs only when none was
+        // called. Within each of the two, the most specific enabled listener wins.
+        if subscriber.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
+            if let Some(listener) = subscriber.get_listener()? {
+                let _marker = OnDataOnReadersGuard::new(subscriber.guid());
+                listener.on_data_on_readers(&subscriber);
+                return Ok(());
+            }
+        }
+
+        if participant.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
+            if let Some(listener) = participant.get_listener()? {
+                let _marker = OnDataOnReadersGuard::new(subscriber.guid());
+                listener.on_data_on_readers(&subscriber);
+                return Ok(());
+            }
+        }
+
+        if self.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = self.get_listener()? {
+                listener.on_data_available(self);
+                return Ok(());
+            }
+        }
+
+        if subscriber.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = subscriber.get_listener()? {
+                listener.on_data_available(self);
+                return Ok(());
+            }
+        }
+
+        if participant.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = participant.get_listener()? {
+                listener.on_data_available(self);
+            }
         }
 
         Ok(())
@@ -1630,16 +1679,28 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
-        let topic_ordered = self.subscriber_topic_ordered();
+        let (group_ordered, topic_ordered) = match self.subscriber_arc() {
+            Ok(subscriber) => (
+                subscriber.presentation_group_ordered().unwrap_or(false),
+                subscriber.presentation_topic_ordered().unwrap_or(false),
+            ),
+            Err(_) => (false, false),
+        };
+
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
         let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
         // Enforce Lifespan QoS at read time so expired samples are never returned,
         // even if the periodic cleanup timer hasn't fired yet.
         guard.purge_expired_on_read()?;
-        // TOPIC ordered_access presents samples in topic-wide DESTINATION_ORDER across instances;
-        // otherwise return the per-instance storage order.
-        if topic_ordered {
+
+        // GROUP ordered_access presents samples in group sequence number order, TOPIC
+        // ordered_access in topic-wide DESTINATION_ORDER across instances. Otherwise return the
+        // per-instance storage order.
+        if group_ordered {
+            Ok(guard.get_changes_for_group_scoped_ordered_access())
+        } else if topic_ordered {
             Ok(guard.get_changes_for_topic_scoped_ordered_access())
         } else {
             Ok(guard.get_changes())
@@ -1658,10 +1719,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         self.subscriber.as_ref().and_then(|weak_ref| weak_ref.upgrade()).ok_or_else(|| {
             DdsError::Error("Subscriber reference is invalid or expired".to_string())
         })
-    }
-
-    fn subscriber_topic_ordered(&self) -> bool {
-        self.subscriber_arc().and_then(|s| s.presentation_topic_ordered()).unwrap_or(false)
     }
 
     pub(crate) fn is_subscriber_coherent(&self) -> bool {
@@ -2379,6 +2436,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         )
     }
 
+    // TODO: release loans from the subscriber's coherent access block when that block closes.
     /// Ends a loan from `read_loaned`/`take_loaned` and their variants. Dropping the
     /// loan does the same. A loan from another reader is handed back, still valid,
     /// with `PreconditionNotMet`.
@@ -3066,6 +3124,13 @@ impl<Foo: DdsType> DataReader<Foo> {
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
+        let mut is_limited_to_one_sample = false;
+
+        if let Ok(subscriber) = self.subscriber_arc() {
+            subscriber.check_group_access_block_open()?;
+            is_limited_to_one_sample = subscriber.is_group_order_enforced()?;
+        }
+
         if max_samples == 0 {
             return Err(DdsError::BadParameter);
         }
@@ -3081,7 +3146,16 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.set_read_communication_status(false)?;
         let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
-        let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
+
+        // Group ordered access hands out one sample per call, so that the application can move to
+        // the next reader of the returned list.
+        let mut remaining = if is_limited_to_one_sample {
+            1
+        } else if max_samples == -1 {
+            i32::MAX
+        } else {
+            max_samples
+        };
 
         let changes = self.get_available_changes()?;
 
@@ -3253,6 +3327,13 @@ impl<Foo: DdsType> DataReader<Foo> {
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
+        let mut is_limited_to_one_sample = false;
+
+        if let Ok(subscriber) = self.subscriber_arc() {
+            subscriber.check_group_access_block_open()?;
+            is_limited_to_one_sample = subscriber.is_group_order_enforced()?;
+        }
+
         if max_samples == 0 {
             log::warn!("BadParameter: max_samples={}", max_samples);
             return Err(DdsError::BadParameter);
@@ -3278,8 +3359,16 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.set_read_communication_status(false)?;
         let mut result_samples: Vec<R> = Vec::new();
-        // TODO: The size of the collection may be additionally limited by the PRESENTATION QoS policy (2.2.3.6).
-        let mut remaining_samples = if max_samples == -1 { i32::MAX } else { max_samples };
+
+        // Group ordered access hands out one sample per call, so that the application can move to
+        // the next reader of the returned list.
+        let mut remaining_samples = if is_limited_to_one_sample {
+            1
+        } else if max_samples == -1 {
+            i32::MAX
+        } else {
+            max_samples
+        };
 
         // let rtps_reader = self.get_rtps_reader()?;
         // let mut changes = rtps_reader.available_changes();
@@ -4110,6 +4199,10 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
         }
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
@@ -4125,8 +4218,37 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         Box::new(self.clone())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn get_group_seq_nums_of_matching_samples(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Option<SequenceNumber>>> {
+        let changes = self.get_available_changes()?;
+        let instance_infos = self.get_instance_infos()?;
+
+        let mut group_seq_nums = Vec::new();
+
+        for change in changes.iter() {
+            let sample_state =
+                self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
+
+            let (view_state, instance_state) = match instance_infos.get(&change.instance_handle()) {
+                Some(info) => (info.view_state, info.instance_state),
+                None => (ViewStateKind::NEW_VIEW_STATE, InstanceStateKind::ALIVE_INSTANCE_STATE),
+            };
+
+            if !sample_states.matches(sample_state)
+                || !view_states.matches(view_state)
+                || !instance_states.matches(instance_state)
+            {
+                continue;
+            }
+
+            group_seq_nums.push(change.presentation_info().group_seq_num);
+        }
+
+        Ok(group_seq_nums)
     }
 
     fn notify_data_available(&self) {
@@ -4248,6 +4370,7 @@ pub(crate) mod tests {
     use crate::subscription::subscriber_listener::SubscriberListener;
     use crate::test_utils::unique_domain_id;
     use crate::topic::qos::TopicQos;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{sync_channel, SyncSender};
     use std::sync::Arc;
 
@@ -4420,9 +4543,8 @@ pub(crate) mod tests {
     /// `test_take_next_instance_surfaces_no_writers_after_writer_deleted`.
     ///
     /// The mask is what separates the two mechanisms: the listener takes data notifications, the
-    /// WaitSet takes everything else. Note that `handle_data_available_status` invokes the listener
-    /// without consulting the mask, so DATA_AVAILABLE is named here for intent rather than because
-    /// omitting it would silence the counter.
+    /// WaitSet takes everything else. DATA_AVAILABLE has to be named here, since
+    /// `handle_data_available_status` skips a listener whose mask leaves it out.
     const DATA_ONLY_LISTENER_MASK: StatusMask = StatusMask::DATA_AVAILABLE;
 
     struct SubListener {
@@ -7498,7 +7620,7 @@ pub(crate) mod tests {
         // set may be buffered on the reader.
         assert_eq!(is_relevant, Some(false), "sn5 should be received via GAP, not DATA");
         assert_eq!(
-            reader_cache.lock().unwrap().pending_coherent_len(writer_guid),
+            reader_cache.lock().unwrap().coherent_pending_change_count_for_writer(writer_guid),
             0,
             "no member of the GAPped set should be buffered"
         );
@@ -7507,5 +7629,164 @@ pub(crate) mod tests {
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
+    }
+
+    struct CountingSubscriberListener {
+        on_data_on_readers_count: Arc<AtomicUsize>,
+        does_notify_datareaders: bool,
+    }
+
+    impl SubscriberListener for CountingSubscriberListener {
+        fn on_data_on_readers(&self, subscriber: &Subscriber) {
+            self.on_data_on_readers_count.fetch_add(1, Ordering::AcqRel);
+
+            if self.does_notify_datareaders {
+                subscriber.notify_datareaders().unwrap();
+            }
+        }
+    }
+
+    struct CountingReaderListener {
+        on_data_available_count: Arc<AtomicUsize>,
+    }
+
+    impl DataReaderListener for CountingReaderListener {
+        type Foo = HelloWorld;
+
+        fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+            self.on_data_available_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    // Writes one sample to a Subscriber and a DataReader that both count their data callbacks.
+    fn count_data_callbacks_of_one_sample(
+        topic_name: &str,
+        does_notify_datareaders: bool,
+    ) -> (usize, usize) {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                topic_name,
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_keep_all_writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos,
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let on_data_on_readers_count = Arc::new(AtomicUsize::new(0));
+        let on_data_available_count = Arc::new(AtomicUsize::new(0));
+
+        let subscriber = participant
+            .create_subscriber(
+                SubscriberQos::default(),
+                Some(Arc::new(CountingSubscriberListener {
+                    on_data_on_readers_count: Arc::clone(&on_data_on_readers_count),
+                    does_notify_datareaders,
+                })),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_keep_all_reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos,
+                Some(Arc::new(CountingReaderListener {
+                    on_data_available_count: Arc::clone(&on_data_available_count),
+                })),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("timed out waiting for the reader");
+        wait_set.detach_condition(condition).unwrap();
+
+        writer
+            .write(&HelloWorld { index: 0, message: "sample".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+
+        // The listener that wins the dispatch is the one to wait for. Every other seat of the
+        // same dispatch is already settled once it has run.
+        let awaited = if does_notify_datareaders {
+            &on_data_available_count
+        } else {
+            &on_data_on_readers_count
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        while awaited.load(Ordering::Acquire) == 0 {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for the callback");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let counts = (
+            on_data_on_readers_count.load(Ordering::Acquire),
+            on_data_available_count.load(Ordering::Acquire),
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        counts
+    }
+
+    #[test]
+    fn test_on_data_on_readers_leaves_on_data_available_uncalled() {
+        let (on_data_on_readers, on_data_available) =
+            count_data_callbacks_of_one_sample("OnDataOnReadersWins", false);
+
+        assert_eq!(on_data_on_readers, 1);
+        assert_eq!(on_data_available, 0);
+    }
+
+    #[test]
+    fn test_notify_datareaders_reaches_the_reader_listener_from_on_data_on_readers() {
+        let (on_data_on_readers, on_data_available) =
+            count_data_callbacks_of_one_sample("NotifyDatareaders", true);
+
+        assert_eq!(on_data_on_readers, 1);
+        assert_eq!(on_data_available, 1);
     }
 }

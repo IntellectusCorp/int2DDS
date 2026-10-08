@@ -18,6 +18,14 @@ inputs:
     description: 'Enable int2DDS logging'
     required: false
     default: 'false'
+  range-start:
+    description: 'Test case to start at, inclusive. Empty starts at the first case'
+    required: false
+    default: ''
+  range-end:
+    description: 'Test case to stop after, inclusive. Empty runs to the last case'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
@@ -64,6 +72,30 @@ runs:
                 names += [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
         print(' '.join(dict.fromkeys(names)))
         ")
+
+        # Slice the suite to the requested range, keeping the order test_suite.py defines.
+        START="${{ inputs.range-start }}"
+        END="${{ inputs.range-end }}"
+
+        if [ -n "$START" ] || [ -n "$END" ]; then
+          SELECTED=""
+          IN_RANGE=0
+          [ -z "$START" ] && IN_RANGE=1
+
+          for tc in $CASES; do
+            [ "$tc" = "$START" ] && IN_RANGE=1
+            [ "$IN_RANGE" = "1" ] && SELECTED="$SELECTED $tc"
+            [ -n "$END" ] && [ "$tc" = "$END" ] && break
+          done
+
+          CASES="$SELECTED"
+
+          if [ -z "$CASES" ]; then
+            echo "::error::No test case matches range start='$START' end='$END'"
+            exit 1
+          fi
+        fi
+
         echo "Running $(echo $CASES | wc -w) test cases one at a time"
 
         # Uploaded together with the per-case files so the artifact root stays at OUT
