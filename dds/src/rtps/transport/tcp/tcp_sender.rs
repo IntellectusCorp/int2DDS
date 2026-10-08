@@ -204,7 +204,29 @@ impl TcpSender {
         let mut frame = Vec::with_capacity(data.len() + 8);
         encode_frame(data, &mut frame)?;
 
-        match connection.send(&frame) {
+        match self.write_frame(key, &connection, &frame) {
+            // The stream the frame was meant for is gone, and a new one starts
+            // from a frame boundary, so the whole frame goes out again, once.
+            Err(_) if connection.is_failed() => {
+                let reopened = self.open_connection(key)?;
+                let result = self.write_frame(key, &reopened, &frame);
+                if result.is_err() && reopened.is_failed() {
+                    self.stats.write_error.record("write error", addr, kind);
+                }
+                result
+            }
+            result => result,
+        }
+    }
+
+    fn write_frame(
+        &self,
+        key: ConnectionKey,
+        connection: &Arc<OutboundConnection>,
+        frame: &[u8],
+    ) -> io::Result<()> {
+        let (addr, kind) = key;
+        match connection.send(frame) {
             Ok(SendOutcome::Sent) => Ok(()),
             Ok(SendOutcome::Stalled) => {
                 self.stats.peer_stalled.record("peer send queue full", addr, kind);
@@ -215,8 +237,7 @@ impl TcpSender {
             }
             Err(error) => {
                 if connection.is_failed() {
-                    self.evict_connection(key, &connection);
-                    self.stats.write_error.record("write error", addr, kind);
+                    self.evict_connection(key, connection);
                     debug!("TcpSender: write {:?} to {} failed: {}", kind, addr, error);
                 }
                 Err(error)
@@ -322,7 +343,9 @@ impl Drop for TcpSender {
 mod tests {
     use super::*;
     use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
-    use crate::rtps::transport::tcp::framing::test_message;
+    use crate::rtps::transport::tcp::framing::{test_framed, test_message};
+    use std::io::Read;
+    use std::net::TcpStream;
 
     fn make_sender(config: TcpConfig) -> Arc<TcpSender> {
         let tuning = TcpSocketTuning {
@@ -422,6 +445,68 @@ mod tests {
         }
 
         assert_eq!(sender.stats.peer_stalled.count(), 0);
+        sender.shutdown();
+    }
+
+    fn accept_within(listener: &std::net::TcpListener, wait: Duration) -> Option<TcpStream> {
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking stream");
+                    stream.set_read_timeout(Some(wait)).expect("read timeout");
+                    return Some(stream);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        }
+        None
+    }
+
+    fn read_frame(stream: &mut TcpStream, message: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0u8; test_framed(message).len()];
+        stream.read_exact(&mut frame).expect("a whole frame");
+        frame
+    }
+
+    /// A frame whose write fails must not be dropped: the slot is reopened and
+    /// the same frame goes out on the new connection, once.
+    #[test]
+    fn a_frame_whose_write_fails_is_sent_again_on_a_new_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let peer = listener.local_addr().expect("addr");
+        let config =
+            TcpConfig { connect_timeout: Duration::from_millis(500), ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let first = test_message(0x02, b"first");
+        let retried = test_message(0x02, b"retried");
+
+        sender.send_to(peer, TcpFrameKind::UserData, &first).expect("first send");
+        let mut old = accept_within(&listener, Duration::from_secs(2)).expect("first connection");
+        assert_eq!(read_frame(&mut old, &first), test_framed(&first));
+
+        let connection =
+            sender.live_connection(&(peer, TcpFrameKind::UserData)).expect("an open slot");
+        connection.shutdown_write();
+
+        let result = sender.send_to(peer, TcpFrameKind::UserData, &retried);
+        let mut new = accept_within(&listener, Duration::from_secs(2))
+            .expect("the failed frame was dropped: no new connection was opened");
+        assert_eq!(read_frame(&mut new, &retried), test_framed(&retried));
+        result.expect("send that had to be retried");
+
+        new.set_read_timeout(Some(Duration::from_millis(200))).expect("read timeout");
+        let mut extra = [0u8; 1];
+        assert!(
+            !matches!(new.read(&mut extra), Ok(read) if read > 0),
+            "the frame went out more than once"
+        );
+
+        drop(old);
         sender.shutdown();
     }
 }

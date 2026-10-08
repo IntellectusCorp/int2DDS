@@ -184,6 +184,13 @@ impl OutboundConnection {
     fn lock(&self) -> MutexGuard<'_, ConnectionState> {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// Closes this side for writing while the peer stays open, so the next
+    /// write fails without the peer having closed anything.
+    #[cfg(test)]
+    pub(crate) fn shutdown_write(&self) {
+        let _ = self.lock().wire.socket().shutdown(std::net::Shutdown::Write);
+    }
 }
 
 impl ConnectionState {
