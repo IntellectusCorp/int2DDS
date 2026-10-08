@@ -608,4 +608,37 @@ mod tests {
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
     }
+
+    #[test]
+    fn take_w_condition_skips_elements_without_data() {
+        use crate::subscription::loan_tests::{
+            keep_all, shape, wait_until, Fixture, ANY_INSTANCE, ANY_SAMPLE, ANY_VIEW,
+        };
+
+        let f = Fixture::new(1, keep_all());
+        f.write(&[shape(0, 10), shape(1, 20)], 2);
+        let reader = &f.readers[0];
+        f.writer.dispose(&shape(0, 0), InstanceHandle::NIL).unwrap();
+        wait_until("dispose", || reader.get_available_changes().unwrap().len() == 3);
+        let qc = reader
+            .create_querycondition(
+                ANY_SAMPLE,
+                ANY_VIEW,
+                ANY_INSTANCE,
+                "size > %0",
+                vec!["0".into()],
+            )
+            .unwrap();
+
+        let taken = reader.take_w_condition(10, qc.clone()).unwrap();
+
+        let sizes: Vec<u32> = taken.iter().map(|s| s.data().unwrap().size).collect();
+        assert_eq!(sizes, [10, 20]);
+        assert_eq!(qc.get_trigger_value(), Ok(false));
+        let rest = reader.read(10, ANY_SAMPLE, ANY_VIEW, ANY_INSTANCE).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert!(!rest[0].sample_info().valid_data);
+        reader.delete_readcondition(qc).unwrap();
+        f.finish();
+    }
 }

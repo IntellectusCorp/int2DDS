@@ -85,6 +85,7 @@ ffi.cdef("""
     typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
     typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
     typedef struct Int2DdsSerializedLoan Int2DdsSerializedLoan;
+    typedef struct Int2DdsLoanedSamples Int2DdsLoanedSamples;
     typedef struct Int2DdsSerializedWriteLoan Int2DdsSerializedWriteLoan;
 
     typedef int32_t Int2DdsRet;
@@ -1401,6 +1402,43 @@ ffi.cdef("""
         size_t index,
         Int2DdsSampleInfo *info_out
     );
+    Int2DdsRet int2dds_datareader_read_loaned(const Int2DdsDataReader *reader, int32_t max_samples,
+        uint32_t sample_state_mask, uint32_t view_state_mask, uint32_t instance_state_mask,
+        Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_loaned(const Int2DdsDataReader *reader, int32_t max_samples,
+        uint32_t sample_state_mask, uint32_t view_state_mask, uint32_t instance_state_mask,
+        Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_w_condition_loaned(const Int2DdsDataReader *reader,
+        const Int2DdsReadCondition *condition, int32_t max_samples, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_w_condition_loaned(const Int2DdsDataReader *reader,
+        const Int2DdsReadCondition *condition, int32_t max_samples, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_next_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*previous_handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_next_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*previous_handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_next_instance_w_condition_loaned(
+        const Int2DdsDataReader *reader, const uint8_t (*previous_handle)[16],
+        const Int2DdsReadCondition *condition, int32_t max_samples,
+        Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_next_instance_w_condition_loaned(
+        const Int2DdsDataReader *reader, const uint8_t (*previous_handle)[16],
+        const Int2DdsReadCondition *condition, int32_t max_samples,
+        Int2DdsLoanedSamples **loan_out);
+    size_t int2dds_loaned_samples_length(const Int2DdsLoanedSamples *loan);
+    Int2DdsRet int2dds_loaned_samples_get_info(const Int2DdsLoanedSamples *loan, size_t index,
+        Int2DdsSampleInfo *info_out);
+    Int2DdsRet int2dds_loaned_samples_get_data(const Int2DdsLoanedSamples *loan, size_t index,
+        const uint8_t **data_out, size_t *size_out);
+    Int2DdsRet int2dds_datareader_return_loan(const Int2DdsDataReader *reader,
+        Int2DdsLoanedSamples *loan);
     Int2DdsRet int2dds_sample_seq_delete(Int2DdsSampleSeq *seq);
 
     /* Serialized batch read/take (all instances) */
