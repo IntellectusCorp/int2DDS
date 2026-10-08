@@ -272,7 +272,13 @@ impl TcpSender {
         )
         .inspect_err(|error| {
             self.stats.connect_failed.record("connect failed", addr, kind);
-            self.shared.note_connect_failure(key, error);
+            // A refusal costs the caller one round trip, and discovery never
+            // dials more often than its own periods, so holding it back only
+            // drops the reply a participant that just reappeared is waiting for.
+            let refused = error.kind() == io::ErrorKind::ConnectionRefused;
+            if !(refused && kind == TcpFrameKind::Discovery) {
+                self.shared.note_connect_failure(key, error);
+            }
         })?;
 
         self.shared.clear_backoff(key);
@@ -506,6 +512,40 @@ mod tests {
         sender.shutdown();
     }
 
+    /// A discovery frame tried while the peer was down must not hold back the
+    /// one sent right after it comes back: that is the reply a restarted
+    /// participant needs before it can match.
+    #[test]
+    fn a_refused_discovery_dial_does_not_hold_back_the_next_frame() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let peer = listener.local_addr().expect("addr");
+        let config =
+            TcpConfig { connect_timeout: Duration::from_millis(500), ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let before = test_message(0xC2, b"before the restart");
+        let while_down = test_message(0xC2, b"while the peer is down");
+        let after = test_message(0xC2, b"after the restart");
+
+        sender.send_to(peer, TcpFrameKind::Discovery, &before).expect("first send");
+        let mut old = accept_within(&listener, Duration::from_secs(2)).expect("first connection");
+        assert_eq!(read_frame(&mut old, &before), test_framed(&before));
+
+        drop(old);
+        drop(listener);
+        std::thread::sleep(Duration::from_millis(100));
+        let refused = sender.send_to(peer, TcpFrameKind::Discovery, &while_down).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+
+        let restarted = std::net::TcpListener::bind(peer).expect("same port again");
+        let result = sender.send_to(peer, TcpFrameKind::Discovery, &after);
+        let mut new = accept_within(&restarted, Duration::from_secs(2))
+            .expect("the frame after the restart was held back by the refused dial");
+        assert_eq!(read_frame(&mut new, &after), test_framed(&after));
+        result.expect("send after the restart");
+
+        sender.shutdown();
+    }
+
     /// A frame whose write fails must not be dropped: the slot is reopened and
     /// the same frame goes out on the new connection, once.
     #[test]
@@ -540,6 +580,38 @@ mod tests {
         );
 
         drop(old);
+        sender.shutdown();
+    }
+
+    /// A peer that answers nothing must still put discovery into backoff: a
+    /// dial that times out holds the calling thread, so the next frame must not
+    /// wait for it again.
+    #[test]
+    fn a_discovery_dial_that_times_out_enters_backoff() {
+        // With its accept queue full the kernel drops new SYNs without a reply,
+        // as a host that is down would.
+        let listener = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+            .expect("socket");
+        listener.bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into()).expect("bind");
+        listener.listen(0).expect("listen");
+        let peer = listener.local_addr().expect("addr").as_socket().expect("inet addr");
+        let _queued: Vec<TcpStream> = (0..2)
+            .filter_map(|_| TcpStream::connect_timeout(&peer, Duration::from_millis(100)).ok())
+            .collect();
+
+        let bound = Duration::from_millis(200);
+        let config = TcpConfig { connect_timeout: bound, ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let message = test_message(0xC2, b"discovery");
+
+        let first = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
+        assert_eq!(first.kind(), io::ErrorKind::TimedOut);
+
+        let call = Instant::now();
+        let second = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
+        assert_eq!(second.kind(), io::ErrorKind::WouldBlock, "the second dial was not held back");
+        assert!(call.elapsed() < bound / 2, "the second send waited {:?}", call.elapsed());
+
         sender.shutdown();
     }
 }
