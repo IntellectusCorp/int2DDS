@@ -209,6 +209,11 @@
 #define INT2DDS_MEMBER_EXTERNAL (1 << 3)
 
 /**
+ * Marks the `default:` case member of a union builder (`IS_DEFAULT`); ignored on structs.
+ */
+#define INT2DDS_MEMBER_DEFAULT (1 << 4)
+
+/**
  * C-compatible QoS policy ID enum
  */
 typedef enum Int2DdsQosPolicyId {
@@ -319,6 +324,11 @@ typedef struct Int2DdsDynamicValue Int2DdsDynamicValue;
  * Opaque handle to a GuardCondition
  */
 typedef struct Int2DdsGuardCondition Int2DdsGuardCondition;
+
+/**
+ * Samples loaned from a DataReader's cache. Released only by `int2dds_datareader_return_loan`.
+ */
+typedef struct Int2DdsLoanedSamples Int2DdsLoanedSamples;
 
 /**
  * Opaque handle to a DomainParticipant
@@ -1920,6 +1930,11 @@ Int2DdsRet int2dds_create_datareader_dynamic(const struct Int2DdsSubscriber *sub
 /**
  * Destroy a dynamic DataWriter handle. Safe to call with null.
  *
+ * Mirrors `int2dds_delete_datawriter`: unregisters the writer from its
+ * parent publisher so the publisher/participant can be deleted afterward.
+ * Best-effort, since a void destructor cannot report a failure code; the
+ * FFI wrapper is freed either way.
+ *
  * # Safety
  * - `w` must be a valid dynamic datawriter, or null (null is a no-op)
  * - `w` must not be used after this call
@@ -1928,6 +1943,11 @@ void int2dds_dynamic_writer_destroy(struct Int2DdsDynamicDataWriter *w);
 
 /**
  * Destroy a dynamic DataReader handle. Safe to call with null.
+ *
+ * Mirrors `int2dds_delete_datareader`: unregisters the reader from its
+ * parent subscriber so the subscriber/participant can be deleted afterward.
+ * Best-effort, since a void destructor cannot report a failure code; the
+ * FFI wrapper is freed either way.
  *
  * # Safety
  * - `r` must be a valid dynamic datareader, or null (null is a no-op)
@@ -2404,6 +2424,16 @@ Int2DdsRet int2dds_env_set_qos_profile(const char *path);
 Int2DdsRet int2dds_env_set_default_qos_profile(const char *profile);
 
 /**
+ * Clear the calling thread's last-error message from the C ABI. Lets a host
+ * binding reset the thread-local before an operation whose error state it
+ * wants to read in isolation.
+ *
+ * # Safety
+ * Callable from any thread under the C ABI; touches only that thread's slot.
+ */
+void int2dds_clear_last_error(void);
+
+/**
  * Copy the calling thread's last error message (UTF-8, NUL-terminated) into `buf`.
  * Returns the full message byte length, excluding the NUL.
  *
@@ -2415,6 +2445,188 @@ Int2DdsRet int2dds_env_set_default_qos_profile(const char *profile);
  * `buf` must be null or point to at least `buf_len` writable bytes.
  */
 int32_t int2dds_last_error_message(char *buf, int32_t buf_len);
+
+/**
+ * Loan samples from the cache without removing them. `NO_DATA` with a null loan when
+ * nothing matches. A state mask of 0 selects ANY.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `loan_out` a valid pointer
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_loaned(const struct Int2DdsDataReader *reader,
+                                          int32_t max_samples,
+                                          uint32_t sample_state_mask,
+                                          uint32_t view_state_mask,
+                                          uint32_t instance_state_mask,
+                                          struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_loaned(const struct Int2DdsDataReader *reader,
+                                          int32_t max_samples,
+                                          uint32_t sample_state_mask,
+                                          uint32_t view_state_mask,
+                                          uint32_t instance_state_mask,
+                                          struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * Loan samples matching a Read/QueryCondition without removing them.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `condition` a condition created from it,
+ *   `loan_out` a valid pointer
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                      const struct Int2DdsReadCondition *condition,
+                                                      int32_t max_samples,
+                                                      struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_w_condition_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_w_condition_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                      const struct Int2DdsReadCondition *condition,
+                                                      int32_t max_samples,
+                                                      struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_loaned` limited to the instance `handle`. A NULL or all-zero
+ * (NIL) handle is `INVALID_ARGUMENT`.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `loan_out` a valid pointer
+ * - `handle` must be null or point to a 16-byte instance handle
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                   const uint8_t (*handle)[16],
+                                                   int32_t max_samples,
+                                                   uint32_t sample_state_mask,
+                                                   uint32_t view_state_mask,
+                                                   uint32_t instance_state_mask,
+                                                   struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_instance_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_instance_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                   const uint8_t (*handle)[16],
+                                                   int32_t max_samples,
+                                                   uint32_t sample_state_mask,
+                                                   uint32_t view_state_mask,
+                                                   uint32_t instance_state_mask,
+                                                   struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_instance_loaned` for the next instance after `previous_handle`
+ * that has matching samples. A NULL or NIL handle starts from the first instance.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_instance_loaned`
+ */
+Int2DdsRet int2dds_datareader_read_next_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                        const uint8_t (*previous_handle)[16],
+                                                        int32_t max_samples,
+                                                        uint32_t sample_state_mask,
+                                                        uint32_t view_state_mask,
+                                                        uint32_t instance_state_mask,
+                                                        struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_next_instance_loaned` that removes the samples from the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_instance_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_next_instance_loaned(const struct Int2DdsDataReader *reader,
+                                                        const uint8_t (*previous_handle)[16],
+                                                        int32_t max_samples,
+                                                        uint32_t sample_state_mask,
+                                                        uint32_t view_state_mask,
+                                                        uint32_t instance_state_mask,
+                                                        struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_next_instance_loaned` with a Read/QueryCondition instead of
+ * state masks.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader, `condition` a condition created from it,
+ *   `loan_out` a valid pointer
+ * - `previous_handle` must be null or point to a 16-byte instance handle
+ * - A non-null `*loan_out` must be released with `int2dds_datareader_return_loan`
+ */
+Int2DdsRet int2dds_datareader_read_next_instance_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                                    const uint8_t (*previous_handle)[16],
+                                                                    const struct Int2DdsReadCondition *condition,
+                                                                    int32_t max_samples,
+                                                                    struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * `int2dds_datareader_read_next_instance_w_condition_loaned` that removes the samples from
+ * the cache.
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_read_next_instance_w_condition_loaned`
+ */
+Int2DdsRet int2dds_datareader_take_next_instance_w_condition_loaned(const struct Int2DdsDataReader *reader,
+                                                                    const uint8_t (*previous_handle)[16],
+                                                                    const struct Int2DdsReadCondition *condition,
+                                                                    int32_t max_samples,
+                                                                    struct Int2DdsLoanedSamples **loan_out);
+
+/**
+ * Number of elements in a loan; 0 for null.
+ *
+ * # Safety
+ * - `loan` must be null or a loan not yet returned
+ */
+uintptr_t int2dds_loaned_samples_length(const struct Int2DdsLoanedSamples *loan);
+
+/**
+ * SampleInfo of element `index`.
+ *
+ * # Safety
+ * - `loan` must be a loan not yet returned, `info_out` a valid pointer
+ */
+Int2DdsRet int2dds_loaned_samples_get_info(const struct Int2DdsLoanedSamples *loan,
+                                           uintptr_t index,
+                                           struct Int2DdsSampleInfo *info_out);
+
+/**
+ * Lends the serialized bytes of element `index`; valid until the loan is returned.
+ * `NO_DATA` with a null pointer for an element without data.
+ *
+ * # Safety
+ * - `loan` must be a loan not yet returned; `data_out` and `size_out` valid pointers
+ */
+Int2DdsRet int2dds_loaned_samples_get_data(const struct Int2DdsLoanedSamples *loan,
+                                           uintptr_t index,
+                                           const uint8_t **data_out,
+                                           uintptr_t *size_out);
+
+/**
+ * Returns `loan` to `reader` and frees it. A loan from another reader is left valid
+ * and owned by the caller (`PRECONDITION_NOT_MET`). A null loan is a no-op.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `loan` must be null or a loan not yet returned; it must not be used after `OK`
+ */
+Int2DdsRet int2dds_datareader_return_loan(const struct Int2DdsDataReader *reader,
+                                          struct Int2DdsLoanedSamples *loan);
 
 /**
  * Create a DomainParticipant
@@ -4046,6 +4258,17 @@ Int2DdsRet int2dds_datareader_get_statuscondition(const struct Int2DdsDataReader
                                                   struct Int2DdsStatusCondition **condition_out);
 
 /**
+ * Get the StatusCondition from a dynamic DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid handle from `int2dds_create_datareader_dynamic`
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_dynamic_reader_get_statuscondition(const struct Int2DdsDynamicDataReader *reader,
+                                                      struct Int2DdsStatusCondition **condition_out);
+
+/**
  * Get the StatusCondition from a DataWriter
  *
  * # Safety
@@ -5086,6 +5309,43 @@ Int2DdsRet int2dds_type_info_add_bitmask_flag(struct Int2DdsTypeInfo *type_info,
                                               uint16_t position);
 
 /**
+ * Create a bitset type info builder. Populate it with `int2dds_type_info_add_bitfield`
+ * in declaration order, then pass it to `int2dds_type_info_add_nested_field` on the
+ * parent so a bitset-typed member resolves like the derive's `#[dds_type(bitset)]`.
+ */
+Int2DdsRet int2dds_type_info_create_bitset(const char *type_name, struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a `bitfield<bitcount>` to a bitset builder. `holder_type` is the
+ * `INT2DDS_FIELD_*` integer kind that holds the field (`BYTE` up to 8 bits, then
+ * `UINT16`/`UINT32`/`UINT64`); the bit position follows the previous bitfield.
+ */
+Int2DdsRet int2dds_type_info_add_bitfield(struct Int2DdsTypeInfo *type_info,
+                                          const char *field_name,
+                                          uint8_t bitcount,
+                                          int32_t holder_type);
+
+/**
+ * Create a union type info builder. `discriminator_type` is the `INT2DDS_FIELD_*`
+ * scalar kind of the switch (string kinds are rejected). Add each case member with the
+ * same `int2dds_type_info_add_*_field` calls a struct uses, giving the `default:`
+ * member `INT2DDS_MEMBER_DEFAULT`, then attach its labels with
+ * `int2dds_type_info_add_union_label`.
+ */
+Int2DdsRet int2dds_type_info_create_union(const char *type_name,
+                                          int32_t extensibility,
+                                          int32_t discriminator_type,
+                                          struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a case label to the union member named `member_name`, which must already
+ * have been added. Boolean labels are `1`/`0`; enum labels are their literal value.
+ */
+Int2DdsRet int2dds_type_info_add_union_label(struct Int2DdsTypeInfo *type_info,
+                                             const char *member_name,
+                                             int32_t label);
+
+/**
  * Add a primitive-typed field to the type info builder.
  *
  * # Safety
@@ -5242,6 +5502,33 @@ Int2DdsRet int2dds_type_info_add_array_of_named_field(struct Int2DdsTypeInfo *ty
                                                       const char *element_hash_name,
                                                       uint32_t array_size,
                                                       int32_t flags);
+
+/**
+ * Add a `map<K, V>` field whose key and value are scalar `INT2DDS_FIELD_*` kinds.
+ * `key_bound`/`value_bound` apply to the string kinds (`0` = unbounded) and are ignored
+ * otherwise; `bound` is the map's own bound (`0` = unbounded).
+ */
+Int2DdsRet int2dds_type_info_add_map_field(struct Int2DdsTypeInfo *type_info,
+                                           const char *field_name,
+                                           int32_t key_type,
+                                           uint32_t key_bound,
+                                           int32_t value_type,
+                                           uint32_t value_bound,
+                                           uint32_t bound,
+                                           int32_t flags);
+
+/**
+ * Add a `map<K, Nested>` field whose key is a scalar `INT2DDS_FIELD_*` kind and whose
+ * value is a nested struct/enum/bitmask/union builder, referenced by content-hash so
+ * the runtime can resolve the entries. `value_type_info` is borrowed, not consumed.
+ */
+Int2DdsRet int2dds_type_info_add_map_of_nested_field(struct Int2DdsTypeInfo *type_info,
+                                                     const char *field_name,
+                                                     int32_t key_type,
+                                                     uint32_t key_bound,
+                                                     const struct Int2DdsTypeInfo *value_type_info,
+                                                     uint32_t bound,
+                                                     int32_t flags);
 
 /**
  * # Safety
@@ -5485,8 +5772,9 @@ Int2DdsRet int2dds_xml_type_registry_get_type_support(const struct Int2DdsXmlTyp
                                                       struct Int2DdsDynamicTypeSupport **out);
 
 /**
- * Look up a loaded type by name and return its top-level TypeObject for
- * introspection. Destroy the result with `int2dds_type_object_destroy`.
+ * Look up a loaded type by name and return its TypeObject, carrying its full
+ * nested-dependency closure so struct/array/sequence members decode correctly.
+ * Destroy the result with `int2dds_type_object_destroy`.
  *
  * # Safety
  * - `registry` must be a valid XML type registry

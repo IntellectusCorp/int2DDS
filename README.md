@@ -33,8 +33,8 @@ Add int2DDS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-int2dds = "0.1.7"
-int2dds-derive = "0.1.7"
+int2dds = "0.1.8"
+int2dds-derive = "0.1.8"
 ```
 
 ### Basic Example
@@ -219,38 +219,40 @@ fn main() {
 
 - C#: .NET SDK 8.0 or later (covers all multi-targets including legacy net45/net48 via reference assemblies)
 - Python: Python 3.10 or later, `pip`
-- Java: JDK 11 or later (Gradle wrapper is included — no separate install needed)
+- Java: JDK 17 to run Gradle (the wrapper is included — no separate install needed). The published JAR runs on Java 8 or later; the first build auto-provisions JDK 24 to compile the JDK 22+ (FFM) backend
 
 ```bash
 git clone https://github.com/IntellectusCorp/int2DDS.git
 cd int2DDS
 ```
 
-### 1. Build the FFI native libraries
+### 1. Rust core
 
-The C# and Python bindings load `int2dds-ffi` (a `cdylib`) at runtime. The Java binding uses a separate JNI crate (`int2dds-java`).
+```bash
+cargo build --release
+cargo test
+```
+
+### 2. Build the FFI native libraries
+
+The C# and Python bindings load `int2dds-ffi` (a `cdylib`) at runtime. The Java binding uses a separate JNI crate (`int2dds-java`, under `java/native/`) that re-exports the same C ABI.
 
 ```bash
 # Required for C# and Python bindings
 cargo build --release -p int2dds-ffi
 
-# Required for the Java binding (currently on the feature/java-binding branch)
+# Required for the Java binding
 cargo build --release -p int2dds-java
 ```
 
 Outputs land in `target/release/`:
 
 - `int2dds_ffi.{dll,so,dylib}` — for C# / Python
-- `int2dds_java.{dll,so,dylib}` — for Java
+- `int2dds_java.dll` / `libint2dds_java.{so,dylib}` — for Java
 
 > **Note:** native libraries are built for the host architecture by default. The process loading them must match (e.g. an x64 .dll cannot be loaded into a 32-bit process). Cross-compile with `cargo build --release --target <triple>` if needed.
 
-### 2. Rust core
 
-```bash
-cargo build --release
-cargo test
-```
 
 ### 3. C# binding
 
@@ -294,13 +296,13 @@ cd java
 ./gradlew test
 ```
 
-The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variable → bundled JAR resources → `java.library.path`. For local development:
+The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variable → bundled JAR resources → `java.library.path`. Gradle's test and example tasks point `INT2DDS_JAVA_LIB` at `target/release/` for you; set it by hand only when running outside Gradle:
 
 ```bash
-export INT2DDS_JAVA_LIB=/abs/path/to/target/release/int2dds_java.dll
+export INT2DDS_JAVA_LIB=/abs/path/to/target/release/libint2dds_java.so
 ```
 
-> **Status:** the Java JNI crate lives on the `feature/java-binding` branch and is being integrated; the API module under [java/int2dds-api/](java/int2dds-api/) compiles independently.
+See [java/README.md](java/README.md) for the full guide.
 
 ### Running Examples
 
@@ -316,6 +318,14 @@ dotnet run -c Release --project csharp/examples/HelloWorldSub -f net8.0
 # Python
 python python/examples/hello_world_pub.py
 python python/examples/hello_world_sub.py
+
+# Java (requires cargo build --release -p int2dds-java; see step 1)
+## Linux / macOS / Git Bash
+(cd java && ./gradlew :examples:runPub)
+(cd java && ./gradlew :examples:runSub)
+## Windows (PowerShell / cmd)
+java\gradlew.bat -p java :examples:runPub
+java\gradlew.bat -p java :examples:runSub
 ```
 
 > These are the minimal per-language hello_world smoke examples that ship in the core repo.
@@ -376,6 +386,12 @@ int2DDS/
 │   ├── tests/        # Integration tests
 │   └── benches/      # Performance benchmarks
 ├── derive/           # DdsType derive macro
+├── ffi/              # C ABI (cdylib) for the C, C# and Python bindings
+├── idl/              # OMG IDL code generator
+├── rpc/              # DDS-RPC layer
+├── csharp/           # C# binding
+├── python/           # Python binding
+├── java/             # Java binding (Gradle project + JNI crate in java/native/)
 └── docs/             # Documentation and guides
 ```
 

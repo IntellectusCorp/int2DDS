@@ -53,11 +53,15 @@ class KeyedMessage:
     _dds_type_name: ClassVar[str] = "KeyedMessage"
     _extensibility: ClassVar[Extensibility] = Extensibility.FINAL
     _has_key: ClassVar[bool] = True
+    _dds_type_info_fields: ClassVar[list] = [
+        ("field", "id", 9, 0, 1),        # u32, key
+        ("string", "value", 0, 0, 0),    # unbounded string
+    ]
 
     id: int = 0
     value: str = ""
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_u32(self.id)
         w.write_string(self.value)
@@ -79,7 +83,7 @@ class NoKeyMessage:
 
     value: int = 0
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.value)
         return w.to_bytes()
@@ -864,7 +868,7 @@ def run_all_tests():
         print(f"\n--- Test 30: {name} ---")
         reader_qos_cases = [
             ("ownership", DataReaderQos(ownership=Ownership("SHARED"))),
-            ("resource_limits", DataReaderQos(resource_limits=ResourceLimits(max_samples=50))),
+            ("resource_limits", DataReaderQos(resource_limits=ResourceLimits(max_samples=50, max_instances=10, max_samples_per_instance=5))),
             ("destination_order", DataReaderQos(destination_order=DestinationOrder("BY_RECEPTION"))),
             # ("time_based_filter", DataReaderQos(time_based_filter=TimeBasedFilter(minimum_separation=0.1))), # not supported int2DDS Core
             # ("latency_budget", DataReaderQos(latency_budget=LatencyBudget(duration=0.005))),  # not supported int2DDS Core

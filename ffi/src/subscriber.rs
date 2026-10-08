@@ -584,7 +584,7 @@ pub unsafe extern "C" fn int2dds_datareader_get_guid(
     INT2DDS_RET_OK
 }
 
-unsafe fn reader_handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
+pub(crate) unsafe fn reader_handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
     if handle_ptr.is_null() {
         return InstanceHandle::NIL;
     }
@@ -706,8 +706,6 @@ pub unsafe extern "C" fn int2dds_delete_datareader(reader: *mut Int2DdsDataReade
     let reader_arc = Arc::from_raw(reader as *const Int2DdsDataReader);
     let reader_obj = reader_arc.inner.clone();
 
-    let _ = reader_obj.set_listener(None, StatusMask::default());
-
     let subscriber = match reader_obj.get_subscriber() {
         Ok(s) => s,
         Err(e) => {
@@ -717,7 +715,8 @@ pub unsafe extern "C" fn int2dds_delete_datareader(reader: *mut Int2DdsDataReade
     };
 
     // On failure the reader is not deleted; hand the caller's strong reference
-    // back (into_raw) so the handle stays valid instead of being freed.
+    // back (into_raw) so the handle (and its listener) stay intact. On success
+    // the reader is destroyed, so its listener slot goes with it.
     match subscriber.delete_datareader(reader_obj) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => {
@@ -1316,7 +1315,7 @@ pub unsafe extern "C" fn int2dds_datareader_read_instance_serialized_batch(
 }
 
 /// A mask of 0 selects ANY, mirroring the `extensibility = -1` default sentinel.
-fn state_kinds_from_masks(
+pub(crate) fn state_kinds_from_masks(
     sample_state_mask: u32,
     view_state_mask: u32,
     instance_state_mask: u32,

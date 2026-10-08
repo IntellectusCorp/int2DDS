@@ -160,6 +160,73 @@ module app { module msg {
 }
 
 #[test]
+fn test_java_same_module_include_generates() {
+    // An #include'd type declared in the SAME module as the referencing struct
+    // must resolve into that module's package and generate successfully.
+    let root = unique_dir("java_same_mod");
+    fs::create_dir_all(&root).unwrap();
+    let base = root.join("base.idl");
+    fs::write(
+        &base,
+        "module a { enum Color { RED, GREEN }; struct Point { double x; double y; }; };\n",
+    )
+    .unwrap();
+    let same_mod = root.join("same_mod.idl");
+    fs::write(
+        &same_mod,
+        "#include \"base.idl\"\nmodule a { struct Wrap { Point p; Color c; long t; }; };\n",
+    )
+    .unwrap();
+
+    let (merged, _m) =
+        preprocess::load_with_includes(&same_mod, std::slice::from_ref(&root)).unwrap();
+    let all_defs = parser::parse_idl(&merged).unwrap();
+    let root_defs = parser::parse_idl(&fs::read_to_string(&same_mod).unwrap()).unwrap();
+    let model = resolver::resolve_scoped(&root_defs, all_defs).unwrap();
+
+    let files =
+        codegen::java::generate(&model, "same_mod.idl", &codegen::java::JavaOptions::default())
+            .expect("same-module included reference must generate");
+    let wrap = files.iter().find(|f| f.relative_path.ends_with("Wrap.java")).unwrap();
+    assert!(wrap.source.contains("package a;"), "{}", wrap.source);
+    assert!(wrap.source.contains("public Point p"), "{}", wrap.source);
+    // The included enum must still yield a default, or the field stays null and
+    // serializeCdr throws NPE on the first write.
+    assert!(wrap.source.contains("public Color c = Color.RED;"), "{}", wrap.source);
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn test_java_cross_module_include_still_refused() {
+    // An #include'd type declared in a DIFFERENT module than the referencing
+    // struct must still be refused: the guard's whole point is to catch this.
+    let root = unique_dir("java_cross_mod");
+    fs::create_dir_all(&root).unwrap();
+    let base = root.join("base.idl");
+    fs::write(&base, "module a { struct Point { double x; double y; }; };\n").unwrap();
+    let cross_mod = root.join("cross_mod.idl");
+    fs::write(
+        &cross_mod,
+        "#include \"base.idl\"\nmodule b { struct Wrap { a::Point p; long t; }; };\n",
+    )
+    .unwrap();
+
+    let (merged, _m) =
+        preprocess::load_with_includes(&cross_mod, std::slice::from_ref(&root)).unwrap();
+    let all_defs = parser::parse_idl(&merged).unwrap();
+    let root_defs = parser::parse_idl(&fs::read_to_string(&cross_mod).unwrap()).unwrap();
+    let model = resolver::resolve_scoped(&root_defs, all_defs).unwrap();
+
+    let err =
+        codegen::java::generate(&model, "cross_mod.idl", &codegen::java::JavaOptions::default())
+            .expect_err("cross-module included reference must still be refused");
+    assert!(err.contains("cross-package reference"), "{err}");
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn test_missing_include_is_reported_not_fatal() {
     let root = unique_dir("missing");
     fs::create_dir_all(&root).unwrap();

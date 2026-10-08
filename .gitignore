@@ -51,6 +51,9 @@ yarn-error.log
 # Java / JVM
 *.class
 *.jar
+# The Gradle wrapper jar is committed on purpose — it is what makes ./gradlew
+# work on a fresh clone without a preinstalled Gradle.
+!java/gradle/wrapper/gradle-wrapper.jar
 *.war
 *.ear
 *.nar
@@ -152,6 +155,9 @@ int2DDS-shapes-demo
 
 # C# / .NET
 **/bin/
+# java/native/src/bin/ is real committed Rust source (the gen-jni generator),
+# not a .NET build output directory — exempt it from the rule above.
+!java/native/src/bin/
 **/obj/
 *.user
 *.suo

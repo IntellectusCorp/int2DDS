@@ -62,7 +62,7 @@ namespace Int2Dds.Core
 
                 if (adFields != null && adFields.Length > 0)
                 {
-                    IntPtr typeInfo = BuildTypeInfo(_typeName, extensibility, adFields);
+                    IntPtr typeInfo = BuildTypeInfoForType(typeof(T));
                     try
                     {
                         unsafe
@@ -171,73 +171,49 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
-        /// Builds a native Int2DdsTypeInfo from generator-emitted flat-type field descriptors
-        /// so a conformant TypeObject can be advertised during discovery. The returned handle
-        /// is owned by the caller and must be freed with int2dds_type_info_destroy.
+        /// Builds a generated type's Int2DdsTypeInfo so a conformant TypeObject can be
+        /// advertised during discovery. A struct reflects its <c>DdsTypeInfoFields</c> and
+        /// <c>DdsTypeAttribute</c>; a union (<c>DdsUnionAttribute</c>) and a bitset
+        /// (<c>DdsBitsetAttribute</c>) replay the same field array onto their own builders;
+        /// enums and bitmasks (<c>DdsBitmaskAttribute</c>) are built by reflection. The
+        /// returned handle is owned by the caller and must be freed with
+        /// int2dds_type_info_destroy.
         /// </summary>
-        private static unsafe IntPtr BuildTypeInfo(string typeName, int extensibility, DdsTypeInfoField[] fields)
+        private static unsafe IntPtr BuildTypeInfoForType(Type type)
         {
-            var nameBytes = Encoding.UTF8.GetBytes(typeName + '\0');
+            if (type.IsEnum)
+            {
+                var bitmask = type.GetCustomAttribute<DdsBitmaskAttribute>();
+                return bitmask != null ? BuildBitmaskTypeInfo(type, bitmask) : BuildEnumTypeInfo(type);
+            }
+
+            var attr = type.GetCustomAttribute<DdsTypeAttribute>();
+            string name = attr?.TypeName ?? type.Name;
+            int ext = attr?.Extensibility ?? NativeMethods.int2dds_default_extensibility();
+            var fieldsInfo = type.GetField(
+                "DdsTypeInfoFields", BindingFlags.Public | BindingFlags.Static);
+            var fields = fieldsInfo?.GetValue(null) as DdsTypeInfoField[]
+                ?? new DdsTypeInfoField[0];
+
+            var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
             IntPtr ti;
             fixed (byte* pName = nameBytes)
             {
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_type_info_create(pName, extensibility, out ti));
+                var union = type.GetCustomAttribute<DdsUnionAttribute>();
+                if (union != null)
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_type_info_create_union(pName, ext, union.DiscriminatorType, out ti));
+                else if (type.GetCustomAttribute<DdsBitsetAttribute>() != null)
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_type_info_create_bitset(pName, out ti));
+                else
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_type_info_create(pName, ext, out ti));
             }
 
             try
             {
-                foreach (var f in fields)
-                {
-                    var fieldBytes = Encoding.UTF8.GetBytes(f.Name + '\0');
-                    fixed (byte* pField = fieldBytes)
-                    {
-                        int rc;
-                        switch (f.Op)
-                        {
-                            case "field":
-                                rc = NativeMethods.int2dds_type_info_add_field(ti, pField, f.TypeConst, f.Flags);
-                                break;
-                            case "string":
-                                rc = NativeMethods.int2dds_type_info_add_string_field(ti, pField, f.Size, f.Flags);
-                                break;
-                            case "wstring":
-                                rc = NativeMethods.int2dds_type_info_add_wstring_field(ti, pField, f.Size, f.Flags);
-                                break;
-                            case "seq":
-                                rc = NativeMethods.int2dds_type_info_add_sequence_field(ti, pField, f.TypeConst, f.Size, f.Flags);
-                                break;
-                            case "arr":
-                                rc = NativeMethods.int2dds_type_info_add_array_field(ti, pField, f.TypeConst, f.Size, f.Flags);
-                                break;
-                            case "nested":
-                            case "seq_nested":
-                            case "arr_nested":
-                                if (f.NestedType == null)
-                                    throw new InvalidOperationException(
-                                        $"Nested type_info field '{f.Name}' has no NestedType.");
-                                IntPtr nestedTi = BuildTypeInfoForType(f.NestedType);
-                                try
-                                {
-                                    if (f.Op == "seq_nested")
-                                        rc = NativeMethods.int2dds_type_info_add_sequence_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
-                                    else if (f.Op == "arr_nested")
-                                        rc = NativeMethods.int2dds_type_info_add_array_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
-                                    else
-                                        rc = NativeMethods.int2dds_type_info_add_nested_field(ti, pField, nestedTi, f.Flags);
-                                }
-                                finally
-                                {
-                                    NativeMethods.int2dds_type_info_destroy(nestedTi);
-                                }
-                                break;
-                            default:
-                                rc = 0;
-                                break;
-                        }
-                        ReturnCodeHelper.CheckReturn(rc);
-                    }
-                }
+                AddTypeInfoFields(ti, fields);
             }
             catch
             {
@@ -249,25 +225,125 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
-        /// Builds a nested type's Int2DdsTypeInfo. For a struct, reflects its generated
-        /// <c>DdsTypeInfoFields</c> and <c>DdsTypeAttribute</c>. For an enum, builds the
-        /// enumerated TypeObject by reflection (PascalCase member names match the Rust derive,
-        /// IDL enums are i32 -> bit_bound 32). The returned handle is owned by the caller and
-        /// must be freed with int2dds_type_info_destroy.
+        /// Replays generator-emitted field descriptors onto the builder <paramref name="ti"/>:
+        /// scalar/string/collection members by their kind, nested named types by recursively
+        /// building their own type_info (referenced by content-hash), maps by key/value kind,
+        /// bitset <c>bitfield</c> entries and union <c>label</c> entries.
         /// </summary>
-        private static unsafe IntPtr BuildTypeInfoForType(Type nestedType)
+        private static unsafe void AddTypeInfoFields(IntPtr ti, DdsTypeInfoField[] fields)
         {
-            if (nestedType.IsEnum)
-                return BuildEnumTypeInfo(nestedType);
+            foreach (var f in fields)
+            {
+                var fieldBytes = Encoding.UTF8.GetBytes(f.Name + '\0');
+                fixed (byte* pField = fieldBytes)
+                {
+                    int rc;
+                    switch (f.Op)
+                    {
+                        case "field":
+                            rc = NativeMethods.int2dds_type_info_add_field(ti, pField, f.TypeConst, f.Flags);
+                            break;
+                        case "string":
+                            rc = NativeMethods.int2dds_type_info_add_string_field(ti, pField, f.Size, f.Flags);
+                            break;
+                        case "wstring":
+                            rc = NativeMethods.int2dds_type_info_add_wstring_field(ti, pField, f.Size, f.Flags);
+                            break;
+                        case "seq":
+                            rc = NativeMethods.int2dds_type_info_add_sequence_field(ti, pField, f.TypeConst, f.Size, f.Flags);
+                            break;
+                        case "arr":
+                            rc = NativeMethods.int2dds_type_info_add_array_field(ti, pField, f.TypeConst, f.Size, f.Flags);
+                            break;
+                        case "map":
+                            rc = NativeMethods.int2dds_type_info_add_map_field(
+                                ti, pField, f.KeyType, f.KeyBound, f.TypeConst, f.ValueBound, f.Size, f.Flags);
+                            break;
+                        case "bitfield":
+                            rc = NativeMethods.int2dds_type_info_add_bitfield(ti, pField, (byte)f.Size, f.TypeConst);
+                            break;
+                        case "label":
+                            rc = NativeMethods.int2dds_type_info_add_union_label(ti, pField, f.TypeConst);
+                            break;
+                        case "nested":
+                        case "seq_nested":
+                        case "arr_nested":
+                        case "map_nested":
+                            if (f.NestedType == null)
+                                throw new InvalidOperationException(
+                                    $"Nested type_info field '{f.Name}' has no NestedType.");
+                            IntPtr nestedTi = BuildTypeInfoForType(f.NestedType);
+                            try
+                            {
+                                switch (f.Op)
+                                {
+                                    case "seq_nested":
+                                        rc = NativeMethods.int2dds_type_info_add_sequence_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
+                                        break;
+                                    case "arr_nested":
+                                        rc = NativeMethods.int2dds_type_info_add_array_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
+                                        break;
+                                    case "map_nested":
+                                        rc = NativeMethods.int2dds_type_info_add_map_of_nested_field(
+                                            ti, pField, f.KeyType, f.KeyBound, nestedTi, f.Size, f.Flags);
+                                        break;
+                                    default:
+                                        rc = NativeMethods.int2dds_type_info_add_nested_field(ti, pField, nestedTi, f.Flags);
+                                        break;
+                                }
+                            }
+                            finally
+                            {
+                                NativeMethods.int2dds_type_info_destroy(nestedTi);
+                            }
+                            break;
+                        default:
+                            rc = 0;
+                            break;
+                    }
+                    ReturnCodeHelper.CheckReturn(rc);
+                }
+            }
+        }
 
-            var attr = nestedType.GetCustomAttribute<DdsTypeAttribute>();
-            string name = attr?.TypeName ?? nestedType.Name;
-            int ext = attr?.Extensibility ?? NativeMethods.int2dds_default_extensibility();
-            var fieldsInfo = nestedType.GetField(
-                "DdsTypeInfoFields", BindingFlags.Public | BindingFlags.Static);
-            var fields = fieldsInfo?.GetValue(null) as DdsTypeInfoField[]
-                ?? new DdsTypeInfoField[0];
-            return BuildTypeInfo(name, ext, fields);
+        /// <summary>
+        /// Builds a bitmask's Int2DdsTypeInfo from its <c>[Flags]</c> enum: the IDL
+        /// <c>@bit_bound</c> comes from <see cref="DdsBitmaskAttribute"/>, each member (read in
+        /// declaration order, PascalCase like the Rust derive) becomes a flag at the bit position
+        /// of its value. The returned handle is owned by the caller and must be freed with
+        /// int2dds_type_info_destroy.
+        /// </summary>
+        private static unsafe IntPtr BuildBitmaskTypeInfo(Type enumType, DdsBitmaskAttribute bitmask)
+        {
+            var nameBytes = Encoding.UTF8.GetBytes(bitmask.TypeName + '\0');
+            IntPtr ti;
+            fixed (byte* pName = nameBytes)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_type_info_create_bitmask(pName, (ushort)bitmask.BitBound, out ti));
+            }
+            try
+            {
+                foreach (var field in enumType.GetFields(BindingFlags.Public | BindingFlags.Static))
+                {
+                    ulong value = Convert.ToUInt64(field.GetRawConstantValue());
+                    ushort position = 0;
+                    while (position < 64 && ((value >> position) & 1UL) == 0)
+                        position++;
+                    var flagBytes = Encoding.UTF8.GetBytes(field.Name + '\0');
+                    fixed (byte* pFlag = flagBytes)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_type_info_add_bitmask_flag(ti, pFlag, position));
+                    }
+                }
+            }
+            catch
+            {
+                NativeMethods.int2dds_type_info_destroy(ti);
+                throw;
+            }
+            return ti;
         }
 
         /// <summary>

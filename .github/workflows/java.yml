@@ -1,0 +1,197 @@
+name: Java
+run-name: "Java ${{ github.head_ref }}"
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+    # gen-jni parses ffi/src and formats with rustfmt.toml; the codegen check reads idl/.
+    # Keep "java" out of the required checks: a skipped workflow never reports a status.
+    paths:
+      - "ffi/src/**"
+      - "idl/**"
+      - "java/**"
+      - ".github/workflows/java.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+  workflow_dispatch:
+
+jobs:
+  jni-drift:
+    name: Generated JNI layer is current
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          # gen-jni runs rustfmt on its output so `cargo fmt` stays a no-op on
+          # the committed file. Without the component the generator fails.
+          components: rustfmt
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      - name: Check for generator drift
+        shell: bash
+        run: ./java/scripts/check-jni-drift.sh
+
+      - name: Verify the C ABI surface against the FFI library
+        shell: bash
+        run: |
+          # Ground truth for the exported C ABI is the FFI library's own
+          # dynamic symbol table.
+          cargo build --release -p int2dds-ffi -p int2dds-java
+          abi=$(nm -D --defined-only target/release/libint2dds_ffi.so \
+                | grep -c ' T int2dds_')
+
+          # An export the gen-jni parser misses drops out of the Java binding
+          # without an error.
+          parsed=$(cargo run --quiet -p int2dds-java --bin gen-jni -- --count)
+          echo "int2dds_ symbols: $abi exported, $parsed parsed by gen-jni"
+          if [ "$parsed" -ne "$abi" ]; then
+            echo "ERROR: gen-jni parsed $parsed C ABI functions, libint2dds_ffi.so exports $abi" >&2
+            exit 1
+          fi
+
+          # The JDK 22+ Panama (FFM) backend reuses the JNI .so, which only
+          # works while the dependency rlib's #[no_mangle]
+          # symbols reach the dynamic symbol table. They do so because the
+          # forwarders reference them — a linker dead-code pass would drop them
+          # again if that ever stopped being true.
+          reexported=$(nm -D --defined-only target/release/libint2dds_java.so \
+                       | grep -c ' T int2dds_')
+          echo "int2dds_ symbols re-exported from the JNI library: $reexported"
+          if [ "$reexported" -ne "$abi" ]; then
+            echo "ERROR: expected $abi re-exported C ABI symbols, found $reexported" >&2
+            exit 1
+          fi
+
+  idl-java-codegen:
+    name: Generated Java compiles and is current
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      # JDK 17 runs both Gradle and the javac the script invokes.
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Phase 1 compiles the backend's output for the whole idl/input corpus;
+      # phase 2 fails when the committed CdrGolden.java is stale. The script
+      # builds java/api/build/classes itself when the runner has none.
+      - name: Check the IDL Java backend
+        shell: bash
+        run: ./java/scripts/check-idl-java.sh
+
+  # The JNI crate's own tests and the Java suite against the built library.
+  # Windows is in the matrix because the JNI path is the one every JDK below
+  # 22 uses, and the Gradle scripts pick the platform library name themselves.
+  jni-tests:
+    name: JNI tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Disable Windows Defender realtime monitoring
+        if: runner.os == 'Windows'
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+        shell: powershell
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      # JDK 17 runs Gradle; the java22 source set's JDK 24 is provisioned by
+      # the foojay resolver plugin on first use.
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the JNI library and run the crate tests
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
+        run: |
+          cargo build --release -p int2dds-java
+          cargo test -p int2dds-java
+
+      # The Test tasks derive INT2DDS_JAVA_LIB from the OS and isolate the run
+      # on a loopback-only random domain (java/api/build.gradle.kts).
+      - name: Run the Java suite
+        shell: bash
+        working-directory: java
+        run: ./gradlew test --console=plain
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-test-reports-${{ matrix.os }}
+          path: java/api/build/reports/tests/test/
+
+  # Reports a single "java" status; fails unless every check job succeeded.
+  java-gate:
+    name: java
+    needs: [jni-drift, idl-java-codegen, jni-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        run: |
+          if [ "${{ needs.jni-drift.result }}" != "success" ] \
+             || [ "${{ needs.idl-java-codegen.result }}" != "success" ] \
+             || [ "${{ needs.jni-tests.result }}" != "success" ]; then
+            echo "jni-drift: ${{ needs.jni-drift.result }}"
+            echo "idl-java-codegen: ${{ needs.idl-java-codegen.result }}"
+            echo "jni-tests: ${{ needs.jni-tests.result }}"
+            exit 1
+          fi

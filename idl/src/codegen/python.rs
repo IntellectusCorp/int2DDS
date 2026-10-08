@@ -100,6 +100,10 @@ impl<'a> PyGen<'a> {
             self.line("");
             self.line("");
         }
+
+        for u in &self.model.unions {
+            self.emit_union_type_info_metadata(u);
+        }
     }
 
     // ---- Enum ----
@@ -147,6 +151,19 @@ impl<'a> PyGen<'a> {
             self.line("pass");
         }
         self.indent -= 1;
+        let flags: Vec<String> = b
+            .flags
+            .iter()
+            .map(|f| format!("(\"{}\", {})", naming::to_pascal_case(&f.name), f.position))
+            .collect();
+        self.line("");
+        self.line(&format!("{}._dds_type_name = \"{}\"", b.name, b.qualified_name));
+        self.line(&format!(
+            "{}._dds_bitmask_info = ({}, ({},))",
+            b.name,
+            b.bit_bound,
+            flags.join(", ")
+        ));
     }
 
     // ---- Bitset ----
@@ -177,7 +194,7 @@ impl<'a> PyGen<'a> {
         self.line(&format!("_dds_type_name: ClassVar[str] = \"{}\"", b.qualified_name));
         self.line("_extensibility: ClassVar[Extensibility] = Extensibility.FINAL");
         self.line("_has_key: ClassVar[bool] = False");
-        self.line("");
+        self.emit_bitset_type_info_metadata(b);
 
         // Fields (each as int with default 0)
         for f in &b.fields {
@@ -336,6 +353,11 @@ impl<'a> PyGen<'a> {
         self.line(&format!("_dds_type_name: ClassVar[str] = \"{}\"", u.qualified_name));
         self.line(&format!("_extensibility: ClassVar[Extensibility] = Extensibility.{}", ext_name));
         self.line("_has_key: ClassVar[bool] = False");
+        self.line("_dds_type_kind: ClassVar[str] = \"union\"");
+        self.line(&format!(
+            "_dds_union_discriminator: ClassVar[int] = {}",
+            super::field_type_code(&super::discriminator_kind(&u.discriminant_type)).unwrap_or(5)
+        ));
         self.line("");
 
         // Discriminator field
@@ -545,10 +567,6 @@ impl<'a> PyGen<'a> {
         ));
         self.line("");
 
-        // XTypes TypeObject advertisement metadata: the runtime builds an Int2DdsTypeInfo from
-        // this and advertises a conformant TypeObject during discovery, matching the Rust derive.
-        // Nested structs are referenced by content-hash (via int2dds_type_info_add_nested_field)
-        // so composite keys resolve. Enums/maps/unions still fall back to name-based matching.
         self.emit_type_info_metadata(&all_members);
 
         // Fields (including inherited from base structs)
@@ -597,42 +615,17 @@ impl<'a> PyGen<'a> {
         self.line("");
     }
 
-    /// FFI INT2DDS_FIELD_* constant for a scalar/string/char type; None for composite types.
-    fn field_constant(ty: &ResolvedType) -> Option<i32> {
-        Some(match ty {
-            ResolvedType::Bool => 0,
-            ResolvedType::U8 => 1,   // BYTE (octet)
-            ResolvedType::Char => 2, // CHAR8
-            ResolvedType::I8 => 3,
-            ResolvedType::I16 => 4,
-            ResolvedType::I32 => 5,
-            ResolvedType::I64 => 6,
-            ResolvedType::UInt8 => 7, // UINT8
-            ResolvedType::U16 => 8,
-            ResolvedType::U32 => 9,
-            ResolvedType::U64 => 10,
-            ResolvedType::F32 => 11,
-            ResolvedType::F64 => 12,
-            ResolvedType::String { .. } => 13,
-            ResolvedType::WChar => 14, // CHAR16
-            ResolvedType::WString { .. } => 15,
-            _ => return None,
-        })
-    }
-
-    /// A member is advertisable byte-correctly when its type is a primitive/string, an enum or
-    /// bitmask, a (non-@external) nested struct that is itself recursively advertisable, or a
-    /// sequence/array whose element is one of those (single-level). Maps, unions, and nested
-    /// collections are excluded (they fall back to the name-based keyed path).
+    /// A member is advertisable byte-correctly when its type is a primitive/string, an enum, a
+    /// bitmask, a bitset, a nested struct or union that is itself recursively advertisable, a
+    /// sequence/array of one of those (single-level), or a map with a scalar key and such a
+    /// value. An `@external` nested struct is advertised like any other nested struct,
+    /// carrying the EXTERNAL member flag exactly as the Rust derive does for `Box<T>`. Nested
+    /// collections, enum-keyed maps and cyclic nested-type references are excluded.
     fn member_advertisable(
         &self,
         m: &ResolvedMember,
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
-        // @external only guards direct struct members (Box) against type cycles.
-        if m.is_external && matches!(m.resolved_type, ResolvedType::Struct(_)) {
-            return false;
-        }
         self.type_advertisable(&m.resolved_type, visited)
     }
 
@@ -643,49 +636,69 @@ impl<'a> PyGen<'a> {
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
         match ty {
-            ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+            ResolvedType::Struct(name) => self.named_advertisable(name, visited),
             ResolvedType::Enum(_) => true,
+            ResolvedType::Bitmask(name) => self.find_bitmask(name).is_some(),
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                // Single-level only: element is a leaf named type or primitive/string, not
-                // another collection (nested-collection ids aren't emitted yet).
-                match element.as_ref() {
-                    ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
-                    ResolvedType::Enum(_) => true,
-                    other => Self::field_constant(other).is_some(),
-                }
+                self.element_advertisable(element, visited)
             }
-            // Bitmask/Map/Union keys fall back to the name-based keyed path (deferred).
-            other => Self::field_constant(other).is_some(),
+            ResolvedType::Map { key, value, .. } => {
+                super::field_type_code(key).is_some() && self.element_advertisable(value, visited)
+            }
+            other => super::field_type_code(other).is_some(),
         }
     }
 
-    /// The simple generated class name for an advertisable named element (Struct/Enum), else
-    /// None. Used both to gate collection elements and to emit the nested-reference spec.
+    /// A collection element or map value is advertisable when it is a leaf type (not
+    /// another collection) that is itself advertisable.
+    fn element_advertisable(
+        &self,
+        ty: &ResolvedType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        !matches!(
+            ty,
+            ResolvedType::Sequence { .. } | ResolvedType::Array { .. } | ResolvedType::Map { .. }
+        ) && self.type_advertisable(ty, visited)
+    }
+
+    /// The simple generated class name for an advertisable named element
+    /// (struct/union/bitset/enum/bitmask), else None. Used both to gate collection elements
+    /// and to emit the nested-reference spec.
     fn element_class_name(ty: &ResolvedType) -> Option<String> {
         match ty {
-            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) | ResolvedType::Bitmask(name) => {
                 Some(name.rsplit("::").next().unwrap_or(name).to_string())
             }
             _ => None,
         }
     }
 
-    /// A named struct is advertisable when it exists in the model and all of its members are
-    /// recursively advertisable. `visited` guards against @external-induced type cycles.
-    fn struct_advertisable(
+    /// A named struct, union or bitset is advertisable when it exists in the model and all
+    /// of its members are recursively advertisable. `visited` guards against
+    /// @external-induced type cycles.
+    fn named_advertisable(
         &self,
         name: &str,
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
         let simple = name.rsplit("::").next().unwrap_or(name);
+        if self.find_bitset(simple).is_some() {
+            return true;
+        }
         if !visited.insert(simple.to_string()) {
             return false;
         }
-        let ok = match self.find_struct(simple).cloned() {
-            Some(s) => {
-                self.collect_all_members(&s).iter().all(|m| self.member_advertisable(m, visited))
-            }
-            None => false,
+        let ok = if let Some(s) = self.find_struct(simple).cloned() {
+            self.collect_all_members(&s).iter().all(|m| self.member_advertisable(m, visited))
+        } else if let Some(u) = self.find_union(simple).cloned() {
+            u.cases
+                .iter()
+                .map(|c| &c.member.resolved_type)
+                .chain(u.default_case.iter().map(|d| &d.resolved_type))
+                .all(|ty| self.type_advertisable(ty, visited))
+        } else {
+            false
         };
         visited.remove(simple);
         ok
@@ -713,7 +726,13 @@ impl<'a> PyGen<'a> {
     /// One `(op, name, type_const, size, flags)` tuple describing how the runtime should add
     /// this member to the type_info builder.
     fn type_info_field_spec(m: &ResolvedMember) -> String {
-        let flags = Self::member_flags(m);
+        Self::type_info_field_spec_with_flags(m, Self::member_flags(m))
+    }
+
+    /// The `(op, name, type_const, size, flags)` tuple for a member with an explicit
+    /// `INT2DDS_MEMBER_*` flag bitmask: nested named types by class object, maps by a
+    /// `(key_const, key_bound, value)` tuple in the `type_const` slot, then the scalar forms.
+    fn type_info_field_spec_with_flags(m: &ResolvedMember, flags: i32) -> String {
         match &m.resolved_type {
             ResolvedType::String { bound } => {
                 format!("(\"string\", \"{}\", 0, {}, {}),", m.name, bound.unwrap_or(0), flags)
@@ -731,7 +750,7 @@ impl<'a> PyGen<'a> {
                         flags
                     )
                 } else {
-                    let ec = Self::field_constant(element).unwrap_or(0);
+                    let ec = super::field_type_code(element).unwrap_or(0);
                     format!("(\"seq\", \"{}\", {}, {}, {}),", m.name, ec, bound.unwrap_or(0), flags)
                 }
             }
@@ -739,21 +758,99 @@ impl<'a> PyGen<'a> {
                 if let Some(cls) = Self::element_class_name(element) {
                     format!("(\"arr_nested\", \"{}\", {}, {}, {}),", m.name, cls, size, flags)
                 } else {
-                    let ec = Self::field_constant(element).unwrap_or(0);
+                    let ec = super::field_type_code(element).unwrap_or(0);
                     format!("(\"arr\", \"{}\", {}, {}, {}),", m.name, ec, size, flags)
                 }
             }
-            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
-                // Reference the generated class object (struct/enum) so the runtime recursively
-                // builds its nested type_info by content-hash.
+            ResolvedType::Map { key, value, bound } => {
+                let kc = super::field_type_code(key).unwrap_or(0);
+                let kb = super::scalar_string_bound(key);
+                if let Some(cls) = Self::element_class_name(value) {
+                    format!(
+                        "(\"map_nested\", \"{}\", ({}, {}, {}), {}, {}),",
+                        m.name,
+                        kc,
+                        kb,
+                        cls,
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                } else {
+                    format!(
+                        "(\"map\", \"{}\", ({}, {}, {}, {}), {}, {}),",
+                        m.name,
+                        kc,
+                        kb,
+                        super::field_type_code(value).unwrap_or(0),
+                        super::scalar_string_bound(value),
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                }
+            }
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) | ResolvedType::Bitmask(name) => {
                 let cls = name.rsplit("::").next().unwrap_or(name);
                 format!("(\"nested\", \"{}\", {}, 0, {}),", m.name, cls, flags)
             }
             other => {
-                let c = Self::field_constant(other).unwrap_or(0);
+                let c = super::field_type_code(other).unwrap_or(0);
                 format!("(\"field\", \"{}\", {}, 0, {}),", m.name, c, flags)
             }
         }
+    }
+
+    /// Emit the union's `_dds_type_info_fields` as a module-level assignment: every case
+    /// member (PascalCase like the Rust variant) followed by a `label` entry per case label,
+    /// and the `default:` member flagged `INT2DDS_MEMBER_DEFAULT` under the implicit default
+    /// discriminator. Assigned after every class is defined because a case member may
+    /// reference a struct the module emits after the unions. Omitted when a case member
+    /// cannot be advertised.
+    fn emit_union_type_info_metadata(&mut self, u: &ResolvedUnion) {
+        let mut visited = std::collections::HashSet::new();
+        if !self.named_advertisable(&u.name, &mut visited) {
+            return;
+        }
+        self.line(&format!("{}._dds_type_info_fields = [", u.name));
+        self.indent += 1;
+        for case in &u.cases {
+            let m = super::union_case_member(&case.member);
+            self.line(&Self::type_info_field_spec_with_flags(&m, 0));
+            for label in &case.labels {
+                if let Some(value) = super::union_label_value(self.model, label) {
+                    self.line(&Self::union_label_spec(&m.name, value));
+                }
+            }
+        }
+        if let Some(dc) = &u.default_case {
+            let m = super::union_case_member(dc);
+            self.line(&Self::type_info_field_spec_with_flags(&m, super::MEMBER_DEFAULT));
+            self.line(&Self::union_label_spec(&m.name, super::union_default_label(u)));
+        }
+        self.indent -= 1;
+        self.line("]");
+        self.line("");
+    }
+
+    /// One `label` entry attaching `value` to the union member `member`.
+    fn union_label_spec(member: &str, value: i64) -> String {
+        format!("(\"label\", \"{}\", {}, 0, 0),", member, value)
+    }
+
+    /// Emit the bitset's `_dds_type_kind` and `_dds_type_info_fields`: one `bitfield`
+    /// entry per field carrying its holder kind and width, matching the derive's
+    /// `#[dds_type(bitset)]`.
+    fn emit_bitset_type_info_metadata(&mut self, b: &ResolvedBitset) {
+        self.line("_dds_type_kind: ClassVar[str] = \"bitset\"");
+        self.line("_dds_type_info_fields: ClassVar[list] = [");
+        self.indent += 1;
+        for f in &b.fields {
+            let holder =
+                super::field_type_code(&super::bitfield_holder_kind(f.bit_width)).unwrap_or(0);
+            self.line(&format!("(\"bitfield\", \"{}\", {}, {}, 0),", f.name, holder, f.bit_width));
+        }
+        self.indent -= 1;
+        self.line("]");
+        self.line("");
     }
 
     fn emit_constants(&mut self) {
@@ -1123,6 +1220,18 @@ impl<'a> PyGen<'a> {
     fn find_enum(&self, name: &str) -> Option<&ResolvedEnum> {
         let simple = name.rsplit("::").next().unwrap_or(name);
         self.model.enums.iter().chain(self.model.imported.enums.iter()).find(|e| e.name == simple)
+    }
+
+    /// Locate a union declared in this file by leaf name.
+    fn find_union(&self, name: &str) -> Option<&ResolvedUnion> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.unions.iter().find(|u| u.name == simple)
+    }
+
+    /// Locate a bitset declared in this file by leaf name.
+    fn find_bitset(&self, name: &str) -> Option<&ResolvedBitset> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.bitsets.iter().find(|b| b.name == simple)
     }
 
     /// Returns (write_method, read_method) for a bitmask based on bit_bound.
@@ -1604,15 +1713,157 @@ mod tests {
     fn test_type_info_metadata_omitted_for_unsupported_members() {
         let defs = parse_idl(
             r#"
-            struct Widget { map<long, long> m; long x; };
+            enum Kind { A, B };
+            struct Widget { map<Kind, long> m; long x; };
             "#,
         )
         .unwrap();
         let model = resolve(defs).unwrap();
         let code = generate(&model, "Widget.idl", &PythonOptions::new());
-        // Widget has a map member -> not advertisable -> advertisement metadata is omitted
+        // An enum-keyed map has no scalar key kind -> not advertisable -> metadata omitted
         // so it falls back to name-based matching.
         assert!(!code.contains("_dds_type_info_fields"), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_map_members() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Value { long code; };
+            @final
+            struct Table {
+                @key long id;
+                map<string, long> counts;
+                map<long, Value> values;
+                map<string<8>, double, 10> bounded;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Table.idl", &PythonOptions::new());
+        assert!(code.contains(r#"("map", "counts", (13, 0, 5, 0), 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("map_nested", "values", (5, 0, Value), 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("map", "bounded", (13, 8, 12, 0), 10, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_bitmask_members() {
+        let defs = parse_idl(
+            r#"
+            @bit_bound(8)
+            bitmask Perm { READ, WRITE, @position(5) EXEC };
+            struct Holder { @key long id; Perm p; sequence<Perm> ps; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &PythonOptions::new());
+        assert!(code.contains(r#"Perm._dds_type_name = "Perm""#), "{}", code);
+        assert!(
+            code.contains(
+                r#"Perm._dds_bitmask_info = (8, (("Read", 0), ("Write", 1), ("Exec", 5),))"#
+            ),
+            "{}",
+            code
+        );
+        assert!(code.contains(r#"("nested", "p", Perm, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("seq_nested", "ps", Perm, 0, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_bitset() {
+        let defs = parse_idl(
+            r#"
+            bitset Small { bitfield<1> flag; bitfield<3> mode; };
+            bitset Wide { bitfield<12> a; bitfield<20> b; };
+            struct Holder { @key long id; Small s; Wide w; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &PythonOptions::new());
+        assert!(code.contains("_dds_type_kind: ClassVar[str] = \"bitset\""), "{}", code);
+        assert!(code.contains(r#"("bitfield", "flag", 1, 1, 0),"#), "{}", code);
+        assert!(code.contains(r#"("bitfield", "mode", 1, 3, 0),"#), "{}", code);
+        assert!(code.contains(r#"("bitfield", "a", 8, 12, 0),"#), "{}", code);
+        assert!(code.contains(r#"("bitfield", "b", 9, 20, 0),"#), "{}", code);
+        assert!(code.contains(r#"("nested", "s", Small, 0, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_union() {
+        let defs = parse_idl(
+            r#"
+            union Choice switch (long) {
+                case 0:
+                case 1:
+                    long num;
+                case 2:
+                    string<16> text;
+                case 3:
+                    Inner inner;
+                default:
+                    octet other;
+            };
+            union Flag switch (boolean) {
+                case TRUE: long yes;
+                case FALSE: string no;
+            };
+            @final
+            struct Inner { long x; };
+            @final
+            struct Holder {
+                @key long id;
+                Choice choice;
+                Flag flag;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &PythonOptions::new());
+        assert!(code.contains("_dds_type_kind: ClassVar[str] = \"union\""), "{}", code);
+        assert!(code.contains("_dds_union_discriminator: ClassVar[int] = 5"), "{}", code);
+        assert!(code.contains("_dds_union_discriminator: ClassVar[int] = 1"), "{}", code);
+        assert!(code.contains("\nChoice._dds_type_info_fields = [\n"), "{}", code);
+        assert!(code.contains(r#"("field", "Num", 5, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("label", "Num", 0, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("label", "Num", 1, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("string", "Text", 0, 16, 0),"#), "{}", code);
+        assert!(code.contains(r#"("label", "Text", 2, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("nested", "Inner", Inner, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("field", "Other", 1, 0, 16),"#), "{}", code);
+        assert!(code.contains(r#"("label", "Other", -1, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("label", "Yes", 1, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("label", "No", 0, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("nested", "choice", Choice, 0, 0),"#), "{}", code);
+        // The union field list is assigned after every class so the Inner reference resolves.
+        let inner_def = code.find("class Inner:").unwrap();
+        let choice_fields = code.find("Choice._dds_type_info_fields = [").unwrap();
+        assert!(inner_def < choice_fields, "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_external_nested_struct() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Inner {
+                long v;
+            };
+            @final
+            struct Outer {
+                @key long id;
+                @external Inner ext;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Outer.idl", &PythonOptions::new());
+        assert!(code.contains(r#"("nested", "ext", Inner, 0, 8),"#), "{}", code);
     }
 
     #[test]

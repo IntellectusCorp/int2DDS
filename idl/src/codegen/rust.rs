@@ -266,7 +266,7 @@ impl<'a> RustGen<'a> {
             let variant_name =
                 naming::escape_keyword(&naming::to_pascal_case(&dc.name), naming::TargetLang::Rust);
             let type_str = self.type_to_rust(&dc.resolved_type);
-            let disc_val = self.default_discriminant(u, repr);
+            let disc_val = super::union_default_label(u);
 
             self.line("#[dds(default)]");
             self.line(&format!("{}({}) = {},", variant_name, type_str, disc_val));
@@ -274,36 +274,6 @@ impl<'a> RustGen<'a> {
 
         self.indent -= 1;
         self.line("}");
-    }
-
-    fn default_discriminant(&self, u: &ResolvedUnion, repr: &str) -> String {
-        let used: std::collections::HashSet<i64> = u
-            .cases
-            .iter()
-            .flat_map(|c| &c.labels)
-            .filter_map(|l| match l {
-                ResolvedUnionLabel::Int(v) => Some(*v),
-                ResolvedUnionLabel::Bool(b) => Some(*b as i64),
-                ResolvedUnionLabel::Ident(_) => None,
-            })
-            .collect();
-
-        // Signed discriminators default to -1, or, when -1 is already a declared label,
-        // the negative value closest to zero that no label uses (spec §7.14.2).
-        // Unsigned discriminators use the value closest to zero that no label uses.
-        if matches!(repr, "i8" | "i16" | "i32" | "i64") {
-            let mut candidate = -1i64;
-            while used.contains(&candidate) {
-                candidate -= 1;
-            }
-            candidate.to_string()
-        } else {
-            let mut candidate = 0i64;
-            while used.contains(&candidate) {
-                candidate += 1;
-            }
-            candidate.to_string()
-        }
     }
 
     fn discriminant_repr(&self, ty: &ResolvedType) -> &'static str {

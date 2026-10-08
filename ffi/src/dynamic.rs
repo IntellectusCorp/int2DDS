@@ -797,9 +797,25 @@ pub unsafe extern "C" fn int2dds_dynamic_data_from_sample(
     check_null!(type_obj);
     check_null!(out);
     let slice = std::slice::from_raw_parts(bytes, len);
-    let support = ffi_try!((*participant)
-        .inner
-        .create_dynamic_type_from_type_object((*type_obj).inner.clone()));
+    let support = if (*type_obj).deps.is_empty() {
+        ffi_try!((*participant)
+            .inner
+            .create_dynamic_type_from_type_object((*type_obj).inner.clone()))
+    } else {
+        // Register the nested dependency closure so struct-of-nested members resolve,
+        // mirroring decode_flat / RawTypeSupport::with_type_info_and_deps.
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in &(*type_obj).deps {
+            registry.register_type_object_with_id(id, obj.clone());
+        }
+        match DynamicTypeSupport::from_type_object_with_registry(
+            (*type_obj).inner.clone(),
+            &registry,
+        ) {
+            Ok(s) => s,
+            Err(_) => return INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE,
+        }
+    };
     let data = match deserialize_dynamic_data(slice, support.dynamic_type()) {
         Ok(d) => d,
         Err(_) => return INT2DDS_RET_DYNAMIC_DECODE_ERROR,
@@ -1142,26 +1158,52 @@ pub unsafe extern "C" fn int2dds_create_datareader_dynamic(
 
 /// Destroy a dynamic DataWriter handle. Safe to call with null.
 ///
+/// Mirrors `int2dds_delete_datawriter`: unregisters the writer from its
+/// parent publisher so the publisher/participant can be deleted afterward.
+/// Best-effort, since a void destructor cannot report a failure code; the
+/// FFI wrapper is freed either way.
+///
 /// # Safety
 /// - `w` must be a valid dynamic datawriter, or null (null is a no-op)
 /// - `w` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_writer_destroy(w: *mut Int2DdsDynamicDataWriter) {
-    if !w.is_null() {
-        drop(Box::from_raw(w));
+    if w.is_null() {
+        return;
     }
+    let boxed = Box::from_raw(w);
+    let writer_obj = boxed.inner.clone();
+    if let Ok(publisher) = writer_obj.get_publisher() {
+        let _ = publisher.delete_datawriter(writer_obj);
+    }
+    // `boxed` (and its own `inner` clone) drops here. `deleted` is a shared
+    // atomic flag, so if delete_datawriter succeeded above this drop is a
+    // no-op rather than a double unregister.
 }
 
 /// Destroy a dynamic DataReader handle. Safe to call with null.
+///
+/// Mirrors `int2dds_delete_datareader`: unregisters the reader from its
+/// parent subscriber so the subscriber/participant can be deleted afterward.
+/// Best-effort, since a void destructor cannot report a failure code; the
+/// FFI wrapper is freed either way.
 ///
 /// # Safety
 /// - `r` must be a valid dynamic datareader, or null (null is a no-op)
 /// - `r` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_reader_destroy(r: *mut Int2DdsDynamicDataReader) {
-    if !r.is_null() {
-        drop(Box::from_raw(r));
+    if r.is_null() {
+        return;
     }
+    let boxed = Box::from_raw(r);
+    let reader_obj = boxed.inner.clone();
+    if let Ok(subscriber) = reader_obj.get_subscriber() {
+        let _ = subscriber.delete_datareader(reader_obj);
+    }
+    // `boxed` (and its own `inner` clone) drops here. `deleted` is a shared
+    // atomic flag, so if delete_datareader succeeded above this drop is a
+    // no-op rather than a double unregister.
 }
 
 /// Get the effective QoS of a dynamic DataWriter.

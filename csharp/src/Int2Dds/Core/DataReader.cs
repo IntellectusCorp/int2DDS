@@ -584,6 +584,159 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Loans matching samples without copying or removing them. Dispose the result (or pass it
+        /// to <see cref="ReturnLoan"/>) to return the loan. Empty when nothing matches.
+        /// </summary>
+        public LoanedSamples<T> ReadLoaned(int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var ret = NativeMethods.int2dds_datareader_read_loaned(
+                _handle, maxSamples, sampleStates, viewStates, instanceStates, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeLoaned(int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var ret = NativeMethods.int2dds_datareader_take_loaned(
+                _handle, maxSamples, sampleStates, viewStates, instanceStates, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadLoaned"/> for samples matching a Read/QueryCondition of this reader.</summary>
+        public LoanedSamples<T> ReadWithConditionLoaned(ReadCondition condition, int maxSamples = -1)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            var ret = NativeMethods.int2dds_datareader_read_w_condition_loaned(
+                _handle, condition.Handle, maxSamples, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadWithConditionLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeWithConditionLoaned(ReadCondition condition, int maxSamples = -1)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            var ret = NativeMethods.int2dds_datareader_take_w_condition_loaned(
+                _handle, condition.Handle, maxSamples, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadLoaned"/> limited to the instance <paramref name="handle"/>.</summary>
+        public LoanedSamples<T> ReadInstanceLoaned(InstanceHandle handle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(handle, maxSamples, sampleStates, viewStates, instanceStates, next: false, take: false);
+        }
+
+        /// <summary><see cref="ReadInstanceLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeInstanceLoaned(InstanceHandle handle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(handle, maxSamples, sampleStates, viewStates, instanceStates, next: false, take: true);
+        }
+
+        /// <summary>
+        /// <see cref="ReadInstanceLoaned"/> for the next instance after <paramref name="previousHandle"/>
+        /// that has matching samples; <see cref="InstanceHandle.Nil"/> starts from the first instance.
+        /// </summary>
+        public LoanedSamples<T> ReadNextInstanceLoaned(InstanceHandle previousHandle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(previousHandle, maxSamples, sampleStates, viewStates, instanceStates, next: true, take: false);
+        }
+
+        /// <summary><see cref="ReadNextInstanceLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeNextInstanceLoaned(InstanceHandle previousHandle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(previousHandle, maxSamples, sampleStates, viewStates, instanceStates, next: true, take: true);
+        }
+
+        /// <summary><see cref="ReadNextInstanceLoaned"/> for samples matching a Read/QueryCondition of this reader.</summary>
+        public LoanedSamples<T> ReadNextInstanceWithConditionLoaned(InstanceHandle previousHandle, ReadCondition condition, int maxSamples = -1)
+        {
+            return LoanNextInstanceWithCondition(previousHandle, condition, maxSamples, take: false);
+        }
+
+        /// <summary><see cref="ReadNextInstanceWithConditionLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeNextInstanceWithConditionLoaned(InstanceHandle previousHandle, ReadCondition condition, int maxSamples = -1)
+        {
+            return LoanNextInstanceWithCondition(previousHandle, condition, maxSamples, take: true);
+        }
+
+        /// <summary>
+        /// Returns <paramref name="loan"/> to this reader. A loan from another reader throws
+        /// <see cref="DdsPreconditionNotMetException"/> and stays valid. A returned loan is ignored.
+        /// </summary>
+        public void ReturnLoan(LoanedSamples<T> loan)
+        {
+            if (loan == null) throw new ArgumentNullException(nameof(loan));
+            if (loan.IsReturned) return;
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_return_loan(_handle, loan.Handle));
+            loan.MarkReturned();
+        }
+
+        private unsafe LoanedSamples<T> LoanInstance(InstanceHandle handle, int maxSamples,
+            uint sampleStates, uint viewStates, uint instanceStates, bool next, bool take)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var key = handle.ToByteArray();
+            int ret;
+            IntPtr loan;
+            fixed (byte* pHandle = key)
+            {
+                ret = (next, take) switch
+                {
+                    (false, false) => NativeMethods.int2dds_datareader_read_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                    (false, true) => NativeMethods.int2dds_datareader_take_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                    (true, false) => NativeMethods.int2dds_datareader_read_next_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                    (true, true) => NativeMethods.int2dds_datareader_take_next_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                };
+            }
+            return WrapLoan(ret, loan);
+        }
+
+        private unsafe LoanedSamples<T> LoanNextInstanceWithCondition(InstanceHandle previousHandle, ReadCondition condition, int maxSamples, bool take)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            var key = previousHandle.ToByteArray();
+            int ret;
+            IntPtr loan;
+            fixed (byte* pHandle = key)
+            {
+                ret = take
+                    ? NativeMethods.int2dds_datareader_take_next_instance_w_condition_loaned(_handle, pHandle, condition.Handle, maxSamples, out loan)
+                    : NativeMethods.int2dds_datareader_read_next_instance_w_condition_loaned(_handle, pHandle, condition.Handle, maxSamples, out loan);
+            }
+            return WrapLoan(ret, loan);
+        }
+
+        private LoanedSamples<T> WrapLoan(int ret, IntPtr loan)
+        {
+            if (ret == ReturnCode.NoData) return new LoanedSamples<T>(this, IntPtr.Zero);
+            ReturnCodeHelper.CheckReturn(ret);
+            return new LoanedSamples<T>(this, loan);
+        }
+
+        /// <summary>
         /// Gets the current QoS policies of this DataReader.
         /// </summary>
         public DataReaderQos GetQos()
@@ -1044,7 +1197,7 @@ namespace Int2Dds.Core
             return results;
         }
 
-        private static unsafe SampleInfo ConvertSampleInfo(ref NativeSampleInfo native)
+        internal static unsafe SampleInfo ConvertSampleInfo(ref NativeSampleInfo native)
         {
             var instanceHandleBytes = new byte[16];
             var pubHandleBytes = new byte[16];

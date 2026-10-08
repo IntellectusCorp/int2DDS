@@ -7,6 +7,7 @@ A high-performance DDS (Data Distribution Service) implementation.
 try:
     from int2dds.core.participant import DomainParticipant
     from int2dds.core.publisher import DataWriter, Publisher
+    from int2dds.core.loan import LoanedSample, LoanedSamples
     from int2dds.core.subscriber import DataReader, Sample, Subscriber
     from int2dds.core.topic import ContentFilteredTopic, Topic
     from int2dds.core.qos import (
@@ -100,6 +101,8 @@ __all__ = [
     "Topic",
     "ContentFilteredTopic",
     "Sample",
+    "LoanedSample",
+    "LoanedSamples",
     # QoS
     "DataWriterQos",
     "DataReaderQos",

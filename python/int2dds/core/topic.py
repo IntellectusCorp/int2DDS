@@ -29,108 +29,130 @@ def _build_cstr_array(strings: list[str]):
     return arr, bufs
 
 
-def _build_nested_type_info(cls):
-    """Build a native Int2DdsTypeInfo for a nested generated class (struct or enum),
-    dispatching on the descriptor the generator emitted. Returns a handle the caller owns.
+def _build_type_info_for(cls):
+    """Build a native Int2DdsTypeInfo for a generated class, dispatching on the descriptor
+    the generator emitted. Returns a handle the caller owns and must free with
+    ``int2dds_type_info_destroy`` (after ``create_topic_with_type_info`` for a topic type).
 
     - Enum: ``_dds_enum_info = (bit_bound, ((name, value, is_default), ...))``
-    - Struct: recurse over ``_dds_type_info_fields``.
+    - Bitmask: ``_dds_bitmask_info = (bit_bound, ((name, position), ...))``
+    - Struct / union / bitset: ``_dds_type_kind`` selects the builder (a union also carries
+      ``_dds_union_discriminator``), then ``_dds_type_info_fields`` is replayed onto it.
 
-    Enum literal names come from the descriptor (canonical PascalCase), so the built
-    TypeObject byte-matches the Rust derive regardless of the Python member naming.
+    Literal, flag and union member names come from the descriptor (canonical PascalCase),
+    so the built TypeObject byte-matches the Rust derive regardless of the Python naming.
     """
+    name_c = ffi.new("char[]", getattr(cls, "_dds_type_name", cls.__name__).encode())
+    ti_ptr = ffi.new("Int2DdsTypeInfo **")
     enum_info = getattr(cls, "_dds_enum_info", None)
+    bitmask_info = getattr(cls, "_dds_bitmask_info", None)
+    kind = getattr(cls, "_dds_type_kind", "struct")
+    extensibility = getattr(
+        cls, "_extensibility", Extensibility(lib.int2dds_default_extensibility())
+    )
     if enum_info is not None:
-        bit_bound, literals = enum_info
-        name_c = ffi.new("char[]", getattr(cls, "_dds_type_name", cls.__name__).encode())
-        ti_ptr = ffi.new("Int2DdsTypeInfo **")
-        check_ret(lib.int2dds_type_info_create_enum(name_c, bit_bound, ti_ptr))
-        ti = ti_ptr[0]
-        try:
-            for lit_name, value, is_default in literals:
+        check_ret(lib.int2dds_type_info_create_enum(name_c, enum_info[0], ti_ptr))
+    elif bitmask_info is not None:
+        check_ret(lib.int2dds_type_info_create_bitmask(name_c, bitmask_info[0], ti_ptr))
+    elif kind == "bitset":
+        check_ret(lib.int2dds_type_info_create_bitset(name_c, ti_ptr))
+    elif kind == "union":
+        check_ret(
+            lib.int2dds_type_info_create_union(
+                name_c, int(extensibility), cls._dds_union_discriminator, ti_ptr
+            )
+        )
+    else:
+        check_ret(lib.int2dds_type_info_create(name_c, int(extensibility), ti_ptr))
+    ti = ti_ptr[0]
+    try:
+        if enum_info is not None:
+            for lit_name, value, is_default in enum_info[1]:
                 lname_c = ffi.new("char[]", lit_name.encode())
                 check_ret(
                     lib.int2dds_type_info_add_enum_literal(
                         ti, lname_c, value, 1 if is_default else 0
                     )
                 )
-        except Exception:
-            lib.int2dds_type_info_destroy(ti)
-            raise
-        return ti
-
-    nested_ext = getattr(cls, "_extensibility", Extensibility(lib.int2dds_default_extensibility()))
-    return _build_type_info(
-        getattr(cls, "_dds_type_name", cls.__name__),
-        nested_ext,
-        getattr(cls, "_dds_type_info_fields", []),
-    )
-
-
-def _build_type_info(type_name: str, extensibility: Extensibility, fields: list):
-    """Build a native Int2DdsTypeInfo from generated ``_dds_type_info_fields`` metadata.
-
-    Each entry is ``(op, name, type_const, size, flags)`` where ``op`` selects the
-    ``int2dds_type_info_add_*`` call. The returned handle is owned by the caller and must be
-    freed with ``int2dds_type_info_destroy`` after ``create_topic_with_type_info``.
-    """
-    name_c = ffi.new("char[]", type_name.encode())
-    ti_ptr = ffi.new("Int2DdsTypeInfo **")
-    check_ret(lib.int2dds_type_info_create(name_c, int(extensibility), ti_ptr))
-    ti = ti_ptr[0]
-    try:
-        for op, field_name, type_const, size, flags in fields:
-            fname_c = ffi.new("char[]", field_name.encode())
-            if op == "field":
-                check_ret(lib.int2dds_type_info_add_field(ti, fname_c, type_const, flags))
-            elif op == "string":
-                check_ret(lib.int2dds_type_info_add_string_field(ti, fname_c, size, flags))
-            elif op == "wstring":
-                check_ret(lib.int2dds_type_info_add_wstring_field(ti, fname_c, size, flags))
-            elif op == "seq":
-                check_ret(
-                    lib.int2dds_type_info_add_sequence_field(ti, fname_c, type_const, size, flags)
-                )
-            elif op == "arr":
-                check_ret(
-                    lib.int2dds_type_info_add_array_field(ti, fname_c, type_const, size, flags)
-                )
-            elif op == "nested":
-                # `type_const` holds the nested generated class (struct/enum/bitmask). Build its
-                # own type_info and reference it by content-hash so composite keys resolve.
-                nested_ti = _build_nested_type_info(type_const)
-                try:
-                    check_ret(
-                        lib.int2dds_type_info_add_nested_field(ti, fname_c, nested_ti, flags)
-                    )
-                finally:
-                    lib.int2dds_type_info_destroy(nested_ti)
-            elif op == "seq_nested":
-                # `type_const` holds the element class; `size` is the sequence bound.
-                elem_ti = _build_nested_type_info(type_const)
-                try:
-                    check_ret(
-                        lib.int2dds_type_info_add_sequence_of_nested_field(
-                            ti, fname_c, elem_ti, size, flags
-                        )
-                    )
-                finally:
-                    lib.int2dds_type_info_destroy(elem_ti)
-            elif op == "arr_nested":
-                # `type_const` holds the element class; `size` is the array length.
-                elem_ti = _build_nested_type_info(type_const)
-                try:
-                    check_ret(
-                        lib.int2dds_type_info_add_array_of_nested_field(
-                            ti, fname_c, elem_ti, size, flags
-                        )
-                    )
-                finally:
-                    lib.int2dds_type_info_destroy(elem_ti)
+        elif bitmask_info is not None:
+            for flag_name, position in bitmask_info[1]:
+                fname_c = ffi.new("char[]", flag_name.encode())
+                check_ret(lib.int2dds_type_info_add_bitmask_flag(ti, fname_c, position))
+        else:
+            _add_type_info_fields(ti, getattr(cls, "_dds_type_info_fields", []))
     except Exception:
         lib.int2dds_type_info_destroy(ti)
         raise
     return ti
+
+
+def _add_type_info_fields(ti, fields: list) -> None:
+    """Replay generated ``_dds_type_info_fields`` entries onto the builder ``ti``.
+
+    Each entry is ``(op, name, type_const, size, flags)`` where ``op`` selects the
+    ``int2dds_type_info_add_*`` call. The nested ops carry the nested generated class in
+    ``type_const`` and build its type_info recursively (referenced by content-hash so
+    composite keys resolve); the map ops carry ``(key_const, key_bound, value)`` there,
+    ``value`` being a scalar ``(value_const, value_bound)`` pair for ``map`` or the value
+    class for ``map_nested``. ``bitfield`` entries (bitsets) carry the holder kind and the bit
+    width, ``label`` entries (unions) the label value for the member named ``name``.
+    """
+    for op, field_name, type_const, size, flags in fields:
+        fname_c = ffi.new("char[]", field_name.encode())
+        if op == "field":
+            check_ret(lib.int2dds_type_info_add_field(ti, fname_c, type_const, flags))
+        elif op == "string":
+            check_ret(lib.int2dds_type_info_add_string_field(ti, fname_c, size, flags))
+        elif op == "wstring":
+            check_ret(lib.int2dds_type_info_add_wstring_field(ti, fname_c, size, flags))
+        elif op == "seq":
+            check_ret(
+                lib.int2dds_type_info_add_sequence_field(ti, fname_c, type_const, size, flags)
+            )
+        elif op == "arr":
+            check_ret(
+                lib.int2dds_type_info_add_array_field(ti, fname_c, type_const, size, flags)
+            )
+        elif op == "map":
+            key_const, key_bound, value_const, value_bound = type_const
+            check_ret(
+                lib.int2dds_type_info_add_map_field(
+                    ti, fname_c, key_const, key_bound, value_const, value_bound, size, flags
+                )
+            )
+        elif op == "bitfield":
+            check_ret(lib.int2dds_type_info_add_bitfield(ti, fname_c, size, type_const))
+        elif op == "label":
+            check_ret(lib.int2dds_type_info_add_union_label(ti, fname_c, type_const))
+        elif op in ("nested", "seq_nested", "arr_nested", "map_nested"):
+            nested_cls = type_const[2] if op == "map_nested" else type_const
+            nested_ti = _build_type_info_for(nested_cls)
+            try:
+                if op == "nested":
+                    check_ret(
+                        lib.int2dds_type_info_add_nested_field(ti, fname_c, nested_ti, flags)
+                    )
+                elif op == "seq_nested":
+                    check_ret(
+                        lib.int2dds_type_info_add_sequence_of_nested_field(
+                            ti, fname_c, nested_ti, size, flags
+                        )
+                    )
+                elif op == "arr_nested":
+                    check_ret(
+                        lib.int2dds_type_info_add_array_of_nested_field(
+                            ti, fname_c, nested_ti, size, flags
+                        )
+                    )
+                else:
+                    key_const, key_bound, _value_cls = type_const
+                    check_ret(
+                        lib.int2dds_type_info_add_map_of_nested_field(
+                            ti, fname_c, key_const, key_bound, nested_ti, size, flags
+                        )
+                    )
+            finally:
+                lib.int2dds_type_info_destroy(nested_ti)
 
 
 def _apply_topic_qos(handle: CData, qos: "TopicQos") -> None:
@@ -274,7 +296,7 @@ class Topic(Generic[T]):
                 f"type; the name-only keyed path was removed (#334)."
             )
         if type_info_fields:
-            ti = _build_type_info(self._type_name, extensibility, type_info_fields)
+            ti = _build_type_info_for(type_class)
             try:
                 check_ret(
                     lib.int2dds_create_topic_with_type_info(
