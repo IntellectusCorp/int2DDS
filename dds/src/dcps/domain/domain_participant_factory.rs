@@ -126,7 +126,7 @@ impl DomainParticipantFactory {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<DomainParticipant> {
-        crate::common::enterprise_hooks::call_participant_gate()?;
+        crate::common::enterprise_loader::participant_gate()?;
         let domain_id = if domain_id != DEFAULT_DOMAIN_ID {
             domain_id
         } else {

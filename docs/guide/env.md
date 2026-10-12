@@ -157,6 +157,7 @@ cargo run --example hello_world_pub
 ### INT2DDS_NETWORK_INTERFACE
 
 Specifies the network interface name to use (e.g., eth0, wlan0, en0).
+The first non-loopback IPv4 address of that interface is used for every socket.
 If not specified, all available interfaces will be used.
 
 #### Configuration
@@ -177,7 +178,7 @@ cargo run --example hello_world_pub
 
 ### INT2DDS_NETWORK_IP
 
-Directly specifies the network IP address to use.
+Directly specifies the IPv4 address to use for every socket.
 If not specified, all available addresses will be used.
 
 #### Configuration
@@ -196,6 +197,19 @@ export INT2DDS_NETWORK_IP=192.168.1.100
 cargo run --example hello_world_pub
 ```
 
+### Network selection rules
+
+1. `INT2DDS_NETWORK_IP` is checked first. A non-loopback IPv4 address pins every
+   socket (send, receive and the addresses announced to other participants) to it.
+2. Otherwise `INT2DDS_NETWORK_INTERFACE` is checked. An interface with a
+   non-loopback IPv4 address pins every socket to that address.
+3. Otherwise all available interfaces are used.
+
+A value that cannot be used (malformed, empty, IPv6, loopback, or an interface
+without an IPv4 address) logs a warning and is ignored, as if it were not set.
+Release builds keep only error logs, so there the value is ignored without any log.
+While an address is pinned, `INT2DDS_USE_LOOPBACK_INTERFACE` does not add 127.0.0.1.
+
 ### INT2DDS_USE_LOOPBACK_INTERFACE
 
 Enables the loopback interface for endpoint communication. <br>
@@ -206,7 +220,7 @@ However, new participants will not be discovered since loopback multicast discov
 
 #### Interaction with Other Settings
 
-- When int2DDS-feature provides the working IP, this setting is ignored. The feature-specified NIC takes full control of the network interface selection.
+- While `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE` pins an address, this setting is ignored and 127.0.0.1 is not added.
 - If no network interfaces are available (e.g., WiFi and Ethernet disconnected), loopback is automatically used without setting this variable.
 
 #### Configuration
@@ -233,7 +247,7 @@ same host and multicast traffic must not leave the machine.
 
 #### Interaction with Other Settings
 
-- When int2DDS-feature provides the working IP, this setting is ignored. The feature-specified NIC takes full control of the network interface selection.
+- While `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE` pins an address, this setting is ignored and multicast goes out through the pinned address.
 - Use together with `INT2DDS_USE_LOOPBACK_INTERFACE=true`. The multicast group is joined on each working IP, so 127.0.0.1 must be in the working IP list for the loopback-sent multicast to be received.
 
 #### Configuration

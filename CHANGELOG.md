@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `INT2DDS_NETWORK_IP` and `INT2DDS_NETWORK_INTERFACE` take effect in the core.
+  A usable value pins every socket to that one IPv4 address, with
+  `INT2DDS_NETWORK_IP` checked first. A value that cannot be used logs a warning
+  and all interfaces are used
+
+### Changed
+
+- The hook seams are cleaned up
+
+### Removed
+
+- **Breaking:** the five `__int2dds_hook_set_*` registration symbols
+
 ## [0.1.8] - 2026-10-06
 
 The IDL compiler emits Java, and the Java binding ships a documented build.
