@@ -6,7 +6,7 @@
 //! data. A frame is refused only once the peer owes more than the queue
 //! budget, which bounds memory rather than answering congestion.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -56,6 +56,41 @@ impl Wire {
         match self {
             Wire::Plain(stream) => stream.flush(),
             Wire::Tls(stream) => stream.flush(),
+        }
+    }
+
+    /// Whether the peer has closed or reset the stream. Nothing the peer sends
+    /// on this connection is used, but bytes left unread would hide a close
+    /// queued behind them, so they are read and discarded.
+    fn peer_is_gone(&mut self) -> bool {
+        let mut sink = [0u8; 512];
+        match self {
+            Wire::Plain(stream) => loop {
+                match stream.read(&mut sink) {
+                    Ok(0) => return true,
+                    Ok(_) => continue,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(_) => return true,
+                }
+            },
+            Wire::Tls(stream) => loop {
+                match stream.conn.read_tls(&mut stream.sock) {
+                    Ok(0) => return true,
+                    Ok(_) => match stream.conn.process_new_packets() {
+                        Ok(state) if state.peer_has_closed() => return true,
+                        Ok(_) => {
+                            while matches!(stream.conn.reader().read(&mut sink), Ok(read) if read > 0)
+                            {
+                            }
+                        }
+                        Err(_) => return true,
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(_) => return true,
+                }
+            },
         }
     }
 }
@@ -139,7 +174,7 @@ impl OutboundConnection {
 
         // A write into a stream the peer has already closed is accepted locally
         // and then lost, so the frame must not start on it.
-        if peer_has_closed(state.wire.socket()) {
+        if state.wire.peer_is_gone() {
             let peer = state.peer();
             return Err(self.fail(io::Error::new(
                 io::ErrorKind::ConnectionReset,
@@ -259,22 +294,6 @@ impl ConnectionState {
             Err(_) => "<disconnected>".to_string(),
         }
     }
-}
-
-/// Whether the peer has sent a FIN or a reset. Data the peer may still send,
-/// such as TLS session tickets, does not count.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn peer_has_closed(socket: &TcpStream) -> bool {
-    use std::os::unix::io::AsRawFd;
-    let mut poll_fd = libc::pollfd { fd: socket.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
-    // SAFETY: one valid pollfd for a socket this connection owns, zero timeout.
-    let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
-    ready > 0 && poll_fd.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR) != 0
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn peer_has_closed(_socket: &TcpStream) -> bool {
-    false
 }
 
 /// The socket refused the bytes for now but the connection is intact.
@@ -422,5 +441,69 @@ mod tests {
         drop(connection);
         drop(accepted);
         drop(listener);
+    }
+
+    /// The session tickets a TLS server sends after the handshake sit unread on
+    /// this side, and they must not hide the close that arrives behind them.
+    #[test]
+    fn a_tls_peer_that_closed_behind_its_session_tickets_is_noticed_before_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("cert.pem");
+        let key_file = dir.path().join("key.pem");
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_file, generated.cert.pem()).unwrap();
+        std::fs::write(&key_file, generated.key_pair.serialize_pem()).unwrap();
+        let config = TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file,
+            key_file,
+            server_name: "localhost".to_string(),
+            verify_peer: false,
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = listener.local_addr().unwrap();
+        let server_config = config.build_server_config().unwrap();
+        let frame = b"before the close".to_vec();
+        let frame_len = frame.len();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut received = vec![0u8; frame_len];
+            tls.read_exact(&mut received).unwrap();
+            while tls.conn.wants_write() {
+                tls.conn.write_tls(&mut tls.sock).unwrap();
+            }
+            received
+        });
+
+        let connection = OutboundConnection::connect(
+            peer,
+            &TcpSocketTuning::default(),
+            Some(&config),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+        assert_eq!(server.join().unwrap(), frame);
+
+        let mut probe = [0u8; 1];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(connection.lock().wire.socket().peek(&mut probe), Ok(read) if read > 0) {
+            assert!(Instant::now() < deadline, "the server's session tickets never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Lets the FIN land behind the tickets.
+        std::thread::sleep(Duration::from_millis(100));
+
+        connection
+            .send(b"after the close")
+            .expect_err("a write into a stream the peer has closed must not count as sent");
+        assert!(connection.is_failed());
+
+        drop(connection);
     }
 }
