@@ -46,7 +46,7 @@ namespace Int2Dds.Core
         /// Creates a new DataReader. Normally called via Subscriber.CreateDataReader.
         /// </summary>
         internal DataReader(Subscriber subscriber, Topic<T> topic, DataReaderQos? qos = null,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
         {
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
@@ -117,7 +117,7 @@ namespace Int2Dds.Core
         /// Normally called via Subscriber.CreateDataReaderWithProfile.
         /// </summary>
         internal DataReader(Subscriber subscriber, Topic<T> topic, string qosPath,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
         {
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);

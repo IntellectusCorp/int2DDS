@@ -193,7 +193,7 @@ namespace Int2Dds.Core
         /// <param name="statusMask">Bitmask of statuses to listen for.</param>
         /// <returns>A new DataReader instance.</returns>
         public DataReader<T> CreateDataReader<T>(Topic<T> topic, DataReaderQos? qos = null,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
             where T : class, IDdsType, new()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -210,7 +210,7 @@ namespace Int2Dds.Core
         /// <param name="statusMask">Bitmask of statuses to listen for.</param>
         /// <returns>A new DataReader instance.</returns>
         public DataReader<T> CreateDataReaderWithProfile<T>(Topic<T> topic, string qosPath,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
             where T : class, IDdsType, new()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);

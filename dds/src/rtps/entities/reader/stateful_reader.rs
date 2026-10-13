@@ -7,7 +7,7 @@ use std::{
     fmt::Debug,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
     },
 };
 
@@ -43,7 +43,7 @@ use crate::{
             entity::Entity,
             history::{
                 cache_change::CacheChange, history_cache::HistoryCache,
-                reader_history::ReaderHistoryCache,
+                reader_history::ReaderHistoryCache, subscriber_history::SubscriberHistoryCache,
             },
         },
     },
@@ -76,6 +76,8 @@ pub(crate) struct StatefulReader {
     in_flight_callbacks: AtomicUsize,
     // Set when `remove_reader` starts draining this reader.
     deleted: AtomicBool,
+    // Present only when the owning Subscriber has GROUP access scope.
+    subscriber_history_cache: OnceLock<Arc<Mutex<SubscriberHistoryCache>>>,
 }
 
 impl StatefulReader {
@@ -120,7 +122,21 @@ impl StatefulReader {
             )),
             in_flight_callbacks: AtomicUsize::new(0),
             deleted: AtomicBool::new(false),
+            subscriber_history_cache: OnceLock::new(),
         }
+    }
+
+    // Shares the owning Subscriber's history cache. Later calls are ignored.
+    pub(crate) fn set_subscriber_history_cache(
+        &self,
+        subscriber_history_cache: Arc<Mutex<SubscriberHistoryCache>>,
+    ) {
+        let _ = self.subscriber_history_cache.set(subscriber_history_cache);
+    }
+
+    // None on every reader but a GROUP access scope one.
+    pub(crate) fn subscriber_history_cache(&self) -> Option<&Arc<Mutex<SubscriberHistoryCache>>> {
+        self.subscriber_history_cache.get()
     }
 
     pub(crate) fn preemptive_acknack_delay(&self) -> RtpsDuration {

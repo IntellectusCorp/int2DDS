@@ -4,7 +4,7 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use log::debug;
 
@@ -36,7 +36,10 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::{cache_change::CacheChange, history_cache::HistoryCache},
+            history::{
+                cache_change::CacheChange, history_cache::HistoryCache,
+                subscriber_history::SubscriberHistoryCache,
+            },
             participant::Participant,
             reader::{Reader, StatefulReader, StatelessReader},
             writer::{StatefulWriter, StatelessWriter, Writer},
@@ -374,6 +377,8 @@ impl DcpsBridge {
         content_filter_property: Option<ContentFilterProperty>,
         change_callback: Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>,
         status_callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
+        subscriber_guid: Guid,
+        subscriber_history_cache: Option<Arc<Mutex<SubscriberHistoryCache>>>,
     ) -> Result<Arc<dyn Reader + Send + Sync>, RtpsError> {
         let datareader_guid = subscription_builtin_topic_data.endpoint_guid();
         let entity_kind = datareader_guid.entity_kind();
@@ -401,7 +406,7 @@ impl DcpsBridge {
 
         let reader: Arc<dyn Reader + Send + Sync> = if subscription_builtin_topic_data.is_reliable()
         {
-            Arc::new(StatefulReader::new(
+            let stateful_reader = StatefulReader::new(
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::Reliable,
@@ -413,8 +418,30 @@ impl DcpsBridge {
                 status_callback,
                 subscription_builtin_topic_data.clone(),
                 self.participant.guid(),
-            ))
+            );
+
+            // Planted before the reader is registered and matched, so no writer or sample gets
+            // past the gate.
+            if let Some(subscriber_history_cache) = subscriber_history_cache {
+                stateful_reader.set_subscriber_history_cache(Arc::clone(&subscriber_history_cache));
+                self.participant.register_subscriber_history_cache(
+                    subscriber_guid,
+                    Arc::downgrade(&subscriber_history_cache),
+                )?;
+            }
+
+            Arc::new(stateful_reader)
         } else {
+            // A best effort reader tracks no Heartbeat or Gap, so it cannot meet the group order
+            // conditions and is left out of it.
+            if subscriber_history_cache.is_some() {
+                debug!(
+                    "Reader {} is best effort, so the group order of Subscriber {} skips it",
+                    datareader_guid,
+                    subscriber_guid.to_hex_string()
+                );
+            }
+
             Arc::new(StatelessReader::new(
                 datareader_guid,
                 topic_kind,
@@ -1055,6 +1082,8 @@ mod tests {
                         None,
                         Some(Arc::new(tests::change_callback)),
                         Some(Arc::new(tests::status_callback)),
+                        Guid::UNKNOWN,
+                        None,
                     )
                     .unwrap();
 
@@ -1180,6 +1209,8 @@ mod tests {
                     None,
                     Some(Arc::new(tests::change_callback)),
                     Some(Arc::new(tests::status_callback)),
+                    Guid::UNKNOWN,
+                    None,
                 )
                 .unwrap();
 
@@ -1192,6 +1223,8 @@ mod tests {
                     None,
                     Some(Arc::new(tests::change_callback)),
                     Some(Arc::new(tests::status_callback)),
+                    Guid::UNKNOWN,
+                    None,
                 )
                 .unwrap();
 
@@ -1494,6 +1527,8 @@ mod tests {
                         None,
                         Some(Arc::new(tests::change_callback)),
                         Some(Arc::new(tests::status_callback)),
+                        Guid::UNKNOWN,
+                        None,
                     )
                     .unwrap();
 
@@ -1554,6 +1589,8 @@ mod tests {
                 None,
                 Some(Arc::new(tests::change_callback)),
                 Some(Arc::new(tests::status_callback)),
+                Guid::UNKNOWN,
+                None,
             )
             .unwrap();
 

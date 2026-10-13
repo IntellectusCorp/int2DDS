@@ -27,6 +27,7 @@
 //! | [`TypeConsistencyEnforcementQosPolicy`] | Type consistency enforcement for DDS-XTypes | DataReader |
 //! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
 //! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
+//! | [`PresentationQosPolicy`] | Coherent/ordered access for change groups | Publisher, Subscriber |
 //!
 //! ## int2DDS Extension QoS Policies
 //!
@@ -42,7 +43,6 @@
 //! | Policy | Description | Applicable to |
 //! |--------|-------------|---------------|
 //! | [`UserDataQosPolicy`] | Arbitrary user data attached to entity | DomainParticipant, DataWriter, DataReader |
-//! | [`PresentationQosPolicy`] | Coherent/ordered access for change groups | Publisher, Subscriber |
 //! | [`LatencyBudgetQosPolicy`] | Acceptable delivery delay hint | DataWriter, DataReader, Topic |
 //! | [`TransportPriorityQosPolicy`] | Transport priority for delivery | DataWriter, Topic |
 //! | [`TimeBasedFilterQosPolicy`] | Minimum separation between samples | DataReader |
@@ -712,12 +712,17 @@ impl PresentationQosAccessScopeKind {
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
 ///
-/// **Note**: This QoS policy is currently unsupported.
+/// `coherent_access` and `ordered_access` are independent. `access_scope` is the granularity of
+/// whichever of the two is enabled, and enabling one says nothing about the other: coherent
+/// access alone asks for atomicity, ordered access alone asks for order.
 ///
 /// # Values (access_scope)
 /// - `Instance`: Changes are coherent/ordered at instance level (default)
 /// - `Topic`: Changes are coherent/ordered at topic level
 /// - `Group`: Changes are coherent/ordered at group (Publisher/Subscriber) level
+///
+/// # Default
+/// `access_scope` is `Instance`, `coherent_access` and `ordered_access` are `false`.
 #[derive(DdsType, ConstDefault, Copy, Eq)]
 #[dds_type(crate_path = "crate")]
 pub struct PresentationQosPolicy {
@@ -1706,6 +1711,19 @@ impl QosPolicy for DurabilityQosPolicy {
 /// - With `KeepAll`: The `max_samples_per_instance` value is used as the actual limit.
 /// - `max_samples` is capped at `max_instances × max_samples_per_instance`.
 ///
+/// # Interaction with PresentationQosPolicy
+///
+/// With `coherent_access` and access_scope Instance or Topic, a reader buffers the members of a
+/// coherent set until that set closes. The buffer holds twice this `max_samples`, counted across
+/// all remote DataWriters, with `LENGTH_UNLIMITED` counted as `i32::MAX` as it is for the
+/// history. A member arriving at a full buffer discards the coherent set it belongs to.
+///
+/// A coherent set that the history cannot store whole is discarded.
+///
+/// With access_scope Group, this `max_samples` does not bound that buffer. A separate limit of
+/// 32 MiB of payload per remote Publisher applies instead, and it is planned to become
+/// configurable by the user.
+///
 /// # Default
 /// All limits are `LENGTH_UNLIMITED`.
 ///
@@ -1775,7 +1793,8 @@ impl QosPolicy for DurabilityQosPolicy {
 #[dds_type(crate_path = "crate", no_default)]
 #[serde(default)]
 pub struct ResourceLimitsQosPolicy {
-    /// Maximum total number of samples that can be stored.
+    /// Maximum total number of samples that can be stored. Twice this value also bounds the
+    /// coherent set buffer a DataReader's samples pass through before they are stored.
     #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
     #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_samples: i32,

@@ -16,7 +16,7 @@ use crate::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
     rtps::common::{
-        guid::Guid,
+        guid::{GroupDigest, Guid},
         // parameters::ParameterList,
         sequence::SequenceNumber,
         time::RtpsTime,
@@ -76,6 +76,7 @@ pub(crate) struct PresentationInfo {
     pub coherent_set: Option<SequenceNumber>, // PID_COHERENT_SET (writer's first member seq)
     pub group_seq_num: Option<SequenceNumber>, // PID_GROUP_SEQ_NUM (sample's own group seq)
     pub group_coherent_set: Option<SequenceNumber>, // PID_GROUP_COHERENT_SET (group set's first seq)
+    pub writer_group_info: Option<GroupDigest>, // PID_WRITER_GROUP_INFO (publisher's writer set)
 }
 
 /// The reader's decoded sample; set once and never modified afterwards.
@@ -293,6 +294,12 @@ impl CacheChange {
 
     pub(crate) fn set_presentation_info(&mut self, presentation_info: PresentationInfo) {
         self.presentation_info = presentation_info;
+    }
+
+    // An End Coherent Set carries no payload and names its group coherent set, while a member of
+    // that set carries a payload.
+    pub(crate) fn is_end_coherent_set(&self) -> bool {
+        self.data_payload.is_empty() && self.presentation_info.group_coherent_set.is_some()
     }
 
     pub(crate) fn sequence_number(&self) -> SequenceNumber {

@@ -17,15 +17,18 @@
 
 use std::{
     any::TypeId,
-    collections::HashMap,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Mutex, OnceLock, RwLock, Weak,
     },
 };
 
 use arc_swap::ArcSwap;
+
+use crate::rtps::entities::history::subscriber_history::SubscriberHistoryCache;
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -102,6 +105,10 @@ pub struct Subscriber {
     orphaned_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     default_datareader_qos: Arc<Mutex<Option<DataReaderQos>>>,
     participant: Option<Weak<DomainParticipant>>,
+    // Present only under GROUP access scope. Shared with every reader of this Subscriber.
+    subscriber_history_cache: Arc<OnceLock<Arc<Mutex<SubscriberHistoryCache>>>>,
+    // Nesting depth of begin/end_access. The access block is open while non-zero.
+    access_depth: Arc<AtomicU32>,
 }
 
 impl Debug for Subscriber {
@@ -204,6 +211,8 @@ impl Subscriber {
             orphaned_readers: Arc::new(Mutex::new(Vec::new())),
             default_datareader_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
+            subscriber_history_cache: Arc::new(OnceLock::new()),
+            access_depth: Arc::new(AtomicU32::new(0)),
         };
         let subscriber_arc = Arc::new(subscriber.clone());
         let weak_ref = Arc::downgrade(&subscriber_arc);
@@ -786,13 +795,12 @@ impl Subscriber {
         Ok(())
     }
 
-    // TODO
     pub fn get_datareaders(
         &self,
-        _sample_states: &[SampleStateKind],
-        _view_states: &[ViewStateKind],
-        _instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<Box<dyn DataReaderBase<Qos = DataReaderQos> + Send>>> {
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Arc<dyn DataReaderBase<Qos = DataReaderQos>>>> {
         /*
             This operation allows the application to access DataReader objects that contain samples with specified sample_states, view_states, and instance_states.
             If the PRESENTATION QoS policy of the Subscriber to which the DataReader belongs has access_scope set to 'GROUP', this operation must only be called within a begin_access / end_access block.
@@ -805,7 +813,53 @@ impl Subscriber {
             The pattern that the application should use when accessing data is described in detail in section 2.2.2.5.1 "Access to the data".
         */
         let _operation = self.lifecycle.begin_operation()?;
-        Err(DdsError::Unsupported)
+        self.check_group_access_block_open()?;
+
+        let readers = self.get_datareaders_internal()?;
+
+        // GROUP ordered_access outside a listener returns a list, one entry per matching sample.
+        if self.is_group_order_enforced()? {
+            let mut readers_by_group_seq_num = Vec::new();
+
+            for reader in readers.iter() {
+                for group_seq_num in reader.get_group_seq_nums_of_matching_samples(
+                    sample_states,
+                    view_states,
+                    instance_states,
+                )? {
+                    readers_by_group_seq_num.push((group_seq_num, Arc::clone(reader)));
+                }
+            }
+
+            // Stable, so samples that share a group sequence number keep their relative order.
+            readers_by_group_seq_num.sort_by_key(|(group_seq_num, _)| *group_seq_num);
+
+            return Ok(readers_by_group_seq_num
+                .into_iter()
+                .map(|(_, reader)| reader as Arc<dyn DataReaderBase<Qos = DataReaderQos>>)
+                .collect());
+        }
+
+        // Everything else, coherent_access alone and inside on_data_on_readers included,
+        // returns a set holding each reader at most once.
+        let mut readers_with_samples = Vec::new();
+
+        for reader in readers.iter() {
+            let has_matching_sample = !reader
+                .get_group_seq_nums_of_matching_samples(
+                    sample_states,
+                    view_states,
+                    instance_states,
+                )?
+                .is_empty();
+
+            if has_matching_sample {
+                readers_with_samples
+                    .push(Arc::clone(reader) as Arc<dyn DataReaderBase<Qos = DataReaderQos>>);
+            }
+        }
+
+        Ok(readers_with_samples)
     }
 
     pub fn get_data_readers(&self) -> DdsResult<Vec<Arc<dyn DataReaderBase<Qos = DataReaderQos>>>> {
@@ -1036,7 +1090,6 @@ impl Subscriber {
         Ok(())
     }
 
-    // TODO
     pub fn begin_access(&self) -> DdsResult<()> {
         /*
             This operation notifies the Service that the application is about to access data samples in one or more DataReader objects attached to the Subscriber.
@@ -1053,10 +1106,27 @@ impl Subscriber {
         if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
-        Err(DdsError::Unsupported)
+
+        // Inside on_data_on_readers the access block is neither needed nor tracked.
+        if is_inside_on_data_on_readers(self.guid) {
+            return Ok(());
+        }
+
+        // Nested calls only deepen the current block. A new block starts at depth 0 -> 1.
+        let previous_depth = self.access_depth.fetch_add(1, Ordering::AcqRel);
+
+        if previous_depth == 0 {
+            if let Some(subscriber_history_cache) = self.subscriber_history_cache()? {
+                subscriber_history_cache
+                    .lock()
+                    .map_err(|e| DdsError::Error(e.to_string()))?
+                    .open_access_block();
+            }
+        }
+
+        Ok(())
     }
 
-    // TODO
     pub fn end_access(&self) -> DdsResult<()> {
         /*
             This operation indicates that the application has completed accessing data samples from DataReader objects managed by the Subscriber.
@@ -1069,7 +1139,47 @@ impl Subscriber {
         if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
-        Err(DdsError::Unsupported)
+
+        // Inside on_data_on_readers the access block is neither needed nor tracked.
+        if is_inside_on_data_on_readers(self.guid) {
+            return Ok(());
+        }
+
+        // fetch_update returns the pre-decrement depth. checked_sub refuses to go below zero.
+        match self
+            .access_depth
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| depth.checked_sub(1))
+        {
+            // Depth was 0: no matching begin_access.
+            Err(_) => Err(DdsError::PreconditionNotMet),
+            // Depth 1 -> 0: the outermost end hands over what the block held back.
+            Ok(1) => self.close_access_block_and_commit_held_changes(),
+            // Depth 2+ -> 1+: nested end, the block stays open.
+            Ok(_) => Ok(()),
+        }
+    }
+
+    // Reopens the gate and stores everything it held back while the block was open.
+    fn close_access_block_and_commit_held_changes(&self) -> DdsResult<()> {
+        let Some(subscriber_history_cache) = self.subscriber_history_cache()? else {
+            return Ok(());
+        };
+
+        let participant = self.get_participant()?.get_rtps_participant()?;
+
+        let mut cache =
+            subscriber_history_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        cache.close_access_block();
+
+        let released = cache.flush_pending_changes();
+        let available = participant
+            .commit_released_samples(released)
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        drop(cache);
+
+        participant.notify_available_changes(available);
+
+        Ok(())
     }
 
     pub fn notify_datareaders(&self) -> DdsResult<()> {
@@ -1109,10 +1219,78 @@ impl Subscriber {
             })
     }
 
+    pub(crate) fn guid(&self) -> Guid {
+        self.guid
+    }
+
     /// PRESENTATION coherent_access without cloning the whole subscriber to read one bool.
     /// Read twice per received sample by the reader history's coherent-access probes.
     pub(crate) fn presentation_coherent_access(&self) -> DdsResult<bool> {
         Ok(self.qos.load().presentation.coherent_access)
+    }
+
+    // None unless the access scope is GROUP and either coherent or ordered access is requested.
+    // Created on first use, once the participant's discovery data is reachable, and shared by
+    // every reader created afterwards.
+    pub(crate) fn subscriber_history_cache(
+        &self,
+    ) -> DdsResult<Option<Arc<Mutex<SubscriberHistoryCache>>>> {
+        let presentation = self.qos.load().presentation;
+        let is_group_order_requested = presentation.access_scope
+            == PresentationQosAccessScopeKind::Group
+            && (presentation.coherent_access || presentation.ordered_access);
+
+        if !is_group_order_requested {
+            return Ok(None);
+        }
+
+        if let Some(cache) = self.subscriber_history_cache.get() {
+            return Ok(Some(Arc::clone(cache)));
+        }
+
+        let remote_publications =
+            self.get_participant()?.get_rtps_participant()?.remote_publications();
+        let cache = self.subscriber_history_cache.get_or_init(|| {
+            Arc::new(Mutex::new(SubscriberHistoryCache::new(
+                remote_publications,
+                presentation.ordered_access,
+                presentation.coherent_access,
+            )))
+        });
+
+        Ok(Some(Arc::clone(cache)))
+    }
+
+    // Under GROUP access scope the sample access operations need an open begin_access block.
+    // Inside this Subscriber's on_data_on_readers they are exempt.
+    pub(crate) fn check_group_access_block_open(&self) -> DdsResult<()> {
+        if self.qos.load().presentation.access_scope != PresentationQosAccessScopeKind::Group {
+            return Ok(());
+        }
+
+        if is_inside_on_data_on_readers(self.guid) {
+            return Ok(());
+        }
+
+        if self.access_depth.load(Ordering::Acquire) > 0 {
+            return Ok(());
+        }
+
+        Err(DdsError::PreconditionNotMet)
+    }
+
+    // PRESENTATION ordered_access at group scope.
+    pub(crate) fn presentation_group_ordered(&self) -> DdsResult<bool> {
+        let qos = self.qos.load();
+
+        Ok(qos.presentation.ordered_access
+            && qos.presentation.access_scope == PresentationQosAccessScopeKind::Group)
+    }
+
+    // Whether the caller has to access samples in group order. Inside on_data_on_readers the
+    // application is free to read in any order, so the group order is not enforced there.
+    pub(crate) fn is_group_order_enforced(&self) -> DdsResult<bool> {
+        Ok(self.presentation_group_ordered()? && !is_inside_on_data_on_readers(self.guid))
     }
 
     /// PRESENTATION ordered_access at topic scope, same reasoning. Read on every `read`/`take`.
@@ -1361,13 +1539,56 @@ impl Subscriber {
     }
 }
 
+thread_local! {
+    // Subscribers whose on_data_on_readers callback is running on this thread.
+    static SUBSCRIBERS_IN_ON_DATA_ON_READERS: RefCell<HashSet<Guid>> = RefCell::new(HashSet::new());
+}
+
+// Marks a Subscriber for as long as its on_data_on_readers callback runs on this thread.
+pub(crate) struct OnDataOnReadersGuard {
+    subscriber_guid: Guid,
+}
+
+impl OnDataOnReadersGuard {
+    pub(crate) fn new(subscriber_guid: Guid) -> Self {
+        let _ = SUBSCRIBERS_IN_ON_DATA_ON_READERS.try_with(|subscribers| {
+            subscribers.borrow_mut().insert(subscriber_guid);
+        });
+
+        Self { subscriber_guid }
+    }
+}
+
+impl Drop for OnDataOnReadersGuard {
+    fn drop(&mut self) {
+        let _ = SUBSCRIBERS_IN_ON_DATA_ON_READERS.try_with(|subscribers| {
+            subscribers.borrow_mut().remove(&self.subscriber_guid);
+        });
+    }
+}
+
+fn is_inside_on_data_on_readers(subscriber_guid: Guid) -> bool {
+    SUBSCRIBERS_IN_ON_DATA_ON_READERS
+        .try_with(|subscribers| subscribers.borrow().contains(&subscriber_guid))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use int2dds_derive::DdsType;
 
     use super::*;
     use crate::{
+        core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+        infrastructure::{
+            qos_policy::{
+                HistoryQosPolicy, HistoryQosPolicyKind, PresentationQosPolicy,
+                ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+            },
+            wait_set::WaitSet,
+        },
+        publication::qos::{DataWriterQos, PublisherQos},
         subscription::{
             qos::{DataReaderQos, SubscriberQos},
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
@@ -1986,6 +2207,523 @@ mod tests {
         subscriber.delete_contained_entities().unwrap();
 
         assert!(subscriber.get_data_readers().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    fn group_access_subscriber_qos() -> SubscriberQos {
+        SubscriberQos {
+            presentation: crate::infrastructure::qos_policy::PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ordered_access: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_begin_access_nests_and_unmatched_end_access_fails() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+
+        subscriber.begin_access().unwrap();
+        subscriber.begin_access().unwrap();
+        subscriber.end_access().unwrap();
+        subscriber.end_access().unwrap();
+
+        assert_eq!(subscriber.end_access(), Err(DdsError::PreconditionNotMet));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_unmatched_end_access_is_no_op_outside_group_access_scope() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        subscriber.begin_access().unwrap();
+        subscriber.end_access().unwrap();
+        subscriber.end_access().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_take_needs_an_open_access_block_under_group_access_scope() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "HelloWorld",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let take_any = || {
+            reader.take(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
+        let read_any = || {
+            reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
+        // The serialized variants run through their own funnel and need the same check.
+        let take_any_serialized = || {
+            reader.take_serialized(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
+
+        assert!(matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(read_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(take_any_serialized(), Err(DdsError::PreconditionNotMet)));
+
+        subscriber.begin_access().unwrap();
+        assert!(!matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(!matches!(read_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(!matches!(take_any_serialized(), Err(DdsError::PreconditionNotMet)));
+        subscriber.end_access().unwrap();
+
+        assert!(matches!(take_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(read_any(), Err(DdsError::PreconditionNotMet)));
+        assert!(matches!(take_any_serialized(), Err(DdsError::PreconditionNotMet)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_get_datareaders_needs_an_open_access_block_under_group_access_scope() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "HelloWorld",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let get_datareaders = || {
+            subscriber.get_datareaders(
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+        };
+
+        assert!(matches!(get_datareaders(), Err(DdsError::PreconditionNotMet)));
+
+        subscriber.begin_access().unwrap();
+        // No samples have arrived, so no reader is reported either way.
+        assert!(get_datareaders().unwrap().is_empty());
+        subscriber.end_access().unwrap();
+
+        assert!(matches!(get_datareaders(), Err(DdsError::PreconditionNotMet)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    fn group_access_unordered_subscriber_qos() -> SubscriberQos {
+        SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ordered_access: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn group_access_publisher_qos() -> PublisherQos {
+        PublisherQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ordered_access: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn reliable_keep_all_writer_qos() -> DataWriterQos {
+        DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn reliable_keep_all_reader_qos() -> DataReaderQos {
+        DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn wait_for_match(writer_condition: StatusCondition<DataWriterQos>) {
+        let wait_set = WaitSet::new();
+        writer_condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(writer_condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("timed out waiting for the reader");
+        wait_set.detach_condition(writer_condition).unwrap();
+    }
+
+    #[test]
+    fn test_group_ordered_access_lists_a_reader_once_per_sample_and_takes_one() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "GroupOrderedList",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(group_access_publisher_qos(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        wait_for_match(writer.get_statuscondition().unwrap().clone());
+
+        for index in 0..2 {
+            writer
+                .write(&HelloWorld { index, message: "sample".to_string() }, InstanceHandle::NIL)
+                .unwrap();
+        }
+
+        // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let entries = loop {
+            subscriber.begin_access().unwrap();
+
+            let entries = subscriber
+                .get_datareaders(
+                    &[SampleStateKind::ANY_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                )
+                .unwrap();
+
+            if entries.len() == 2 {
+                break entries;
+            }
+
+            subscriber.end_access().unwrap();
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for both samples, the list held {} entries",
+                entries.len()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+
+        // One reader holding two samples is named twice.
+        assert_eq!(entries.len(), 2);
+
+        // max_samples is 10, but group ordered access hands out one sample.
+        let first = reader
+            .take(
+                10,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].data().unwrap().index, 0);
+
+        let second = reader
+            .take(
+                10,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].data().unwrap().index, 1);
+
+        let remaining = subscriber
+            .get_datareaders(
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert!(remaining.is_empty());
+
+        subscriber.end_access().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    // GROUP is the scope of whichever of the two flags is set, so with neither set the Subscriber
+    // owes no group order and keeps no cache for it.
+    #[test]
+    fn test_group_access_scope_alone_keeps_no_subscriber_history_cache() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let scope_only_qos = SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Group,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let subscriber =
+            participant.create_subscriber(scope_only_qos, None, StatusMask::default()).unwrap();
+
+        assert!(subscriber.subscriber_history_cache().unwrap().is_none());
+
+        let ordered_subscriber = participant
+            .create_subscriber(group_access_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+
+        assert!(ordered_subscriber.subscriber_history_cache().unwrap().is_some());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_group_access_without_ordered_access_names_each_reader_once() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "GroupUnorderedSet",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(group_access_publisher_qos(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(group_access_unordered_subscriber_qos(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        wait_for_match(writer.get_statuscondition().unwrap().clone());
+
+        for index in 0..2 {
+            writer
+                .write(&HelloWorld { index, message: "sample".to_string() }, InstanceHandle::NIL)
+                .unwrap();
+        }
+
+        // Nothing reaches a reader while an access block is open, so every attempt opens its own.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        loop {
+            subscriber.begin_access().unwrap();
+
+            let delivered = reader
+                .read(
+                    10,
+                    &[SampleStateKind::ANY_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                )
+                .map(|samples| samples.len())
+                .unwrap_or(0);
+
+            if delivered == 2 {
+                break;
+            }
+
+            subscriber.end_access().unwrap();
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for both samples, the reader held {}",
+                delivered
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Two samples in one reader, but without ordered_access the reader is named once.
+        let entries = subscriber
+            .get_datareaders(
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+
+        // Without ordered_access the single sample limit does not apply.
+        let taken = reader
+            .take(
+                10,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+
+        subscriber.end_access().unwrap();
+
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken[0].data().unwrap().index, 0);
+        assert_eq!(taken[1].data().unwrap().index, 1);
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
