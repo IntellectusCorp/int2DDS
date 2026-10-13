@@ -307,14 +307,17 @@ impl Participant {
         }
     }
 
-    /// Whether the peer behind `remote_prefix` runs on this host. A source
-    /// address decides and keeps the verdict, `None` only reads one, so the
-    /// answer does not depend on which announcement arrived first.
+    /// Whether the peer behind `remote_prefix` runs on this host. For other participants,
+    /// a source address decides and keeps the verdict; `None` only reads one.
     pub(crate) fn remote_is_same_host(
         &self,
         remote_prefix: GuidPrefix,
         from_addr: Option<SocketAddr>,
     ) -> bool {
+        // This participant is always local to itself.
+        if remote_prefix == self.guid.prefix() {
+            return true;
+        }
         match from_addr {
             Some(from_addr) => *self
                 .remote_same_host
