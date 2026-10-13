@@ -519,8 +519,9 @@ mod tests {
     fn a_refused_discovery_dial_does_not_hold_back_the_next_frame() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let peer = listener.local_addr().expect("addr");
-        let config =
-            TcpConfig { connect_timeout: Duration::from_millis(500), ..TcpConfig::default() };
+        // Some kernels retry a refused SYN before reporting it, so the bound
+        // leaves room for the refusal to arrive instead of a timeout.
+        let config = TcpConfig { connect_timeout: Duration::from_secs(3), ..TcpConfig::default() };
         let sender = make_sender(config);
         let before = test_message(0xC2, b"before the restart");
         let while_down = test_message(0xC2, b"while the peer is down");
@@ -586,10 +587,11 @@ mod tests {
     /// A peer that answers nothing must still put discovery into backoff: a
     /// dial that times out holds the calling thread, so the next frame must not
     /// wait for it again.
+    // Only these kernels drop new SYNs without a reply once the accept queue is
+    // full, which is what stands in for a host that is down.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn a_discovery_dial_that_times_out_enters_backoff() {
-        // With its accept queue full the kernel drops new SYNs without a reply,
-        // as a host that is down would.
         let listener = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
             .expect("socket");
         listener.bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into()).expect("bind");
