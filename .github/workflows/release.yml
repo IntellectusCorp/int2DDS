@@ -71,10 +71,12 @@ jobs:
           # One artifact per arch then covers RHEL 8/9/10 and Ubuntu 20.04+.
           - { triple: x86_64-unknown-linux-gnu,      dist: linux-x86_64,  runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64",  pkg: dnf, max_glibc: "2.28" }
           - { triple: aarch64-unknown-linux-gnu,     dist: linux-aarch64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64", pkg: dnf, max_glibc: "2.28" }
-          # armhf keeps the ubuntu 22.04 cross path: manylinux publishes no
-          # armv7 image, and every lower-glibc armhf builder is unmaintained
-          # (debian 10 archived, debian 11 LTS ends 2026-08-31, ubuntu 20.04 EOL).
-          - { triple: armv7-unknown-linux-gnueabihf, dist: linux-armhf,   runner: ubuntu-latest,    image: "ubuntu:22.04", pkg: apt, max_glibc: "2.35" }
+          # armhf builds on debian 10 so its glibc floor is 2.28 like the other
+          # two arches. ROS 2 Humble lists Ubuntu 20.04 and Debian 11 (glibc 2.31)
+          # as Tier 3 for arm32, and a library linked against the ubuntu 22.04
+          # cross libc (2.35) does not load there. manylinux publishes no armv7
+          # image; debian 10 is archived, so apt reads archive.debian.org.
+          - { triple: armv7-unknown-linux-gnueabihf, dist: linux-armhf,   runner: ubuntu-latest,    image: "debian:10", pkg: apt, max_glibc: "2.28" }
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.image }}
     steps:
@@ -84,10 +86,15 @@ jobs:
       # add an older /usr/bin/gcc and muddy the toolchain, so there is no dnf
       # prerequisites step for the manylinux entries.
 
-      - name: Install build prerequisites (Ubuntu)
+      - name: Install build prerequisites (Debian)
         if: matrix.pkg == 'apt'
         run: |
-          apt-get update
+          # debian 10 lives on archive.debian.org, whose Release files have expired.
+          printf '%s\n' \
+            'deb http://archive.debian.org/debian buster main' \
+            'deb http://archive.debian.org/debian-security buster/updates main' \
+            > /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends \
             curl ca-certificates build-essential git pkg-config cmake perl file binutils
           # libc6-dev-armhf-cross is only a *recommended* dep of the cross gcc,
