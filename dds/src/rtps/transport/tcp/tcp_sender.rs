@@ -519,9 +519,8 @@ mod tests {
     fn a_refused_discovery_dial_does_not_hold_back_the_next_frame() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let peer = listener.local_addr().expect("addr");
-        // Some kernels retry a refused SYN before reporting it, so the bound
-        // leaves room for the refusal to arrive instead of a timeout.
-        let config = TcpConfig { connect_timeout: Duration::from_secs(3), ..TcpConfig::default() };
+        let config =
+            TcpConfig { connect_timeout: Duration::from_millis(500), ..TcpConfig::default() };
         let sender = make_sender(config);
         let before = test_message(0xC2, b"before the restart");
         let while_down = test_message(0xC2, b"while the peer is down");

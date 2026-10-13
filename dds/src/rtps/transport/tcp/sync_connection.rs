@@ -16,6 +16,7 @@ use rustls::pki_types::ServerName;
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
+use crate::rtps::transport::tcp::dial::dial;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// How much a peer may owe the stream before frames are refused instead of
@@ -133,7 +134,7 @@ impl OutboundConnection {
         connect_timeout: Duration,
         tls_handshake_timeout: Duration,
     ) -> io::Result<Self> {
-        let socket = TcpStream::connect_timeout(&addr, connect_timeout).map_err(|error| {
+        let socket = dial(addr, connect_timeout).map_err(|error| {
             let code = match error.kind() {
                 io::ErrorKind::ConnectionRefused => TransportErrorCode::TcpConnectionRefused,
                 _ => TransportErrorCode::TcpConnectionTimeout,
@@ -505,5 +506,26 @@ mod tests {
         assert!(connection.is_failed());
 
         drop(connection);
+    }
+
+    /// A closed port must surface as a refusal within the default connect
+    /// timeout, since only a refusal spares a discovery dial the backoff.
+    #[test]
+    fn a_refused_dial_is_reported_within_the_default_connect_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+
+        let error = OutboundConnection::connect(
+            closed,
+            &TcpSocketTuning::default(),
+            None,
+            crate::rtps::transport::TcpConfig::default().connect_timeout,
+            Duration::from_secs(1),
+        )
+        .err()
+        .expect("nothing listens on a closed port");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     }
 }
