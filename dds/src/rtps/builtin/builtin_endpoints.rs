@@ -63,9 +63,8 @@ pub struct BuiltinEndpoints {
 
 impl BuiltinEndpoints {
     fn get_heartbeat_period() -> RtpsDuration {
-        let period = crate::common::enterprise_hooks::call_heartbeat_period(
-            DEFAULT_HEARTBEAT_PERIOD_SECONDS,
-        );
+        let period =
+            crate::common::enterprise_loader::heartbeat_period(DEFAULT_HEARTBEAT_PERIOD_SECONDS);
 
         RtpsDuration::from_seconds_f64(period)
     }

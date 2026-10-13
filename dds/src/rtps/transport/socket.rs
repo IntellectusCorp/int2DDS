@@ -1,5 +1,8 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::vec;
+
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 
 use crate::common::env::{get_network_interface, get_network_ip};
 use crate::rtps::common::types::{DomainId, ParticipantId};
@@ -65,27 +68,43 @@ impl Socket {
         let mut ips: Vec<String> = Vec::new();
         let mut from_feature = false;
 
-        // Check if user specified which network to use via env variable
-        let is_network_specified = get_network_interface().is_some() || get_network_ip().is_some();
-
-        if let Some(ip) = crate::common::enterprise_hooks::call_resolve_ip() {
-            // enterprise resolve_ip hook enabled
-            if is_network_specified {
-                log::debug!("Using enterprise hooks specified IP: {}", ip);
-                ips.push(ip);
-                from_feature = true;
-            } else {
-                log::warn!(
-                    "enterprise resolve_ip hook is enabled but no network interface specified. \
-                            Falling back to default (auto-detection)"
-                );
+        // INT2DDS_NETWORK_IP first, then INT2DDS_NETWORK_INTERFACE; a value that
+        // cannot be used is ignored and every NIC is used as if it were unset.
+        if let Some(value) = get_network_ip() {
+            match value.parse::<IpAddr>() {
+                Ok(ip) if ip.is_ipv4() && !ip.is_loopback() => {
+                    log::debug!("Using INT2DDS_NETWORK_IP: {}", ip);
+                    ips.push(ip.to_string());
+                    from_feature = true;
+                }
+                _ => log::warn!(
+                    "INT2DDS_NETWORK_IP '{}' is not a non-loopback IPv4 address; ignoring it",
+                    value
+                ),
             }
-        } else if is_network_specified {
-            // These variables can only be used with the enterprise resolve_ip hook
-            log::warn!(
-                "Env variable INT2DDS_NETWORK_INTERFACE or INT2DDS_NETWORK_IP is set \
-                 but the enterprise resolve_ip hook is not enabled. Ignoring the value"
-            );
+        }
+        if !from_feature {
+            if let Some(name) = get_network_interface() {
+                let found = NetworkInterface::show()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|iface| iface.name == name)
+                    .flat_map(|iface| iface.addr)
+                    .map(|addr| addr.ip())
+                    .find(|ip| ip.is_ipv4() && !ip.is_loopback());
+                match found {
+                    Some(ip) => {
+                        log::debug!("Using INT2DDS_NETWORK_INTERFACE '{}': {}", name, ip);
+                        ips.push(ip.to_string());
+                        from_feature = true;
+                    }
+                    None => log::warn!(
+                        "INT2DDS_NETWORK_INTERFACE '{}' has no non-loopback IPv4 address; \
+                         using all interfaces",
+                        name
+                    ),
+                }
+            }
         }
 
         let use_loopback = crate::common::env::get_use_loopback_interface();
@@ -117,7 +136,7 @@ impl Socket {
             !from_feature && !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
 
         // If no NIC available or loopback is set to use, add localhost IP to the list
-        // also skipped when from_feature — feature-specified NIC takes full control
+        // also skipped when an address is pinned by INT2DDS_NETWORK_IP / _INTERFACE
         if ips.is_empty() || should_add_loopback {
             ips.push("127.0.0.1".to_string());
         }
@@ -136,7 +155,7 @@ impl Socket {
     }
 
     pub(crate) fn get_sender_bind_addr(&self) -> String {
-        // From enterprise hooks: bind to the hook-specified IP directly
+        // Pinned by INT2DDS_NETWORK_IP / _INTERFACE: bind to that address directly
         if self.working_ips.from_feature {
             return self.working_ips.ips[0].clone();
         }
@@ -159,12 +178,9 @@ impl Socket {
     // 0.0.0.0 relies on default route, which doesn't exist in gateway-less environments,
     // and multicast addresses (e.g. 239.x) don't match any subnet route.
     pub(crate) fn get_sender_multicast_if_addr(&self) -> String {
-        // From enterprise hooks: use the hook-specified IP directly
+        // Pinned by INT2DDS_NETWORK_IP / _INTERFACE: use that address directly
         if self.working_ips.from_feature {
-            log::debug!(
-                "Using enterprise hooks specified multicast interface IP: {}",
-                self.working_ips.ips[0]
-            );
+            log::debug!("Using pinned multicast interface IP: {}", self.working_ips.ips[0]);
             return self.working_ips.ips[0].clone();
         }
 
@@ -242,5 +258,110 @@ mod tests {
         assert!(Socket::is_loopback_interface_name("lo:0"));
         assert!(!Socket::is_loopback_interface_name("eth0"));
         assert!(!Socket::is_loopback_interface_name("wlo1"));
+    }
+
+    use std::sync::{Mutex, MutexGuard};
+
+    // Serialize env-mutating tests since std::env is process-global
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds the lock and clears both selection variables on drop, even after a panic.
+    struct NetworkEnv(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    impl NetworkEnv {
+        fn set(ip: Option<&str>, interface: Option<&str>) -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            clear_network_env();
+            if let Some(v) = ip {
+                crate::common::env::set_network_ip(v);
+            }
+            if let Some(v) = interface {
+                crate::common::env::set_network_interface(v);
+            }
+            Self(guard)
+        }
+    }
+
+    impl Drop for NetworkEnv {
+        fn drop(&mut self) {
+            clear_network_env();
+        }
+    }
+
+    fn clear_network_env() {
+        unsafe {
+            std::env::remove_var("INT2DDS_NETWORK_IP");
+            std::env::remove_var("INT2DDS_NETWORK_INTERFACE");
+        }
+    }
+
+    fn working_ips_with(ip: Option<&str>, interface: Option<&str>) -> WorkingIps {
+        let _env = NetworkEnv::set(ip, interface);
+        Socket::get_new_working_ips().unwrap()
+    }
+
+    #[test]
+    fn network_ip_pins_a_usable_ipv4() {
+        let w = working_ips_with(Some("192.0.2.10"), None);
+        assert!(w.from_feature, "{w:?}");
+        assert_eq!(w.ips, vec!["192.0.2.10".to_string()]);
+    }
+
+    #[test]
+    fn network_ip_ignores_loopback() {
+        assert!(!working_ips_with(Some("127.0.0.1"), None).from_feature);
+    }
+
+    #[test]
+    fn network_ip_ignores_a_malformed_value() {
+        assert!(!working_ips_with(Some("not-an-ip"), None).from_feature);
+    }
+
+    #[test]
+    fn network_ip_ignores_ipv6() {
+        assert!(!working_ips_with(Some("fe80::1"), None).from_feature);
+    }
+
+    #[test]
+    fn network_interface_ignores_an_unknown_name() {
+        assert!(!working_ips_with(None, Some("int2dds-no-such-nic")).from_feature);
+    }
+
+    #[test]
+    fn network_ip_takes_precedence_over_interface() {
+        let w = working_ips_with(Some("192.0.2.10"), Some("int2dds-no-such-nic"));
+        assert_eq!(w.ips, vec!["192.0.2.10".to_string()]);
+    }
+
+    #[test]
+    fn network_interface_pins_an_ipv4_of_that_interface() {
+        use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+        // Picks a NIC from this host, so it holds on any CI runner; no usable NIC, nothing to check.
+        let ifaces = NetworkInterface::show().unwrap_or_default();
+        let usable = |ip: &std::net::IpAddr| ip.is_ipv4() && !ip.is_loopback();
+        let Some(name) =
+            ifaces.iter().find(|i| i.addr.iter().any(|a| usable(&a.ip()))).map(|i| i.name.clone())
+        else {
+            return;
+        };
+        let candidates: Vec<String> = ifaces
+            .iter()
+            .filter(|i| i.name == name)
+            .flat_map(|i| i.addr.iter().map(|a| a.ip()))
+            .filter(usable)
+            .map(|ip| ip.to_string())
+            .collect();
+        let w = working_ips_with(None, Some(&name));
+        assert!(w.from_feature, "interface {name} was not pinned: {w:?}");
+        assert_eq!(w.ips.len(), 1, "{w:?}");
+        assert!(
+            candidates.contains(&w.ips[0]),
+            "{} is not an IPv4 of {name}: {candidates:?}",
+            w.ips[0]
+        );
+
+        // With a real NIC as well, INT2DDS_NETWORK_IP still wins and nothing is added.
+        let w = working_ips_with(Some("192.0.2.10"), Some(&name));
+        assert_eq!(w.ips, vec!["192.0.2.10".to_string()]);
     }
 }

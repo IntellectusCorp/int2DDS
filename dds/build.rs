@@ -1,5 +1,4 @@
 fn main() {
-    // No build-time linking required. Enterprise integrations hook in via the
-    // static `enterprise-hooks` feature seams (see dds/src/common/enterprise_hooks.rs),
-    // not dynamic library loading.
+    // No build-time linking required. The enterprise library is discovered and
+    // loaded at runtime by dds/src/common/enterprise_loader.rs.
 }

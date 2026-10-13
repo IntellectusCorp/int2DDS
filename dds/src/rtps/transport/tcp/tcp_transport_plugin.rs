@@ -1250,9 +1250,12 @@ mod tests {
     fn a_peer_reached_by_a_discovery_send_is_announced_to_every_round() {
         let domain = next_test_domain();
         let receiver = make_scanning_plugin(domain, None).expect("receiver");
+        // The receiver is the only slot guessed, so the first round reaches it at
+        // once on a host where an empty port takes a connect timeout to fail.
         let send_cfg = TcpConfig {
             bind_port: Some(0),
             initial_peers: vec!["127.0.0.1:0".parse().unwrap()],
+            peer_search_slots: 1,
             ..TcpConfig::default()
         };
         let sender = TcpTransportPlugin::new(
