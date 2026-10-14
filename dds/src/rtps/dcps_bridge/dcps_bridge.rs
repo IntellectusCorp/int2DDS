@@ -16,8 +16,9 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
+    domain::qos::DomainParticipantQos,
     infrastructure::{
-        qos_policy::ReliabilityQosPolicyKind,
+        qos_policy::{ReliabilityQosPolicyKind, UserDataQosPolicy},
         status::{StatusInfo, StatusKind},
     },
     rtps::{
@@ -79,10 +80,8 @@ pub(crate) struct DcpsBridge {
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
 
 impl DcpsBridge {
-    pub(crate) fn new(
-        domain_id: DomainId,
-        property: &crate::infrastructure::qos_policy::PropertyQosPolicy,
-    ) -> RtpsResult<Self> {
+    pub(crate) fn new(domain_id: DomainId, qos: &DomainParticipantQos) -> RtpsResult<Self> {
+        let property = &qos.property;
         let mut socket = Socket::new(domain_id);
 
         let transport_type = property
@@ -149,7 +148,7 @@ impl DcpsBridge {
         let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
-        let mut participant = Participant::new(
+        let participant = Participant::new(
             domain_id,
             participant_id,
             socket.working_ips(),
@@ -157,6 +156,7 @@ impl DcpsBridge {
             default_unicast_locators,
         );
         participant.set_local_receive_buffer_size(transport.advertised_receive_buffer_size());
+        participant.set_local_user_data(qos.user_data.clone());
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 
@@ -350,6 +350,19 @@ impl DcpsBridge {
 
     pub(crate) fn get_participant(&self) -> Result<Participant, RtpsError> {
         Ok(Arc::try_unwrap(self.participant.clone()).unwrap_or_else(|a| (*a).clone()))
+    }
+
+    pub(crate) fn update_participant(&self, user_data: UserDataQosPolicy) -> RtpsResult<()> {
+        self.participant.set_local_user_data(user_data);
+
+        log::debug!(
+            "Participant {} updated, sending SPDP once through multicast",
+            self.participant.guid()
+        );
+        match self.spdp_logic.as_ref() {
+            Some(spdp_logic) => spdp_logic.trigger_send_spdp_multicast(),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn delete_rtps_writer(
@@ -722,6 +735,12 @@ impl DcpsBridge {
             })?
             .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
+        self.participant
+            .remote_subscriptions()
+            .entry(subscription_builtin_topic_data.topic_name().to_string())
+            .or_default()
+            .insert(datareader_guid, subscription_builtin_topic_data.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             subscription_builtin_topic_data.topic_name().as_str(),
@@ -792,6 +811,12 @@ impl DcpsBridge {
                 )
             })?
             .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
+
+        self.participant
+            .remote_publications()
+            .entry(publication_builtin_topic_data.topic_name().to_string())
+            .or_default()
+            .insert(datawriter_guid, publication_builtin_topic_data.clone());
 
         self.send_sedp_message_and_match(
             cache_change,

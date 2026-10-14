@@ -898,7 +898,7 @@ impl SedpLogic {
 
             // Still compatible - update builtin_topic_data just in case QoS has changed
             // it is idempotent behavior
-            if writer
+            if !writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
                     RtpsErrorCode::MatchedEntityNotFound,
@@ -1070,7 +1070,7 @@ impl SedpLogic {
 
             // Still compatible - update builtin_topic_data just in case QoS has changed
             // it is idempotent behavior
-            if writer
+            if !writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
                     RtpsErrorCode::MatchedEntityNotFound,
@@ -1425,7 +1425,7 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            if reader
+            if !reader
                 .matched_writer_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
                     RtpsErrorCode::MatchedEntityNotFound,
@@ -1434,7 +1434,7 @@ impl SedpLogic {
                 .publication_builtin_topic_data()
                 .changeable_qos_equals(&publication_builtin_topic_data)
             {
-                // Still compatible - just update builtin_topic_data
+                // Still compatible with changed QoS - update builtin_topic_data
                 debug!(
                     "Syncing publication_builtin_topic_data for compatible remote writer {}",
                     endpoint_guid
@@ -1594,7 +1594,7 @@ impl SedpLogic {
             }
 
             // Still compatible - just update builtin_topic_data
-            if reader
+            if !reader
                 .matched_writer_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
                     RtpsErrorCode::MatchedEntityNotFound,
@@ -1699,10 +1699,7 @@ impl SedpLogic {
         start_time: Option<Instant>,
         duration: StdDuration,
         spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
-        data: Option<Arc<Vec<u8>>>,
     ) -> RtpsResult<()> {
-        let data =
-            data.ok_or_else(|| RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set"))?;
         let participant = self.get_upgraded_participant()?;
         let remote_prefix = spdp_discovered_participant_data.guid_prefix();
 
@@ -1735,6 +1732,10 @@ impl SedpLogic {
             }
             return Ok(());
         }
+
+        let data = self
+            .create_spdp_message()?
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set"))?;
 
         for remote_participant_data in filtered_list.iter() {
             if let Err(e) = self.send_to_participant_metatraffic_locators(

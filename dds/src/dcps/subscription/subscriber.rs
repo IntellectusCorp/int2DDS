@@ -180,6 +180,10 @@ impl EnableChild for Subscriber {
         Ok(())
     }
 
+    fn update_rtps_entity(&self, _qos: &Self::Qos) -> DdsResult<()> {
+        Self::update_enabled_rtps_readers(self.get_datareaders_internal()?)
+    }
+
     impl_check_parent_enabled!(get_participant);
 }
 impl UpdateStatus for Subscriber {}
@@ -892,6 +896,36 @@ impl Subscriber {
             }
         }
         Ok(result)
+    }
+
+    // Re-announces the enabled readers of `topic_name` with their current QoS.
+    pub(crate) fn update_rtps_readers_of_topic(&self, topic_name: &str) -> DdsResult<()> {
+        let readers: Vec<_> = self
+            .readers_by_topic_name
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .get(topic_name)
+            .into_iter()
+            .flatten()
+            .filter_map(|weak_reader| weak_reader.upgrade())
+            .collect();
+
+        Self::update_enabled_rtps_readers(readers)
+    }
+
+    fn update_enabled_rtps_readers(
+        readers: Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>,
+    ) -> DdsResult<()> {
+        let enabled_readers: Vec<_> =
+            readers.into_iter().filter(|reader| reader.has_rtps_reader()).collect();
+
+        log::debug!("Re-announcing {} readers after a QoS change", enabled_readers.len());
+        for reader in enabled_readers {
+            let qos = reader.get_qos_arc()?;
+            reader.update_rtps_entity(&qos)?;
+        }
+
+        Ok(())
     }
 
     pub fn lookup_datareader<Foo: 'static + Clone + Debug>(

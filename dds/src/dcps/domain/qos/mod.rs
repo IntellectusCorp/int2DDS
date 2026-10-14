@@ -12,12 +12,9 @@
 
 use const_default::ConstDefault;
 
-use crate::{
-    core::error::{DdsError, DdsResult},
-    infrastructure::{
-        qos_kind::QosKind,
-        qos_policy::{EntityFactoryQosPolicy, PropertyQosPolicy, Qos, UserDataQosPolicy},
-    },
+use crate::infrastructure::{
+    qos_kind::QosKind,
+    qos_policy::{EntityFactoryQosPolicy, PropertyQosPolicy, Qos, UserDataQosPolicy},
 };
 
 pub const PARTICIPANT_QOS_DEFAULT: QosKind<DomainParticipantQos> = QosKind::Default;
@@ -30,12 +27,8 @@ pub struct DomainParticipantQos {
 }
 
 impl Qos for DomainParticipantQos {
-    fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.user_data != UserDataQosPolicy::default() {
-            return Err(DdsError::Unsupported);
-        }
-
-        Ok(())
+    fn autoenable_created_entities(&self) -> bool {
+        self.entity_factory.autoenable_created_entities
     }
 }
 

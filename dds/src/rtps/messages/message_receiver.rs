@@ -8,6 +8,7 @@ use super::{
     submessages::info::{InfoDestination, InfoReply, InfoSource, InfoTimestamp},
 };
 use crate::{
+    infrastructure::qos_policy::UserDataQosPolicy,
     rtps::common::parameters::{ParameterValue, PlCdrParameter as Parameter},
     rtps::common::types::DomainId,
     rtps::{
@@ -592,6 +593,7 @@ impl MessageReceiver {
                     if log_on {
                         debug!("Parameter {}: User data ({} bytes)", index, data.len());
                     }
+                    spdp_data.set_user_data(UserDataQosPolicy { value: data.to_vec() });
                 }
                 ParameterValue::TopicData(data) => {
                     if log_on {

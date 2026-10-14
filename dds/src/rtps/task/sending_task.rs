@@ -116,15 +116,9 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::PeriodicParticipantDataMulticast(
-                start_time,
-                duration,
-                domain_id,
-                data,
-            ) => {
-                spdp_logic.send_periodic_participant_data_multicast(
-                    start_time, duration, domain_id, data,
-                )?;
+            MessageType::PeriodicParticipantDataMulticast(start_time, duration, domain_id) => {
+                spdp_logic
+                    .send_periodic_participant_data_multicast(start_time, duration, domain_id)?;
                 Ok(())
             }
 
@@ -132,12 +126,10 @@ impl SendingTask {
                 start_time,
                 duration,
                 spdp_discovered_participant_data,
-                data,
             ) => sedp_logic.send_periodic_participant_data_unicast(
                 start_time,
                 duration,
                 spdp_discovered_participant_data,
-                data,
             ),
 
             MessageType::PeriodicPublicationHeartbeat(start_time, duration, guid_prefix) => {

@@ -122,7 +122,7 @@ pub trait DataWriterBase: DomainEntity + Send + Any {
     fn wait_for_acknowledgments(&self, max_wait: Duration) -> DdsResult<()>;
 }
 
-pub(crate) trait DataWriterInternal: DataWriterBase {
+pub(crate) trait DataWriterInternal: DataWriterBase + EnableChild {
     fn has_rtps_writer(&self) -> bool;
     fn disable(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataWriterInternal<Qos = DataWriterQos> + Send>;
@@ -389,6 +389,11 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         Ok(())
     }
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
+        // A disabled writer has no RTPS writer yet. Enabling it announces the current QoS.
+        if self.is_enabled().is_err() {
+            return Ok(());
+        }
+
         let publisher = self.get_publisher()?;
         let topic = self.get_topic()?;
         let publisher_qos = publisher.get_qos_arc()?;

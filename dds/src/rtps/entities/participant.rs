@@ -29,6 +29,7 @@ use crate::{
     },
     infrastructure::{
         liveliness_monitor::LivelinessMonitor,
+        qos_policy::UserDataQosPolicy,
         status::{StatusInfo, StatusKind},
     },
     rtps::{
@@ -79,7 +80,7 @@ pub struct Participant {
     participant_id: ParticipantId,
     builtin_endpoints: Arc<BuiltinEndpoints>,
     // My data
-    local_participant_proxy_data: Arc<SPDPDiscoveredParticipantData>,
+    local_participant_proxy_data: Arc<ArcSwap<SPDPDiscoveredParticipantData>>,
     // Remote participant data
     remote_participant_proxy_datas: Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>>,
 
@@ -186,7 +187,8 @@ impl Participant {
             local_participant_proxy_data.add_default_unicast_locator(locator);
         }
 
-        let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
+        let local_participant_proxy_data =
+            Arc::new(ArcSwap::from_pointee(local_participant_proxy_data));
         let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
 
         Self {
@@ -241,19 +243,25 @@ impl Participant {
     }
 
     pub(crate) fn local_participant_proxy_data(&self) -> Arc<SPDPDiscoveredParticipantData> {
-        self.local_participant_proxy_data.clone()
+        self.local_participant_proxy_data.load_full()
     }
 
-    /// Record this participant's own receive-buffer size for SPDP to advertise.
-    /// Called once, right after construction, while the proxy Arc is still
-    /// uniquely owned - `Arc::get_mut` fails silently (a no-op) otherwise.
-    pub(crate) fn set_local_receive_buffer_size(&mut self, size: Option<usize>) {
-        match Arc::get_mut(&mut self.local_participant_proxy_data) {
-            Some(proxy) => proxy.set_receive_buffer_size(size),
-            None => log::warn!(
-                "local_participant_proxy_data already shared; receive buffer size not recorded"
-            ),
-        }
+    // Record this participant's own receive-buffer size for SPDP to advertise.
+    pub(crate) fn set_local_receive_buffer_size(&self, size: Option<usize>) {
+        self.local_participant_proxy_data.rcu(|current| {
+            let mut proxy = SPDPDiscoveredParticipantData::clone(current);
+            proxy.set_receive_buffer_size(size);
+            proxy
+        });
+    }
+
+    // Record this participant's own USER_DATA for SPDP to advertise.
+    pub(crate) fn set_local_user_data(&self, user_data: UserDataQosPolicy) {
+        self.local_participant_proxy_data.rcu(|current| {
+            let mut proxy = SPDPDiscoveredParticipantData::clone(current);
+            proxy.set_user_data(user_data.clone());
+            proxy
+        });
     }
 
     pub(crate) fn remote_participant_proxy_datas(
@@ -1536,7 +1544,7 @@ impl Participant {
     }
 
     pub(crate) fn increase_manual_liveliness_count(&self) -> RtpsResult<()> {
-        self.local_participant_proxy_data.increase_manual_liveliness_count()
+        self.local_participant_proxy_data.load().increase_manual_liveliness_count()
     }
 
     pub(crate) fn liveliness_monitor(&self) -> Arc<Mutex<Option<LivelinessMonitor>>> {

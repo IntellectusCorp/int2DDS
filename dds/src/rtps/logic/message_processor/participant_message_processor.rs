@@ -106,8 +106,8 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
 
         // Check if this participant data already exists
         let is_exist = participant.remote_participant_proxy_datas().lock().is_ok_and(
-            |remote_participant_datas| {
-                remote_participant_datas.iter().any(|remote_participant_data| {
+            |mut remote_participant_datas| {
+                remote_participant_datas.iter_mut().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
                         log::debug!(
                             "DiscoveredParticipantData already exist {} / [{}]",
@@ -119,6 +119,16 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         );
+
+                        let received_user_data = spdp_discovered_participant_data.user_data();
+                        if remote_participant_data.user_data() != received_user_data {
+                            log::debug!(
+                                "Remote participant {} USER_DATA changed",
+                                participant_guid
+                            );
+                            remote_participant_data.set_user_data(received_user_data.clone());
+                        }
+
                         true
                     } else {
                         false
@@ -335,7 +345,6 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             Some(ms) => std::time::Duration::from_millis(ms),
             None => crate::rtps::logic::sedp_logic::BUILTIN_SEDP_HB_PERIOD,
         };
-        let spdp_payload = self.create_spdp_message()?;
 
         // Send each SPDP message to the discovered participant before registering periodic timers
         // since timer is not triggered immediately after registration
@@ -343,7 +352,6 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             None,
             period,
             spdp_discovered_participant_data.clone(),
-            spdp_payload.clone(),
         ));
 
         sending_handler.push_message_and_wake(MessageType::PeriodicPublicationHeartbeat(
@@ -383,7 +391,6 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                         None,
                         period,
                         spdp_discovered_participant_data.clone(),
-                        spdp_payload,
                     ),
                 );
             }

@@ -109,8 +109,7 @@ impl ConstDefault for TopicQos {
 
 impl Qos for TopicQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.topic_data != TopicDataQosPolicy::default()
-            || self.durability_service != DurabilityServiceQosPolicy::default()
+        if self.durability_service != DurabilityServiceQosPolicy::default()
             || self.latency_budget != LatencyBudgetQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
         {

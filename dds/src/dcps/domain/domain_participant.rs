@@ -352,6 +352,22 @@ impl EnableChild for DomainParticipant {
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
+    fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
+        if self.is_enabled().is_err() {
+            self.get_rtps_participant()?.set_local_user_data(qos.user_data.clone());
+            return Ok(());
+        }
+
+        let dcps_bridge = self.get_dcps_bridge()?;
+        let dcps_bridge = dcps_bridge
+            .as_ref()
+            .ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?;
+
+        // This is the only changeable QoS for DomainParticipant.
+        dcps_bridge
+            .update_participant(qos.user_data.clone())
+            .map_err(|e| DdsError::Error(e.message))
+    }
     fn enable_child_entities(&self) -> DdsResult<()> {
         // Helper macro to reduce repetitive code
         macro_rules! enable_entities {
@@ -418,8 +434,8 @@ impl DomainParticipant {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<Self> {
-        let dcps_bridge = DcpsBridge::new(domain_id as u32, &qos.property)
-            .map_err(|e| DdsError::Error(e.message))?;
+        let dcps_bridge =
+            DcpsBridge::new(domain_id as u32, &qos).map_err(|e| DdsError::Error(e.message))?;
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
 
         let mut participant = Self {
@@ -2424,7 +2440,7 @@ impl DomainParticipant {
         }
     }
 
-    fn get_publishers(&self) -> DdsResult<Vec<Arc<Publisher>>> {
+    pub(crate) fn get_publishers(&self) -> DdsResult<Vec<Arc<Publisher>>> {
         match self.publishers.lock() {
             Ok(mut publishers) => {
                 let mut valid_publishers = Vec::new();
@@ -2442,7 +2458,7 @@ impl DomainParticipant {
         }
     }
 
-    fn get_subscribers(&self) -> DdsResult<Vec<Arc<Subscriber>>> {
+    pub(crate) fn get_subscribers(&self) -> DdsResult<Vec<Arc<Subscriber>>> {
         match self.subscribers.lock() {
             Ok(mut subscribers) => {
                 let mut valid_subscribers = Vec::new();

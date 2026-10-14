@@ -35,7 +35,7 @@ use std::{
     marker::PhantomData,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, RwLock, Weak,
+        Arc, Mutex, OnceLock, RwLock, Weak,
     },
 };
 
@@ -145,7 +145,8 @@ pub trait DataReaderBase: DomainEntity + Send + Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-pub(crate) trait DataReaderInternal: DataReaderBase {
+pub(crate) trait DataReaderInternal: DataReaderBase + EnableChild {
+    fn has_rtps_reader(&self) -> bool;
     fn disable(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataReaderBase<Qos = DataReaderQos> + Send>;
     fn notify_data_available(&self);
@@ -220,9 +221,10 @@ pub struct DataReader<Foo> {
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     sample_lost_status: Arc<Mutex<SampleLostStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
-    change_callback: Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>,
+    change_callback: Arc<OnceLock<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>>,
     #[allow(clippy::type_complexity)]
-    status_callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
+    status_callback:
+        Arc<OnceLock<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>,
     _phantom: PhantomData<fn() -> Foo>, // Temporary
     datareader_cache: Arc<Mutex<DataReaderHistoryCache<Foo>>>,
     outstanding_loans: Arc<AtomicUsize>,
@@ -422,12 +424,12 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
 
             let status_callback = self
                 .status_callback
-                .as_ref()
+                .get()
                 .ok_or(DdsError::Error("Status callback is not initialized".to_string()))?
                 .clone();
             let change_callback = self
                 .change_callback
-                .as_ref()
+                .get()
                 .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
                 .clone();
 
@@ -476,6 +478,11 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         Ok(())
     }
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
+        // A disabled reader has no RTPS reader yet. Enabling it announces the current QoS.
+        if self.is_enabled().is_err() {
+            return Ok(());
+        }
+
         let subscriber = self.get_subscriber()?;
         let topic = self.get_topic()?;
         let subscriber_qos = subscriber.get_qos_arc()?;
@@ -2188,7 +2195,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         } else {
             (None, None)
         };
-        let mut reader = Self {
+        let reader = Self {
             is_builtin,
             guid,
             qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
@@ -2221,8 +2228,8 @@ impl<Foo: DdsType> DataReader<Foo> {
             )),
             subscription_matched_status: Arc::new(Mutex::new(SubscriptionMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
-            change_callback: None,
-            status_callback: None,
+            change_callback: Arc::new(OnceLock::new()),
+            status_callback: Arc::new(OnceLock::new()),
             _phantom: PhantomData,
             datareader_cache: Arc::new(Mutex::new(DataReaderHistoryCache::<Foo>::new(
                 Weak::new(),
@@ -2251,10 +2258,11 @@ impl<Foo: DdsType> DataReader<Foo> {
             *self_ref = Some(reader_arc);
         }
 
+        // The callbacks are shared with the copy held in self_ref.
         let change_callback = reader.create_change_received_callback()?;
-        reader.change_callback = Some(change_callback.clone());
+        let _ = reader.change_callback.set(change_callback);
         let status_callback = reader.create_status_callback()?;
-        reader.status_callback = Some(status_callback.clone());
+        let _ = reader.status_callback.set(status_callback.clone());
 
         {
             let mut datareader_cache =
@@ -4174,6 +4182,10 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
 impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
     fn has_outstanding_loans(&self) -> bool {
         self.outstanding_loan_count() > 0
+    }
+
+    fn has_rtps_reader(&self) -> bool {
+        self.get_rtps_reader().is_ok()
     }
 
     fn disable(&self) -> DdsResult<()> {

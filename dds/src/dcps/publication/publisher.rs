@@ -183,6 +183,10 @@ impl EnableChild for Publisher {
         Ok(())
     }
 
+    fn update_rtps_entity(&self, _qos: &Self::Qos) -> DdsResult<()> {
+        Self::update_enabled_rtps_writers(self.get_datawriters_internal()?)
+    }
+
     impl_check_parent_enabled!(get_participant);
 }
 impl UpdateStatus for Publisher {}
@@ -735,6 +739,36 @@ impl Publisher {
             }
         }
         Ok(result)
+    }
+
+    // Re-announces the enabled writers of `topic_name` with their current QoS.
+    pub(crate) fn update_rtps_writers_of_topic(&self, topic_name: &str) -> DdsResult<()> {
+        let writers: Vec<_> = self
+            .writers_by_topic_name
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .get(topic_name)
+            .into_iter()
+            .flatten()
+            .filter_map(|weak_writer| weak_writer.upgrade())
+            .collect();
+
+        Self::update_enabled_rtps_writers(writers)
+    }
+
+    fn update_enabled_rtps_writers(
+        writers: Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>,
+    ) -> DdsResult<()> {
+        let enabled_writers: Vec<_> =
+            writers.into_iter().filter(|writer| writer.has_rtps_writer()).collect();
+
+        log::debug!("Re-announcing {} writers after a QoS change", enabled_writers.len());
+        for writer in enabled_writers {
+            let qos = writer.get_qos_arc()?;
+            writer.update_rtps_entity(&qos)?;
+        }
+
+        Ok(())
     }
 
     pub fn lookup_datawriter<Foo: 'static + Clone>(
