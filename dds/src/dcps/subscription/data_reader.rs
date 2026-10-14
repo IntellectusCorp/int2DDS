@@ -1788,26 +1788,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// RTPS reader history keeps acquiring datareader cache lock on socket listening thread,
     /// So never try to acquire rtps reader cache lock while holding datareader cache lock.
     fn remove_change_from_rtps_reader_cache(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
-        if let Ok(weak_rtps_reader) = self.rtps_reader.lock().as_ref() {
-            let weak_rtps_reader = weak_rtps_reader
-                .as_ref()
-                .ok_or(DdsError::Error("RTPS Reader is not initialized".to_string()))?;
-            let rtps_reader = weak_rtps_reader
-                .upgrade()
-                .ok_or(DdsError::Error("Failed to upgrade rtps reader weak".to_string()))?;
-            let rtps_reader_cache = rtps_reader.reader_cache();
-            let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
-                DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
-            })?;
-            let res = cache_guard.remove_change(a_change);
-            if res.is_ok() {
-                Ok(())
-            } else {
-                Err(DdsError::Error(res.err().unwrap().to_string()))
-            }
-        } else {
-            Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
-        }
+        let rtps_reader = self.get_rtps_reader()?;
+
+        let rtps_reader_cache = rtps_reader.reader_cache();
+        let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
+            DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
+        })?;
+        cache_guard.remove_change(a_change).map_err(|e| DdsError::Error(e.to_string()))
     }
 
     /// Removes changes by the given change IDs from RTPS reader cache.
@@ -1816,26 +1803,15 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         &self,
         change_id_set: HashSet<ReaderChangeId>,
     ) -> DdsResult<()> {
-        if let Ok(weak_rtps_reader) = self.rtps_reader.lock().as_ref() {
-            let weak_rtps_reader = weak_rtps_reader
-                .as_ref()
-                .ok_or(DdsError::Error("RTPS Reader is not initialized".to_string()))?;
-            let rtps_reader = weak_rtps_reader
-                .upgrade()
-                .ok_or(DdsError::Error("Failed to upgrade rtps reader weak".to_string()))?;
-            let rtps_reader_cache = rtps_reader.reader_cache();
-            let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
-                DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
-            })?;
-            let res = cache_guard.remove_change_by_id_set(change_id_set);
-            if res.is_ok() {
-                Ok(())
-            } else {
-                Err(DdsError::Error(res.err().unwrap().to_string()))
-            }
-        } else {
-            Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
-        }
+        let rtps_reader = self.get_rtps_reader()?;
+
+        let rtps_reader_cache = rtps_reader.reader_cache();
+        let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
+            DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
+        })?;
+        cache_guard
+            .remove_change_by_id_set(change_id_set)
+            .map_err(|e| DdsError::Error(e.to_string()))
     }
 
     pub(crate) fn fallback_instance_handle(
