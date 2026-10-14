@@ -62,12 +62,15 @@ use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
 use mio::Waker;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
 /// How many in-progress fragmented samples a participant holds before the oldest are evicted.
 /// One entry per (writer, reader, sample), so several readers of one topic each take a slot.
 const FRAGMENT_BUFFER_LIMIT: usize = 128;
+// Bytes those buffers may reserve together; a sample whose buffers alone exceed this is refused.
+const FRAGMENT_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
 // Payload one writer may pin waiting for a hole. In bytes because what it protects is the
 // allocator reuse the receive path needs, and a sample is a kilobyte or a megabyte.
 const IN_ORDER_BUFFER_BYTES: usize = 16 * 1024 * 1024;
@@ -509,40 +512,47 @@ fn send_credit_backstop() -> Duration {
 
 /// `exclude` must hold every key this call is about to write -- one DATA_FRAG fans out to one
 /// buffer per matched reader -- or an omitted key can become its own eviction victim.
+/// `held_bytes` is the running total kept beside the map, so this needs no extra shard walk.
 fn select_eviction_victims(
     buffers: &DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer>,
+    held_bytes: usize,
     max_size: usize,
+    max_bytes: usize,
+    incoming_bytes: usize,
     exclude: &[(Guid, EntityId, SequenceNumber)],
 ) -> Vec<(Guid, EntityId, SequenceNumber)> {
-    if buffers.len() <= max_size {
+    let mut count = buffers.len();
+    let mut bytes = held_bytes;
+    let over = |count: usize, bytes: usize| {
+        count > max_size || bytes.saturating_add(incoming_bytes) > max_bytes
+    };
+    if !over(count, bytes) {
         return Vec::new();
     }
-    let buffers_to_remove = buffers.len() - max_size;
 
-    let mut incomplete: Vec<_> = buffers
+    // Incomplete buffers go first, stalest first; then complete ones, oldest first.
+    let mut candidates: Vec<_> = buffers
         .iter()
-        .filter(|entry| !exclude.contains(entry.key()) && !entry.value().all_fragments_received())
-        .map(|entry| (*entry.key(), entry.value().last_updated))
+        .filter(|entry| !exclude.contains(entry.key()))
+        .map(|entry| {
+            let buffer = entry.value();
+            let complete = buffer.all_fragments_received();
+            let age = if complete { buffer.created_at } else { buffer.last_updated };
+            (complete, age, *entry.key(), buffer.total_size as usize)
+        })
         .collect();
-    incomplete.sort_by_key(|(_, last_updated)| *last_updated);
+    candidates.sort_by_key(|(complete, age, _, _)| (*complete, *age));
 
-    let mut victims: Vec<_> =
-        incomplete.into_iter().take(buffers_to_remove).map(|(key, _)| key).collect();
-
-    if victims.len() < buffers_to_remove {
-        let mut complete: Vec<_> = buffers
-            .iter()
-            .filter(|entry| {
-                !exclude.contains(entry.key()) && entry.value().all_fragments_received()
-            })
-            .map(|entry| (*entry.key(), entry.value().created_at))
-            .collect();
-        complete.sort_by_key(|(_, created_at)| *created_at);
-
-        let remaining = buffers_to_remove - victims.len();
-        victims.extend(complete.into_iter().take(remaining).map(|(key, _)| key));
+    let mut victims = Vec::new();
+    for (_, _, key, size) in candidates {
+        if !over(count, bytes) {
+            break;
+        }
+        victims.push(key);
+        count -= 1;
+        // Saturating: the relaxed counter may trail a concurrent insert or removal.
+        bytes = bytes.saturating_sub(size);
     }
-
     victims
 }
 
@@ -554,6 +564,8 @@ pub(crate) struct UserLogic {
     /// Keyed by the reader the DATA_FRAG was addressed to as well: the writer sends one copy
     /// per reader, and merging those streams completes a buffer only one of them is given.
     fragment_buffers: Arc<DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer>>,
+    // Sum of `total_size` over `fragment_buffers`, so the budget check needs no shard walk.
+    fragment_buffer_bytes: Arc<AtomicUsize>,
     /// Wire bytes charged toward each remote participant, shared by every send call so that
     /// consecutive and concurrent sends draw on one budget per peer instead of each opening a
     /// fresh window. Released when that peer answers, aged out by `SEND_CREDIT_BACKSTOP`.
@@ -569,6 +581,7 @@ impl UserLogic {
             participant: Arc::downgrade(&participant),
             transport,
             fragment_buffers: Arc::new(DashMap::new()),
+            fragment_buffer_bytes: Arc::new(AtomicUsize::new(0)),
             send_credit: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_waker: Arc::new(OnceLock::new()),
@@ -2672,20 +2685,26 @@ impl UserLogic {
         Ok(())
     }
 
-    /// Evict old reassembly buffers once the map is over its cap, sparing this sample's keys.
+    /// Evict old reassembly buffers once over the count cap or byte budget, sparing this sample.
     /// Called only when a DATA_FRAG opens a new buffer: `len` read-locks every shard.
     fn evict_fragment_buffers_if_full(
         &self,
         writer_guid: Guid,
         matched_readers: &[ReaderCallbackLease],
         sn: SequenceNumber,
+        incoming_bytes: usize,
     ) {
-        if self.fragment_buffers.len() <= FRAGMENT_BUFFER_LIMIT {
+        let held_bytes = self.fragment_buffer_bytes.load(Ordering::Relaxed);
+        if self.fragment_buffers.len() <= FRAGMENT_BUFFER_LIMIT
+            && held_bytes.saturating_add(incoming_bytes) <= FRAGMENT_BUFFER_BYTES
+        {
             return;
         }
         debug!(
-            "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
-            self.fragment_buffers.len()
+            "[UserLogic] Fragment buffers over budget ({} buffers, {} bytes held, {} incoming), cleaning up old buffers.",
+            self.fragment_buffers.len(),
+            held_bytes,
+            incoming_bytes
         );
         // This datagram writes one key per matched reader; excluding all of them is what stops
         // the arriving fragment from evicting its own buffer.
@@ -2693,8 +2712,13 @@ impl UserLogic {
             .iter()
             .map(|reader| (writer_guid, reader.guid().entity_id(), sn))
             .collect();
-        for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
-            self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
+        for (evicted_writer_guid, evicted_reader_id, evicted_sn) in self
+            .cleanup_old_fragment_buffers(
+                FRAGMENT_BUFFER_LIMIT,
+                FRAGMENT_BUFFER_BYTES,
+                incoming_bytes,
+                &arriving_keys,
+            )
         {
             // The bytes are gone, so the ledger must stop claiming them. The key names the
             // one reader that lost them; every other reader's buffer is still whole.
@@ -2730,13 +2754,22 @@ impl UserLogic {
     fn cleanup_old_fragment_buffers(
         &self,
         max_size: usize,
+        max_bytes: usize,
+        incoming_bytes: usize,
         exclude: &[(Guid, EntityId, SequenceNumber)],
     ) -> Vec<(Guid, EntityId, SequenceNumber)> {
-        let victims = select_eviction_victims(&self.fragment_buffers, max_size, exclude);
+        let victims = select_eviction_victims(
+            &self.fragment_buffers,
+            self.fragment_buffer_bytes.load(Ordering::Relaxed),
+            max_size,
+            max_bytes,
+            incoming_bytes,
+            exclude,
+        );
 
         let mut evicted = Vec::new();
         for key in &victims {
-            let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) else {
+            let Some(removed_buffer) = self.remove_fragment_buffer(key) else {
                 continue;
             };
             if removed_buffer.all_fragments_received() {
@@ -2801,13 +2834,68 @@ impl UserLogic {
     /// removed: it can never complete these, and `get_matched_readers` will not find it again,
     /// so nothing but this would ever reclaim them.
     pub(crate) fn forget_fragment_buffers_for_reader(&self, reader_id: EntityId) {
-        self.fragment_buffers.retain(|key, _| key.1 != reader_id);
+        self.retain_fragment_buffers(|key| key.1 != reader_id);
     }
 
     /// Drop every reassembly buffer waiting on `writer_guid`. Called when that writer is
     /// unmatched: it will send no further DATA_FRAG, so nothing but this would ever reclaim them.
     pub(crate) fn forget_fragment_buffers_for_writer(&self, writer_guid: Guid) {
-        self.fragment_buffers.retain(|key, _| key.0 != writer_guid);
+        self.retain_fragment_buffers(|key| key.0 != writer_guid);
+    }
+
+    /// Bytes `writer_guid`'s sample holds once every reader matched to it opens a buffer.
+    /// Counts all of them even for a directed repair, or repairs addressed one reader at a
+    /// time would slip a sample past the budget.
+    fn fragment_sample_footprint(
+        &self,
+        writer_guid: Guid,
+        addressed_reader_id: EntityId,
+        addressed_readers: usize,
+        total_size: u32,
+    ) -> RtpsResult<usize> {
+        let readers = if addressed_reader_id == EntityId::UNKNOWN {
+            addressed_readers
+        } else {
+            self.get_upgraded_participant()?
+                .find_reader_callback_leases_matched_with_remote_writer(writer_guid)?
+                .len()
+                .max(addressed_readers)
+        };
+        Ok((total_size as usize).saturating_mul(readers))
+    }
+
+    // The only ways buffers enter or leave the map, so `fragment_buffer_bytes` stays exact.
+    fn insert_fragment_buffer(
+        &self,
+        key: (Guid, EntityId, SequenceNumber),
+        buffer: FragmentBuffer,
+    ) -> dashmap::mapref::one::RefMut<'_, (Guid, EntityId, SequenceNumber), FragmentBuffer> {
+        match self.fragment_buffers.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.into_ref(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                self.fragment_buffer_bytes.fetch_add(buffer.total_size as usize, Ordering::Relaxed);
+                entry.insert(buffer)
+            }
+        }
+    }
+
+    fn remove_fragment_buffer(
+        &self,
+        key: &(Guid, EntityId, SequenceNumber),
+    ) -> Option<FragmentBuffer> {
+        let (_, buffer) = self.fragment_buffers.remove(key)?;
+        self.fragment_buffer_bytes.fetch_sub(buffer.total_size as usize, Ordering::Relaxed);
+        Some(buffer)
+    }
+
+    fn retain_fragment_buffers(&self, keep: impl Fn(&(Guid, EntityId, SequenceNumber)) -> bool) {
+        self.fragment_buffers.retain(|key, buffer| {
+            let kept = keep(key);
+            if !kept {
+                self.fragment_buffer_bytes.fetch_sub(buffer.total_size as usize, Ordering::Relaxed);
+            }
+            kept
+        });
     }
 
     /// The locators one message is actually written to: the highest-priority kind reachable on
@@ -3628,18 +3716,37 @@ impl UnicastMessageProcessor for UserLogic {
                 let mut buffer = match self.fragment_buffers.get_mut(&key) {
                     Some(buffer) => buffer,
                     None => {
+                        let footprint = self.fragment_sample_footprint(
+                            remote_writer_guid,
+                            data_frag.reader_id,
+                            matched_readers.len(),
+                            total_size,
+                        )?;
+                        if footprint > FRAGMENT_BUFFER_BYTES {
+                            warn!(
+                                "[UserLogic] Sample sn={:?} from {} needs {} bytes of reassembly buffers, over the {} byte budget; dropping its fragments",
+                                data_frag.writer_sn, remote_writer_guid, footprint, FRAGMENT_BUFFER_BYTES
+                            );
+                            continue;
+                        }
                         self.evict_fragment_buffers_if_full(
                             remote_writer_guid,
                             &matched_readers,
                             data_frag.writer_sn,
+                            total_size as usize,
                         );
-                        self.fragment_buffers.entry(key).or_insert_with(|| {
-                            FragmentBuffer::new(
-                                data_frag.writer_sn,
-                                total_size,
-                                data_frag.fragment_size,
-                            )
-                        })
+                        let Some(new_buffer) = FragmentBuffer::new(
+                            data_frag.writer_sn,
+                            total_size,
+                            data_frag.fragment_size,
+                        ) else {
+                            warn!(
+                                "[UserLogic] Cannot allocate {} bytes to reassemble sn={:?} from {}; dropping its fragments",
+                                total_size, data_frag.writer_sn, remote_writer_guid
+                            );
+                            continue;
+                        };
+                        self.insert_fragment_buffer(key, new_buffer)
                     }
                 };
 
@@ -3710,7 +3817,7 @@ impl UnicastMessageProcessor for UserLogic {
             let received_fragments = FragmentSet::new();
 
             // Move payload from buffer without cloning
-            let Some((_, mut buffer)) = self.fragment_buffers.remove(&key) else {
+            let Some(mut buffer) = self.remove_fragment_buffer(&key) else {
                 continue;
             };
             let assembled_inline_qos = buffer.inline_qos.take();
@@ -5200,12 +5307,12 @@ mod tests {
                 EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
             );
             let mut buffer =
-                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE).unwrap();
             for fragment in 1..=4u32 {
                 buffer.copy_fragment_data(fragment, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
             }
             assert!(buffer.all_fragments_received(), "filler buffers must not be eviction bait");
-            user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
+            drop(user_logic.insert_fragment_buffer((writer_guid, reader_id, sn), buffer));
         }
     }
 
@@ -5787,14 +5894,14 @@ mod tests {
             );
             let sn = SequenceNumber::new(0, 1);
             let mut buffer =
-                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE).unwrap();
             buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
-            user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
+            drop(user_logic.insert_fragment_buffer((writer_guid, reader_id, sn), buffer));
         }
 
         let before: std::collections::HashSet<_> =
             user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
-        let evicted = user_logic.cleanup_old_fragment_buffers(2, &[]);
+        let evicted = user_logic.cleanup_old_fragment_buffers(2, FRAGMENT_BUFFER_BYTES, 0, &[]);
         let after: std::collections::HashSet<_> =
             user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
 
@@ -5826,7 +5933,8 @@ mod tests {
                 );
                 let key = (writer_guid, reader_id, sn);
                 let mut buffer =
-                    FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+                    FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE)
+                        .unwrap();
                 buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
                 buffers.insert(key, buffer);
                 key
@@ -5834,7 +5942,14 @@ mod tests {
             .collect();
 
         let arriving_keys = [keys[0], keys[1]];
-        let victims = select_eviction_victims(&buffers, 3, &arriving_keys);
+        let victims = select_eviction_victims(
+            &buffers,
+            held(&buffers),
+            3,
+            FRAGMENT_BUFFER_BYTES,
+            0,
+            &arriving_keys,
+        );
 
         for key in &arriving_keys {
             assert!(!victims.contains(key), "no key being written may be its own eviction victim");
@@ -5844,6 +5959,110 @@ mod tests {
             vec![keys[2], keys[3], keys[4]],
             "eviction must move on to the next-oldest keys once every arriving key is excluded"
         );
+    }
+
+    type FragKey = (Guid, EntityId, SequenceNumber);
+
+    // What `fragment_buffer_bytes` would read for a map built outside `UserLogic`.
+    fn held(buffers: &DashMap<FragKey, FragmentBuffer>) -> usize {
+        buffers.iter().map(|entry| entry.value().total_size as usize).sum()
+    }
+
+    fn incomplete_test_buffers(n: u8) -> (DashMap<FragKey, FragmentBuffer>, Vec<FragKey>) {
+        let buffers = DashMap::new();
+        let reader_id = EntityId::new([0xA0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let sn = SequenceNumber::new(0, 1);
+        let keys = (0..n)
+            .map(|i| {
+                let writer_guid = Guid::new(
+                    [i; 12],
+                    EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+                );
+                let key = (writer_guid, reader_id, sn);
+                let mut buffer =
+                    FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE)
+                        .unwrap();
+                buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
+                buffers.insert(key, buffer);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                key
+            })
+            .collect();
+        (buffers, keys)
+    }
+
+    // Every insert and removal path must keep the byte counter equal to the map's real total.
+    #[test]
+    fn fragment_buffer_bytes_tracks_every_insert_and_removal() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
+        let user_logic = UserLogic::new(participant, transport);
+        let (source, keys) = incomplete_test_buffers(4);
+        for key in &keys {
+            let (_, buffer) = source.remove(key).unwrap();
+            drop(user_logic.insert_fragment_buffer(*key, buffer));
+        }
+        let size = FRAG_TEST_SAMPLE_SIZE as usize;
+        let counter = || user_logic.fragment_buffer_bytes.load(Ordering::Relaxed);
+        assert_eq!(counter(), 4 * size);
+
+        assert!(user_logic.remove_fragment_buffer(&keys[0]).is_some());
+        user_logic.forget_fragment_buffers_for_writer(keys[1].0);
+        assert_eq!(counter(), 2 * size);
+        user_logic.cleanup_old_fragment_buffers(1, FRAGMENT_BUFFER_BYTES, 0, &[]);
+        assert_eq!(counter(), size);
+        user_logic.forget_fragment_buffers_for_reader(keys[3].1);
+        assert_eq!(counter(), 0);
+        assert!(user_logic.fragment_buffers.is_empty());
+    }
+
+    // Under the count cap, the byte budget alone evicts the stalest until the new sample fits.
+    #[test]
+    fn byte_budget_evicts_stalest_until_the_incoming_sample_fits() {
+        let (buffers, keys) = incomplete_test_buffers(3);
+        let size = FRAG_TEST_SAMPLE_SIZE as usize;
+        // 3 held + 1 incoming = 4 samples against a budget of 2.
+        let victims = select_eviction_victims(&buffers, held(&buffers), 128, 2 * size, size, &[]);
+        assert_eq!(victims, vec![keys[0], keys[1]]);
+    }
+
+    // A sample whose buffers for every matched reader exceed the budget is refused, never
+    // allocated, whether it arrives as a burst or as a repair addressed to one reader.
+    #[test]
+    fn a_sample_over_the_byte_budget_is_refused() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let fragment_size: u16 = 1344;
+        // Fits the budget for one reader, not for the two matched.
+        let sample_size = (FRAGMENT_BUFFER_BYTES / 2 + 1) as u32;
+
+        for reader_id in [reader_a.guid().entity_id(), EntityId::UNKNOWN] {
+            let mut data_frag = DataFrag::new(
+                reader_id,
+                writer_guid.entity_id(),
+                sn,
+                1,
+                1,
+                fragment_size,
+                sample_size,
+            );
+            data_frag.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(vec![
+                0u8;
+                fragment_size as usize
+            ])));
+            let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+            let message_receiver = MessageReceiver::new(participant.guid().prefix(), &from_addr);
+            user_logic
+                .handle_datafrag_message(
+                    &Header::new(writer_guid.prefix()),
+                    &data_frag,
+                    &message_receiver,
+                )
+                .expect("handle_datafrag_message must not error");
+
+            assert!(user_logic.fragment_buffers.is_empty(), "reader_id={:?}", reader_id);
+            assert_eq!(user_logic.fragment_buffer_bytes.load(Ordering::Relaxed), 0);
+        }
     }
 
     /// One reader matched to `n` distinct synthetic writers, all reliable and primed past
