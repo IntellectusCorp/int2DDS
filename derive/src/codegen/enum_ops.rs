@@ -98,8 +98,8 @@ pub fn generate_enum_xcdr_serialize_impl(
         .collect();
 
     quote! {
+        // Enums are not XTypes primitives: collections of them carry a DHEADER.
         impl #crate_path::serialize::cdr::XcdrSerialize for #name {
-            const IS_PRIMITIVE: bool = true;
             fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::cdr::XcdrSerializer) -> #crate_path::serialize::cdr::XcdrResult<()> {
                 use #crate_path::serialize::cdr::PrimitiveSerialize;
                 let discriminant: #disc_rust_type = match self {
@@ -134,7 +134,6 @@ pub fn generate_enum_xcdr_deserialize_impl(
 
     quote! {
         impl #crate_path::serialize::cdr::XcdrDeserialize for #name {
-            const IS_PRIMITIVE: bool = true;
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::cdr::XcdrDeserializer) -> #crate_path::serialize::cdr::XcdrResult<Self> {
                 let discriminant = deserializer.#deserialize_method()? as i64;
                 match discriminant {

@@ -20,6 +20,8 @@ pub enum ResolvedType {
     U64,
     F32,
     F64,
+    /// IDL `long double`, carried as binary128 bits in every target language.
+    F128,
     Char,
     WChar,
     String {

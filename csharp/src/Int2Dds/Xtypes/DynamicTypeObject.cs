@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using Int2Dds.Cdr;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
@@ -217,6 +218,16 @@ namespace Int2Dds.Xtypes
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_sample_get_f64(pBytes, (UIntPtr)bytes.Length, _handle, pName, out double v));
                 return v;
             }
+        }
+
+        public unsafe Float128 GetSampleF128(byte[] bytes, string fieldName)
+        {
+            var value = new byte[16];
+            fixed (byte* pBytes = bytes)
+            fixed (byte* pName = NameBytes(fieldName))
+            fixed (byte* pv = value)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_sample_get_f128(pBytes, (UIntPtr)bytes.Length, _handle, pName, pv));
+            return Float128.FromBytes(value, 0);
         }
 
         /// <summary>Reads a string field directly from raw CDR bytes using this TypeObject.</summary>

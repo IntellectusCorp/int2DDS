@@ -336,6 +336,15 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return guid;
     }
 
+    /** This reader's own DDS instance handle. */
+    public InstanceHandle getInstanceHandle() {
+        byte[] h = new byte[16];
+        int rc = FfiAccess.datareaderGetInstanceHandle(handle(), h);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new InstanceHandle(h);
+    }
+
     /**
      * This reader's SUBSCRIPTION_MATCHED status: how many DataWriters it has matched, and the
      * change since last read. Per DDS, reading this status clears its {@code *Change} fields.

@@ -196,6 +196,45 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
+     * Reads this publisher's current QoS off the native side. Policies with no native getter come
+     * back null; see {@link QosMarshal#readPublisherQos}.
+     */
+    public PublisherQos getQos() {
+        long[] qosOut = new long[1];
+        int rc = FfiAccess.getPublisherQos(handle(), qosOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long qosHandle = qosOut[0];
+        try {
+            return QosMarshal.readPublisherQos(qosHandle);
+        } finally {
+            FfiAccess.destroyPublisherQos(qosHandle);
+        }
+    }
+
+    /**
+     * Opens a coherent set: samples written by this publisher's datawriters until the matching
+     * {@link #endCoherentChanges} are delivered together. Calls may be nested.
+     */
+    public void beginCoherentChanges() {
+        int rc = FfiAccess.publisherBeginCoherentChanges(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Closes the coherent set opened by {@link #beginCoherentChanges}.
+     *
+     * @throws kr.co.intellectus.int2dds.exceptions.DdsPreconditionNotMetException if no coherent
+     *     set is open
+     */
+    public void endCoherentChanges() {
+        int rc = FfiAccess.publisherEndCoherentChanges(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
      * Deletes every datawriter created through this publisher. Their Java wrappers are closed
      * first, so none outlives its native writer; the native call then removes any writer the tree
      * does not track.

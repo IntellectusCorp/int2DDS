@@ -125,7 +125,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         self.read_octet_run(size, |b| b as char)
     }
 
+    /// XCDR2: strings are non-primitive, so the array carries a DHEADER.
     pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
+        self.read_dheader()?;
         let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             result.push(self.deserialize_string()?);

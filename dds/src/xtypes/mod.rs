@@ -68,7 +68,9 @@ pub use type_object_xcdr::{deserialize_type_object, serialize_type_object, spec_
 
 // Dynamic type support
 pub use dynamic_data::{DynamicData, DynamicValue, FromDynamicValue, IntoDynamicValue};
-pub use dynamic_serialization::{deserialize_dynamic_data, serialize_dynamic_data};
+pub use dynamic_serialization::{
+    deserialize_dynamic_data, serialize_dynamic_data, UNION_DISCRIMINATOR_FIELD,
+};
 pub use dynamic_type::{
     DynamicType, DynamicTypeError, DynamicTypeKind, EnumDescriptor, EnumLiteralDescriptor,
     MemberDescriptor, PrimitiveKind, StructDescriptor,

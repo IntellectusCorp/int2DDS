@@ -20,7 +20,7 @@ impl PythonOptions {
 
 /// Generate Python code from the IDL model.
 pub fn generate(model: &IdlModel, idl_filename: &str, opts: &PythonOptions) -> String {
-    let mut gen = PyGen { out: String::new(), opts, model, indent: 0 };
+    let mut gen = PyGen { out: String::new(), opts, model, indent: 0, dh_id: 0 };
     gen.emit_file(idl_filename);
     gen.out
 }
@@ -41,6 +41,8 @@ struct PyGen<'a> {
     opts: &'a PythonOptions,
     model: &'a IdlModel,
     indent: usize,
+    /// Counter for unique collection DHEADER token names in generated writers.
+    dh_id: usize,
 }
 
 impl<'a> PyGen<'a> {
@@ -59,7 +61,10 @@ impl<'a> PyGen<'a> {
         self.line("from enum import IntEnum, IntFlag");
         self.line("from typing import ClassVar");
         self.line("");
-        self.line(&format!("from {}.cdr import CdrReader, CdrWriter, Extensibility", module_name));
+        self.line(&format!(
+            "from {}.cdr import CdrReader, CdrWriter, Extensibility, Float128",
+            module_name
+        ));
         self.line("");
         self.emit_cross_file_imports();
         self.line("");
@@ -874,6 +879,7 @@ impl<'a> PyGen<'a> {
             ResolvedType::I32 | ResolvedType::U32 => "int".to_string(),
             ResolvedType::I64 | ResolvedType::U64 => "int".to_string(),
             ResolvedType::F32 | ResolvedType::F64 => "float".to_string(),
+            ResolvedType::F128 => "Float128".to_string(),
             ResolvedType::Char => "str".to_string(),
             ResolvedType::String { .. } => "str".to_string(),
             ResolvedType::Sequence { element, .. } => {
@@ -903,6 +909,8 @@ impl<'a> PyGen<'a> {
             ResolvedType::I32 | ResolvedType::U32 => "0".to_string(),
             ResolvedType::I64 | ResolvedType::U64 => "0".to_string(),
             ResolvedType::F32 | ResolvedType::F64 => "0.0".to_string(),
+            // Hashable, so a plain dataclass default is allowed and also works as an array element.
+            ResolvedType::F128 => "Float128()".to_string(),
             ResolvedType::Char => "\"\"".to_string(),
             ResolvedType::String { .. } => "\"\"".to_string(),
             ResolvedType::Sequence { .. } => "field(default_factory=list)".to_string(),
@@ -1182,19 +1190,56 @@ impl<'a> PyGen<'a> {
             || self.model.unions.iter().any(|u| u.name == leaf)
     }
 
+    /// XCDR2 collections of non-primitive elements carry a DHEADER
+    /// (DDS-XTypes 1.3 §7.4.3.5.3 rules (9)/(12)); matches Rust `T::IS_PRIMITIVE == false`.
     fn is_non_primitive_element(element: &ResolvedType) -> bool {
-        // Per DDS-XTypes 7.4.3.5.4, sequences/arrays of non-primitive elements
-        // are preceded by a DHEADER. Matches Rust `XcdrSerialize for Vec<T>`
-        // where T::IS_PRIMITIVE == false.
         matches!(
             element,
             ResolvedType::String { .. }
                 | ResolvedType::WString { .. }
                 | ResolvedType::Struct(_)
+                | ResolvedType::Enum(_)
+                | ResolvedType::Bitmask(_)
                 | ResolvedType::Sequence { .. }
                 | ResolvedType::Array { .. }
                 | ResolvedType::Map { .. }
         )
+    }
+
+    /// Wrap `body` in an XCDR2 DHEADER when `framed`; XCDR1 writes the body flat.
+    fn emit_dheader_write<F: FnOnce(&mut Self)>(&mut self, framed: bool, body: F) {
+        if !framed {
+            body(self);
+            return;
+        }
+        let token = format!("_dh{}", self.dh_id);
+        self.dh_id += 1;
+        self.line("if w._xcdr2:");
+        self.indent += 1;
+        self.line(&format!("{} = w.write_dheader_begin()", token));
+        self.indent -= 1;
+        body(self);
+        self.line("if w._xcdr2:");
+        self.indent += 1;
+        self.line(&format!("w.write_dheader_finalize({})", token));
+        self.indent -= 1;
+    }
+
+    /// Read-side counterpart of `emit_dheader_write`; `name` scopes the size/start locals.
+    fn emit_dheader_read<F: FnOnce(&mut Self)>(&mut self, framed: bool, name: &str, body: F) {
+        if !framed {
+            body(self);
+            return;
+        }
+        self.line("if r._xcdr2:");
+        self.indent += 1;
+        self.line(&format!("_{n}_dsize, _{n}_dstart = r.read_dheader()", n = name));
+        self.indent -= 1;
+        body(self);
+        self.line("if r._xcdr2:");
+        self.indent += 1;
+        self.line(&format!("r.read_dheader_end(_{n}_dsize, _{n}_dstart)", n = name));
+        self.indent -= 1;
     }
 
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
@@ -1260,6 +1305,7 @@ impl<'a> PyGen<'a> {
             ResolvedType::U64 => self.line(&format!("w.write_u64({})", accessor)),
             ResolvedType::F32 => self.line(&format!("w.write_f32({})", accessor)),
             ResolvedType::F64 => self.line(&format!("w.write_f64({})", accessor)),
+            ResolvedType::F128 => self.line(&format!("w.write_f128({})", accessor)),
             ResolvedType::Char => self.line(&format!("w.write_char({})", accessor)),
             ResolvedType::String { .. } => self.line(&format!("w.write_string({})", accessor)),
             ResolvedType::Enum(_) => self.line(&format!("w.write_enum(int({}))", accessor)),
@@ -1268,54 +1314,41 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{}._serialize_cdr_inline(w)", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
-                self.line(&format!("w.write_seq_header(len({}))", accessor));
-                self.line(&format!("for _item in {}:", accessor));
-                self.indent += 1;
-                self.emit_write_field(element, "_item");
-                self.indent -= 1;
+                let framed = Self::is_non_primitive_element(element);
+                self.emit_dheader_write(framed, |g| {
+                    g.line(&format!("w.write_seq_header(len({}))", accessor));
+                    g.line(&format!("for _item in {}:", accessor));
+                    g.indent += 1;
+                    g.emit_write_field(element, "_item");
+                    g.indent -= 1;
+                });
             }
             ResolvedType::Array { element, size } => {
                 self.line(&format!(
                     "assert len({}) == {}, \"Array size mismatch\"",
                     accessor, size
                 ));
-                self.line(&format!("for _item in {}:", accessor));
-                self.indent += 1;
-                self.emit_write_field(element, "_item");
-                self.indent -= 1;
+                let framed = Self::is_non_primitive_element(element);
+                self.emit_dheader_write(framed, |g| {
+                    g.line(&format!("for _item in {}:", accessor));
+                    g.indent += 1;
+                    g.emit_write_field(element, "_item");
+                    g.indent -= 1;
+                });
             }
             ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
             ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
             ResolvedType::Map { key, value, .. } => {
-                if Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value) {
-                    self.line("if w._xcdr2:");
-                    self.indent += 1;
-                    self.line("_map_token = w.write_dheader_begin()");
-                    self.line(&format!("w.write_seq_header(len({}))", accessor));
-                    self.line(&format!("for _k, _v in {}.items():", accessor));
-                    self.indent += 1;
-                    self.emit_write_field(key, "_k");
-                    self.emit_write_field(value, "_v");
-                    self.indent -= 1;
-                    self.line("w.write_dheader_finalize(_map_token)");
-                    self.indent -= 1;
-                    self.line("else:");
-                    self.indent += 1;
-                    self.line(&format!("w.write_seq_header(len({}))", accessor));
-                    self.line(&format!("for _k, _v in {}.items():", accessor));
-                    self.indent += 1;
-                    self.emit_write_field(key, "_k");
-                    self.emit_write_field(value, "_v");
-                    self.indent -= 1;
-                    self.indent -= 1;
-                } else {
-                    self.line(&format!("w.write_seq_header(len({}))", accessor));
-                    self.line(&format!("for _k, _v in {}.items():", accessor));
-                    self.indent += 1;
-                    self.emit_write_field(key, "_k");
-                    self.emit_write_field(value, "_v");
-                    self.indent -= 1;
-                }
+                let framed =
+                    Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value);
+                self.emit_dheader_write(framed, |g| {
+                    g.line(&format!("w.write_seq_header(len({}))", accessor));
+                    g.line(&format!("for _k, _v in {}.items():", accessor));
+                    g.indent += 1;
+                    g.emit_write_field(key, "_k");
+                    g.emit_write_field(value, "_v");
+                    g.indent -= 1;
+                });
             }
             ResolvedType::Bitmask(bitmask_name) => {
                 let (write_fn, _) = self.bitmask_methods(bitmask_name);
@@ -1547,6 +1580,7 @@ impl<'a> PyGen<'a> {
             ResolvedType::U64 => self.line(&format!("{} = r.read_u64()", name)),
             ResolvedType::F32 => self.line(&format!("{} = r.read_f32()", name)),
             ResolvedType::F64 => self.line(&format!("{} = r.read_f64()", name)),
+            ResolvedType::F128 => self.line(&format!("{} = r.read_f128()", name)),
             ResolvedType::Char => self.line(&format!("{} = r.read_char()", name)),
             ResolvedType::String { .. } => self.line(&format!("{} = r.read_string()", name)),
             ResolvedType::Enum(enum_name) => {
@@ -1559,47 +1593,45 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, cls));
             }
             ResolvedType::Sequence { element, .. } => {
-                self.line(&format!("_{}_count = r.read_seq_header()", name));
-                self.line(&format!("{} = []", name));
-                self.line(&format!("for _ in range(_{}_count):", name));
-                self.indent += 1;
-                let item_name = format!("_{}_item", name);
-                self.emit_read_field(element, &item_name);
-                self.line(&format!("{}.append({})", name, item_name));
-                self.indent -= 1;
+                let framed = Self::is_non_primitive_element(element);
+                self.emit_dheader_read(framed, name, |g| {
+                    g.line(&format!("_{}_count = r.read_seq_header()", name));
+                    g.line(&format!("{} = []", name));
+                    g.line(&format!("for _ in range(_{}_count):", name));
+                    g.indent += 1;
+                    let item_name = format!("_{}_item", name);
+                    g.emit_read_field(element, &item_name);
+                    g.line(&format!("{}.append({})", name, item_name));
+                    g.indent -= 1;
+                });
             }
             ResolvedType::Array { element, size } => {
-                self.line(&format!("{} = []", name));
-                self.line(&format!("for _ in range({}):", size));
-                self.indent += 1;
-                let item_name = format!("_{}_item", name);
-                self.emit_read_field(element, &item_name);
-                self.line(&format!("{}.append({})", name, item_name));
-                self.indent -= 1;
+                let framed = Self::is_non_primitive_element(element);
+                self.emit_dheader_read(framed, name, |g| {
+                    g.line(&format!("{} = []", name));
+                    g.line(&format!("for _ in range({}):", size));
+                    g.indent += 1;
+                    let item_name = format!("_{}_item", name);
+                    g.emit_read_field(element, &item_name);
+                    g.line(&format!("{}.append({})", name, item_name));
+                    g.indent -= 1;
+                });
             }
             ResolvedType::WChar => self.line(&format!("{} = r.read_wchar()", name)),
             ResolvedType::WString { .. } => self.line(&format!("{} = r.read_wstring()", name)),
             ResolvedType::Map { key, value, .. } => {
-                if Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value) {
-                    self.line("if r._xcdr2:");
-                    self.indent += 1;
-                    self.line("_map_dsize, _map_dstart = r.read_dheader()");
-                    self.indent -= 1;
-                }
-                self.line(&format!("_{}_count = r.read_seq_header()", name));
-                self.line(&format!("{} = {{}}", name));
-                self.line(&format!("for _ in range(_{}_count):", name));
-                self.indent += 1;
-                self.emit_read_field(key, "_k");
-                self.emit_read_field(value, "_v");
-                self.line(&format!("{}[_k] = _v", name));
-                self.indent -= 1;
-                if Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value) {
-                    self.line("if r._xcdr2:");
-                    self.indent += 1;
-                    self.line("r.read_dheader_end(_map_dsize, _map_dstart)");
-                    self.indent -= 1;
-                }
+                let framed =
+                    Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value);
+                self.emit_dheader_read(framed, name, |g| {
+                    g.line(&format!("_{}_count = r.read_seq_header()", name));
+                    g.line(&format!("{} = {{}}", name));
+                    g.line(&format!("for _ in range(_{}_count):", name));
+                    g.indent += 1;
+                    g.emit_read_field(key, "_k");
+                    g.emit_read_field(value, "_v");
+                    g.line(&format!("{}[_k] = _v", name));
+                    g.indent -= 1;
+                });
             }
             ResolvedType::Bitmask(bitmask_name) => {
                 let (_, read_fn) = self.bitmask_methods(bitmask_name);

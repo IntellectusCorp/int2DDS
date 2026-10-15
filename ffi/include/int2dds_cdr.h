@@ -85,6 +85,13 @@ typedef enum Int2DdsCdrError {
 #define INT2DDS_CDR_PID_SENTINEL     0x3F02
 #define INT2DDS_CDR_PID_MAX_SHORT_ID 0x3F00
 
+/** IDL float128 (long double) as IEEE binary128 bytes, little-endian. C `long double` is not
+ *  binary128 on x86_64 (80-bit x87) or MSVC (64-bit), so the value is carried as raw bytes;
+ *  int2dds_float128_parse / _from_f64 / _to_f64 in int2dds-ffi.h convert it. */
+typedef struct Int2DdsFloat128 {
+    uint8_t bytes[16];
+} Int2DdsFloat128;
+
 /* ========================================================================
  * Writer Struct
  * ======================================================================== */
@@ -137,6 +144,7 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_i64 (Int2DdsCdrWriter *w, int64_t val);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_u64 (Int2DdsCdrWriter *w, uint64_t val);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_f32 (Int2DdsCdrWriter *w, float val);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_f64 (Int2DdsCdrWriter *w, double val);
+INT2DDS_CDR_DEF bool int2dds_cdr_write_f128(Int2DdsCdrWriter *w, Int2DdsFloat128 val);
 
 /* String / Sequence / Bytes */
 INT2DDS_CDR_DEF bool int2dds_cdr_write_string(Int2DdsCdrWriter *w, const char *str);
@@ -191,6 +199,7 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_i64 (Int2DdsCdrReader *r, int64_t *out);
 INT2DDS_CDR_DEF bool int2dds_cdr_read_u64 (Int2DdsCdrReader *r, uint64_t *out);
 INT2DDS_CDR_DEF bool int2dds_cdr_read_f32 (Int2DdsCdrReader *r, float *out);
 INT2DDS_CDR_DEF bool int2dds_cdr_read_f64 (Int2DdsCdrReader *r, double *out);
+INT2DDS_CDR_DEF bool int2dds_cdr_read_f128(Int2DdsCdrReader *r, Int2DdsFloat128 *out);
 
 /* String / Sequence / Bytes */
 INT2DDS_CDR_DEF bool int2dds_cdr_read_string(Int2DdsCdrReader *r, const char **str_out, size_t *len_out);
@@ -520,6 +529,16 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_f64(Int2DdsCdrWriter *w, double val) {
     return int2dds_cdr_write_u64(w, bits);
 }
 
+INT2DDS_CDR_DEF bool int2dds_cdr_write_f128(Int2DdsCdrWriter *w, Int2DdsFloat128 val) {
+    int i;
+    if (!int2dds_cdr_write_align(w, 8)) return false;
+    if (!_int2dds_cdr_w_ensure(w, 16)) return false;
+    for (i = 0; i < 16; i++)
+        w->buf[w->pos + i] = val.bytes[w->little_endian ? i : 15 - i];
+    w->pos += 16;
+    return true;
+}
+
 /* ---- String / Sequence / Bytes Write ---------------------------------- */
 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_string(Int2DdsCdrWriter *w, const char *str) {
@@ -845,6 +864,17 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_f64(Int2DdsCdrReader *r, double *out) {
     uint64_t bits;
     if (!int2dds_cdr_read_u64(r, &bits)) { *out = 0.0; return false; }
     memcpy(out, &bits, 8);
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_read_f128(Int2DdsCdrReader *r, Int2DdsFloat128 *out) {
+    int i;
+    memset(out->bytes, 0, 16);
+    if (!int2dds_cdr_read_align(r, 8)) return false;
+    if (!_int2dds_cdr_r_ensure(r, 16)) return false;
+    for (i = 0; i < 16; i++)
+        out->bytes[r->little_endian ? i : 15 - i] = r->buf[r->pos + i];
+    r->pos += 16;
     return true;
 }
 

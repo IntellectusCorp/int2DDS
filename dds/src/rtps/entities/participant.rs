@@ -15,7 +15,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 use log::{debug, info};
 
@@ -108,6 +108,11 @@ pub struct Participant {
 
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
+
+    // Remote participants, writers and readers the application ignored. Entries are never removed.
+    ignored_participants: Arc<DashSet<GuidPrefix>>,
+    ignored_publications: Arc<DashSet<Guid>>,
+    ignored_subscriptions: Arc<DashSet<Guid>>,
 
     // Subscriber HistoryCaches of the GROUP access scope Subscribers, keyed by Subscriber GUID.
     // Weak so a deleted Subscriber drops out on the next walk.
@@ -210,6 +215,9 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
+            ignored_participants: Arc::new(DashSet::new()),
+            ignored_publications: Arc::new(DashSet::new()),
+            ignored_subscriptions: Arc::new(DashSet::new()),
             subscriber_history_caches: Arc::new(Mutex::new(HashMap::new())),
             type_registry: new_shared_registry(),
             working_ips,
@@ -274,6 +282,46 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>> {
         self.remote_publications.clone()
+    }
+
+    // Records the participant as ignored and removes it with all of its endpoints.
+    pub(crate) fn ignore_participant(&self, participant_prefix: GuidPrefix) -> RtpsResult<()> {
+        self.ignored_participants.insert(participant_prefix);
+        debug!("Ignoring remote participant {}", Guid::guid_prefix_to_string(&participant_prefix));
+
+        self.unmatch_with_remote_participant(&Guid::new(participant_prefix, EntityId::PARTICIPANT))
+    }
+
+    pub(crate) fn is_participant_ignored(&self, participant_prefix: GuidPrefix) -> bool {
+        self.ignored_participants.contains(&participant_prefix)
+    }
+
+    // Records the writer as ignored and unmatches it from the local readers.
+    pub(crate) fn ignore_publication(&self, writer_guid: Guid) -> RtpsResult<()> {
+        self.ignored_publications.insert(writer_guid);
+        debug!("Ignoring remote publication {}", writer_guid);
+
+        self.cleanup_remote_writer_by_guid(writer_guid)
+    }
+
+    // True when the writer or its participant is ignored.
+    pub(crate) fn is_publication_ignored(&self, writer_guid: Guid) -> bool {
+        self.ignored_publications.contains(&writer_guid)
+            || self.is_participant_ignored(writer_guid.prefix())
+    }
+
+    // Records the reader as ignored and unmatches it from the local writers.
+    pub(crate) fn ignore_subscription(&self, reader_guid: Guid) -> RtpsResult<()> {
+        self.ignored_subscriptions.insert(reader_guid);
+        debug!("Ignoring remote subscription {}", reader_guid);
+
+        self.cleanup_remote_reader_by_guid(reader_guid)
+    }
+
+    // True when the reader or its participant is ignored.
+    pub(crate) fn is_subscription_ignored(&self, reader_guid: Guid) -> bool {
+        self.ignored_subscriptions.contains(&reader_guid)
+            || self.is_participant_ignored(reader_guid.prefix())
     }
 
     // Registering the same Subscriber again replaces its entry, which every reader of that
@@ -1077,6 +1125,12 @@ impl Participant {
     }
 
     pub(crate) fn cleanup_remote_writer_by_guid(&self, writer_guid: Guid) -> RtpsResult<()> {
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_writer(writer_guid);
+            }
+        }
+
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.wlp_logic() {
                 let _ = wlp_logic.deregister_monitored_writer(writer_guid);
@@ -1119,6 +1173,7 @@ impl Participant {
                 stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
         }
+        self.forget_type_rejections(writer_guid);
 
         self.remove_matched_writer_from_subscriber_history_caches(writer_guid)?;
 
@@ -1141,8 +1196,17 @@ impl Participant {
                 stateless_writer.remove_matched_reader_and_update_status(reader_guid)?;
             }
         }
+        self.forget_type_rejections(reader_guid);
 
         Ok(())
+    }
+
+    // Every endpoint removal path ends in the two callers above, so the once-only
+    // type-rejection records are dropped here instead of at each dispose site.
+    fn forget_type_rejections(&self, endpoint_guid: Guid) {
+        if let Some(sedp_logic) = self.sedp_logic.get().and_then(|logic| logic.as_ref().as_ref()) {
+            sedp_logic.forget_type_rejections(endpoint_guid);
+        }
     }
 
     pub(crate) fn find_readers_matched_with_local_writer(

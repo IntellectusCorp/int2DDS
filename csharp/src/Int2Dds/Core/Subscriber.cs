@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -18,6 +19,7 @@ namespace Int2Dds.Core
     public sealed class Subscriber : IDisposable
     {
         private readonly IntPtr _handle;
+        private readonly Dictionary<InstanceHandle, WeakReference> _readers = new Dictionary<InstanceHandle, WeakReference>();
         private bool _disposed;
 
         /// <summary>
@@ -25,38 +27,12 @@ namespace Int2Dds.Core
         /// </summary>
         internal Subscriber(DomainParticipant participant, SubscriberQos? qos = null)
         {
-            if (qos?.Partition is { Names: { Length: var len } } partition && len > 0)
+            if (qos != null && QosMarshal.HasSubscriberPolicies(qos))
             {
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_create_default(out var qosHandle));
                 try
                 {
-                    unsafe
-                    {
-                        var partitionByteArrays = partition.Names
-                            .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
-                            .ToArray();
-                        var pinnedArrays = new GCHandle[partitionByteArrays.Length];
-                        for (int i = 0; i < partitionByteArrays.Length; i++)
-                            pinnedArrays[i] = GCHandle.Alloc(
-                                partitionByteArrays[i], GCHandleType.Pinned);
-
-                        try
-                        {
-                            var ptrs = new byte*[partitionByteArrays.Length];
-                            for (int i = 0; i < ptrs.Length; i++)
-                                ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
-                            fixed (byte** pPartitions = ptrs)
-                            {
-                                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_set_partition(
-                                    qosHandle, pPartitions, (UIntPtr)partition.Names.Length));
-                            }
-                        }
-                        finally
-                        {
-                            foreach (var pin in pinnedArrays)
-                                pin.Free();
-                        }
-                    }
+                    QosMarshal.ApplySubscriberQos(qosHandle, qos);
 
                     ReturnCodeHelper.CheckReturn(
                         NativeMethods.int2dds_create_subscriber(participant.Handle, qosHandle, out _handle));
@@ -145,41 +121,142 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_get_qos(_handle, out var qosHandle));
             try
             {
-                if (qos.Partition is { Names: { Length: var len } } partition && len > 0)
-                {
-                    unsafe
-                    {
-                        var partitionByteArrays = partition.Names
-                            .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
-                            .ToArray();
-                        var pinnedArrays = new GCHandle[partitionByteArrays.Length];
-                        for (int i = 0; i < partitionByteArrays.Length; i++)
-                            pinnedArrays[i] = GCHandle.Alloc(
-                                partitionByteArrays[i], GCHandleType.Pinned);
-                        try
-                        {
-                            var ptrs = new byte*[partitionByteArrays.Length];
-                            for (int i = 0; i < ptrs.Length; i++)
-                                ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
-                            fixed (byte** pPartitions = ptrs)
-                            {
-                                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_set_partition(
-                                    qosHandle, pPartitions, (UIntPtr)partition.Names.Length));
-                            }
-                        }
-                        finally
-                        {
-                            foreach (var pin in pinnedArrays)
-                                pin.Free();
-                        }
-                    }
-                }
-
+                QosMarshal.ApplySubscriberQos(qosHandle, qos);
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_set_qos(_handle, qosHandle));
             }
             finally
             {
                 NativeMethods.int2dds_subscriber_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
+        /// Gets the current QoS policies of this Subscriber.
+        /// Partition has no native getter and is left null.
+        /// </summary>
+        public SubscriberQos GetQos()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_get_qos(_handle, out var qosHandle));
+            try
+            {
+                return QosMarshal.ReadSubscriberQos(qosHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_subscriber_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
+        /// Begins a sample access block. Required before reading or calling
+        /// <see cref="GetDataReaders()"/> under GROUP access scope; no effect under other
+        /// access scopes. Calls may be nested.
+        /// </summary>
+        public void BeginAccess()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_begin_access(_handle));
+        }
+
+        /// <summary>
+        /// Ends the sample access block started by <see cref="BeginAccess"/>.
+        /// </summary>
+        /// <exception cref="DdsPreconditionNotMetException">GROUP access scope without a matching BeginAccess call.</exception>
+        public void EndAccess()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_end_access(_handle));
+        }
+
+        /// <summary>
+        /// Gets the DataReaders of this Subscriber that hold samples in any state.
+        /// See <see cref="GetDataReaders(uint, uint, uint)"/>.
+        /// </summary>
+        public IReadOnlyList<object> GetDataReaders()
+        {
+            return GetDataReaders(
+                Int2Dds.Conditions.SampleState.Any, Int2Dds.Conditions.ViewState.Any, Int2Dds.Conditions.InstanceState.Any);
+        }
+
+        /// <summary>
+        /// Gets the DataReaders of this Subscriber that hold samples matching the state masks.
+        /// Each entry is the same <c>DataReader&lt;T&gt;</c> object returned by
+        /// <see cref="CreateDataReader{T}"/> or <see cref="CreateDataReaderWithProfile{T}"/>.
+        /// Under GROUP access scope with ordered access the list is in sample order and a
+        /// reader may appear more than once. Readers created through other paths (e.g. dynamic
+        /// type readers) are not included.
+        /// </summary>
+        /// <param name="sampleStates">Sample state mask (<see cref="Int2Dds.Conditions.SampleState"/>).</param>
+        /// <param name="viewStates">View state mask (<see cref="Int2Dds.Conditions.ViewState"/>).</param>
+        /// <param name="instanceStates">Instance state mask (<see cref="Int2Dds.Conditions.InstanceState"/>).</param>
+        /// <exception cref="DdsPreconditionNotMetException">GROUP access scope outside a BeginAccess/EndAccess block.</exception>
+        public unsafe IReadOnlyList<object> GetDataReaders(uint sampleStates, uint viewStates, uint instanceStates)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            // An empty buffer passes NULL, which queries the count. Grow and retry until it fits.
+            var handles = Int2Dds.Internal.EmptyArrayHolder<byte>.Value;
+            int count;
+            while (true)
+            {
+                int capacity = handles.Length / 16;
+                UIntPtr total;
+                fixed (byte* p = handles)
+                {
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_get_datareaders(
+                        _handle, sampleStates, viewStates, instanceStates, p, (UIntPtr)capacity, out total));
+                }
+                count = (int)(uint)total;
+                if (count <= capacity) break;
+                handles = new byte[count * 16];
+            }
+
+            var readers = new List<object>(count);
+            lock (_readers)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    var key = new InstanceHandle(new ReadOnlySpan<byte>(handles, i * 16, 16));
+                    if (_readers.TryGetValue(key, out var weak) && weak.Target is object reader)
+                        readers.Add(reader);
+                }
+            }
+            return readers;
+        }
+
+        /// <summary>
+        /// Invokes the on_data_available listener of every DataReader of this Subscriber.
+        /// </summary>
+        public void NotifyDataReaders()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_notify_datareaders(_handle));
+        }
+
+        // Registers a reader created by this Subscriber so GetDataReaders can map its GUID back to it.
+        private DataReader<T> RegisterReader<T>(DataReader<T> reader) where T : class, IDdsType, new()
+        {
+            var key = new InstanceHandle(reader.GetGuid());
+            lock (_readers)
+            {
+                _readers[key] = new WeakReference(reader);
+            }
+            return reader;
+        }
+
+        // Removes a disposed reader and any entries whose reader has been collected.
+        internal void UnregisterReader(object reader)
+        {
+            lock (_readers)
+            {
+                var stale = _readers
+                    .Where(entry => entry.Value.Target is var target && (target == null || target == reader))
+                    .Select(entry => entry.Key)
+                    .ToList();
+                foreach (var key in stale)
+                    _readers.Remove(key);
             }
         }
 
@@ -197,7 +274,7 @@ namespace Int2Dds.Core
             where T : class, IDdsType, new()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            return new DataReader<T>(this, topic, qos, listener, statusMask);
+            return RegisterReader(new DataReader<T>(this, topic, qos, listener, statusMask));
         }
 
         /// <summary>
@@ -214,7 +291,7 @@ namespace Int2Dds.Core
             where T : class, IDdsType, new()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            return new DataReader<T>(this, topic, qosPath, listener, statusMask);
+            return RegisterReader(new DataReader<T>(this, topic, qosPath, listener, statusMask));
         }
 
         /// <summary>

@@ -411,9 +411,8 @@ public final class DomainParticipant extends NativeEntity {
     }
 
     /**
-     * This participant's current QoS. Only {@code Property} entries can be read back; {@code
-     * UserData} has no native getter and is left null, and each entry's {@code propagate} flag
-     * reads back as false.
+     * This participant's current QoS: {@code UserData} and the text {@code Property} entries. Each
+     * entry's {@code propagate} flag reads back as false.
      */
     public ParticipantQos getQos() {
         long[] qosOut = new long[1];
@@ -481,6 +480,48 @@ public final class DomainParticipant extends NativeEntity {
         } finally {
             FfiAccess.destroyParticipantQos(qos);
         }
+    }
+
+    /** This participant's own DDS instance handle. */
+    public InstanceHandle getInstanceHandle() {
+        byte[] h = new byte[16];
+        int rc = FfiAccess.participantGetInstanceHandle(handle(), h);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new InstanceHandle(h);
+    }
+
+    /**
+     * Ignores a remote participant and its endpoints. The operation cannot be reversed. Throws for
+     * the handle of this participant itself (BAD_PARAMETER).
+     */
+    public void ignoreParticipant(InstanceHandle handle) {
+        Objects.requireNonNull(handle, "handle");
+        int rc = FfiAccess.participantIgnoreParticipant(handle(), handle.bytes());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Ignores a remote publication. The operation cannot be reversed. Throws for the handle of a
+     * local DataWriter (BAD_PARAMETER).
+     */
+    public void ignorePublication(InstanceHandle handle) {
+        Objects.requireNonNull(handle, "handle");
+        int rc = FfiAccess.participantIgnorePublication(handle(), handle.bytes());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Ignores a remote subscription. The operation cannot be reversed. Throws for the handle of a
+     * local DataReader (BAD_PARAMETER).
+     */
+    public void ignoreSubscription(InstanceHandle handle) {
+        Objects.requireNonNull(handle, "handle");
+        int rc = FfiAccess.participantIgnoreSubscription(handle(), handle.bytes());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
     }
 
     /** Whether this participant contains the entity identified by {@code handle}. */
@@ -787,9 +828,8 @@ public final class DomainParticipant extends NativeEntity {
      * current value), and destroys it again once the native {@code set_qos} call returns — success
      * or failure, thrown or not, the same build-apply-destroy shape {@link #createWithQos} uses for
      * the create path. {@code ParticipantQos} declares no immutable policies in this core, so a
-     * change to {@code Property} succeeds regardless of whether this participant is already
-     * enabled; {@code UserData} is this type's one unsupported policy -- rejected outright, mutable
-     * or not -- see {@code check_unsupported_policies} in dds/src/dcps/domain/qos/mod.rs.
+     * change to {@code UserData} or {@code Property} succeeds regardless of whether this
+     * participant is already enabled.
      *
      * @throws NullPointerException if {@code qos} is null
      */

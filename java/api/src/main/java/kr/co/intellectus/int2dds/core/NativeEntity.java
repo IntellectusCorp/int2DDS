@@ -98,6 +98,20 @@ abstract class NativeEntity implements AutoCloseable {
         }
     }
 
+    /** A snapshot of the children that are neither collected nor closed. */
+    final List<NativeEntity> openChildren() {
+        List<NativeEntity> open = new ArrayList<NativeEntity>();
+        synchronized (childLock) {
+            for (WeakReference<NativeEntity> ref : children) {
+                NativeEntity child = ref.get();
+                if (child != null && !child.isClosed()) {
+                    open.add(child);
+                }
+            }
+        }
+        return open;
+    }
+
     /** Drops references whose child has already been collected. */
     private void sweepLocked() {
         for (Iterator<WeakReference<NativeEntity>> it = children.iterator(); it.hasNext(); ) {

@@ -25,38 +25,12 @@ namespace Int2Dds.Core
         /// </summary>
         internal Publisher(DomainParticipant participant, PublisherQos? qos = null)
         {
-            if (qos?.Partition is { Names: { Length: var len } } partition && len > 0)
+            if (qos != null && QosMarshal.HasPublisherPolicies(qos))
             {
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_qos_create_default(out var qosHandle));
                 try
                 {
-                    unsafe
-                    {
-                        var partitionByteArrays = partition.Names
-                            .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
-                            .ToArray();
-                        var pinnedArrays = new GCHandle[partitionByteArrays.Length];
-                        for (int i = 0; i < partitionByteArrays.Length; i++)
-                            pinnedArrays[i] = GCHandle.Alloc(
-                                partitionByteArrays[i], GCHandleType.Pinned);
-
-                        try
-                        {
-                            var ptrs = new byte*[partitionByteArrays.Length];
-                            for (int i = 0; i < ptrs.Length; i++)
-                                ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
-                            fixed (byte** pPartitions = ptrs)
-                            {
-                                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_qos_set_partition(
-                                    qosHandle, pPartitions, (UIntPtr)partition.Names.Length));
-                            }
-                        }
-                        finally
-                        {
-                            foreach (var pin in pinnedArrays)
-                                pin.Free();
-                        }
-                    }
+                    QosMarshal.ApplyPublisherQos(qosHandle, qos);
 
                     ReturnCodeHelper.CheckReturn(
                         NativeMethods.int2dds_create_publisher(participant.Handle, qosHandle, out _handle));
@@ -179,42 +153,52 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_get_qos(_handle, out var qosHandle));
             try
             {
-                if (qos.Partition is { Names: { Length: var len } } partition && len > 0)
-                {
-                    unsafe
-                    {
-                        var partitionByteArrays = partition.Names
-                            .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
-                            .ToArray();
-                        var pinnedArrays = new GCHandle[partitionByteArrays.Length];
-                        for (int i = 0; i < partitionByteArrays.Length; i++)
-                            pinnedArrays[i] = GCHandle.Alloc(
-                                partitionByteArrays[i], GCHandleType.Pinned);
-                        try
-                        {
-                            var ptrs = new byte*[partitionByteArrays.Length];
-                            for (int i = 0; i < ptrs.Length; i++)
-                                ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
-                            fixed (byte** pPartitions = ptrs)
-                            {
-                                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_qos_set_partition(
-                                    qosHandle, pPartitions, (UIntPtr)partition.Names.Length));
-                            }
-                        }
-                        finally
-                        {
-                            foreach (var pin in pinnedArrays)
-                                pin.Free();
-                        }
-                    }
-                }
-
+                QosMarshal.ApplyPublisherQos(qosHandle, qos);
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_set_qos(_handle, qosHandle));
             }
             finally
             {
                 NativeMethods.int2dds_publisher_qos_destroy(qosHandle);
             }
+        }
+
+        /// <summary>
+        /// Gets the current QoS policies of this Publisher.
+        /// Partition has no native getter and is left null.
+        /// </summary>
+        public PublisherQos GetQos()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_get_qos(_handle, out var qosHandle));
+            try
+            {
+                return QosMarshal.ReadPublisherQos(qosHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_publisher_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
+        /// Begins a coherent set. Samples written by this Publisher's DataWriters until the
+        /// matching <see cref="EndCoherentChanges"/> form one coherent set. Calls may be nested.
+        /// </summary>
+        public void BeginCoherentChanges()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_begin_coherent_changes(_handle));
+        }
+
+        /// <summary>
+        /// Ends the coherent set started by <see cref="BeginCoherentChanges"/>.
+        /// </summary>
+        /// <exception cref="DdsPreconditionNotMetException">No matching BeginCoherentChanges call.</exception>
+        public void EndCoherentChanges()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_end_coherent_changes(_handle));
         }
 
         /// <summary>

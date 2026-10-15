@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::serialize::Float128;
 use crate::xtypes::dynamic_type::{DynamicType, DynamicTypeError, DynamicTypeKind, PrimitiveKind};
 
 /// Dynamic data container - stores field values at runtime.
@@ -185,6 +186,8 @@ pub enum DynamicValue {
     Uint64(u64),
     Float32(f32),
     Float64(f64),
+    /// Kept as binary128 bits so no precision is lost before it reaches the wire.
+    Float128(Float128),
     Char8(char),
     Byte(u8),
     /// UTF-8 string
@@ -234,6 +237,7 @@ impl DynamicValue {
             DynamicValue::Uint64(_) => "Uint64",
             DynamicValue::Float32(_) => "Float32",
             DynamicValue::Float64(_) => "Float64",
+            DynamicValue::Float128(_) => "Float128",
             DynamicValue::Char8(_) => "Char8",
             DynamicValue::Byte(_) => "Byte",
             DynamicValue::String(_) => "String",
@@ -266,6 +270,7 @@ impl DynamicValue {
                 | DynamicValue::Uint64(_)
                 | DynamicValue::Float32(_)
                 | DynamicValue::Float64(_)
+                | DynamicValue::Float128(_)
                 | DynamicValue::Char8(_)
                 | DynamicValue::Byte(_)
         )
@@ -291,7 +296,7 @@ impl DynamicValue {
                 PrimitiveKind::Uint64 => DynamicValue::Uint64(0),
                 PrimitiveKind::Float32 => DynamicValue::Float32(0.0),
                 PrimitiveKind::Float64 => DynamicValue::Float64(0.0),
-                PrimitiveKind::Float128 => DynamicValue::Float64(0.0), // Approximate
+                PrimitiveKind::Float128 => DynamicValue::Float128(Float128::ZERO),
                 PrimitiveKind::Char8 => DynamicValue::Char8('\0'),
                 PrimitiveKind::Char16 => DynamicValue::Char8('\0'),
                 PrimitiveKind::Byte => DynamicValue::Byte(0),
@@ -335,6 +340,7 @@ impl fmt::Display for DynamicValue {
             DynamicValue::Uint64(v) => write!(f, "{}", v),
             DynamicValue::Float32(v) => write!(f, "{}", v),
             DynamicValue::Float64(v) => write!(f, "{}", v),
+            DynamicValue::Float128(v) => write!(f, "{}", v),
             DynamicValue::Char8(v) => write!(f, "'{}'", v),
             DynamicValue::Byte(v) => write!(f, "0x{:02x}", v),
             DynamicValue::String(v) => write!(f, "\"{}\"", v),
@@ -507,8 +513,24 @@ impl FromDynamicValue for f64 {
         match value {
             DynamicValue::Float64(v) => Ok(*v),
             DynamicValue::Float32(v) => Ok(*v as f64),
+            // Lossy narrowing, kept so float128 members still read as f64 as they did before.
+            DynamicValue::Float128(v) => Ok(v.to_f64()),
             _ => Err(DynamicTypeError::ConversionError(format!(
                 "Cannot convert {} to f64",
+                value.type_kind()
+            ))),
+        }
+    }
+}
+
+impl FromDynamicValue for Float128 {
+    fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
+        match value {
+            DynamicValue::Float128(v) => Ok(*v),
+            DynamicValue::Float64(v) => Ok(Float128::from(*v)),
+            DynamicValue::Float32(v) => Ok(Float128::from(*v as f64)),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to Float128",
                 value.type_kind()
             ))),
         }
@@ -655,6 +677,12 @@ impl IntoDynamicValue for f32 {
 impl IntoDynamicValue for f64 {
     fn into_dynamic(self) -> DynamicValue {
         DynamicValue::Float64(self)
+    }
+}
+
+impl IntoDynamicValue for Float128 {
+    fn into_dynamic(self) -> DynamicValue {
+        DynamicValue::Float128(self)
     }
 }
 

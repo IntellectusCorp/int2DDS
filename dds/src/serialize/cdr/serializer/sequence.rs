@@ -130,7 +130,18 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
 
 // Implement SequenceSerialize for both serializer types
 impl SequenceSerialize for CdrSerializer {}
-impl SequenceSerialize for Xcdr2Serializer {}
+impl SequenceSerialize for Xcdr2Serializer {
+    /// XCDR2: strings are non-primitive, so the sequence carries a DHEADER.
+    fn serialize_string_sequence(&mut self, data: &[String]) -> Result<(), CdrError> {
+        self.serialize_delimited(|s| {
+            s.serialize_u32(checked_length(data.len())?)?;
+            for value in data {
+                s.serialize_string(value)?;
+            }
+            Ok(())
+        })
+    }
+}
 
 // Generic serialize_sequence and serialize_optional methods need to stay as inherent impl
 // because they use generic parameters with Self type bounds
@@ -173,7 +184,7 @@ impl CdrSerializer {
 }
 
 impl Xcdr2Serializer {
-    /// Serialize sequence of non-primitive values with length prefix (XCDR2).
+    /// Serialize sequence of non-primitive values with DHEADER + length prefix (XCDR2).
     pub fn serialize_sequence<T, F>(
         &mut self,
         values: &[T],
@@ -182,12 +193,13 @@ impl Xcdr2Serializer {
     where
         F: FnMut(&mut Self, &T) -> Result<(), CdrError>,
     {
-        let length = checked_length(values.len())?;
-        self.serialize_u32(length)?;
-        for value in values {
-            serialize_fn(self, value)?;
-        }
-        Ok(())
+        self.serialize_delimited(|s| {
+            s.serialize_u32(checked_length(values.len())?)?;
+            for value in values {
+                serialize_fn(s, value)?;
+            }
+            Ok(())
+        })
     }
 
     /// Serialize optional value

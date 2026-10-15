@@ -260,12 +260,17 @@ See [docs/guide/env.md](../docs/guide/env.md) for the full env-var reference.
 - `create_publisher() -> Publisher` - Create a publisher
 - `create_subscriber() -> Subscriber` - Create a subscriber
 - `create_topic(name: str, type_class: type) -> Topic` - Create a topic
+- `get_instance_handle() -> bytes` - This participant's 16-byte instance handle
+- `ignore_participant(handle: bytes)` - Ignore a remote participant (cannot be reversed)
+- `ignore_publication(handle: bytes)` - Ignore a remote DataWriter (cannot be reversed)
+- `ignore_subscription(handle: bytes)` - Ignore a remote DataReader (cannot be reversed)
 
 ### Publisher / DataWriter
 
 - `Publisher.create_datawriter(topic, qos=None) -> DataWriter`
 - `DataWriter.write(sample)` - Write a sample
 - `DataWriter.matched_readers` - Number of matched readers
+- `DataWriter.get_instance_handle() -> bytes` - This writer's 16-byte instance handle
 
 ### Subscriber / DataReader
 
@@ -273,6 +278,7 @@ See [docs/guide/env.md](../docs/guide/env.md) for the full env-var reference.
 - `DataReader.take() -> list[Sample]` - Take all available samples
 - `DataReader.read() -> list[Sample]` - Read samples without removing
 - `DataReader.matched_writers` - Number of matched writers
+- `DataReader.get_instance_handle() -> bytes` - This reader's 16-byte instance handle
 
 ### WaitSet
 

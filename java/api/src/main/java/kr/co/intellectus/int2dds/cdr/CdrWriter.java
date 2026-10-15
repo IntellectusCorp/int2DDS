@@ -291,6 +291,15 @@ public final class CdrWriter implements AutoCloseable {
         writeI64(Double.doubleToRawLongBits(value));
     }
 
+    /** Writes an IEEE binary128 ({@code float128}) with 8-byte alignment. */
+    public void writeF128(Float128 value) {
+        align(8);
+        ensure(16);
+        pooled.buffer.putLong(pos, littleEndian ? value.lo() : value.hi());
+        pooled.buffer.putLong(pos + 8, littleEndian ? value.hi() : value.lo());
+        pos += 16;
+    }
+
     // ---- strings, sequences, raw bytes -----------------------------------
 
     /**
@@ -356,16 +365,16 @@ public final class CdrWriter implements AutoCloseable {
     }
 
     /**
-     * Writes a CDR wstring: a uint32 count of UTF-16 code units, then each unit as a u16. Unlike
-     * {@link #writeString}, there is no terminator and the count does not include one -- {@code
-     * String.length()} is already the UTF-16 unit count, so a surrogate pair contributes two.
+     * Writes a CDR wstring: a uint32 length in bytes (XTypes 1.3 7.4.1.1.2), then each UTF-16
+     * unit as a u16. Unlike {@link #writeString}, there is no terminator -- {@code
+     * String.length()} is the UTF-16 unit count, so a surrogate pair contributes four bytes.
      */
     public void writeWString(String s) {
         if (s == null) {
             s = "";
         }
         int n = s.length();
-        writeU32(n);
+        writeU32(2 * n);
         for (int i = 0; i < n; i++) {
             writeU16(s.charAt(i));
         }

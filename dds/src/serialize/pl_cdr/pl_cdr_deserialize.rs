@@ -731,8 +731,13 @@ impl PlCdrParser {
                 } else {
                     let mut reader = PlCdrReader::new(data, self.endianness);
                     let kind_u16 = reader.read_u16().unwrap_or(0);
-                    let kind = TypeConsistencyKind::from_u16(kind_u16)
-                        .unwrap_or(TypeConsistencyKind::DisallowTypeCoercion);
+                    // 2 is a coercing kind on the wire: OpenDDS ALLOW_TYPE_COERCION,
+                    // RTI AUTO_TYPE_COERCION.
+                    let kind = match kind_u16 {
+                        2 => TypeConsistencyKind::AllowTypeCoercion,
+                        k => TypeConsistencyKind::from_u16(k)
+                            .unwrap_or(TypeConsistencyKind::DisallowTypeCoercion),
+                    };
 
                     // Read boolean flags (1 byte each)
                     let ignore_sequence_bounds =

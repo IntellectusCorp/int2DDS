@@ -18,9 +18,10 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
+use int2dds::serialize::Float128;
 use int2dds::xtypes::{DynamicValue, FromDynamicValue};
 
-use crate::dynamic::{copy_str_to_c, resolve_path, Int2DdsDynamicData};
+use crate::dynamic::{copy_str_to_c, read_f128, resolve_path, write_f128, Int2DdsDynamicData};
 use crate::error::*;
 
 /// Value-kind discriminators returned by `int2dds_dynamic_value_kind`.
@@ -49,6 +50,7 @@ pub const INT2DDS_VALUE_KIND_ARRAY: i32 = 21;
 pub const INT2DDS_VALUE_KIND_MAP: i32 = 22;
 pub const INT2DDS_VALUE_KIND_OPTIONAL: i32 = 23;
 pub const INT2DDS_VALUE_KIND_NULL: i32 = 24;
+pub const INT2DDS_VALUE_KIND_FLOAT128: i32 = 25;
 
 /// Opaque, owning handle wrapping a [`DynamicValue`].
 pub struct Int2DdsDynamicValue {
@@ -410,6 +412,7 @@ pub unsafe extern "C" fn int2dds_dynamic_value_kind(
         DynamicValue::Uint64(_) => INT2DDS_VALUE_KIND_UINT64,
         DynamicValue::Float32(_) => INT2DDS_VALUE_KIND_FLOAT32,
         DynamicValue::Float64(_) => INT2DDS_VALUE_KIND_FLOAT64,
+        DynamicValue::Float128(_) => INT2DDS_VALUE_KIND_FLOAT128,
         DynamicValue::Char8(_) => INT2DDS_VALUE_KIND_CHAR8,
         DynamicValue::Byte(_) => INT2DDS_VALUE_KIND_BYTE,
         DynamicValue::String(_) => INT2DDS_VALUE_KIND_STRING,
@@ -462,6 +465,88 @@ value_as!(int2dds_dynamic_value_as_u32, u32);
 value_as!(int2dds_dynamic_value_as_u64, u64);
 value_as!(int2dds_dynamic_value_as_f32, f32);
 value_as!(int2dds_dynamic_value_as_f64, f64);
+
+/// Construct a float128 value from `value` (16 bytes, little-endian binary128).
+///
+/// # Safety
+/// - `value` must point to 16 readable bytes
+/// - `out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_value_f128(
+    value: *const u8,
+    out: *mut *mut Int2DdsDynamicValue,
+) -> Int2DdsRet {
+    check_null!(value);
+    check_null!(out);
+    *out = into_handle(DynamicValue::Float128(read_f128(value)));
+    INT2DDS_RET_OK
+}
+
+/// Read a value as float128 into `out` (16 bytes, little-endian binary128).
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must point to 16 writable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_value_as_f128(
+    value: *const Int2DdsDynamicValue,
+    out: *mut u8,
+) -> Int2DdsRet {
+    check_null!(value);
+    check_null!(out);
+    match Float128::from_dynamic(&(*value).inner) {
+        Ok(v) => {
+            write_f128(out, v);
+            INT2DDS_RET_OK
+        }
+        Err(_) => INT2DDS_RET_DYNAMIC_TYPE_MISMATCH,
+    }
+}
+
+// Conversions exported so every binding shares the core's exact decimal parser instead of
+// reimplementing binary128 rounding.
+
+/// Parse a decimal literal into `out` (16 bytes, little-endian binary128), correctly rounded.
+///
+/// # Safety
+/// - `text` must be a valid null-terminated C string
+/// - `out` must point to 16 writable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_float128_parse(text: *const c_char, out: *mut u8) -> Int2DdsRet {
+    check_null!(text);
+    check_null!(out);
+    match CStr::from_ptr(text).to_str().ok().and_then(|s| s.parse::<Float128>().ok()) {
+        Some(v) => {
+            write_f128(out, v);
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_INVALID_ARGUMENT,
+    }
+}
+
+/// Widen `value` exactly into `out` (16 bytes, little-endian binary128).
+///
+/// # Safety
+/// - `out` must point to 16 writable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_float128_from_f64(value: f64, out: *mut u8) -> Int2DdsRet {
+    check_null!(out);
+    write_f128(out, Float128::from(value));
+    INT2DDS_RET_OK
+}
+
+/// Narrow `value` (16 bytes, little-endian binary128) to the nearest double.
+///
+/// # Safety
+/// - `value` must point to 16 readable bytes
+/// - `out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_float128_to_f64(value: *const u8, out: *mut f64) -> Int2DdsRet {
+    check_null!(value);
+    check_null!(out);
+    *out = read_f128(value).to_f64();
+    INT2DDS_RET_OK
+}
 
 /// Read a char8 value as its byte value.
 ///

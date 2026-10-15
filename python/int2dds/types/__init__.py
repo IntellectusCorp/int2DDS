@@ -2,6 +2,7 @@
 Type system support for DDS data types.
 """
 
+from int2dds.cdr.float128 import Float128
 from int2dds.types.base import DdsType
 from int2dds.types.dynamic import (
     DynamicData,
@@ -25,6 +26,7 @@ __all__ = [
     "DynamicTopic",
     "DynamicTypeSupport",
     "DynamicValue",
+    "Float128",
     "TypeInfoBuilder",
     "TypeObject",
     "XmlTypeRegistry",

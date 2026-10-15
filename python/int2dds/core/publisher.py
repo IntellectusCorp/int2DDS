@@ -18,7 +18,7 @@ from int2dds.exceptions import check_ret
 
 if TYPE_CHECKING:
     from int2dds.core.participant import DomainParticipant
-    from int2dds.core.qos import DataWriterQos
+    from int2dds.core.qos import DataWriterQos, PublisherQos
     from int2dds.core.topic import Topic
     from int2dds.types.base import DdsType
 
@@ -62,8 +62,8 @@ def _apply_datawriter_qos(handle: CData, qos: "DataWriterQos") -> None:
     if qos.transport_priority is not None:
         check_ret(lib.int2dds_datawriter_qos_set_transport_priority(
             handle, qos.transport_priority.value))
-    if qos.user_data is not None and qos.user_data.data:
-        data_ptr = ffi.from_buffer(qos.user_data.data)
+    if qos.user_data is not None:
+        data_ptr = ffi.from_buffer(qos.user_data.data) if qos.user_data.data else ffi.NULL
         check_ret(lib.int2dds_datawriter_qos_set_user_data(
             handle, data_ptr, len(qos.user_data.data)))
     if qos.writer_data_lifecycle is not None:
@@ -79,6 +79,41 @@ def _apply_datawriter_qos(handle: CData, qos: "DataWriterQos") -> None:
             handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
     if qos.data_frag is not None:
         check_ret(lib.int2dds_datawriter_qos_set_data_frag(handle, qos.data_frag))
+
+
+def _apply_publisher_qos(handle: CData, qos: "PublisherQos") -> None:
+    """Apply PublisherQos policies onto a native publisher QoS handle.
+
+    Shared by publisher creation and set_qos. Only the policies explicitly set on
+    `qos` are applied; an empty partition name list is left unapplied.
+    """
+    if qos.partition is not None and qos.partition.names:
+        c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
+        c_array = ffi.new("char*[]", c_strings)
+        check_ret(lib.int2dds_publisher_qos_set_partition(
+            handle, c_array, len(qos.partition.names)))
+    if qos.presentation is not None:
+        check_ret(lib.int2dds_publisher_qos_set_presentation(
+            handle,
+            qos.presentation._access_scope_int,
+            qos.presentation.coherent_access,
+            qos.presentation.ordered_access))
+    if qos.group_data is not None:
+        data_ptr = ffi.from_buffer(qos.group_data.data) if qos.group_data.data else ffi.NULL
+        check_ret(lib.int2dds_publisher_qos_set_group_data(
+            handle, data_ptr, len(qos.group_data.data)))
+
+
+def _has_publisher_policies(qos: "PublisherQos") -> bool:
+    """True when `qos` sets a policy that differs from the creation default.
+
+    A QoS without one is created with a NULL handle so the configured default
+    profile still applies.
+    """
+    return bool(
+        (qos.partition is not None and qos.partition.names)
+        or qos.presentation is not None
+        or (qos.group_data is not None and qos.group_data.data))
 
 
 class Publisher:
@@ -99,17 +134,16 @@ class Publisher:
         if profile is not None:
             check_ret(lib.int2dds_create_publisher_with_profile(
                 participant._handle, profile.encode(), publisher_ptr))
-        elif qos is not None and qos.partition is not None and qos.partition.names:
+        elif qos is not None and _has_publisher_policies(qos):
             qos_handle_ptr = ffi.new("Int2DdsPublisherQos **")
             check_ret(lib.int2dds_publisher_qos_create_default(qos_handle_ptr))
             qos_handle = qos_handle_ptr[0]
-            c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
-            c_array = ffi.new("char*[]", c_strings)
-            check_ret(lib.int2dds_publisher_qos_set_partition(
-                qos_handle, c_array, len(qos.partition.names)))
-            check_ret(lib.int2dds_create_publisher(
-                participant._handle, qos_handle, publisher_ptr))
-            lib.int2dds_publisher_qos_destroy(qos_handle)
+            try:
+                _apply_publisher_qos(qos_handle, qos)
+                check_ret(lib.int2dds_create_publisher(
+                    participant._handle, qos_handle, publisher_ptr))
+            finally:
+                lib.int2dds_publisher_qos_destroy(qos_handle)
         else:
             check_ret(lib.int2dds_create_publisher(
                 participant._handle, ffi.NULL, publisher_ptr))
@@ -169,24 +203,70 @@ class Publisher:
         check_ret(lib.int2dds_publisher_get_status_changes(self._handle, mask_out))
         return mask_out[0]
 
+    def get_qos(self) -> "PublisherQos":
+        """Return the effective QoS in force.
+
+        Reports the policies with a native getter (presentation, group_data).
+        ``partition`` has no native getter and is left unset.
+        """
+        from int2dds.core.discovery import _read_bytes
+        from int2dds.core.qos import (
+            GroupData, Presentation, PresentationAccessScope, PublisherQos,
+        )
+
+        qos_ptr = ffi.new("Int2DdsPublisherQos **")
+        check_ret(lib.int2dds_publisher_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            access_scope = ffi.new("int32_t *")
+            coherent_access = ffi.new("bool *")
+            ordered_access = ffi.new("bool *")
+            check_ret(lib.int2dds_publisher_qos_get_presentation(
+                handle, access_scope, coherent_access, ordered_access))
+            group_data = _read_bytes(lib.int2dds_publisher_qos_get_group_data, handle)
+        finally:
+            lib.int2dds_publisher_qos_destroy(handle)
+
+        return PublisherQos(
+            presentation=Presentation(
+                access_scope=PresentationAccessScope(access_scope[0]).name,
+                coherent_access=bool(coherent_access[0]),
+                ordered_access=bool(ordered_access[0]),
+            ),
+            group_data=GroupData(data=group_data),
+        )
+
     def set_qos(self, qos: "PublisherQos") -> None:
         """Set this publisher's QoS.
 
-        The current QoS is used as the merge base, then the ``partition`` policy
-        from ``qos`` (the only mutable PublisherQos policy) is applied on top.
+        The given policies are merged onto the publisher's current QoS (fetched as
+        the base), then applied. Changing an immutable policy (presentation) to a
+        different value is rejected by the core.
         """
         qos_ptr = ffi.new("Int2DdsPublisherQos **")
         check_ret(lib.int2dds_publisher_get_qos(self._handle, qos_ptr))
         handle = qos_ptr[0]
         try:
-            if qos is not None and qos.partition is not None and qos.partition.names:
-                c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
-                c_array = ffi.new("char*[]", c_strings)
-                check_ret(lib.int2dds_publisher_qos_set_partition(
-                    handle, c_array, len(qos.partition.names)))
+            _apply_publisher_qos(handle, qos)
             check_ret(lib.int2dds_publisher_set_qos(self._handle, handle))
         finally:
             lib.int2dds_publisher_qos_destroy(handle)
+
+    def begin_coherent_changes(self) -> None:
+        """Begin a coherent set.
+
+        Samples written by this publisher's DataWriters until the matching
+        end_coherent_changes() form one coherent set. Calls may be nested.
+        """
+        check_ret(lib.int2dds_publisher_begin_coherent_changes(self._handle))
+
+    def end_coherent_changes(self) -> None:
+        """End the coherent set started by begin_coherent_changes().
+
+        Raises:
+            DdsPreconditionNotMet: If there is no matching begin_coherent_changes().
+        """
+        check_ret(lib.int2dds_publisher_end_coherent_changes(self._handle))
 
     def close(self) -> None:
         """Delete the publisher."""
@@ -292,9 +372,10 @@ class DataWriter(Generic[T]):
 
     def get_qos(self) -> "DataWriterQos":
         """Return the effective QoS (reliability, durability, history) in force."""
+        from int2dds.core.discovery import _read_bytes
         from int2dds.core.qos import (
             DataWriterQos, Reliability, Durability, History, Lifespan, ResourceLimits,
-            ReliabilityKind, DurabilityKind, HistoryKind,
+            ReliabilityKind, DurabilityKind, HistoryKind, UserData,
         )
 
         qos_ptr = ffi.new("Int2DdsDataWriterQos **")
@@ -318,6 +399,7 @@ class DataWriter(Generic[T]):
             max_per_instance = ffi.new("int32_t *")
             check_ret(lib.int2dds_datawriter_qos_get_resource_limits(
                 handle, max_samples, max_instances, max_per_instance))
+            user_data = _read_bytes(lib.int2dds_datawriter_qos_get_user_data, handle)
         finally:
             lib.int2dds_datawriter_qos_destroy(handle)
 
@@ -335,6 +417,7 @@ class DataWriter(Generic[T]):
             ),
             data_frag=frag[0],
             lifespan=Lifespan.from_ns(lifespan_ns[0]),
+            user_data=UserData(data=user_data),
         )
 
     def set_qos(self, qos: "DataWriterQos") -> None:
@@ -574,6 +657,13 @@ class DataWriter(Generic[T]):
         """Get this DataWriter's 16-byte GUID."""
         buf = ffi.new("uint8_t[16]")
         check_ret(lib.int2dds_datawriter_get_guid(self._handle, ffi.cast("uint8_t(*)[16]", buf)))
+        return bytes(ffi.buffer(buf, 16))
+
+    def get_instance_handle(self) -> bytes:
+        """Get this DataWriter's 16-byte instance handle."""
+        buf = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_datawriter_get_instance_handle(
+            self._handle, ffi.cast("uint8_t(*)[16]", buf)))
         return bytes(ffi.buffer(buf, 16))
 
     def write_serialized_staged(self, data: bytes) -> None:

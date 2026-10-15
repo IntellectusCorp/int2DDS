@@ -27,6 +27,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
 | `INT2DDS_SEND_CREDIT_BACKSTOP_MS`    | Writer send-credit backstop (ms)           | 250                     |
 | `INT2DDS_ENABLE_SEND_WINDOW`         | Bound fragment sends by peer receive buffer | false                  |
+| `INT2DDS_XTYPES_RTI_KEY_COMPAT`      | Skip XTypes key member rules (RTI Connext) | false                   |
 | `INT2DDS_NACK_RESPONSE_DELAY_MS`     | Writer delay before repair reply (ms)      | 0                       |
 | `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` | Writer piggyback HEARTBEAT off    | false                   |
 | `INT2DDS_SEDP_HEARTBEAT_MS`          | SEDP heartbeat period (ms)                 | heartbeat_period (2000) |
@@ -724,6 +725,38 @@ cargo run --example hello_world_pub
 export INT2DDS_ENABLE_SEND_WINDOW=true
 
 cargo run --example hello_world_pub
+```
+
+### INT2DDS_XTYPES_RTI_KEY_COMPAT
+
+Whether type matching skips the key member rules of DDS-XTypes 1.3 Table 19.
+By default a writer type is assignable to a reader type only if its key maps
+onto the reader's key without loss:
+
+- every literal of a `@key` enum on the writer exists on the reader,
+- a `@key` string, sequence or map has a reader bound at least as large, even
+  when `ignore_string_bounds`/`ignore_sequence_bounds` is set,
+- a `@key` struct keeps the same key members (KeyHolder) on both sides,
+- every union case of a `@key` union selects a reader case.
+
+RTI Connext does not apply these rules and matches such pairs. Set this to
+`true` to match the same way when talking to Connext; key bounds then follow
+the `ignore_*_bounds` flags. Read each time a writer and reader are matched.
+
+- Default: `false`
+- Values other than `true`/`1` and `false`/`0` are logged at warn level and
+  ignored -- the default `false` is used.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_XTYPES_RTI_KEY_COMPAT = "true"
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_XTYPES_RTI_KEY_COMPAT=true
 ```
 
 ### INT2DDS_SEND_CREDIT_BACKSTOP_MS

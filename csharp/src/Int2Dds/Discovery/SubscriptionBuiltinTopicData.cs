@@ -192,6 +192,64 @@ namespace Int2Dds.Discovery
             }
         }
 
+        /// <summary>Presentation access scope: 0 = INSTANCE, 1 = TOPIC, 2 = GROUP.</summary>
+        public int PresentationAccessScope
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_presentation(_handle, out var scope, out _, out _));
+                return scope;
+            }
+        }
+
+        /// <summary>Presentation coherent_access flag.</summary>
+        public bool PresentationCoherentAccess
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_presentation(_handle, out _, out var coherent, out _));
+                return coherent;
+            }
+        }
+
+        /// <summary>Presentation ordered_access flag.</summary>
+        public bool PresentationOrderedAccess
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_presentation(_handle, out _, out _, out var ordered));
+                return ordered;
+            }
+        }
+
+        /// <summary>The topic_data bytes of the reader's topic (possibly empty).</summary>
+        public unsafe byte[] TopicData
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                return Int2Dds.Qos.QosMarshal.ReadBytes(
+                    _handle, NativeMethods.int2dds_subscription_builtin_topic_data_get_topic_data);
+            }
+        }
+
+        /// <summary>The group_data bytes of the reader's subscriber (possibly empty).</summary>
+        public unsafe byte[] GroupData
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                return Int2Dds.Qos.QosMarshal.ReadBytes(
+                    _handle, NativeMethods.int2dds_subscription_builtin_topic_data_get_group_data);
+            }
+        }
+
         public void Dispose()
         {
             if (_disposed) return;

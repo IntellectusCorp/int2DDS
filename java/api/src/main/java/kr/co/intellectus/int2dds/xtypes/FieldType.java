@@ -28,4 +28,5 @@ public final class FieldType {
     public static final int SEQUENCE = 17;
     public static final int ARRAY = 18;
     public static final int MAP = 19;
+    public static final int FLOAT128 = 20;
 }

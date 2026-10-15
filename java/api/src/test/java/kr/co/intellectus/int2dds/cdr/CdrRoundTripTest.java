@@ -152,12 +152,12 @@ class CdrRoundTripTest {
     }
 
     @Test
-    void aWstringWithLargeUnitCountDoesNotAllocateBeforeBoundsCheckingIt() {
-        // A wstring claiming 100,000,000 units (200 MB) against a tiny buffer.
+    void aWstringWithLargeByteCountDoesNotAllocateBeforeBoundsCheckingIt() {
+        // A wstring claiming 100,000,000 bytes against a tiny buffer.
         // The bounds check must fire before the allocation.
         // We assert on the message text, not just the exception type, because both the
         // pre-allocation guard and the per-unit require(2) inside readU16() throw
-        // CdrUnderflowException. Only the guard mentions the unit count.
+        // CdrUnderflowException. Only the guard mentions the byte count.
         byte[] hostile = new byte[16];
         // Encapsulation header (LE XCDR1)
         hostile[0] = 0x00;
@@ -173,7 +173,7 @@ class CdrRoundTripTest {
         CdrUnderflowException e = assertThrows(CdrUnderflowException.class, r::readWString);
         assertTrue(
                 e.getMessage().contains("100000000"),
-                "Exception must be from pre-allocation guard (mentions unit count): "
+                "Exception must be from pre-allocation guard (mentions byte count): "
                         + e.getMessage());
     }
 

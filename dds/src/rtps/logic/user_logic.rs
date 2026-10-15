@@ -5877,6 +5877,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ignoring_a_remote_writer_frees_the_reassembly_buffers_waiting_on_it() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            1,
+            2,
+            vec![1, 1, 1, 1, 2, 2, 2, 2],
+        );
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)));
+
+        participant.ignore_publication(writer_guid).expect("ignore_publication");
+
+        assert!(
+            user_logic.fragment_buffers.is_empty(),
+            "every buffer waiting on the ignored writer must be freed"
+        );
+    }
+
     // --- Fragment reassembly: eviction must report exactly what it removed ---
 
     #[test]

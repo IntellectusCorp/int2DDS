@@ -5,6 +5,7 @@
 //! retrieval, and field getters for opaque builtin topic data types.
 
 use crate::error::*;
+use crate::qos::{copy_octets_to_c, presentation_access_scope_to_c};
 use crate::subscriber::{
     INT2DDS_INSTANCE_STATE_ALIVE, INT2DDS_INSTANCE_STATE_NOT_ALIVE_DISPOSED,
     INT2DDS_INSTANCE_STATE_NOT_ALIVE_NO_WRITERS,
@@ -702,6 +703,66 @@ pub unsafe extern "C" fn int2dds_participant_get_discovered_participant_data(
     INT2DDS_RET_OK
 }
 
+/// Ignore a remote participant. The operation cannot be reversed.
+/// Returns BAD_PARAMETER for the handle of the participant itself.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `handle` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_ignore_participant(
+    participant: *const Int2DdsParticipant,
+    handle: *const [u8; 16],
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(handle);
+
+    let participant_ref = &*participant;
+    ffi_try!(participant_ref.inner.ignore_participant(InstanceHandle::new(*handle)));
+
+    INT2DDS_RET_OK
+}
+
+/// Ignore a remote publication. The operation cannot be reversed.
+/// Returns BAD_PARAMETER for the handle of a local DataWriter.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `handle` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_ignore_publication(
+    participant: *const Int2DdsParticipant,
+    handle: *const [u8; 16],
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(handle);
+
+    let participant_ref = &*participant;
+    ffi_try!(participant_ref.inner.ignore_publication(InstanceHandle::new(*handle)));
+
+    INT2DDS_RET_OK
+}
+
+/// Ignore a remote subscription. The operation cannot be reversed.
+/// Returns BAD_PARAMETER for the handle of a local DataReader.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `handle` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_ignore_subscription(
+    participant: *const Int2DdsParticipant,
+    handle: *const [u8; 16],
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(handle);
+
+    let participant_ref = &*participant;
+    ffi_try!(participant_ref.inner.ignore_subscription(InstanceHandle::new(*handle)));
+
+    INT2DDS_RET_OK
+}
+
 /// Get matched subscription data for a given handle.
 /// On success, `*data_out` receives a heap-allocated opaque pointer.
 /// The caller must free it with `int2dds_subscription_builtin_topic_data_destroy`.
@@ -1107,6 +1168,75 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_user_data(
     INT2DDS_RET_OK
 }
 
+/// Get the presentation QoS from a PublicationBuiltinTopicData.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `access_scope_out`, `coherent_access_out` and `ordered_access_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_presentation(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    access_scope_out: *mut i32,
+    coherent_access_out: *mut bool,
+    ordered_access_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(access_scope_out);
+    check_null!(coherent_access_out);
+    check_null!(ordered_access_out);
+
+    let presentation = (*data).inner.presentation();
+    *access_scope_out = presentation_access_scope_to_c(&presentation.access_scope);
+    *coherent_access_out = presentation.coherent_access;
+    *ordered_access_out = presentation.ordered_access;
+
+    INT2DDS_RET_OK
+}
+
+/// Get the topic_data from a PublicationBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_topic_data(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    copy_octets_to_c(&(*data).inner.topic_data().value, buf, capacity, size_out);
+
+    INT2DDS_RET_OK
+}
+
+/// Get the group_data from a PublicationBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_group_data(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    copy_octets_to_c(&(*data).inner.group_data().value, buf, capacity, size_out);
+
+    INT2DDS_RET_OK
+}
+
 /// Free a PublicationBuiltinTopicData obtained from discovery.
 ///
 /// # Safety
@@ -1359,6 +1489,75 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_user_data(
         let copy_len = std::cmp::min(user_data.len(), capacity);
         std::ptr::copy_nonoverlapping(user_data.as_ptr(), buf, copy_len);
     }
+
+    INT2DDS_RET_OK
+}
+
+/// Get the presentation QoS from a SubscriptionBuiltinTopicData.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `access_scope_out`, `coherent_access_out` and `ordered_access_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_presentation(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    access_scope_out: *mut i32,
+    coherent_access_out: *mut bool,
+    ordered_access_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(access_scope_out);
+    check_null!(coherent_access_out);
+    check_null!(ordered_access_out);
+
+    let presentation = (*data).inner.presentation();
+    *access_scope_out = presentation_access_scope_to_c(&presentation.access_scope);
+    *coherent_access_out = presentation.coherent_access;
+    *ordered_access_out = presentation.ordered_access;
+
+    INT2DDS_RET_OK
+}
+
+/// Get the topic_data from a SubscriptionBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_topic_data(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    copy_octets_to_c(&(*data).inner.topic_data().value, buf, capacity, size_out);
+
+    INT2DDS_RET_OK
+}
+
+/// Get the group_data from a SubscriptionBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_group_data(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    copy_octets_to_c(&(*data).inner.group_data().value, buf, capacity, size_out);
 
     INT2DDS_RET_OK
 }

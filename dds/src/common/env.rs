@@ -53,6 +53,7 @@ pub fn init_from_env() {
     // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
     // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 250
     // - INT2DDS_ENABLE_SEND_WINDOW: Bound a fragment burst by the peer's receive buffer. Unset sends every fragment of a change in one go (true, false) - Default: false
+    // - INT2DDS_XTYPES_RTI_KEY_COMPAT: Skip the XTypes 1.3 Table 19 key member rules in type matching, as RTI Connext does (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
     // - INT2DDS_TCP_PEER_SEARCH_SLOTS: Set how many participant slots a TCP peer named with the wildcard port stands for (1-125, one domain's port block) - Default: 16
@@ -629,6 +630,18 @@ pub fn get_enable_send_window() -> bool {
 pub fn set_enable_send_window(is_enabled: bool) {
     log::info!("Environment variable set: INT2DDS_ENABLE_SEND_WINDOW = {}", is_enabled);
     unsafe { std::env::set_var("INT2DDS_ENABLE_SEND_WINDOW", is_enabled.to_string()) };
+}
+
+// Read `INT2DDS_XTYPES_RTI_KEY_COMPAT`. On, type matching skips the Table 19 key member rules
+// (enum literals, union labels, KeyHolder) and key bounds follow the ignore_*_bounds flags.
+pub fn get_xtypes_rti_key_compat() -> bool {
+    get_bool_env("INT2DDS_XTYPES_RTI_KEY_COMPAT").unwrap_or(false)
+}
+
+// Set the RTI key-assignability mode via `INT2DDS_XTYPES_RTI_KEY_COMPAT`.
+pub fn set_xtypes_rti_key_compat(is_enabled: bool) {
+    log::info!("Environment variable set: INT2DDS_XTYPES_RTI_KEY_COMPAT = {}", is_enabled);
+    unsafe { std::env::set_var("INT2DDS_XTYPES_RTI_KEY_COMPAT", is_enabled.to_string()) };
 }
 
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.

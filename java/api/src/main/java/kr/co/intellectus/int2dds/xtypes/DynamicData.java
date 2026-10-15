@@ -1,6 +1,7 @@
 package kr.co.intellectus.int2dds.xtypes;
 
 import java.nio.charset.Charset;
+import kr.co.intellectus.int2dds.cdr.Float128;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
@@ -78,6 +79,16 @@ public final class DynamicData implements AutoCloseable {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return out[0];
+    }
+
+    /** Reads a {@code float128} field at {@code path} (dotted/indexed). */
+    public Float128 getF128(String path) {
+        long h = handle();
+        byte[] out = new byte[16];
+        int rc = FfiAccess.dynamicDataGetF128(h, path.getBytes(UTF8), out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return Float128.fromBytes(out, 0);
     }
 
     /** Reads a {@code string} field at {@code path} (dotted/indexed). */
@@ -319,6 +330,14 @@ public final class DynamicData implements AutoCloseable {
     public void setF64(String field, double value) {
         long h = handle();
         int rc = FfiAccess.dynamicDataSetF64(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code float128} field at {@code field}. */
+    public void setF128(String field, Float128 value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetF128(h, field.getBytes(UTF8), value.toBytes());
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
     }

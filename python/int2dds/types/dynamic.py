@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from int2dds._ffi import CData, ffi, lib
+from int2dds.cdr.float128 import Float128
 from int2dds.exceptions import (
     INT2DDS_RET_INVALID_ARGUMENT,
     INT2DDS_RET_NO_DATA,
@@ -45,6 +46,7 @@ FIELD_NESTED = 16
 FIELD_SEQUENCE = 17
 FIELD_ARRAY = 18
 FIELD_MAP = 19
+FIELD_FLOAT128 = 20
 
 # Member flags.
 MEMBER_KEY = 1 << 0
@@ -78,6 +80,7 @@ VALUE_KIND_ARRAY = 21
 VALUE_KIND_MAP = 22
 VALUE_KIND_OPTIONAL = 23
 VALUE_KIND_NULL = 24
+VALUE_KIND_FLOAT128 = 25
 
 
 def _cstr(s: str) -> CData:
@@ -269,6 +272,13 @@ class TypeObject:
     def read_f64(self, data: bytes, field: str) -> float:
         return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_f64, "double *", data, field)
 
+    def read_f128(self, data: bytes, field: str) -> Float128:
+        out = ffi.new("uint8_t[16]")
+        buf = ffi.from_buffer(data)
+        check_ret(lib.int2dds_dynamic_sample_get_f128(
+            ffi.cast("const uint8_t*", buf), len(data), self._handle, _cstr(field), out))
+        return Float128.from_bytes(ffi.buffer(out, 16))
+
     def read_string(self, data: bytes, field: str) -> str:
         buf = ffi.from_buffer(data)
         return _read_string(
@@ -331,6 +341,11 @@ class DynamicData:
     def get_f64(self, path: str) -> float:
         return self._get_scalar(lib.int2dds_dynamic_data_get_f64, "double*", path)
 
+    def get_f128(self, path: str) -> Float128:
+        out = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_dynamic_data_get_f128(self._handle, _cstr(path), out))
+        return Float128.from_bytes(ffi.buffer(out, 16))
+
     def get_char8(self, path: str) -> int:
         return self._get_scalar(lib.int2dds_dynamic_data_get_char8, "uint8_t*", path)
 
@@ -361,6 +376,7 @@ class DynamicData:
         FIELD_UINT64: "get_u64",
         FIELD_FLOAT32: "get_f32",
         FIELD_FLOAT64: "get_f64",
+        FIELD_FLOAT128: "get_f128",
         FIELD_STRING: "get_string",
         FIELD_WSTRING: "get_string",
     }
@@ -410,6 +426,10 @@ class DynamicData:
 
     def set_f64(self, field: str, value: float) -> "DynamicData":
         return self._set_scalar(lib.int2dds_dynamic_data_set_f64, field, value)
+
+    def set_f128(self, field: str, value: Float128) -> "DynamicData":
+        buf = ffi.new("uint8_t[16]", value.to_bytes())
+        return self._set_scalar(lib.int2dds_dynamic_data_set_f128, field, buf)
 
     def set_char8(self, field: str, value: int | str) -> "DynamicData":
         byte = ord(value) if isinstance(value, str) else value
@@ -543,6 +563,10 @@ class DynamicValue:
         return cls._scalar(lib.int2dds_dynamic_value_f64, v)
 
     @classmethod
+    def f128(cls, v: Float128) -> "DynamicValue":
+        return cls._scalar(lib.int2dds_dynamic_value_f128, ffi.new("uint8_t[16]", v.to_bytes()))
+
+    @classmethod
     def byte(cls, v: int) -> "DynamicValue":
         return cls._scalar(lib.int2dds_dynamic_value_byte, v)
 
@@ -670,6 +694,11 @@ class DynamicValue:
 
     def as_f64(self) -> float:
         return self._as_scalar(lib.int2dds_dynamic_value_as_f64, "double*")
+
+    def as_f128(self) -> Float128:
+        out = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_dynamic_value_as_f128(self._handle, out))
+        return Float128.from_bytes(ffi.buffer(out, 16))
 
     def as_char8(self) -> int:
         return self._as_scalar(lib.int2dds_dynamic_value_as_char8, "uint8_t*")

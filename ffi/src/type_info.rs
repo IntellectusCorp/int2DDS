@@ -61,6 +61,8 @@ pub const INT2DDS_FIELD_NESTED: i32 = 16;
 pub const INT2DDS_FIELD_SEQUENCE: i32 = 17;
 pub const INT2DDS_FIELD_ARRAY: i32 = 18;
 pub const INT2DDS_FIELD_MAP: i32 = 19;
+/// Appended after the composite codes so existing values keep their numbers.
+pub const INT2DDS_FIELD_FLOAT128: i32 = 20;
 pub const INT2DDS_MEMBER_KEY: i32 = 1 << 0;
 pub const INT2DDS_MEMBER_OPTIONAL: i32 = 1 << 1;
 pub const INT2DDS_MEMBER_MUST_UNDERSTAND: i32 = 1 << 2;
@@ -471,8 +473,9 @@ impl Int2DdsTypeInfo {
                 false,
                 field.is_default(),
             );
+            // Member id 0 is the discriminator; branches are numbered from 1, as in derive.
             union_type.add_member(CompleteUnionMember::new(
-                index as u32,
+                index as u32 + 1,
                 member_flags,
                 field.type_id.clone(),
                 field.labels.clone(),
@@ -560,6 +563,7 @@ fn field_type_to_type_identifier(field_type: i32) -> Option<TypeIdentifier> {
         INT2DDS_FIELD_UINT64 => Some(TypeIdentifier::Uint64),
         INT2DDS_FIELD_FLOAT32 => Some(TypeIdentifier::Float32),
         INT2DDS_FIELD_FLOAT64 => Some(TypeIdentifier::Float64),
+        INT2DDS_FIELD_FLOAT128 => Some(TypeIdentifier::Float128),
         INT2DDS_FIELD_STRING => Some(TypeIdentifier::String8),
         INT2DDS_FIELD_WSTRING => Some(TypeIdentifier::String16),
         _ => None,
@@ -1954,7 +1958,8 @@ mod tests {
     }
 
     /// Fixed-array-of-struct @key (`Point[2]`). Element referenced by content-hash wrapped
-    /// in a plain-array id; key resolves to the raw 16-byte inline serialization.
+    /// in a plain-array id; the key holder is the array's collection DHEADER plus the
+    /// 16 inline bytes, so it exceeds 16 bytes and hashes (MD5) — must match derive.
     #[test]
     fn test_type_info_array_of_struct_key_matches_derive() {
         use int2dds::topic::type_support::{DdsType, TypeSupport};
@@ -2010,7 +2015,9 @@ mod tests {
         let handle = dts.compute_key(&dyn_data);
 
         assert_eq!(handle, oracle, "array-of-struct key must match derive oracle");
-        assert_eq!(*handle.value(), [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4]);
+        // Key holder (BE): DHEADER 16, then x1 y1 x2 y2.
+        let holder = [0u8, 0, 0, 16, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4];
+        assert_eq!(*handle.value(), md5::compute(holder).0);
     }
 
     /// Sequence-of-struct @key (`sequence<Point>`). Element referenced by content-hash

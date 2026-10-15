@@ -8,8 +8,8 @@ use crate::xtypes::{
     CollectionElementFlag, CompleteBitfield, CompleteBitflag, CompleteBitmaskType,
     CompleteBitsetType, CompleteEnumeratedLiteral, CompleteEnumeratedType, CompleteStructMember,
     CompleteStructType, CompleteTypeObject, CompleteUnionMember, CompleteUnionType,
-    EnumeratedLiteralFlag, EquivalenceHash, MemberFlag, PlainCollectionHeader, TryConstructKind,
-    TypeFlag, TypeIdentifier,
+    EnumeratedLiteralFlag, EquivalenceHash, MemberFlag, PlainCollectionHeader, TypeFlag,
+    TypeIdentifier,
 };
 
 use super::ast::{
@@ -289,8 +289,8 @@ fn rewrite_id(
 }
 
 fn enum_to_type_object(e: &XmlEnum) -> DdsResult<CompleteTypeObject> {
-    let mut enum_type =
-        CompleteEnumeratedType::new(TypeFlag::default(), e.name.clone(), e.bit_bound);
+    let flags = e.extensibility.map_or_else(TypeFlag::default, |k| TypeFlag::new(k, false, false));
+    let mut enum_type = CompleteEnumeratedType::new(flags, e.name.clone(), e.bit_bound);
     let values = enum_literal_values(e)?;
     for (lit, value) in e.literals.iter().zip(values) {
         let flags = if lit.is_default {
@@ -306,14 +306,24 @@ fn enum_to_type_object(e: &XmlEnum) -> DdsResult<CompleteTypeObject> {
 fn union_to_type_object(u: &XmlUnion) -> DdsResult<CompleteTypeObject> {
     let mut union_type = CompleteUnionType::new(
         TypeFlag::new(u.extensibility, false, false),
-        MemberFlag::default(),
+        MemberFlag::new(
+            u.discriminator_try_construct,
+            false,
+            false,
+            false,
+            u.discriminator_key,
+            false,
+        ),
         member_type_id(&u.discriminator),
         u.name.clone(),
     );
 
     let mut seen_names = HashSet::new();
     let mut seen_labels = HashSet::new();
-    for (index, case) in u.cases.iter().enumerate() {
+    let mut seen_ids = HashSet::new();
+    // Member id 0 is the discriminator; branches continue from the last id, starting at 1.
+    let mut next_id: u32 = 1;
+    for case in &u.cases {
         if !seen_names.insert(case.name.as_str()) {
             return Err(DdsError::Error(format!(
                 "XML types: union '{}': duplicate case member name '{}'",
@@ -339,11 +349,16 @@ fn union_to_type_object(u: &XmlUnion) -> DdsResult<CompleteTypeObject> {
             }
             labels.push(value);
         }
-        let member_id = u32::try_from(index).map_err(|_| {
-            DdsError::Error(format!("XML types: union '{}': case index overflows u32", u.name))
-        })?;
+        let member_id = case.id.unwrap_or(next_id);
+        if member_id == 0 || !seen_ids.insert(member_id) {
+            return Err(DdsError::Error(format!(
+                "XML types: union '{}': invalid or duplicate member id {member_id} (case '{}')",
+                u.name, case.name
+            )));
+        }
+        next_id = member_id + 1;
         let flags =
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, case.is_default);
+            MemberFlag::new(case.try_construct, false, false, false, false, case.is_default);
         union_type.add_member(CompleteUnionMember::new(
             member_id,
             flags,
@@ -831,11 +846,11 @@ mod tests {
         assert_eq!(u.discriminator.type_id, TypeIdentifier::Int16);
         assert_eq!(u.header.type_name, "U");
         assert_eq!(u.member_seq.len(), 2);
-        assert_eq!(u.member_seq[0].common.member_id, 0);
+        assert_eq!(u.member_seq[0].common.member_id, 1);
         assert_eq!(u.member_seq[0].common.label_seq, vec![0, 2]);
         assert_eq!(u.member_seq[0].common.member_type_id, TypeIdentifier::Uint32);
         assert!(!u.member_seq[0].common.member_flags.is_default());
-        assert_eq!(u.member_seq[1].common.member_id, 1);
+        assert_eq!(u.member_seq[1].common.member_id, 2);
         assert!(u.member_seq[1].common.label_seq.is_empty());
         assert!(u.member_seq[1].common.member_flags.is_default());
     }

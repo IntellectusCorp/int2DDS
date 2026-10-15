@@ -9,6 +9,7 @@
 //!    sequence/array elements (delegating to the core dynamic-type machinery)
 
 use int2dds::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
+use int2dds::serialize::Float128;
 use int2dds::xtypes::{
     deserialize_dynamic_data, CompleteStructType, CompleteTypeObject, DynamicData,
     DynamicTypeSupport, DynamicValue, ExtensibilityKind, FromDynamicValue, TypeIdentifier,
@@ -21,12 +22,12 @@ use std::sync::Arc;
 use crate::error::*;
 use crate::type_info::{
     INT2DDS_FIELD_ARRAY, INT2DDS_FIELD_BOOL, INT2DDS_FIELD_BYTE, INT2DDS_FIELD_CHAR16,
-    INT2DDS_FIELD_CHAR8, INT2DDS_FIELD_FLOAT32, INT2DDS_FIELD_FLOAT64, INT2DDS_FIELD_INT16,
-    INT2DDS_FIELD_INT32, INT2DDS_FIELD_INT64, INT2DDS_FIELD_INT8, INT2DDS_FIELD_MAP,
-    INT2DDS_FIELD_NESTED, INT2DDS_FIELD_SEQUENCE, INT2DDS_FIELD_STRING, INT2DDS_FIELD_UINT16,
-    INT2DDS_FIELD_UINT32, INT2DDS_FIELD_UINT64, INT2DDS_FIELD_UINT8, INT2DDS_FIELD_WSTRING,
-    INT2DDS_MEMBER_EXTERNAL, INT2DDS_MEMBER_KEY, INT2DDS_MEMBER_MUST_UNDERSTAND,
-    INT2DDS_MEMBER_OPTIONAL,
+    INT2DDS_FIELD_CHAR8, INT2DDS_FIELD_FLOAT128, INT2DDS_FIELD_FLOAT32, INT2DDS_FIELD_FLOAT64,
+    INT2DDS_FIELD_INT16, INT2DDS_FIELD_INT32, INT2DDS_FIELD_INT64, INT2DDS_FIELD_INT8,
+    INT2DDS_FIELD_MAP, INT2DDS_FIELD_NESTED, INT2DDS_FIELD_SEQUENCE, INT2DDS_FIELD_STRING,
+    INT2DDS_FIELD_UINT16, INT2DDS_FIELD_UINT32, INT2DDS_FIELD_UINT64, INT2DDS_FIELD_UINT8,
+    INT2DDS_FIELD_WSTRING, INT2DDS_MEMBER_EXTERNAL, INT2DDS_MEMBER_KEY,
+    INT2DDS_MEMBER_MUST_UNDERSTAND, INT2DDS_MEMBER_OPTIONAL,
 };
 use crate::types::{Int2DdsParticipant, Int2DdsSubscriber};
 
@@ -54,6 +55,7 @@ fn type_identifier_to_kind(id: &TypeIdentifier) -> Option<i32> {
         TypeIdentifier::Uint64 => INT2DDS_FIELD_UINT64,
         TypeIdentifier::Float32 => INT2DDS_FIELD_FLOAT32,
         TypeIdentifier::Float64 => INT2DDS_FIELD_FLOAT64,
+        TypeIdentifier::Float128 => INT2DDS_FIELD_FLOAT128,
         TypeIdentifier::String8 => INT2DDS_FIELD_STRING,
         TypeIdentifier::String8Small { .. } => INT2DDS_FIELD_STRING,
         TypeIdentifier::String8Large { .. } => INT2DDS_FIELD_STRING,
@@ -1347,6 +1349,109 @@ define_handle_setter!(int2dds_dynamic_data_set_i64, i64);
 define_handle_setter!(int2dds_dynamic_data_set_u64, u64);
 define_handle_setter!(int2dds_dynamic_data_set_f32, f32);
 define_handle_setter!(int2dds_dynamic_data_set_f64, f64);
+
+// float128 crosses the C ABI as 16 little-endian bytes behind a pointer: a by-value 128-bit
+// integer or 16-byte struct is passed differently by MSVC, P/Invoke, cffi and JNI.
+
+pub(crate) unsafe fn read_f128(bytes: *const u8) -> Float128 {
+    let mut b = [0u8; 16];
+    std::ptr::copy_nonoverlapping(bytes, b.as_mut_ptr(), 16);
+    Float128::from_bits(u128::from_le_bytes(b))
+}
+
+pub(crate) unsafe fn write_f128(out: *mut u8, value: Float128) {
+    std::ptr::copy_nonoverlapping(value.to_bits().to_le_bytes().as_ptr(), out, 16);
+}
+
+/// Read a float128 field from a sample buffer into `out` (16 bytes, little-endian binary128).
+///
+/// # Safety
+/// - `bytes` must point to at least `len` readable bytes
+/// - `type_obj` must be a valid TypeObject handle
+/// - `field_name` must be a valid null-terminated C string
+/// - `out` must point to 16 writable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_sample_get_f128(
+    bytes: *const u8,
+    len: usize,
+    type_obj: *const Int2DdsTypeObject,
+    field_name: *const c_char,
+    out: *mut u8,
+) -> Int2DdsRet {
+    check_null!(bytes);
+    check_null!(type_obj);
+    check_null!(field_name);
+    check_null!(out);
+    let slice = std::slice::from_raw_parts(bytes, len);
+    let name = match CStr::from_ptr(field_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    let data = match decode_flat(slice, &*type_obj) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match get_as::<Float128>(&data, name) {
+        Ok(v) => {
+            write_f128(out, v);
+            INT2DDS_RET_OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Read a float128 field into `out` (16 bytes, little-endian binary128).
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field_path` must be a valid null-terminated C string
+/// - `out` must point to 16 writable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_get_f128(
+    data: *const Int2DdsDynamicData,
+    field_path: *const c_char,
+    out: *mut u8,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field_path);
+    check_null!(out);
+    let path = match CStr::from_ptr(field_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    match get_as::<Float128>(&(*data).inner, path) {
+        Ok(v) => {
+            write_f128(out, v);
+            INT2DDS_RET_OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Set a top-level float128 field from `value` (16 bytes, little-endian binary128).
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field` must be a valid null-terminated C string
+/// - `value` must point to 16 readable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_set_f128(
+    data: *mut Int2DdsDynamicData,
+    field: *const c_char,
+    value: *const u8,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field);
+    check_null!(value);
+    let name = match CStr::from_ptr(field).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    match (*data).inner.set(name, read_f128(value)) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(_) => INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+    }
+}
 
 /// Set a char8 field (given as its byte value) on a top-level field.
 ///

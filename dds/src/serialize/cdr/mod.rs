@@ -5,7 +5,7 @@ pub mod serializer;
 pub mod xcdr1;
 pub mod xcdr2;
 
-use crate::serialize::core::{SerializationError, SerializationResult};
+use crate::serialize::core::{Float128, SerializationError, SerializationResult};
 
 // Re-export v1 (CDR) types
 pub use xcdr1::{CdrDeserializer, CdrSerializer, PlCdrMemberHeader};
@@ -212,6 +212,7 @@ crate::impl_primitive_serialization!(
         i64 => (serialize_i64, deserialize_i64),
         f32 => (serialize_f32, deserialize_f32),
         f64 => (serialize_f64, deserialize_f64),
+        Float128 => (serialize_f128, deserialize_f128),
         char => (serialize_char, deserialize_char)
     }
 );
@@ -312,6 +313,7 @@ crate::impl_primitive_serialization!(
         i64 => (serialize_i64, deserialize_i64),
         f32 => (serialize_f32, deserialize_f32),
         f64 => (serialize_f64, deserialize_f64),
+        Float128 => (serialize_f128, deserialize_f128),
         char => (serialize_char, deserialize_char)
     }
 );
@@ -328,12 +330,21 @@ impl XcdrDeserialize for String {
     }
 }
 
+// DDS-XTypes 7.4.3.5.3 (9)/(12): XCDR2 sequences and arrays of non-primitive
+// elements are framed by a DHEADER; primitive-element collections are not.
 impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        serializer.serialize_u32(self.len() as u32)?;
-        if T::IS_PRIMITIVE {
-            serializer.buffer_mut().reserve(self.len() * std::mem::size_of::<T>());
+        if !T::IS_PRIMITIVE {
+            return serializer.serialize_delimited(|s| {
+                s.serialize_u32(self.len() as u32)?;
+                for item in self {
+                    item.serialize_xcdr(s)?;
+                }
+                Ok(())
+            });
         }
+        serializer.serialize_u32(self.len() as u32)?;
+        serializer.buffer_mut().reserve(self.len() * std::mem::size_of::<T>());
         for item in self {
             item.serialize_xcdr(serializer)?;
         }
@@ -343,6 +354,9 @@ impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
 
 impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        if !T::IS_PRIMITIVE {
+            deserializer.read_dheader()?;
+        }
         let length = deserializer.deserialize_u32()? as usize;
         let capacity = deserializer.checked_capacity(length, 1)?;
         let mut result = Vec::with_capacity(capacity);
@@ -376,6 +390,14 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Option<T> {
 
 impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        if !T::IS_PRIMITIVE {
+            return serializer.serialize_delimited(|s| {
+                for item in self.iter() {
+                    item.serialize_xcdr(s)?;
+                }
+                Ok(())
+            });
+        }
         for item in self.iter() {
             item.serialize_xcdr(serializer)?;
         }
@@ -385,6 +407,9 @@ impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
 
 impl<T: XcdrDeserialize, const N: usize> XcdrDeserialize for [T; N] {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        if !T::IS_PRIMITIVE {
+            deserializer.read_dheader()?;
+        }
         let mut vec = Vec::with_capacity(N);
         for _ in 0..N {
             vec.push(T::deserialize_xcdr(deserializer)?);
@@ -659,12 +684,14 @@ impl XcdrDeserialize for WString {
 use crate::serialize::core::WChar;
 
 impl CdrSerialize for WChar {
+    const IS_PRIMITIVE: bool = true;
     fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
         serializer.serialize_wchar16(self.as_char())
     }
 }
 
 impl CdrDeserialize for WChar {
+    const IS_PRIMITIVE: bool = true;
     fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
         let c = deserializer.deserialize_wchar16()?;
         Ok(WChar::from(c))
@@ -672,12 +699,14 @@ impl CdrDeserialize for WChar {
 }
 
 impl XcdrSerialize for WChar {
+    const IS_PRIMITIVE: bool = true;
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
         serializer.serialize_wchar16(self.as_char())
     }
 }
 
 impl XcdrDeserialize for WChar {
+    const IS_PRIMITIVE: bool = true;
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         let c = deserializer.deserialize_wchar16()?;
         Ok(WChar::from(c))

@@ -280,10 +280,10 @@ mod tests {
                 .filter(|m| m.map(|m| m.kind) == Some(k))
                 .count()
         };
-        // 19 `*mut [u8; N]` out-parameters total: 3 are caller-sized arrays
-        // (each followed by a `capacity`), the other 16 are single fixed outs.
-        assert_eq!(count(Kind::ByteArrayOut), 16, "*mut [u8; N] single fixed out parameters");
-        assert_eq!(count(Kind::ByteArrayOutSized), 3, "*mut [u8; N] caller-sized array parameters");
+        // 23 `*mut [u8; N]` out-parameters total: 4 are caller-sized arrays
+        // (each followed by a `capacity`), the other 19 are single fixed outs.
+        assert_eq!(count(Kind::ByteArrayOut), 19, "*mut [u8; N] single fixed out parameters");
+        assert_eq!(count(Kind::ByteArrayOutSized), 4, "*mut [u8; N] caller-sized array parameters");
         assert!(count(Kind::ByteArrayIn) > 0, "*const [u8; N] in parameters");
     }
 

@@ -1,0 +1,27 @@
+name: 'Setup XTypes Test Environment'
+description: 'Downloads executables and dds-xtypes files and sets up the environment for XTypes interoperability tests'
+runs:
+  using: 'composite'
+  steps:
+    - name: Download executables
+      uses: actions/download-artifact@v4
+      with:
+        name: xtypes_executables
+        path: ./executables/
+    - name: Download dds-xtypes files
+      uses: actions/download-artifact@v4
+      with:
+        name: dds-xtypes-files
+        path: .
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11.4"
+    - name: Setting up environment
+      run: |
+        # The OpenDDS test application links against Xerces-C.
+        sudo apt-get update -qq
+        sudo apt-get install -y libxerces-c3.2t64 || sudo apt-get install -y libxerces-c3.2
+        python3 -m venv .venv
+        source .venv/bin/activate
+        pip install -r requirements.txt
+      shell: bash

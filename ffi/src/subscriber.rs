@@ -201,6 +201,103 @@ pub unsafe extern "C" fn int2dds_subscriber_get_instance_handle(
     INT2DDS_RET_OK
 }
 
+/// Begin a sample access block on a Subscriber.
+///
+/// Required before reading or calling `int2dds_subscriber_get_datareaders` under
+/// GROUP access scope. Has no effect under other access scopes. Calls may be nested.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_begin_access(
+    subscriber: *const Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+
+    ffi_try!((*subscriber).inner.begin_access());
+
+    INT2DDS_RET_OK
+}
+
+/// End the sample access block started by `int2dds_subscriber_begin_access`.
+///
+/// Returns PRECONDITION_NOT_MET under GROUP access scope without a matching begin call.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_end_access(
+    subscriber: *const Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+
+    ffi_try!((*subscriber).inner.end_access());
+
+    INT2DDS_RET_OK
+}
+
+/// Get the DataReaders of a Subscriber that hold samples matching the state masks.
+///
+/// Writes up to `capacity` reader instance handles into `handles_out`. A handle equals
+/// the bytes from `int2dds_datareader_get_guid`. `count_out` receives the total count
+/// (may be greater than `capacity`). Under GROUP access scope with ordered access the
+/// result is a list in sample order and a reader may appear more than once.
+/// A state mask of 0 selects "any".
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `handles_out` may be null to query only the count; otherwise it must point to
+///   `capacity` 16-byte handles
+/// - `count_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_get_datareaders(
+    subscriber: *const Int2DdsSubscriber,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    handles_out: *mut [u8; 16],
+    capacity: usize,
+    count_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(count_out);
+
+    let (sample_states, view_states, instance_states) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
+
+    let readers = ffi_try!((*subscriber).inner.get_datareaders(
+        &sample_states,
+        &view_states,
+        &instance_states
+    ));
+
+    *count_out = readers.len();
+    if !handles_out.is_null() {
+        let copy_count = std::cmp::min(readers.len(), capacity);
+        for (i, reader) in readers.iter().take(copy_count).enumerate() {
+            let handle = ffi_try!(reader.get_instance_handle());
+            *handles_out.add(i) = *handle.value();
+        }
+    }
+
+    INT2DDS_RET_OK
+}
+
+/// Invoke the on_data_available listener of every DataReader of a Subscriber.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_notify_datareaders(
+    subscriber: *const Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+
+    ffi_try!((*subscriber).inner.notify_datareaders());
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Subscriber
 ///
 /// # Safety
@@ -516,6 +613,26 @@ pub unsafe extern "C" fn int2dds_datareader_get_listener(
         *listener_out = std::mem::zeroed();
         INT2DDS_RET_OK
     }
+}
+
+/// Get the 16-byte instance handle of a DataReader.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_instance_handle(
+    reader: *const Int2DdsDataReader,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(handle_out);
+
+    let reader_ref = &*reader;
+    let handle = ffi_try!(reader_ref.inner.get_instance_handle());
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
 }
 
 /// Set QoS on a DataReader

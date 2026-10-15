@@ -144,7 +144,7 @@ namespace Int2Dds.Xtypes
         private const int BufferSize = 65536;
 
         private IntPtr _handle;
-        private readonly byte[] _buffer = new byte[BufferSize];
+        private byte[] _buffer = new byte[BufferSize];
         private bool _disposed;
 
         internal DynamicDataReader(Subscriber subscriber, DynamicTopic topic,
@@ -195,20 +195,29 @@ namespace Int2Dds.Xtypes
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            fixed (byte* pBuffer = _buffer)
+            while (true)
             {
-                int ret = NativeMethods.int2dds_datareader_take_serialized(
-                    _handle, pBuffer, (UIntPtr)_buffer.Length, out UIntPtr actualSize, out bool validData);
+                fixed (byte* pBuffer = _buffer)
+                {
+                    int ret = NativeMethods.int2dds_datareader_take_serialized(
+                        _handle, pBuffer, (UIntPtr)_buffer.Length, out UIntPtr actualSize, out bool validData);
 
-                if (ret == ReturnCode.NoData)
-                    return null;
-                ReturnCodeHelper.CheckReturn(ret);
-                if (!validData)
-                    return null;
+                    // The sample stays in the reader; retry with a buffer that fits it.
+                    if (ret == ReturnCode.BufferTooSmall)
+                    {
+                        _buffer = new byte[(int)actualSize];
+                        continue;
+                    }
+                    if (ret == ReturnCode.NoData)
+                        return null;
+                    ReturnCodeHelper.CheckReturn(ret);
+                    if (!validData)
+                        return null;
 
-                var result = new byte[(int)actualSize];
-                Buffer.BlockCopy(_buffer, 0, result, 0, (int)actualSize);
-                return result;
+                    var result = new byte[(int)actualSize];
+                    Buffer.BlockCopy(_buffer, 0, result, 0, (int)actualSize);
+                    return result;
+                }
             }
         }
 

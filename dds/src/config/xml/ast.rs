@@ -45,6 +45,8 @@ impl XmlTypeDecl {
 pub(crate) struct XmlEnum {
     pub(crate) name: String,
     pub(crate) bit_bound: u16,
+    // None when the attribute is absent.
+    pub(crate) extensibility: Option<ExtensibilityKind>,
     pub(crate) literals: Vec<XmlEnumLiteral>,
 }
 
@@ -66,6 +68,8 @@ pub(crate) struct XmlUnion {
     pub(crate) name: String,
     pub(crate) extensibility: ExtensibilityKind,
     pub(crate) discriminator: XmlMemberType,
+    pub(crate) discriminator_key: bool,
+    pub(crate) discriminator_try_construct: TryConstructKind,
     pub(crate) cases: Vec<XmlUnionCase>,
 }
 
@@ -73,6 +77,8 @@ pub(crate) struct XmlUnion {
 pub(crate) struct XmlUnionCase {
     pub(crate) name: String,
     pub(crate) ty: XmlMemberType,
+    pub(crate) id: Option<u32>,
+    pub(crate) try_construct: TryConstructKind,
     pub(crate) labels: Vec<XmlCaseLabel>,
     pub(crate) is_default: bool,
 }

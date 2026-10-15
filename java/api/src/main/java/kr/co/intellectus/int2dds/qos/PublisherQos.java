@@ -9,9 +9,19 @@ import java.util.Objects;
  */
 public class PublisherQos {
 
+    private Presentation presentation;
     private Partition partition;
+    private GroupData groupData;
 
     public PublisherQos() {}
+
+    public Presentation getPresentation() {
+        return presentation;
+    }
+
+    public void setPresentation(Presentation presentation) {
+        this.presentation = presentation;
+    }
 
     public Partition getPartition() {
         return partition;
@@ -19,6 +29,14 @@ public class PublisherQos {
 
     public void setPartition(Partition partition) {
         this.partition = partition;
+    }
+
+    public GroupData getGroupData() {
+        return groupData;
+    }
+
+    public void setGroupData(GroupData groupData) {
+        this.groupData = groupData;
     }
 
     @Override
@@ -30,16 +48,24 @@ public class PublisherQos {
             return false;
         }
         PublisherQos other = (PublisherQos) o;
-        return Objects.equals(partition, other.partition);
+        return Objects.equals(presentation, other.presentation)
+                && Objects.equals(partition, other.partition)
+                && Objects.equals(groupData, other.groupData);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(partition);
+        return Objects.hash(presentation, partition, groupData);
     }
 
     @Override
     public String toString() {
-        return "PublisherQos{partition=" + partition + "}";
+        return "PublisherQos{presentation="
+                + presentation
+                + ", partition="
+                + partition
+                + ", groupData="
+                + groupData
+                + "}";
     }
 }

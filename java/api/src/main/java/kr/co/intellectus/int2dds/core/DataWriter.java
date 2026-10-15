@@ -260,6 +260,15 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         return guid;
     }
 
+    /** This writer's own DDS instance handle. */
+    public InstanceHandle getInstanceHandle() {
+        byte[] h = new byte[16];
+        int rc = FfiAccess.datawriterGetInstanceHandle(handle(), h);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new InstanceHandle(h);
+    }
+
     /**
      * This writer's PUBLICATION_MATCHED status: how many DataReaders it has matched, and the change
      * since last read. Per DDS, reading this status clears its {@code *Change} fields.

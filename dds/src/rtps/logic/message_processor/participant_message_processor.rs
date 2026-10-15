@@ -76,6 +76,14 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         let participant = self.get_upgraded_participant()?;
 
         let participant_guid = spdp_discovered_participant_data.participant_guid();
+
+        if participant.is_participant_ignored(participant_guid.prefix()) {
+            debug!(
+                "Discarding DiscoveredParticipantData of ignored participant {}",
+                participant_guid
+            );
+            return Ok(());
+        }
         log::debug!(
             "Start handling DiscoveredParticipantData {} from {} / [{}]",
             participant_guid,
