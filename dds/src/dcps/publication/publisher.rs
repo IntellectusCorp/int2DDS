@@ -306,6 +306,11 @@ impl Publisher {
 
         let qos = self.resolve_datawriter_qos(qos.into());
 
+        if topic.get_participant()?.get_instance_handle()?
+            != self.get_participant()?.get_instance_handle()?
+        {
+            return Err(DdsError::BadParameter);
+        }
         let type_support = self.get_participant()?.find_typesupport(topic.get_type_name());
         if type_support.is_none() {
             return Err(DdsError::Error("Failed to create DataWriter: Topic does not belong to the same DomainParticipant as Publisher.".to_string()));
