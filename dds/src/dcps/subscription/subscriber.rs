@@ -304,13 +304,10 @@ impl Subscriber {
         let qos = self.resolve_datareader_qos(qos.into());
 
         self.check_topic_participant(topic_description)?;
-        let type_support =
-            self.get_participant()?.find_typesupport(topic_description.get_type_name());
-        if type_support.is_none() {
-            return Err(DdsError::Error("Failed to create DataReader: Topic does not belong to the same DomainParticipant as Subscriber.".to_string()));
-        }
-        let type_support =
-            type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+        let type_support = self
+            .get_participant()?
+            .find_typesupport(topic_description.get_type_name())
+            .ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
 
         self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
     }
