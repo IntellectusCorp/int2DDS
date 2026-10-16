@@ -12,6 +12,7 @@
 //! C users serialize data with IDL-generated code and pass CDR bytes
 //! directly via `int2dds_datawriter_write_serialized`.
 
+use int2dds::utils::notify::notify_user;
 use std::ffi::CStr;
 use std::sync::{Arc, RwLock};
 
@@ -408,14 +409,18 @@ unsafe fn attach_writer_listener(
     if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
         if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
             if status.current_count() > 0 {
-                listener_arc.on_publication_matched(&writer_handle.inner, &status);
+                notify_user("re-notify on_publication_matched", || {
+                    listener_arc.on_publication_matched(&writer_handle.inner, &status)
+                });
             }
         }
     }
     if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
         if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
             if status.total_count() > 0 {
-                listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
+                notify_user("re-notify on_offered_incompatible_qos", || {
+                    listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status)
+                });
             }
         }
     }
