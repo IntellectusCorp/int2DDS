@@ -39,7 +39,19 @@ public final class NativeLoader {
                 return;
             }
             doLoad();
-            nativeVersion = new String(FfiHandwritten.nativeVersion(), UTF8);
+            byte[] version;
+            try {
+                version = FfiHandwritten.nativeVersion();
+            } catch (UnsatisfiedLinkError e) {
+                // A library built from an older tree can carry the same version number but
+                // lack the entry point this JAR calls; say so instead of a bare link error.
+                throw new NativeLoadException(
+                        "int2dds_java does not match this JAR: it lacks the version entry point,"
+                                + " so it was built from an older source tree. Rebuild it with"
+                                + " 'cargo build --release -p int2dds-java'.",
+                        e);
+            }
+            nativeVersion = new String(version, UTF8);
             verifyVersion(jarVersion(), nativeVersion);
             loaded = true;
         }
@@ -105,41 +117,64 @@ public final class NativeLoader {
         }
 
         String fileName = libraryFileName(System.getProperty("os.name", "linux"));
-        String resource = "/native/" + platformDir() + "/" + fileName;
-        try (InputStream in = NativeLoader.class.getResourceAsStream(resource)) {
-            if (in != null) {
-                Path dir = Files.createTempDirectory("int2dds-native");
-                dir.toFile().deleteOnExit();
-                Path target = dir.resolve(fileName);
-                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-                target.toFile().deleteOnExit();
-                System.load(target.toAbsolutePath().toString());
-                return;
+        String platform = platformDir();
+        if (platform != null) {
+            String resource = "/native/" + platform + "/" + fileName;
+            try (InputStream in = NativeLoader.class.getResourceAsStream(resource)) {
+                if (in != null) {
+                    Path dir = Files.createTempDirectory("int2dds-native");
+                    dir.toFile().deleteOnExit();
+                    Path target = dir.resolve(fileName);
+                    Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+                    target.toFile().deleteOnExit();
+                    System.load(target.toAbsolutePath().toString());
+                    return;
+                }
+            } catch (IOException e) {
+                throw new NativeLoadException("failed to extract " + resource, e);
             }
-        } catch (IOException e) {
-            throw new NativeLoadException("failed to extract " + resource, e);
         }
 
         try {
             System.loadLibrary("int2dds_java");
         } catch (UnsatisfiedLinkError e) {
             throw new NativeLoadException(
-                    "could not load int2dds_java. Set INT2DDS_JAVA_LIB to the "
-                            + "absolute path of "
+                    "could not load int2dds_java. "
+                            + unbundledNote(platform)
+                            + "Set INT2DDS_JAVA_LIB to the absolute path of "
                             + fileName
                             + ", or put its directory on java.library.path.",
                     e);
         }
     }
 
+    /** {@code <os>-<arch>} of the bundled copy, or null when the JAR bundles none for this CPU. */
     private static String platformDir() {
         String os = System.getProperty("os.name", "linux").toLowerCase(Locale.ROOT);
-        String arch = System.getProperty("os.arch", "amd64").toLowerCase(Locale.ROOT);
         String o =
                 os.contains("win")
                         ? "windows"
                         : (os.contains("mac") || os.contains("darwin")) ? "macos" : "linux";
-        String a = (arch.contains("aarch64") || arch.contains("arm64")) ? "aarch64" : "x86_64";
-        return o + "-" + a;
+        String a = archDir(System.getProperty("os.arch", ""));
+        return (a == null) ? null : o + "-" + a;
+    }
+
+    private static String archDir(String osArch) {
+        String arch = osArch.toLowerCase(Locale.ROOT);
+        if (arch.equals("amd64") || arch.equals("x86_64")) {
+            return "x86_64";
+        }
+        if (arch.equals("aarch64") || arch.equals("arm64")) {
+            return "aarch64";
+        }
+        return null;
+    }
+
+    private static String unbundledNote(String platform) {
+        return (platform != null)
+                ? ""
+                : "This JAR bundles no native library for os.arch="
+                        + System.getProperty("os.arch")
+                        + ". ";
     }
 }

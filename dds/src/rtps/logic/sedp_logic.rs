@@ -38,7 +38,7 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
-                loopback_locators, Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4,
+                same_host_locators, Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4,
                 LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             parameters::ParameterList,
@@ -1308,7 +1308,7 @@ impl SedpLogic {
             return announced;
         }
 
-        let redirected = loopback_locators(&announced);
+        let redirected = same_host_locators(&announced, participant.same_host_ipv4_destination());
         debug!(
             "Redirected same-host endpoint locators of {} to [{}]",
             Guid::guid_prefix_to_string(&remote_prefix),

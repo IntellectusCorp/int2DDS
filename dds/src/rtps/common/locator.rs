@@ -281,10 +281,11 @@ pub(crate) fn is_same_host(from_addr: std::net::SocketAddr) -> bool {
     sender_ip.is_loopback() || host_addresses().contains(&sender_ip)
 }
 
-/// Every locator whose address this host owns, rewritten to loopback and the
-/// duplicates that collapses into removed. Such an address never reached the
-/// peer anyway, so the rest are left as announced and stay reachable.
-pub(crate) fn loopback_locators(locators: &[Locator]) -> Vec<Locator> {
+/// Every locator whose address this host owns, rewritten to one destination and
+/// the duplicates that collapses into removed: `ipv4_destination` for IPv4 and
+/// the IPv6 loopback otherwise. Such an address never reached the peer anyway,
+/// so the rest are left as announced and stay reachable.
+pub(crate) fn same_host_locators(locators: &[Locator], ipv4_destination: Ipv4Addr) -> Vec<Locator> {
     let host_addresses = host_addresses();
 
     let mut redirected: Vec<Locator> = Vec::with_capacity(locators.len());
@@ -302,10 +303,10 @@ pub(crate) fn loopback_locators(locators: &[Locator]) -> Vec<Locator> {
 
         let resolved = match locator.kind {
             LOCATOR_KIND_UDP_V4 if owned_by_this_host => {
-                Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, locator.port)
+                Locator::from_ip_v4_addr_and_port(&ipv4_destination, locator.port)
             }
             LOCATOR_KIND_TCP_V4 if owned_by_this_host => {
-                Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, locator.port)
+                Locator::from_tcp_v4(ipv4_destination, locator.port)
             }
             LOCATOR_KIND_UDP_V6 if owned_by_this_host => {
                 Locator::from_ip(std::net::Ipv6Addr::LOCALHOST, locator.port)
@@ -399,8 +400,30 @@ mod tests {
         ];
 
         assert_eq!(
-            loopback_locators(&announced),
+            same_host_locators(&announced, Ipv4Addr::LOCALHOST),
             vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 7410)]
+        );
+    }
+
+    #[test]
+    fn addresses_of_this_host_collapse_into_the_given_ipv4_destination() {
+        let Some(address) = interface_address_of_this_host() else {
+            return;
+        };
+        let announced = vec![
+            Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 7410),
+            Locator::from_ip_v4_addr_and_port(&address, 7410),
+            Locator::from_tcp_v4(address, 7410),
+            Locator::from_ip_v4_addr_and_port(&OFF_HOST_ADDRESS, 7410),
+        ];
+
+        assert_eq!(
+            same_host_locators(&announced, address),
+            vec![
+                Locator::from_ip_v4_addr_and_port(&address, 7410),
+                Locator::from_tcp_v4(address, 7410),
+                Locator::from_ip_v4_addr_and_port(&OFF_HOST_ADDRESS, 7410),
+            ]
         );
     }
 
@@ -416,7 +439,7 @@ mod tests {
         ];
 
         assert_eq!(
-            loopback_locators(&announced),
+            same_host_locators(&announced, Ipv4Addr::LOCALHOST),
             vec![
                 Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 7410),
                 Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, 7410),
@@ -431,7 +454,7 @@ mod tests {
             Locator::from_tcp_v4(OFF_HOST_ADDRESS, 7410),
         ];
 
-        assert_eq!(loopback_locators(&announced), announced);
+        assert_eq!(same_host_locators(&announced, Ipv4Addr::LOCALHOST), announced);
     }
 
     /// The point of narrowing one locator at a time: a peer wrongly taken for a
@@ -444,7 +467,7 @@ mod tests {
         ];
 
         assert_eq!(
-            loopback_locators(&announced),
+            same_host_locators(&announced, Ipv4Addr::LOCALHOST),
             vec![
                 Locator::from_ip_v4_addr_and_port(&OFF_HOST_ADDRESS, 7410),
                 Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 7410),
@@ -456,6 +479,6 @@ mod tests {
     fn a_locator_without_a_routable_address_is_left_alone() {
         let announced = vec![Locator::from_shm(&Ipv4Addr::LOCALHOST, 7410)];
 
-        assert_eq!(loopback_locators(&announced), announced);
+        assert_eq!(same_host_locators(&announced, Ipv4Addr::LOCALHOST), announced);
     }
 }

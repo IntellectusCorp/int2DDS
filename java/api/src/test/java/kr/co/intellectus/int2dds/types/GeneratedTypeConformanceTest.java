@@ -28,7 +28,7 @@ import org.junit.jupiter.api.Test;
  * and asserts the field values it decodes.
  *
  * <p>Every other {@code codegen::java} test is a string snapshot against a literal the same author
- * wrote, and {@code java/scripts/check-idl-java.sh} only compiles the output. Neither can see a
+ * wrote, and {@code .github/scripts/ci/check-idl-java.sh} only compiles the output. Neither can see a
  * wire-format mistake, and neither can a round trip through our own reader: writer and reader share
  * the mapping, so they agree even when both are wrong. This test cannot, because the decoder on the
  * other side is the core the interoperability workflow validates against other vendors.

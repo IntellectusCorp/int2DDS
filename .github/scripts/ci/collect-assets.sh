@@ -9,7 +9,7 @@ version="${1:?usage: collect-assets.sh <version> <artifact_root> <out_dir>}"
 artifact_root="${2:?}"
 out_dir="${3:?}"
 
-# nupkg/snupkg/wheel/sdist filenames use the base version (prerelease suffix
+# nupkg/snupkg/wheel/sdist/jar filenames use the base version (prerelease suffix
 # stripped) — the same value check-version.sh enforces on the source version
 # fields. dotnet-libs.zip and the 13 native archives use the full tag version.
 base_version="${version%%-*}"
@@ -20,13 +20,14 @@ mkdir -p "$out_dir"
 # Artifacts arrive as <artifact_root>/<artifact-name>/<file>.
 # int2dds-ffi-*.tar.gz is the vendor tarball built by the ffi-vendor job. It
 # goes to a different repository's releases, not this one's, so it must not land
-# here -- it would be a 25th file and trip the count check below.
+# here -- it would be a 26th file and trip the count check below.
 find "$artifact_root" -type f \
-  \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.nupkg' -o -name '*.snupkg' -o -name '*.whl' \) \
+  \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.nupkg' -o -name '*.snupkg' -o -name '*.whl' \
+     -o -name '*.jar' \) \
   -not -name 'int2dds-ffi-*' \
   -exec cp {} "$out_dir/" \;
 
-expected=24
+expected=25
 actual="$(find "$out_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')"
 if [[ "$actual" -ne "$expected" ]]; then
   echo "ERROR: expected $expected release archives, found $actual" >&2
@@ -50,9 +51,9 @@ for dist in windows-x86_64 windows-i686 windows-aarch64 windows-x86_64-gnu; do
   fi
 done
 
-# Screening the remaining 11 (3 C# + 8 Python) by total count alone would let a
-# wrong filename (e.g. base/full version confusion) pass, because the count is
-# still 24. Check these 11 by exact name too.
+# Screening the remaining 12 (3 C# + 8 Python + 1 Java) by total count alone would
+# let a wrong filename (e.g. base/full version confusion) pass, because the count
+# is still 25. Check these 12 by exact name too.
 for f in "Int2Dds.$base_version.nupkg" \
          "Int2Dds.$base_version.snupkg" \
          "Int2Dds-$version-dotnet-libs.zip"; do
@@ -76,8 +77,13 @@ if [[ ! -f "$out_dir/int2dds-$base_version.tar.gz" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$out_dir/int2dds-api-$base_version.jar" ]]; then
+  echo "ERROR: missing Java JAR int2dds-api-$base_version.jar" >&2
+  exit 1
+fi
+
 ( cd "$out_dir" && sha256sum ./* > SHA256SUMS )
 
 echo "== release assets =="
 ls -1 "$out_dir"
-echo "total: $(find "$out_dir" -maxdepth 1 -type f | wc -l | tr -d ' ') files (24 archives + SHA256SUMS)"
+echo "total: $(find "$out_dir" -maxdepth 1 -type f | wc -l | tr -d ' ') files (25 archives + SHA256SUMS)"

@@ -296,10 +296,11 @@ cd java
 ./gradlew test
 ```
 
-The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variable → bundled JAR resources → `java.library.path`. Gradle's test and example tasks point `INT2DDS_JAVA_LIB` at `target/release/` for you; set it by hand only when running outside Gradle:
+JDK 8–21 use the JNI library `int2dds_java`; JDK 22+ use FFM against the plain C ABI library `int2dds_ffi`, with no JNI involved. Build both with `cargo build --release -p int2dds-java -p int2dds-ffi`. The native loader looks in this order: an environment variable → bundled JAR resources → `java.library.path`. The variable is `INT2DDS_JAVA_LIB` on JDK 8–21 and `INT2DDS_FFI_PATH` (the library or its directory, shared with C# and Python) on JDK 22+. Gradle's test and example tasks point both at `target/release/` for you; set them by hand only when running outside Gradle:
 
 ```bash
-export INT2DDS_JAVA_LIB=/abs/path/to/target/release/libint2dds_java.so
+export INT2DDS_JAVA_LIB=/abs/path/to/target/release/libint2dds_java.so   # JDK 8-21
+export INT2DDS_FFI_PATH=/abs/path/to/target/release/libint2dds_ffi.so    # JDK 22+
 ```
 
 See [java/README.md](java/README.md) for the full guide.
