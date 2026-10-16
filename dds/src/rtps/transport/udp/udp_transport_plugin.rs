@@ -29,6 +29,8 @@ pub(crate) struct UdpTransportPlugin {
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
     user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
+    discovery_unicast_port: u16,
+    user_unicast_port: u16,
 
     // Captured before the unicast listeners are taken (see advertised_receive_buffer_size).
     advertised_receive_buffer_size: Option<usize>,
@@ -66,7 +68,7 @@ impl UdpTransportPlugin {
 
             match UdpListener::new(disc_port) {
                 Ok(disc_listener) => match UdpListener::new(user_port) {
-                    Ok(user_listener) => break (Some(disc_listener), Some(user_listener)),
+                    Ok(user_listener) => break (disc_listener, user_listener),
                     Err(_) => {
                         log::info!(
                             "[UdpTransportPlugin] User port {} in use, closing discovery and trying participant_id {}",
@@ -88,14 +90,14 @@ impl UdpTransportPlugin {
                 }
             }
         };
+        let discovery_unicast_port = discovery_uc.port();
+        let user_unicast_port = user_uc.port();
 
         // The two unicast sockets are bound moments apart under the same sysctl,
         // so they normally agree; take the minimum in case a port-conflict retry
         // left them different.
-        let advertised_receive_buffer_size = [&discovery_uc, &user_uc]
-            .into_iter()
-            .filter_map(|listener| listener.as_ref().and_then(UdpListener::recv_buffer_size))
-            .min();
+        let advertised_receive_buffer_size =
+            [&discovery_uc, &user_uc].into_iter().filter_map(UdpListener::recv_buffer_size).min();
 
         Ok(Self {
             sender,
@@ -103,9 +105,11 @@ impl UdpTransportPlugin {
             participant_id,
             working_ips,
             discovery_multicast_listener: Mutex::new(discovery_mc),
-            discovery_unicast_listener: Mutex::new(discovery_uc),
+            discovery_unicast_listener: Mutex::new(Some(discovery_uc)),
             user_multicast_listener: Mutex::new(user_mc),
-            user_unicast_listener: Mutex::new(user_uc),
+            user_unicast_listener: Mutex::new(Some(user_uc)),
+            discovery_unicast_port,
+            user_unicast_port,
             advertised_receive_buffer_size,
         })
     }
@@ -180,16 +184,11 @@ impl TransportPlugin for UdpTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        let port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id)
-                as u32;
-        self.udp_locators(port)
+        self.udp_locators(self.discovery_unicast_port as u32)
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        let port =
-            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
-        self.udp_locators(port)
+        self.udp_locators(self.user_unicast_port as u32)
     }
 
     fn advertised_receive_buffer_size(&self) -> Option<usize> {

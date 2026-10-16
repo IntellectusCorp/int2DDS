@@ -38,6 +38,7 @@ impl Drop for UdpListener {
 impl UdpListener {
     pub(crate) fn new(port: u16) -> std::io::Result<Self> {
         let recv_buffer_size;
+        let bound_port;
         let socket = {
             let saddr: SocketAddr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
 
@@ -47,6 +48,9 @@ impl UdpListener {
 
             let sock_addr = SockAddr::from(saddr);
             socket2.bind(&sock_addr)?;
+
+            // Port the OS bound, which differs from the requested port when it is 0.
+            bound_port = socket2.local_addr()?.as_socket().map_or(port, |addr| addr.port());
             socket2.set_nonblocking(true)?;
 
             let std_socket: StdUdpSocket = socket2.into();
@@ -55,7 +59,12 @@ impl UdpListener {
             mio::net::UdpSocket::from_std(std_socket)
         };
 
-        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena(), recv_buffer_size })
+        Ok(Self {
+            socket: Some(socket),
+            port: bound_port,
+            recv_arena: new_recv_arena(),
+            recv_buffer_size,
+        })
     }
 
     pub(crate) fn port(&self) -> u16 {
@@ -259,5 +268,14 @@ mod tests {
         let expected = probe.recv_buffer_size().unwrap();
 
         assert_eq!(granted, expected);
+    }
+
+    #[test]
+    fn port_reports_the_os_assigned_port_for_port_zero() {
+        let listener = UdpListener::new(0).expect("bind ephemeral port");
+        let bound_port = listener.socket.as_ref().unwrap().local_addr().unwrap().port();
+
+        assert_ne!(listener.port(), 0);
+        assert_eq!(listener.port(), bound_port);
     }
 }

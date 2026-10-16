@@ -42,6 +42,8 @@ pub(crate) struct ShmTransportPlugin {
     user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
     shm_listener: Mutex<Option<ShmListener>>,
+    discovery_unicast_port: u16,
+    user_unicast_port: u16,
 }
 
 impl ShmTransportPlugin {
@@ -71,7 +73,7 @@ impl ShmTransportPlugin {
             let user_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
             match UdpListener::new(disc_port) {
                 Ok(disc_listener) => match UdpListener::new(user_port) {
-                    Ok(user_listener) => break (Some(disc_listener), Some(user_listener)),
+                    Ok(user_listener) => break (disc_listener, user_listener),
                     Err(_) => {
                         log::info!(
                             "[ShmTransportPlugin] User port {} in use, closing discovery and trying participant_id {}",
@@ -93,6 +95,8 @@ impl ShmTransportPlugin {
                 }
             }
         };
+        let discovery_unicast_port = discovery_uc.port();
+        let user_unicast_port = user_uc.port();
         let shm_listener = ShmListener::new(domain_id).ok();
 
         info!(
@@ -109,10 +113,12 @@ impl ShmTransportPlugin {
             participant_id,
             working_ips,
             discovery_multicast_listener: Mutex::new(discovery_mc),
-            discovery_unicast_listener: Mutex::new(discovery_uc),
+            discovery_unicast_listener: Mutex::new(Some(discovery_uc)),
             user_multicast_listener: Mutex::new(user_mc),
-            user_unicast_listener: Mutex::new(user_uc),
+            user_unicast_listener: Mutex::new(Some(user_uc)),
             shm_listener: Mutex::new(shm_listener),
+            discovery_unicast_port,
+            user_unicast_port,
         })
     }
 
@@ -195,10 +201,7 @@ impl TransportPlugin for ShmTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        let port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id)
-                as u32;
-        self.udp_locators(port)
+        self.udp_locators(self.discovery_unicast_port as u32)
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
@@ -206,8 +209,7 @@ impl TransportPlugin for ShmTransportPlugin {
         // advertised IP (env override or each working_ip), emit an SHM
         // locator and a UDP locator at user_port — SHM first so peers'
         // SHM > UDP priority filter picks SHM when reachable.
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
+        let user_port = self.user_unicast_port as u32;
         let mut locators = Vec::new();
         for ip in self.advertised_ips() {
             locators.push(Locator::from_shm(&ip, user_port));
