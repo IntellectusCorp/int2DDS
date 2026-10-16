@@ -52,8 +52,8 @@ impl UdpTransportPlugin {
         // Create multicast listeners (shared ports, no conflict)
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
         let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let user_mc = UdpListener::new_multicast(user_mc_port, &working_ips).ok();
+        let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
+        let user_mc = Some(UdpListener::new_multicast(user_mc_port, &working_ips)?);
 
         // Create unicast listeners — both discovery_uc and user_uc must bind at
         // the same participant_id (matches develop's Socket contract). If either

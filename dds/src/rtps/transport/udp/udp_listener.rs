@@ -103,7 +103,9 @@ impl UdpListener {
 
         let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
         let sock_addr = SockAddr::from(addr);
-        socket.bind(&sock_addr)?;
+        socket.bind(&sock_addr).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("bind multicast port {}: {}", port, e))
+        })?;
         socket.set_nonblocking(true)?;
 
         let socket = mio::net::UdpSocket::from_std(socket.into());
