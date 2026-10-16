@@ -335,6 +335,14 @@ impl WriterProxy {
         &self.unicast_locator_list
     }
 
+    /// Moves the cursor over the settled run that starts at it and stops at the first sequence
+    /// number the writer still owes. "Settled" is the ACKNACK base's rule (`is_settled`), but the
+    /// walk starts at the cursor rather than at the oldest entry, so a number lost before any
+    /// heartbeat named it stays owed.
+    pub(crate) fn advance_expected_sn_over_settled(&mut self) {
+        self.expected_sn = self.first_unsettled_from(self.expected_sn);
+    }
+
     pub(crate) fn increment_expected_sn(&mut self) {
         self.expected_sn += 1;
     }
@@ -527,26 +535,33 @@ impl WriterProxy {
             return SequenceNumber::new(0, 1);
         };
 
-        let mut base = *first_seq_num;
-        for (seq_num, change) in self.changes_from_writer.iter() {
-            if *seq_num != base {
-                return base;
-            }
-            let settled = match change.status {
-                ChangeFromWriterStatusKind::Received => {
-                    change.fragment_info.as_ref().map(|info| info.is_complete).unwrap_or(true)
-                }
-                ChangeFromWriterStatusKind::NotAvailable(NotAvailable::Removed) => true,
-                _ => false,
-            };
+        self.first_unsettled_from(*first_seq_num)
+    }
 
-            if !settled {
-                return *seq_num;
+    /// Whether the writer owes nothing more for `change`: it arrived whole, or the writer declared
+    /// it removed. A change stamped `Received` on its first fragment is not settled until the rest
+    /// arrive.
+    fn is_settled(change: &ChangeFromWriter) -> bool {
+        match change.status {
+            ChangeFromWriterStatusKind::Received => {
+                change.fragment_info.as_ref().map(|info| info.is_complete).unwrap_or(true)
             }
-            base = seq_num.next();
+            ChangeFromWriterStatusKind::NotAvailable(NotAvailable::Removed) => true,
+            _ => false,
         }
+    }
 
-        base
+    /// The first sequence number at or after `start` that is not settled. A sequence number the
+    /// ledger has no entry for is not settled either.
+    fn first_unsettled_from(&self, start: SequenceNumber) -> SequenceNumber {
+        let mut next = start;
+        for (seq_num, change) in self.changes_from_writer.range(start..) {
+            if *seq_num != next || !Self::is_settled(change) {
+                return next;
+            }
+            next = seq_num.next();
+        }
+        next
     }
 
     pub(crate) fn mark_frag_received(
@@ -1059,6 +1074,23 @@ mod tests {
 
         assert_eq!(base.to_i64(), 6);
         assert_eq!(missing.iter().map(|sn| sn.to_i64()).collect::<Vec<_>>(), vec![6]);
+    }
+
+    /// The cursor and the ACKNACK base read "settled" the same way: a sample whose first
+    /// fragment arrived before any heartbeat is stamped `Received` but is still short of
+    /// fragments, and it stops both of them.
+    #[test]
+    fn the_cursor_and_the_acknack_base_stop_at_the_same_sequence_number() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::from_i64(1));
+        proxy.mark_change_received(SequenceNumber::from_i64(1), None);
+        proxy.mark_frag_received(SequenceNumber::from_i64(2), 2, [1]);
+        proxy.mark_change_received(SequenceNumber::from_i64(3), None);
+
+        proxy.advance_expected_sn_over_settled();
+
+        assert_eq!(proxy.calculate_bitmap_base(), SequenceNumber::from_i64(2));
+        assert_eq!(proxy.expected_sn(), proxy.calculate_bitmap_base());
     }
 
     /// A HEARTBEAT_FRAG arriving first seeds a total from `lastFragmentNum`; only the DATA_FRAGs

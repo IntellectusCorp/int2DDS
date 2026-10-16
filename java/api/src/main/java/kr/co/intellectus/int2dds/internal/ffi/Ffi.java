@@ -514,6 +514,7 @@ public final class Ffi {
     static native int int2dds_type_object_member_count(long t, long out);
     static native int int2dds_type_object_member_info(long t, int index, long out);
     static native int int2dds_type_object_member_name(long t, int index, byte[] buf, long buf_len, long out_len);
+    static native int int2dds_version(byte[] buf, int buf_len);
     static native int int2dds_waitset_attach_guardcondition(long waitset, long condition);
     static native int int2dds_waitset_attach_readcondition(long waitset, long condition);
     static native int int2dds_waitset_attach_statuscondition(long waitset, long condition);

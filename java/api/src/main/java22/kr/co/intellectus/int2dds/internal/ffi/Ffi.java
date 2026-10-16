@@ -3,7 +3,6 @@
 // DO NOT EDIT — regenerate instead. CI fails on drift.
 package kr.co.intellectus.int2dds.internal.ffi;
 
-import kr.co.intellectus.int2dds.internal.NativeLoader;
 import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
 import static java.lang.foreign.ValueLayout.*;
@@ -11,23 +10,19 @@ import static java.lang.foreign.ValueLayout.*;
 /**
  * FFM (Project Panama) downcalls into the int2DDS C ABI. This is the
  * JDK 22+ backend of {@code Ffi}, selected over the JNI backend by the
- * Multi-Release JAR on a new enough runtime. Entity handles are {@code
- * long} addresses, the same convention as the JNI backend; C strings
- * are UTF-8 {@code byte[]}, never {@code String}.
+ * Multi-Release JAR on a new enough runtime. It binds the plain C ABI
+ * library {@code int2dds_ffi} and never touches JNI. Entity handles are
+ * {@code long} addresses, the same convention as the JNI backend; C
+ * strings are UTF-8 {@code byte[]}, never {@code String}.
  */
 public final class Ffi {
     private Ffi() {}
 
-    // NativeLoader.load() must run before LOOKUP is built below: it
-    // System.loads libint2dds_java.so into this classloader, which is
-    // what the lookup built just under it then reflects. Static
-    // initializers run in textual order, so this block stays first.
-    static {
-        NativeLoader.load();
-    }
-
+    // FfmLibrary hands over the int2dds_ffi that NativeLoader opened through
+    // FFM (and version-checked) on first use. Every handle below resolves
+    // against that lookup, never against the class loader's JNI libraries.
     private static final Linker LINKER = Linker.nativeLinker();
-    private static final SymbolLookup LOOKUP = SymbolLookup.loaderLookup();
+    private static final SymbolLookup LOOKUP = FfmLibrary.LOOKUP;
 
     private static MethodHandle dc(String name, FunctionDescriptor d) {
         return LINKER.downcallHandle(LOOKUP.find(name).orElseThrow(
@@ -5501,6 +5496,19 @@ public final class Ffi {
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_type_object_member_name", __ffi_thrown);
+        }
+    }
+
+    private static final MethodHandle MH_int2dds_version = dc("int2dds_version", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
+
+    static int int2dds_version(byte[] buf, int buf_len) {
+        try (Arena __ffi_arena = Arena.ofConfined()) {
+            MemorySegment __ffi_seg_buf = (buf == null) ? MemorySegment.NULL : __ffi_arena.allocate(buf.length);
+            int __ffi_ret = (int) MH_int2dds_version.invokeExact(__ffi_seg_buf, buf_len);
+            if (buf != null) MemorySegment.copy(__ffi_seg_buf, JAVA_BYTE, 0, buf, 0, buf.length);
+            return __ffi_ret;
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_version", __ffi_thrown);
         }
     }
 

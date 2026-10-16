@@ -6025,6 +6025,19 @@ Int2DdsRet int2dds_type_info_to_type_object(const struct Int2DdsTypeInfo *type_i
 void int2dds_type_info_destroy(struct Int2DdsTypeInfo *type_info);
 
 /**
+ * Copy the library's product version (UTF-8, NUL-terminated, e.g. `"0.1.3"`)
+ * into `buf`. Returns the version's full byte length, excluding the NUL.
+ *
+ * Same buffer contract as `int2dds_last_error_message`: `buf` null or
+ * `buf_len <= 0` is query mode and writes nothing; a too-small buffer is
+ * truncated and still returns the full length.
+ *
+ * # Safety
+ * `buf` must be null or point to at least `buf_len` writable bytes.
+ */
+int32_t int2dds_version(char *buf, int32_t buf_len);
+
+/**
  * Create a new WaitSet
  *
  * # Safety
