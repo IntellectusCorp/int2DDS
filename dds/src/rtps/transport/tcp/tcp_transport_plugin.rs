@@ -708,11 +708,35 @@ mod tests {
     const BUILTIN_WRITER: u8 = 0xC2;
     const USER_WRITER: u8 = 0x02;
 
-    /// Keep domain IDs unique across tests to avoid port collisions when
-    /// the test suite runs in parallel.
+    /// The last domain whose whole TCP port block stays below 32768, where the
+    /// ephemeral port range of every supported OS starts at the earliest.
+    const LAST_TEST_DOMAIN: u32 = 100;
+
+    /// Hands consecutive tests different domains, so parallel runs never share a
+    /// port block.
     fn next_test_domain() -> u32 {
-        static NEXT: AtomicU32 = AtomicU32::new(900);
-        NEXT.fetch_add(1, Ordering::SeqCst)
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        NEXT.fetch_add(1, Ordering::SeqCst) % (LAST_TEST_DOMAIN + 1)
+    }
+
+    /// A test port inside the ephemeral range can already be held by an outgoing
+    /// connection on the CI runner, which pushes a scanning participant to the next slot.
+    #[test]
+    fn a_test_domain_keeps_its_tcp_ports_below_the_ephemeral_range() {
+        const EPHEMERAL_RANGE_START: u32 = 32768;
+        let port = |domain, participant_id| {
+            u32::from(PortManager::get_tcp_physical_port(domain, participant_id))
+        };
+        let base = port(0, 0);
+        let domain = next_test_domain();
+        let last_port = base
+            + (port(1, 0) - base) * domain
+            + (port(0, 1) - base) * PortManager::MAX_TCP_PARTICIPANT_ID;
+
+        assert!(
+            last_port < EPHEMERAL_RANGE_START,
+            "domain {domain} reaches TCP port {last_port}, inside the ephemeral range"
+        );
     }
 
     fn make_plugin(domain: u32) -> TcpTransportPlugin {
