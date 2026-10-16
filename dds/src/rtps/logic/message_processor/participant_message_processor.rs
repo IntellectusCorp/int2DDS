@@ -96,12 +96,6 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                 .join(", ")
         );
 
-        // Start monitoring liveliness for the discovered participant
-        self.register_remote_participant_liveliness(
-            &spdp_discovered_participant_data.participant_guid(),
-            spdp_discovered_participant_data.lease_duration().into(),
-        )?;
-
         // Check domain ID match
         if participant.domain_id() != spdp_discovered_participant_data.domain_id() {
             log::trace!(
@@ -111,6 +105,12 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             );
             return Ok(());
         }
+
+        // Start monitoring liveliness for the discovered participant
+        self.register_remote_participant_liveliness(
+            &spdp_discovered_participant_data.participant_guid(),
+            spdp_discovered_participant_data.lease_duration().into(),
+        )?;
 
         // Check if this participant data already exists
         let is_exist = participant.remote_participant_proxy_datas().lock().is_ok_and(
