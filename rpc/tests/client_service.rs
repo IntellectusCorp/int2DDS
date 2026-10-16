@@ -66,7 +66,7 @@ impl RequestHandler<AddCall, AddReturn> for UnsupportedHandler {
     }
 }
 
-static DOMAIN_ID: AtomicI32 = AtomicI32::new(300);
+static DOMAIN_ID: AtomicI32 = AtomicI32::new(180);
 
 fn next_domain_id() -> i32 {
     DOMAIN_ID.fetch_add(1, Ordering::SeqCst)

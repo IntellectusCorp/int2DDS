@@ -193,7 +193,7 @@ mod tests {
 
     fn test_participant() -> DomainParticipant {
         use std::sync::atomic::{AtomicI32, Ordering};
-        static DOMAIN_ID: AtomicI32 = AtomicI32::new(300);
+        static DOMAIN_ID: AtomicI32 = AtomicI32::new(160);
         let factory = DomainParticipantFactory::get_instance();
         factory
             .create_participant(

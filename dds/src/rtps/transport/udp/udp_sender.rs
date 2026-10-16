@@ -80,7 +80,7 @@ impl UdpSender {
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
-        let port = PortManager::get_discovery_traffic_multicast_port(domain_id);
+        let port = PortManager::calculate_discovery_traffic_multicast_port(domain_id)?;
         let multicast_target: SocketAddr = SocketAddr::new(IpAddr::V4(MULTICAST_IP), port);
         let sock_addr = SockAddr::from(multicast_target);
 

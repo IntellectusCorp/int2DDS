@@ -96,9 +96,12 @@ impl KeyedDataType {
 
 static DOMAIN_ID: AtomicI32 = AtomicI32::new(0);
 
+// Highest domain id whose default ports stay within 65535
+const LAST_DOMAIN_ID: i32 = 232;
+
 pub fn next_domain_id() -> i32 {
     let base = (std::process::id() % 200) as i32;
-    base + DOMAIN_ID.fetch_add(1, Ordering::SeqCst)
+    (base + DOMAIN_ID.fetch_add(1, Ordering::SeqCst)) % (LAST_DOMAIN_ID + 1)
 }
 
 pub fn create_datareader(

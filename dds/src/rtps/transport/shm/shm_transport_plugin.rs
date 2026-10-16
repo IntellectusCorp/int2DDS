@@ -59,8 +59,8 @@ impl ShmTransportPlugin {
         let shm_sender = ShmSender::new(domain_id)?;
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).
-        let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
+        let discovery_mc_port = PortManager::calculate_discovery_traffic_multicast_port(domain_id)?;
+        let user_mc_port = PortManager::calculate_user_traffic_multicast_port(domain_id)?;
         let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
         let user_mc = Some(UdpListener::new_multicast(user_mc_port, &working_ips)?);
 
@@ -69,8 +69,9 @@ impl ShmTransportPlugin {
         // partial bind, increment participant_id, and retry.
         let (discovery_uc, user_uc) = loop {
             let disc_port =
-                PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
-            let user_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
+                PortManager::calculate_discovery_traffic_unicast_port(domain_id, participant_id)?;
+            let user_port =
+                PortManager::calculate_user_traffic_unicast_port(domain_id, participant_id)?;
             match UdpListener::new(disc_port) {
                 Ok(disc_listener) => match UdpListener::new(user_port) {
                     Ok(user_listener) => break (disc_listener, user_listener),

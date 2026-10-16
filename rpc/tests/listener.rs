@@ -33,7 +33,7 @@ struct AddResponse {
     result: i32,
 }
 
-static DOMAIN_ID: AtomicI32 = AtomicI32::new(400);
+static DOMAIN_ID: AtomicI32 = AtomicI32::new(200);
 
 fn next_domain_id() -> i32 {
     DOMAIN_ID.fetch_add(1, Ordering::SeqCst)

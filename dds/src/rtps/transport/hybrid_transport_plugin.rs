@@ -53,7 +53,7 @@ impl HybridTransportPlugin {
         let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, hybrid_config.udp)?;
 
         // Multicast first (domain-wide port, no per-participant collision).
-        let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
+        let discovery_mc_port = PortManager::calculate_discovery_traffic_multicast_port(domain_id)?;
         let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
 
         // Create TCP plugin (handles its own mux listener thread). The TCP listen
