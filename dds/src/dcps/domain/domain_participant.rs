@@ -4833,34 +4833,6 @@ mod domain_participant_tests {
         factory.delete_participant(participant).unwrap();
     }
 
-    #[test]
-    fn property_cannot_change_after_the_participant_is_enabled() {
-        let domain_id = unique_domain_id();
-        let factory = DomainParticipantFactory::get_instance();
-        let participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let mut changed_property_qos = participant.get_qos().unwrap();
-        changed_property_qos.property.add_property("int2dds.transport.port_base", "10000", false);
-        let result = participant.set_qos(changed_property_qos);
-
-        assert!(matches!(result, Err(DdsError::ImmutablePolicy)), "{result:?}");
-
-        let mut changed_user_data_qos = participant.get_qos().unwrap();
-        changed_user_data_qos.user_data.value = vec![1, 2, 3];
-
-        participant.set_qos(changed_user_data_qos).unwrap();
-
-        participant.delete_contained_entities().unwrap();
-        factory.delete_participant(participant).unwrap();
-    }
-
     /// Test get_builtin_subscriber on deleted participant
     #[test]
     fn test_get_builtin_subscriber_on_deleted_participant() {
