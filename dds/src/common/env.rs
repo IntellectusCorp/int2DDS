@@ -61,8 +61,6 @@ pub fn init_from_env() {
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
 
     // - INT2DDS_EXTERNAL_ADDRESS: Public IPv4 advertised in SPDP for NAT/WAN traversal. Sockets still bind to local NICs.
-    // - INT2DDS_META_PORT: Pinned metatraffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
-    // - INT2DDS_USER_PORT: Pinned user-traffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
 
     // - TCP transport is configured per-participant via the
     //   int2dds.transport.TCPv4.* QoS properties (see dcps::infrastructure::qos_policy),
@@ -655,27 +653,6 @@ pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
                 raw,
                 e
             );
-            None
-        }
-    }
-}
-
-// Read the pinned metatraffic unicast port from `INT2DDS_META_PORT`.
-pub fn get_meta_port_override() -> Option<u16> {
-    parse_port_env("INT2DDS_META_PORT")
-}
-
-// Read the pinned user-traffic unicast port from `INT2DDS_USER_PORT`.
-pub fn get_user_port_override() -> Option<u16> {
-    parse_port_env("INT2DDS_USER_PORT")
-}
-
-fn parse_port_env(name: &str) -> Option<u16> {
-    let raw = std::env::var(name).ok().filter(|s| !s.is_empty())?;
-    match raw.parse::<u16>() {
-        Ok(port) => Some(port),
-        Err(e) => {
-            log::error!("Invalid {} value '{}': {}. Falling back to default.", name, raw, e);
             None
         }
     }

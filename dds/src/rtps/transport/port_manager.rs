@@ -57,11 +57,6 @@ impl PortManager {
         domain_id: u32,
         participant_id: u32,
     ) -> io::Result<u16> {
-        // Env override pins the base port
-        if let Some(base) = crate::common::env::get_meta_port_override() {
-            // Use 2 * participant_id as the offset
-            return Ok(base.saturating_add(2u16.saturating_mul(participant_id as u16)));
-        }
         self.calculate_port(domain_id, self.discovery_unicast_offset, Some(participant_id))
     }
 
@@ -74,11 +69,6 @@ impl PortManager {
         domain_id: u32,
         participant_id: u32,
     ) -> io::Result<u16> {
-        // Env override pins the base port
-        if let Some(base) = crate::common::env::get_user_port_override() {
-            // Use 2 * participant_id as the offset
-            return Ok(base.saturating_add(2u16.saturating_mul(participant_id as u16)));
-        }
         self.calculate_port(domain_id, self.user_unicast_offset, Some(participant_id))
     }
 
@@ -129,18 +119,9 @@ impl PortManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialize env-mutating tests since std::env is process-global
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn standard_formula_when_env_unset() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("INT2DDS_META_PORT");
-            std::env::remove_var("INT2DDS_USER_PORT");
-        }
+    fn standard_formula_with_default_parameters() {
         let ports = PortManager::default();
 
         // 7400 + 250*0 + 10 + 2*0 = 7410
@@ -151,11 +132,6 @@ mod tests {
 
     #[test]
     fn custom_parameters_replace_every_term_of_the_formula() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("INT2DDS_META_PORT");
-            std::env::remove_var("INT2DDS_USER_PORT");
-        }
         let ports = PortManager {
             port_base: 10000,
             domain_id_gain: 100,
@@ -200,40 +176,6 @@ mod tests {
             PortManager::default().calculate_user_traffic_multicast_port(u32::MAX).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn meta_override_ignores_domain_id() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let ports = PortManager::default();
-        unsafe { std::env::set_var("INT2DDS_META_PORT", "55001") };
-        assert_eq!(ports.calculate_discovery_traffic_unicast_port(0, 0).unwrap(), 55001);
-        assert_eq!(ports.calculate_discovery_traffic_unicast_port(5, 0).unwrap(), 55001);
-        assert_eq!(ports.calculate_discovery_traffic_unicast_port(0, 1).unwrap(), 55003);
-        assert_eq!(ports.calculate_discovery_traffic_unicast_port(99, 3).unwrap(), 55007);
-        unsafe { std::env::remove_var("INT2DDS_META_PORT") };
-    }
-
-    #[test]
-    fn user_override_ignores_domain_id() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let ports = PortManager::default();
-        unsafe { std::env::set_var("INT2DDS_USER_PORT", "55000") };
-        assert_eq!(ports.calculate_user_traffic_unicast_port(0, 0).unwrap(), 55000);
-        assert_eq!(ports.calculate_user_traffic_unicast_port(7, 2).unwrap(), 55004);
-        unsafe { std::env::remove_var("INT2DDS_USER_PORT") };
-    }
-
-    #[test]
-    fn user_override_saturates_near_u16_max() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("INT2DDS_USER_PORT", "65534") };
-        // 65534 + 2*2 -> would overflow, must clamp to 65535
-        assert_eq!(
-            PortManager::default().calculate_user_traffic_unicast_port(0, 2).unwrap(),
-            65535
-        );
-        unsafe { std::env::remove_var("INT2DDS_USER_PORT") };
     }
 
     #[test]
