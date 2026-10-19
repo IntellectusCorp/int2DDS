@@ -903,6 +903,12 @@ A value that does not parse as an unsigned integer, or a PG of 0, is logged at
 warn level and the default is kept. A port the formula pushes past 65535 fails
 participant creation with the computed port in the error.
 
+The id search stops at the last participant id whose ports still belong to
+the domain (119 with the defaults). Only a port already in use moves the
+search on. Any other bind error, such as a port inside a reserved range, fails
+participant creation at once. `int2dds.participant_id` pins the id instead of
+searching: only that id is tried, and creation fails when its ports are taken.
+
 For NAT, `port_base` is usually the only parameter to change. With the other
 defaults and domain 0, the unicast ports of N participants on one host fall in
 the single contiguous range:

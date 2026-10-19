@@ -250,6 +250,13 @@ impl TcpTransportPlugin {
             )
         };
 
+        let port_manager = tcp_config.port_manager;
+        let max_participant_id = port_manager.max_tcp_participant_id();
+        let (first_participant_id, last_participant_id) = match tcp_config.participant_id {
+            Some(fixed_participant_id) => (fixed_participant_id, fixed_participant_id),
+            None => (first_participant_id, max_participant_id),
+        };
+
         if let Some(port) = tcp_config.bind_port {
             return open(port, tls_config)
                 .map(|listener| (listener, first_participant_id))
@@ -273,15 +280,26 @@ impl TcpTransportPlugin {
                 });
         }
 
-        let port_manager = tcp_config.port_manager;
-        let max_participant_id = port_manager.max_tcp_participant_id();
+        if first_participant_id > max_participant_id {
+            return Err(transport_io_error(
+                TransportErrorCode::TcpBindFailed,
+                format!(
+                    "No TCP listening port left for domain {}: participant id {} is past the \
+                     domain's last slot {}",
+                    domain_id, first_participant_id, max_participant_id
+                ),
+            ));
+        }
 
         let mut last_error = None;
-        for participant_id in first_participant_id..=max_participant_id {
+        for participant_id in first_participant_id..=last_participant_id {
             let port = port_manager.calculate_tcp_physical_port(domain_id, participant_id)?;
             match open(port, tls_config.clone()) {
                 Ok(listener) => return Ok((listener, participant_id)),
-                Err(e) => {
+                Err(e)
+                    if e.kind() == io::ErrorKind::AddrInUse
+                        && tcp_config.participant_id.is_none() =>
+                {
                     debug!(
                         "[TcpTransportPlugin] Port {} taken, trying participant id {}",
                         port,
@@ -289,10 +307,28 @@ impl TcpTransportPlugin {
                     );
                     last_error = Some(e);
                 }
+                Err(e) => {
+                    log::error!(
+                        "[TcpTransportPlugin] Failed to bind TCP listener on port {} for \
+                         participant id {} (domain={}): {}",
+                        port,
+                        participant_id,
+                        domain_id,
+                        e
+                    );
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpBindFailed,
+                        format!(
+                            "Failed to bind TCP listener on port {} for participant id {} \
+                             (domain={}): {}",
+                            port, participant_id, domain_id, e
+                        ),
+                    ));
+                }
             }
         }
 
-        let last_port = port_manager.calculate_tcp_physical_port(domain_id, max_participant_id)?;
+        let last_port = port_manager.calculate_tcp_physical_port(domain_id, last_participant_id)?;
         let first_port =
             port_manager.calculate_tcp_physical_port(domain_id, first_participant_id)?;
         log::error!(
@@ -307,17 +343,13 @@ impl TcpTransportPlugin {
         );
         Err(transport_io_error(
             TransportErrorCode::TcpBindFailed,
-            match last_error {
-                Some(e) => format!(
-                    "No free TCP listening port for domain {} (tried {}..={}): {}",
-                    domain_id, first_port, last_port, e
-                ),
-                None => format!(
-                    "No TCP listening port left for domain {}: participant id {} is past the \
-                     domain's last slot {}",
-                    domain_id, first_participant_id, max_participant_id
-                ),
-            },
+            format!(
+                "No free TCP listening port for domain {} (tried {}..={}): {}",
+                domain_id,
+                first_port,
+                last_port,
+                last_error.map(|e| e.to_string()).unwrap_or_default()
+            ),
         ))
     }
 
@@ -845,6 +877,47 @@ mod tests {
         assert_eq!(ports.len(), 68);
         assert_eq!(ports.first(), Some(&65400));
         assert_eq!(ports.last(), Some(&65534));
+    }
+
+    #[test]
+    fn a_fixed_participant_id_is_not_searched_around() {
+        let domain_id = crate::test_utils::unique_domain_id() as u32;
+        let searched = TcpConfig::default();
+        let fixed = TcpConfig { participant_id: Some(0), ..TcpConfig::default() };
+
+        let (first_listener, first_id) = TcpTransportPlugin::bind_listener(
+            domain_id,
+            0,
+            TcpSocketTuning::default(),
+            None,
+            &searched,
+        )
+        .expect("first listener");
+        assert_eq!(first_id, 0);
+
+        let error = match TcpTransportPlugin::bind_listener(
+            domain_id,
+            0,
+            TcpSocketTuning::default(),
+            None,
+            &fixed,
+        ) {
+            Ok(_) => panic!("a fixed participant id whose port is taken must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("participant id 0"), "{error}");
+
+        let (_, second_id) = TcpTransportPlugin::bind_listener(
+            domain_id,
+            0,
+            TcpSocketTuning::default(),
+            None,
+            &searched,
+        )
+        .expect("second listener");
+        assert_eq!(second_id, 1);
+
+        drop(first_listener);
     }
 
     /// Naming one host both ways is a contradiction, and the search wins.

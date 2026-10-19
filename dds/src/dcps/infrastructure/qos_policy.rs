@@ -867,6 +867,9 @@ pub const PROP_DISCOVERY_UNICAST_OFFSET: &str = "int2dds.transport.discovery_uni
 pub const PROP_USER_MULTICAST_OFFSET: &str = "int2dds.transport.user_multicast_offset";
 // d3. Default `11`.
 pub const PROP_USER_UNICAST_OFFSET: &str = "int2dds.transport.user_unicast_offset";
+// Participant id used in the port formulas. When absent the first free id from 0
+// is taken. When present only that id is tried and a taken port fails creation.
+pub const PROP_PARTICIPANT_ID: &str = "int2dds.participant_id";
 
 /// SPDP initial peers, comma-separated `ip:port` list. Port `0` is a wildcard
 /// the TCP transport reads as every participant slot of the domain on that host;

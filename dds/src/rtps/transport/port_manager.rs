@@ -72,6 +72,15 @@ impl PortManager {
         self.calculate_port(domain_id, self.user_unicast_offset, Some(participant_id))
     }
 
+    // Highest participant id whose discovery and user unicast ports both stay below
+    // the next domain's base port.
+    pub(crate) fn max_unicast_participant_id(&self) -> u32 {
+        let last_offset = self.discovery_unicast_offset.max(self.user_unicast_offset);
+
+        self.domain_id_gain.saturating_sub(1).saturating_sub(last_offset)
+            / self.participant_id_gain.max(1)
+    }
+
     /// Highest participant id whose TCP port still falls inside its own domain
     /// block: one step further the offset equals DG, which is the next domain's
     /// base port.
@@ -154,6 +163,26 @@ mod tests {
         assert_eq!(ports.calculate_tcp_physical_port(3, 2).unwrap(), 10308);
         // 100 / 4 - 1 = 24
         assert_eq!(ports.max_tcp_participant_id(), 24);
+        // (100 - 1 - max(2, 5)) / 4 = 23
+        assert_eq!(ports.max_unicast_participant_id(), 23);
+    }
+
+    #[test]
+    fn last_unicast_participant_id_stays_below_the_next_domain() {
+        let ports = PortManager::default();
+
+        // (250 - 1 - 11) / 2 = 119
+        assert_eq!(ports.max_unicast_participant_id(), 119);
+
+        // Domain 1 starts at 7400 + 250 = 7650
+        let next_domain_base_port = 7650;
+
+        // 7400 + 11 + 2*119 = 7649
+        assert!(ports.calculate_user_traffic_unicast_port(0, 119).unwrap() < next_domain_base_port);
+        // 7400 + 11 + 2*120 = 7651
+        assert!(
+            ports.calculate_user_traffic_unicast_port(0, 120).unwrap() >= next_domain_base_port
+        );
     }
 
     #[test]

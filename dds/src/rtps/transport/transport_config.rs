@@ -15,10 +15,10 @@ use std::time::Duration;
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_DISCOVERY_MULTICAST_OFFSET,
     PROP_DISCOVERY_UNICAST_OFFSET, PROP_DOMAIN_ID_GAIN, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_PARTICIPANT_ID_GAIN, PROP_PORT_BASE, PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS,
-    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
-    PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PEER_SEARCH_SLOTS,
-    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PROP_PARTICIPANT_ID, PROP_PARTICIPANT_ID_GAIN, PROP_PORT_BASE, PROP_TCP_BIND_PORT,
+    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
+    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
+    PROP_TCP_PEER_SEARCH_SLOTS, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
     PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
     PROP_USER_MULTICAST_OFFSET, PROP_USER_UNICAST_OFFSET,
 };
@@ -43,11 +43,13 @@ pub(crate) trait TransportConfig {
 pub(crate) struct UdpConfig {
     pub multicast_ttl: u8,
     pub port_manager: PortManager,
+    pub participant_id: Option<u32>,
 }
 
 impl TransportConfig for UdpConfig {
     fn from_property(property: &PropertyQosPolicy) -> Self {
         let port_manager = port_manager_from_property(property);
+        let participant_id = participant_id_from_property(property);
 
         // Multicast TTL: property → env → default. A per-key typo logs a warning
         // and falls back rather than aborting `DomainParticipant` creation.
@@ -67,7 +69,7 @@ impl TransportConfig for UdpConfig {
             })
             .or_else(crate::common::env::get_multicast_ttl_override)
             .unwrap_or(DEFAULT_MULTICAST_TTL);
-        Self { multicast_ttl, port_manager }
+        Self { multicast_ttl, port_manager, participant_id }
     }
 }
 
@@ -91,6 +93,7 @@ pub(crate) struct TcpConfig {
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
     pub port_manager: PortManager,
+    pub participant_id: Option<u32>,
 }
 
 impl TransportConfig for TcpConfig {
@@ -99,6 +102,7 @@ impl TransportConfig for TcpConfig {
             Duration::from_millis(prop_parse::<u64>(property, key).unwrap_or(default))
         };
         let port_manager = port_manager_from_property(property);
+        let participant_id = participant_id_from_property(property);
 
         Self {
             transport_type: property
@@ -143,6 +147,7 @@ impl TransportConfig for TcpConfig {
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
             port_manager,
+            participant_id,
         }
     }
 }
@@ -231,6 +236,20 @@ fn port_manager_from_property(property: &PropertyQosPolicy) -> PortManager {
             defaults.user_multicast_offset,
         ),
         user_unicast_offset: parameter(PROP_USER_UNICAST_OFFSET, defaults.user_unicast_offset),
+    }
+}
+
+// The fixed participant id, or None when the id is to be searched from 0.
+// A value that does not parse logs a warning and is treated as absent.
+fn participant_id_from_property(property: &PropertyQosPolicy) -> Option<u32> {
+    let raw = property.find_property(PROP_PARTICIPANT_ID)?;
+
+    match raw.trim().parse::<u32>() {
+        Ok(participant_id) => Some(participant_id),
+        Err(error) => {
+            log::warn!("invalid {PROP_PARTICIPANT_ID} property value '{raw}': {error}. Ignoring");
+            None
+        }
     }
 }
 
@@ -346,6 +365,23 @@ mod tests {
         p.add_property(PROP_USER_UNICAST_OFFSET, "", false);
 
         assert_eq!(UdpConfig::from_property(&p).port_manager, PortManager::default());
+    }
+
+    #[test]
+    fn participant_id_is_absent_unless_a_valid_property_names_one() {
+        // No property at all: the id is searched from 0
+        assert_eq!(UdpConfig::from_property(&PropertyQosPolicy::default()).participant_id, None);
+
+        // A valid value, with surrounding whitespace, reaches both transports
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_PARTICIPANT_ID, " 7 ", false);
+        assert_eq!(UdpConfig::from_property(&p).participant_id, Some(7));
+        assert_eq!(TcpConfig::from_property(&p).participant_id, Some(7));
+
+        // A value that does not parse as u32 is ignored, as if the property were absent
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_PARTICIPANT_ID, "-1", false);
+        assert_eq!(UdpConfig::from_property(&p).participant_id, None);
     }
 
     #[test]

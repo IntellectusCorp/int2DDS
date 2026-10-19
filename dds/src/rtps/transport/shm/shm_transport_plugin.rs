@@ -48,7 +48,7 @@ pub(crate) struct ShmTransportPlugin {
 impl ShmTransportPlugin {
     pub(crate) fn new(
         domain_id: u32,
-        mut participant_id: u32,
+        participant_id: u32,
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
@@ -66,37 +66,20 @@ impl ShmTransportPlugin {
         let user_mc = Some(UdpListener::new_multicast(user_mc_port, &working_ips)?);
 
         // Unicast listeners — both must bind at the same participant_id
-        // (matches develop's Socket contract). If either fails, close any
-        // partial bind, increment participant_id, and retry.
-        let (discovery_uc, user_uc) = loop {
-            let disc_port =
-                port_manager.calculate_discovery_traffic_unicast_port(domain_id, participant_id)?;
-            let user_port =
-                port_manager.calculate_user_traffic_unicast_port(domain_id, participant_id)?;
-            match UdpListener::new(disc_port) {
-                Ok(disc_listener) => match UdpListener::new(user_port) {
-                    Ok(user_listener) => break (disc_listener, user_listener),
-                    Err(_) => {
-                        log::info!(
-                            "[ShmTransportPlugin] User port {} in use, closing discovery and trying participant_id {}",
-                            user_port,
-                            participant_id + 1
-                        );
-                        let mut disc_listener = disc_listener;
-                        disc_listener.close();
-                        participant_id += 1;
-                    }
-                },
-                Err(_) => {
-                    log::info!(
-                        "[ShmTransportPlugin] Discovery port {} in use, trying participant_id {}",
-                        disc_port,
-                        participant_id + 1
-                    );
-                    participant_id += 1;
-                }
-            }
+        // (matches develop's Socket contract).
+        let (first_participant_id, is_participant_id_fixed) = match udp_config.participant_id {
+            // int2dds.participant_id property: only this id is tried
+            Some(fixed_participant_id) => (fixed_participant_id, true),
+            // No property: search upwards from the id the caller passed in (0 from Socket)
+            None => (participant_id, false),
         };
+        let (discovery_uc, user_uc, participant_id) =
+            UdpListener::bind_discovery_and_user_unicast_listeners(
+                &port_manager,
+                domain_id,
+                first_participant_id,
+                is_participant_id_fixed,
+            )?;
         let discovery_unicast_port = discovery_uc.port();
         let user_unicast_port = user_uc.port();
         let shm_listener = ShmListener::new(domain_id).ok();
