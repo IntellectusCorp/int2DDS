@@ -74,11 +74,23 @@ impl PortManager {
 
     // Highest participant id whose discovery and user unicast ports both stay below
     // the next domain's base port.
-    pub(crate) fn max_unicast_participant_id(&self) -> u32 {
+    pub(crate) fn max_unicast_participant_id(&self) -> io::Result<u32> {
         let last_offset = self.discovery_unicast_offset.max(self.user_unicast_offset);
 
-        self.domain_id_gain.saturating_sub(1).saturating_sub(last_offset)
-            / self.participant_id_gain.max(1)
+        // DG - 1 - max(d1, d3): the room left for PG * participant_id, None when negative
+        let Some(last_slot_offset) =
+            self.domain_id_gain.checked_sub(1).and_then(|last| last.checked_sub(last_offset))
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unicast offset {} does not fit below domain id gain {}",
+                    last_offset, self.domain_id_gain
+                ),
+            ));
+        };
+
+        Ok(last_slot_offset / self.participant_id_gain.max(1))
     }
 
     /// Highest participant id whose TCP port still falls inside its own domain
@@ -164,7 +176,7 @@ mod tests {
         // 100 / 4 - 1 = 24
         assert_eq!(ports.max_tcp_participant_id(), 24);
         // (100 - 1 - max(2, 5)) / 4 = 23
-        assert_eq!(ports.max_unicast_participant_id(), 23);
+        assert_eq!(ports.max_unicast_participant_id().unwrap(), 23);
     }
 
     #[test]
@@ -172,7 +184,7 @@ mod tests {
         let ports = PortManager::default();
 
         // (250 - 1 - 11) / 2 = 119
-        assert_eq!(ports.max_unicast_participant_id(), 119);
+        assert_eq!(ports.max_unicast_participant_id().unwrap(), 119);
 
         // Domain 1 starts at 7400 + 250 = 7650
         let next_domain_base_port = 7650;

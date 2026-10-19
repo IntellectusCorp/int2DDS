@@ -56,7 +56,7 @@ impl UdpListener {
         first_participant_id: u32,
         is_participant_id_fixed: bool,
     ) -> std::io::Result<(Self, Self, u32)> {
-        let max_participant_id = port_manager.max_unicast_participant_id();
+        let max_participant_id = port_manager.max_unicast_participant_id()?;
 
         if first_participant_id > max_participant_id {
             return Err(std::io::Error::new(
@@ -400,6 +400,19 @@ mod tests {
 
         let error =
             UdpListener::bind_discovery_and_user_unicast_listeners(&ports, domain_id, 120, true)
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn unicast_listeners_reject_a_domain_gain_that_leaves_no_unicast_slot() {
+        let domain_id = crate::test_utils::unique_domain_id() as u32;
+
+        // d3 = 11 does not fit below DG = 10, so participant id 0 already lands in the next domain
+        let ports = PortManager { domain_id_gain: 10, ..PortManager::default() };
+
+        let error =
+            UdpListener::bind_discovery_and_user_unicast_listeners(&ports, domain_id, 0, false)
                 .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
