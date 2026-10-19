@@ -259,6 +259,27 @@ impl Locator {
     pub fn is_valid(&self) -> bool {
         self.kind != LOCATOR_KIND_INVALID && self.kind != LOCATOR_KIND_RESERVED
     }
+
+    // A port a datagram or stream transport can bind: not LOCATOR_PORT_INVALID and within 16 bits
+    pub fn is_port_valid(&self) -> bool {
+        self.port != LOCATOR_PORT_INVALID && self.port <= u32::from(u16::MAX)
+    }
+}
+
+// Locator kind of a UDP transport at this address
+pub fn udp_locator_kind(ip_addr: &IpAddr) -> i32 {
+    match ip_addr {
+        IpAddr::V4(_) => LOCATOR_KIND_UDP_V4,
+        IpAddr::V6(_) => LOCATOR_KIND_UDP_V6,
+    }
+}
+
+// Locator kind of a TCP transport at this address
+pub fn tcp_locator_kind(ip_addr: &IpAddr) -> i32 {
+    match ip_addr {
+        IpAddr::V4(_) => LOCATOR_KIND_TCP_V4,
+        IpAddr::V6(_) => LOCATOR_KIND_TCP_V6,
+    }
 }
 
 fn interface_addresses() -> HashSet<IpAddr> {
@@ -362,6 +383,29 @@ impl LocatorUDPv4 {
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+
+    #[test]
+    fn port_is_valid_only_inside_the_16_bit_range_and_not_zero() {
+        let locator_with_port =
+            |port: u32| Locator::new(LOCATOR_KIND_UDP_V4, port, LOCATOR_ADDRESS_INVALID);
+
+        assert!(!locator_with_port(LOCATOR_PORT_INVALID).is_port_valid());
+        assert!(locator_with_port(1).is_port_valid());
+        assert!(locator_with_port(7400).is_port_valid());
+        assert!(locator_with_port(65535).is_port_valid());
+        assert!(!locator_with_port(65536).is_port_valid());
+    }
+
+    #[test]
+    fn locator_kind_follows_the_transport_and_the_ip_version() {
+        let v4: IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+
+        assert_eq!(udp_locator_kind(&v4), LOCATOR_KIND_UDP_V4);
+        assert_eq!(udp_locator_kind(&v6), LOCATOR_KIND_UDP_V6);
+        assert_eq!(tcp_locator_kind(&v4), LOCATOR_KIND_TCP_V4);
+        assert_eq!(tcp_locator_kind(&v6), LOCATOR_KIND_TCP_V6);
+    }
 
     /// Reserved for documentation by RFC 5737 and therefore never assigned to
     /// an interface, which is what makes it a peer address this host cannot own.
