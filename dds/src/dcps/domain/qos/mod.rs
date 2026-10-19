@@ -12,9 +12,12 @@
 
 use const_default::ConstDefault;
 
-use crate::infrastructure::{
-    qos_kind::QosKind,
-    qos_policy::{EntityFactoryQosPolicy, PropertyQosPolicy, Qos, UserDataQosPolicy},
+use crate::{
+    core::error::{DdsError, DdsResult},
+    infrastructure::{
+        qos_kind::QosKind,
+        qos_policy::{EntityFactoryQosPolicy, PropertyQosPolicy, Qos, UserDataQosPolicy},
+    },
 };
 
 pub const PARTICIPANT_QOS_DEFAULT: QosKind<DomainParticipantQos> = QosKind::Default;
@@ -27,6 +30,14 @@ pub struct DomainParticipantQos {
 }
 
 impl Qos for DomainParticipantQos {
+    fn check_immutable_change(&self, new_qos: &Self) -> DdsResult<()> {
+        if self.property != new_qos.property {
+            return Err(DdsError::ImmutablePolicy);
+        }
+
+        Ok(())
+    }
+
     fn autoenable_created_entities(&self) -> bool {
         self.entity_factory.autoenable_created_entities
     }
