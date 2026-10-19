@@ -27,7 +27,7 @@ use crate::{
             entity_id::EntityId,
             guid::Guid,
             locator::{
-                loopback_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
+                same_host_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
                 LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             rtps_error_code::RtpsResult,
@@ -68,10 +68,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        self.redirect_same_host_locators_to_loopback(
-            &mut spdp_discovered_participant_data,
-            from_addr,
-        )?;
+        self.redirect_same_host_locators(&mut spdp_discovered_participant_data, from_addr)?;
 
         let participant = self.get_upgraded_participant()?;
 
@@ -165,7 +162,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
     /// Narrow a co-located peer's unicast locator lists before anything is
     /// derived from them. The multicast lists stay untouched - they carry a
     /// group address, not one entry per interface.
-    fn redirect_same_host_locators_to_loopback(
+    fn redirect_same_host_locators(
         &self,
         spdp_discovered_participant_data: &mut SPDPDiscoveredParticipantData,
         from_addr: SocketAddr,
@@ -179,10 +176,15 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        let metatraffic =
-            loopback_locators(spdp_discovered_participant_data.metatraffic_unicast_locator_list());
-        let default =
-            loopback_locators(spdp_discovered_participant_data.default_unicast_locator_list());
+        let destination = participant.same_host_ipv4_destination();
+        let metatraffic = same_host_locators(
+            spdp_discovered_participant_data.metatraffic_unicast_locator_list(),
+            destination,
+        );
+        let default = same_host_locators(
+            spdp_discovered_participant_data.default_unicast_locator_list(),
+            destination,
+        );
 
         debug!(
             "Redirected same-host unicast locators of {} to metatraffic [{}], default [{}]",

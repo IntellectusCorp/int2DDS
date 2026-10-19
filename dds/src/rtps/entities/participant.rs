@@ -10,7 +10,7 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock, Weak},
 };
 
@@ -124,6 +124,7 @@ pub struct Participant {
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
     remote_same_host: Arc<DashMap<GuidPrefix, bool>>,
+    pinned_egress_ipv4: OnceLock<Ipv4Addr>,
     terminated: Arc<AtomicBool>,
     wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
@@ -222,6 +223,7 @@ impl Participant {
             type_registry: new_shared_registry(),
             working_ips,
             remote_same_host: Arc::new(DashMap::new()),
+            pinned_egress_ipv4: OnceLock::new(),
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
             wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
@@ -531,6 +533,18 @@ impl Participant {
                 .or_insert_with(|| is_same_host(from_addr)),
             None => self.remote_same_host.get(&remote_prefix).is_some_and(|held| *held),
         }
+    }
+
+    /// Record the IPv4 every send of this participant is bound to.
+    pub(crate) fn set_pinned_egress_ipv4(&self, ip: Ipv4Addr) {
+        let _ = self.pinned_egress_ipv4.set(ip);
+    }
+
+    /// Where a co-located peer is reached over IPv4. A sender bound to a pinned
+    /// address may be refused a loopback destination by the host, while its own
+    /// address always reaches a peer on the same host.
+    pub(crate) fn same_host_ipv4_destination(&self) -> Ipv4Addr {
+        self.pinned_egress_ipv4.get().copied().unwrap_or(Ipv4Addr::LOCALHOST)
     }
 
     pub(crate) fn working_ips(&self) -> Vec<String> {

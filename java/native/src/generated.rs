@@ -9737,6 +9737,24 @@ pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1
 }
 
 #[no_mangle]
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1version<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    buf: JByteArray<'local>,
+    buf_len: jint,
+) -> jint {
+    let mut buf_buf = crate::generated_support::out_buffer(&mut env, &buf);
+    let __ret = unsafe {
+        int2dds_ffi::version::int2dds_version(
+            crate::generated_support::ptr_or_null_mut(&mut buf_buf) as _,
+            buf_len as _,
+        )
+    };
+    crate::generated_support::write_back_opt(&mut env, &buf, &buf_buf);
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_Ffi_int2dds_1waitset_1attach_1guardcondition<
     'local,
 >(

@@ -1706,6 +1706,7 @@ impl DomainParticipant {
         let qos = self.resolve_topic_qos(qos.into());
 
         qos.is_consistent()?;
+        self.check_topic_type_matches(topic_name, type_name)?;
         let handle = self.create_instance_handle()?;
 
         let type_support = Foo::TypeSupport::default();
@@ -2057,6 +2058,16 @@ impl DomainParticipant {
                 }
             }
             Err(err_code) => Err(err_code),
+        }
+    }
+
+    /// A participant cannot hold two topics with the same name but different types.
+    fn check_topic_type_matches(&self, topic_name: &str, type_name: &str) -> DdsResult<()> {
+        match self.find_topic_by_name(topic_name)? {
+            Some(existing) if existing.get_type_name() != type_name => {
+                Err(DdsError::PreconditionNotMet)
+            }
+            _ => Ok(()),
         }
     }
 
@@ -2737,9 +2748,10 @@ impl DomainParticipant {
         let qos = self.resolve_topic_qos(qos.into());
 
         qos.is_consistent()?;
+        let type_name = type_support.get_type_name().to_string();
+        self.check_topic_type_matches(topic_name, &type_name)?;
         let handle = self.create_instance_handle()?;
 
-        let type_name = type_support.get_type_name().to_string();
         self.register_type_for_topic(type_support, &type_name)?;
 
         let self_ref = self
@@ -4853,5 +4865,39 @@ mod domain_participant_tests {
         // Should return error on deleted participant
         let result = participant_clone.get_builtin_subscriber();
         assert!(result.is_err(), "get_builtin_subscriber on deleted participant should fail");
+    }
+
+    #[test]
+    fn create_topic_rejects_same_name_with_different_type() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let _topic = participant
+            .create_topic::<HelloWorld>(
+                "dup_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let res = participant.create_topic::<TestData>(
+            "dup_topic",
+            "TestData",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        );
+        assert!(matches!(res, Err(DdsError::PreconditionNotMet)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

@@ -157,6 +157,11 @@ impl DcpsBridge {
         );
         participant.set_local_receive_buffer_size(transport.advertised_receive_buffer_size());
         participant.set_local_user_data(qos.user_data.clone());
+        if socket.is_working_ips_from_feature() {
+            if let Some(pinned) = socket.working_ips().first().and_then(|ip| ip.parse().ok()) {
+                participant.set_pinned_egress_ipv4(pinned);
+            }
+        }
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 
@@ -1044,6 +1049,147 @@ mod tests {
             std::env::remove_var("INT2DDS_DATA_FRAG_SIZE");
             std::env::remove_var("INT2DDS_MAX_MESSAGE_SIZE");
         }
+    }
+
+    /// Pins egress to a non-loopback IPv4 of this host, or `None` on a host without one.
+    fn pin_a_host_address() -> Option<std::net::IpAddr> {
+        let pinned = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|iface| iface.ip())
+            .find(|ip| ip.is_ipv4() && !ip.is_loopback())?;
+        unsafe {
+            std::env::set_var("INT2DDS_NETWORK_IP", pinned.to_string());
+            std::env::remove_var("INT2DDS_DISABLE_SAME_HOST_LOOPBACK");
+        }
+        Some(pinned)
+    }
+
+    fn assert_all_at(pinned: std::net::IpAddr, unicast: &[Locator]) {
+        assert!(!unicast.is_empty());
+        for locator in unicast {
+            assert_eq!(
+                std::net::IpAddr::V4(locator.to_ip_v4_addr()),
+                pinned,
+                "same-host locator {locator} is not the pinned address: {unicast:?}"
+            );
+        }
+    }
+
+    /// A sender bound to a pinned address may be refused a 127.0.0.1 destination
+    /// by the host, so a co-located peer has to be reached at the pinned address.
+    #[test]
+    fn same_host_peer_is_reached_at_the_pinned_address() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(pinned) = pin_a_host_address() else {
+            return;
+        };
+
+        let domain_id = unique_domain_id() as u32;
+        let mut bridge_a = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_a.init().unwrap();
+        let mut bridge_b = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_b.init().unwrap();
+        let guid_b = bridge_b.participant.guid();
+
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(15);
+        let a_view_of_b = loop {
+            if let Some(found) =
+                bridge_a.participant.find_remote_participant_proxy_data(guid_b.prefix())
+            {
+                break found;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "participants did not discover each other"
+            );
+            thread::sleep(StdDuration::from_millis(50));
+        };
+
+        let unicast: Vec<Locator> = a_view_of_b
+            .metatraffic_unicast_locator_list()
+            .iter()
+            .chain(a_view_of_b.default_unicast_locator_list())
+            .cloned()
+            .collect();
+
+        let _ = bridge_a.disable();
+        let _ = bridge_b.disable();
+        unsafe { std::env::remove_var("INT2DDS_NETWORK_IP") };
+
+        assert_all_at(pinned, &unicast);
+    }
+
+    #[test]
+    fn same_host_endpoints_are_reached_at_the_pinned_address() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(pinned) = pin_a_host_address() else {
+            return;
+        };
+        let topic_name = "pinned_same_host_topic";
+        let reliability = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::new(0, 100_000_000),
+        };
+
+        let domain_id = unique_domain_id() as u32;
+        let mut bridge_a = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_a.init().unwrap();
+        let mut bridge_b = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_b.init().unwrap();
+
+        let mut publication = PublicationBuiltinTopicData::new(
+            &DataWriterQos { reliability: reliability.clone(), ..Default::default() },
+            &PublisherQos::default(),
+            &TopicQos::default(),
+        );
+        publication.set_topic_name(topic_name.to_string());
+        publication.set_type_name("HelloWorld".to_string());
+        publication
+            .set_endpoint_guid(bridge_a.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY));
+        let writer = bridge_a.create_rtps_writer(publication, None).unwrap();
+
+        let mut subscription = SubscriptionBuiltinTopicData::new(
+            &DataReaderQos { reliability, ..Default::default() },
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+        subscription.set_topic_name(topic_name.to_string());
+        subscription.set_type_name("HelloWorld".to_string());
+        subscription
+            .set_endpoint_guid(bridge_b.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY));
+        let reader = bridge_b
+            .create_rtps_reader(subscription, None, None, None, Guid::UNKNOWN, None)
+            .unwrap();
+
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let stateful_reader = reader.as_any().downcast_ref::<StatefulReader>().unwrap();
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(15);
+        let unicast: Vec<Locator> = loop {
+            let reader_proxies = stateful_writer.reader_proxies();
+            let writer_proxies = stateful_reader.writer_proxies();
+            let reader_proxies = reader_proxies.lock().unwrap();
+            let writer_proxies = writer_proxies.lock().unwrap();
+            if let (Some(reader_proxy), Some(writer_proxy)) =
+                (reader_proxies.first(), writer_proxies.first())
+            {
+                break reader_proxy
+                    .unicast_locator_list()
+                    .iter()
+                    .chain(writer_proxy.unicast_locator_list())
+                    .cloned()
+                    .collect();
+            }
+            drop((reader_proxies, writer_proxies));
+            assert!(std::time::Instant::now() < deadline, "endpoints did not match");
+            thread::sleep(StdDuration::from_millis(50));
+        };
+
+        let _ = bridge_a.disable();
+        let _ = bridge_b.disable();
+        unsafe { std::env::remove_var("INT2DDS_NETWORK_IP") };
+
+        assert_all_at(pinned, &unicast);
     }
 
     fn change_callback(change: Arc<CacheChange>) {

@@ -50,7 +50,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) 
 /// # Safety
 /// Invoked by the JVM under JNI conventions.
 #[no_mangle]
-pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeVersion<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_readNativeVersion<
     'local,
 >(
     env: JNIEnv<'local>,

@@ -48,6 +48,11 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
 }
 
+// The JDK the Test tasks launch: -PtestJavaVersion=<N> (see ../build.gradle.kts)
+// when given, else the JDK running Gradle. 22 and later exercise the FFM backend.
+val testJdk = providers.gradleProperty("testJavaVersion").orNull?.toInt()
+    ?: JavaVersion.current().majorVersion.toInt()
+
 // Tests load the native library built by `cargo build --release -p int2dds-java`.
 // Overridable through INT2DDS_JAVA_LIB.
 tasks.withType<Test>().configureEach {
@@ -65,6 +70,21 @@ tasks.withType<Test>().configureEach {
 
     val int2ddsJavaLib: String by rootProject.extra
     environment("INT2DDS_JAVA_LIB", int2ddsJavaLib)
+
+    // The test classpath is exploded class directories, where the Multi-Release
+    // JAR's version selection does not happen. On a JDK 22+ test launcher, put
+    // the versioned outputs first so the run gets the classes the packaged JAR
+    // would select there: the FFM backend, not the JNI one.
+    if (testJdk >= 22) {
+        classpath = java22.output + java9.output + classpath
+        // Proof that JDK 22+ needs no JNI: the JNI library is made unloadable, so
+        // anything still reaching it fails loudly instead of passing quietly.
+        environment(
+            "INT2DDS_JAVA_LIB",
+            layout.buildDirectory.file("jni-is-not-used-on-jdk22+/int2dds_java").get().asFile.absolutePath
+        )
+    }
+    systemProperty("int2dds.expected.backend", if (testJdk >= 22) "ffm" else "jni")
 
     // Entity tests create real participants. INT2DDS_FORCE_LOOPBACK_MULTICAST
     // alone only forces the *egress* interface to 127.0.0.1 -- the receive

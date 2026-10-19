@@ -38,7 +38,7 @@ pub fn init_from_env() {
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
     // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
     // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
-    // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of 127.0.0.1 (true, false) - Default: false
+    // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of one same-host destination (127.0.0.1, or the address pinned by INT2DDS_NETWORK_IP / INT2DDS_NETWORK_INTERFACE) (true, false) - Default: false
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP receive and send socket buffer sizes (bytes) - Default: OS default, with 1048576 (1MiB) receive / 65536 (64KiB) send requested when the default is smaller
     // - INT2DDS_UDP_RECV_BUFFER: Set the UDP receive socket buffer size (bytes), overriding INT2DDS_UDP_SOCKET_BUFFER for that direction - Default: INT2DDS_UDP_SOCKET_BUFFER
     // - INT2DDS_UDP_SEND_BUFFER: Set the UDP send socket buffer size (bytes), overriding INT2DDS_UDP_SOCKET_BUFFER for that direction - Default: INT2DDS_UDP_SOCKET_BUFFER

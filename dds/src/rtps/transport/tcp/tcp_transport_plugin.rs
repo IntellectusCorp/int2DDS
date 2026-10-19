@@ -726,6 +726,7 @@ mod tests {
 
     use crate::rtps::transport::peer_spec::DEFAULT_PARTICIPANTS_PER_HOST;
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
+    use std::sync::atomic::AtomicU32;
 
     fn take_listener(plugin: &TcpTransportPlugin) -> TcpListener {
         match plugin.take_stream_source().expect("stream source") {
@@ -760,10 +761,36 @@ mod tests {
     const BUILTIN_WRITER: u8 = 0xC2;
     const USER_WRITER: u8 = 0x02;
 
-    /// Keep domain IDs unique across tests to avoid port collisions when
-    /// the test suite runs in parallel.
+    /// The last domain whose whole TCP port block stays below 32768, where the
+    /// ephemeral port range of every supported OS starts at the earliest.
+    const LAST_TEST_DOMAIN: u32 = 100;
+
+    /// Hands consecutive tests different domains, so parallel runs never share a
+    /// port block.
     fn next_test_domain() -> u32 {
-        crate::test_utils::unique_domain_id() as u32
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        NEXT.fetch_add(1, Ordering::SeqCst) % (LAST_TEST_DOMAIN + 1)
+    }
+
+    /// A test port inside the ephemeral range can already be held by an outgoing
+    /// connection on the CI runner, which pushes a scanning participant to the next slot.
+    #[test]
+    fn a_test_domain_keeps_its_tcp_ports_below_the_ephemeral_range() {
+        const EPHEMERAL_RANGE_START: u32 = 32768;
+        let ports = PortManager::default();
+        let port = |domain, participant_id| {
+            u32::from(ports.calculate_tcp_physical_port(domain, participant_id).unwrap())
+        };
+        let base = port(0, 0);
+        let domain = next_test_domain();
+        let last_port = base
+            + (port(1, 0) - base) * domain
+            + (port(0, 1) - base) * ports.max_tcp_participant_id();
+
+        assert!(
+            last_port < EPHEMERAL_RANGE_START,
+            "domain {domain} reaches TCP port {last_port}, inside the ephemeral range"
+        );
     }
 
     fn make_plugin(domain: u32) -> TcpTransportPlugin {
@@ -881,7 +908,7 @@ mod tests {
 
     #[test]
     fn a_fixed_participant_id_is_not_searched_around() {
-        let domain_id = crate::test_utils::unique_domain_id() as u32;
+        let domain_id = next_test_domain();
         let searched = TcpConfig::default();
         let fixed = TcpConfig { participant_id: Some(0), ..TcpConfig::default() };
 

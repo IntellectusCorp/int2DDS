@@ -24,6 +24,7 @@ import kr.co.intellectus.int2dds.internal.ConditionHandleAccess;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.QosMarshal;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
+import kr.co.intellectus.int2dds.internal.StatusDecoder;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.listeners.DataReaderListener;
 import kr.co.intellectus.int2dds.qos.DataReaderQos;
@@ -350,27 +351,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * change since last read. Per DDS, reading this status clears its {@code *Change} fields.
      */
     public SubscriptionMatchedStatus getSubscriptionMatchedStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.SUBSCRIPTION_MATCHED_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datareaderGetSubscriptionMatchedStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        int currentCount = buf.getInt(8);
-        int currentCountChange = buf.getInt(12);
-        byte[] lastPublicationHandle = new byte[16];
-        for (int i = 0; i < 16; i++) {
-            lastPublicationHandle[i] = buf.get(16 + i);
-        }
-        return new SubscriptionMatchedStatus(
-                totalCount,
-                totalCountChange,
-                currentCount,
-                currentCountChange,
-                lastPublicationHandle);
+        return StatusDecoder.subscriptionMatched(buf);
     }
 
     /**
@@ -379,27 +369,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * *Change} fields.
      */
     public LivelinessChangedStatus getLivelinessChangedStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.LIVELINESS_CHANGED_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datareaderGetLivelinessChangedStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int aliveCount = buf.getInt(0);
-        int notAliveCount = buf.getInt(4);
-        int aliveCountChange = buf.getInt(8);
-        int notAliveCountChange = buf.getInt(12);
-        byte[] lastPublicationHandle = new byte[16];
-        for (int i = 0; i < 16; i++) {
-            lastPublicationHandle[i] = buf.get(16 + i);
-        }
-        return new LivelinessChangedStatus(
-                aliveCount,
-                notAliveCount,
-                aliveCountChange,
-                notAliveCountChange,
-                lastPublicationHandle);
+        return StatusDecoder.livelinessChanged(buf);
     }
 
     /**
@@ -408,20 +387,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * status clears its {@code *Change} field.
      */
     public RequestedDeadlineMissedStatus getRequestedDeadlineMissedStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.DEADLINE_MISSED_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datareaderGetRequestedDeadlineMissedStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        byte[] lastInstanceHandle = new byte[16];
-        for (int i = 0; i < 16; i++) {
-            lastInstanceHandle[i] = buf.get(8 + i);
-        }
-        return new RequestedDeadlineMissedStatus(totalCount, totalCountChange, lastInstanceHandle);
+        return StatusDecoder.requestedDeadlineMissed(buf);
     }
 
     /**
@@ -430,19 +405,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * DDS, reading this status clears its {@code *Change} field.
      */
     public RequestedIncompatibleQosStatus getRequestedIncompatibleQosStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.INCOMPATIBLE_QOS_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datareaderGetRequestedIncompatibleQosStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        int lastPolicyId = buf.getInt(8);
-        int policiesCount = buf.getInt(12);
-        return new RequestedIncompatibleQosStatus(
-                totalCount, totalCountChange, lastPolicyId, policiesCount);
+        return StatusDecoder.requestedIncompatibleQos(buf);
     }
 
     /**
@@ -469,16 +441,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * field.
      */
     public SampleLostStatus getSampleLostStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.COUNT_PAIR_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datareaderGetSampleLostStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        return new SampleLostStatus(totalCount, totalCountChange);
+        return StatusDecoder.sampleLost(buf);
     }
 
     /**
@@ -487,22 +459,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * this status clears its {@code *Change} field.
      */
     public SampleRejectedStatus getSampleRejectedStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(28).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.SAMPLE_REJECTED_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datareaderGetSampleRejectedStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        int lastReason = buf.getInt(8);
-        byte[] lastInstanceHandle = new byte[16];
-        for (int i = 0; i < 16; i++) {
-            lastInstanceHandle[i] = buf.get(12 + i);
-        }
-        return new SampleRejectedStatus(
-                totalCount, totalCountChange, lastReason, lastInstanceHandle);
+        return StatusDecoder.sampleRejected(buf);
     }
 
     /**
