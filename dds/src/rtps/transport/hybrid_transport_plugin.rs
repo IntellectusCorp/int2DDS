@@ -10,7 +10,6 @@ use log::{debug, info};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
-use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
@@ -53,7 +52,8 @@ impl HybridTransportPlugin {
         let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, hybrid_config.udp)?;
 
         // Multicast first (domain-wide port, no per-participant collision).
-        let discovery_mc_port = PortManager::calculate_discovery_traffic_multicast_port(domain_id)?;
+        let discovery_mc_port =
+            hybrid_config.udp.port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
         let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
 
         // Create TCP plugin (handles its own mux listener thread). The TCP listen

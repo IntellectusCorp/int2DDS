@@ -58,6 +58,8 @@ pub(crate) struct TcpTransportPlugin {
     /// Dial peers discovered at runtime that are not in `initial_peers`
     accept_undefined_peers: bool,
 
+    port_manager: PortManager,
+
     /// Addresses already named by `report_unreachable_peer`, so one
     /// misconfigured peer is reported once instead of every announcement.
     reported_unreachable: Mutex<HashSet<SocketAddr>>,
@@ -142,7 +144,12 @@ impl TcpTransportPlugin {
         let dial_allowed = Self::allowed_dial_addresses(&peers);
         let dial_allowed_hosts = Self::allowed_dial_hosts(&peers);
         let announce_targets = Mutex::new(AnnounceTargets::new(
-            Self::candidates(domain_id, &peers, tcp_config.peer_search_slots),
+            Self::candidates(
+                domain_id,
+                &peers,
+                tcp_config.peer_search_slots,
+                tcp_config.port_manager,
+            ),
             Some(PEER_PRUNE_DELAY),
             Instant::now(),
         ));
@@ -207,6 +214,7 @@ impl TcpTransportPlugin {
             announce_targets,
             public_address: tcp_config.public_address,
             accept_undefined_peers: tcp_config.accept_undefined_peers,
+            port_manager: tcp_config.port_manager,
             reported_unreachable: Mutex::new(HashSet::new()),
             shutdown,
             sender,
@@ -265,9 +273,12 @@ impl TcpTransportPlugin {
                 });
         }
 
+        let port_manager = tcp_config.port_manager;
+        let max_participant_id = port_manager.max_tcp_participant_id();
+
         let mut last_error = None;
-        for participant_id in first_participant_id..=PortManager::MAX_TCP_PARTICIPANT_ID {
-            let port = PortManager::calculate_tcp_physical_port(domain_id, participant_id)?;
+        for participant_id in first_participant_id..=max_participant_id {
+            let port = port_manager.calculate_tcp_physical_port(domain_id, participant_id)?;
             match open(port, tls_config.clone()) {
                 Ok(listener) => return Ok((listener, participant_id)),
                 Err(e) => {
@@ -281,11 +292,9 @@ impl TcpTransportPlugin {
             }
         }
 
-        let last_port = PortManager::calculate_tcp_physical_port(
-            domain_id,
-            PortManager::MAX_TCP_PARTICIPANT_ID,
-        )?;
-        let first_port = PortManager::calculate_tcp_physical_port(domain_id, first_participant_id)?;
+        let last_port = port_manager.calculate_tcp_physical_port(domain_id, max_participant_id)?;
+        let first_port =
+            port_manager.calculate_tcp_physical_port(domain_id, first_participant_id)?;
         log::error!(
             "[TcpTransportPlugin] No free TCP listening port for domain {}: ports {}..={} are \
              all in use. A domain holds at most {} participants per host; the next port belongs \
@@ -293,7 +302,7 @@ impl TcpTransportPlugin {
             domain_id,
             first_port,
             last_port,
-            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            max_participant_id + 1,
             domain_id + 1
         );
         Err(transport_io_error(
@@ -306,9 +315,7 @@ impl TcpTransportPlugin {
                 None => format!(
                     "No TCP listening port left for domain {}: participant id {} is past the \
                      domain's last slot {}",
-                    domain_id,
-                    first_participant_id,
-                    PortManager::MAX_TCP_PARTICIPANT_ID
+                    domain_id, first_participant_id, max_participant_id
                 ),
             },
         ))
@@ -422,8 +429,13 @@ impl TcpTransportPlugin {
     /// list keeps it whatever happens. A peer named by host alone becomes one
     /// address per participant slot the configuration says a host may hold,
     /// which is guesswork the list is free to narrow down.
-    fn candidates(domain_id: u32, peers: &[PeerSpec], slots: u32) -> Vec<(SocketAddr, bool)> {
-        let slot = |index: u32| PortManager::calculate_tcp_physical_port(domain_id, index).ok();
+    fn candidates(
+        domain_id: u32,
+        peers: &[PeerSpec],
+        slots: u32,
+        port_manager: PortManager,
+    ) -> Vec<(SocketAddr, bool)> {
+        let slot = |index: u32| port_manager.calculate_tcp_physical_port(domain_id, index).ok();
         peers
             .iter()
             .flat_map(|peer| {
@@ -438,16 +450,15 @@ impl TcpTransportPlugin {
     /// The block ends where the next domain's begins, so a port inside it can
     /// only ever belong to a participant of this domain.
     fn is_in_domain_block(&self, port: u16) -> bool {
-        let Ok(first) = PortManager::calculate_tcp_physical_port(self.domain_id, 0) else {
+        let Ok(first) = self.port_manager.calculate_tcp_physical_port(self.domain_id, 0) else {
             return false;
         };
 
         // Slots above 65535 have no port, so the block ends at u16::MAX
-        let last = PortManager::calculate_tcp_physical_port(
-            self.domain_id,
-            PortManager::MAX_TCP_PARTICIPANT_ID,
-        )
-        .unwrap_or(u16::MAX);
+        let last = self
+            .port_manager
+            .calculate_tcp_physical_port(self.domain_id, self.port_manager.max_tcp_participant_id())
+            .unwrap_or(u16::MAX);
 
         (first..=last).contains(&port)
     }
@@ -783,7 +794,12 @@ mod tests {
 
         assert_eq!(peers, vec![declared]);
         assert_eq!(
-            TcpTransportPlugin::candidates(0, &peers, DEFAULT_PARTICIPANTS_PER_HOST),
+            TcpTransportPlugin::candidates(
+                0,
+                &peers,
+                DEFAULT_PARTICIPANTS_PER_HOST,
+                PortManager::default()
+            ),
             vec![("192.168.0.5:7400".parse().unwrap(), true)]
         );
     }
@@ -797,15 +813,19 @@ mod tests {
             0,
             &TcpTransportPlugin::resolve_peers(&[named]),
             DEFAULT_PARTICIPANTS_PER_HOST,
+            PortManager::default(),
         );
 
         assert_eq!(candidates.len(), DEFAULT_PARTICIPANTS_PER_HOST as usize);
         assert!(candidates.iter().all(|(_, declared)| !declared), "a guess is not declared");
         assert_eq!(
             candidates[0].0,
-            format!("192.168.0.5:{}", PortManager::calculate_tcp_physical_port(0, 0).unwrap())
-                .parse()
-                .unwrap()
+            format!(
+                "192.168.0.5:{}",
+                PortManager::default().calculate_tcp_physical_port(0, 0).unwrap()
+            )
+            .parse()
+            .unwrap()
         );
     }
 
@@ -817,7 +837,8 @@ mod tests {
         let candidates = TcpTransportPlugin::candidates(
             232,
             &TcpTransportPlugin::resolve_peers(&[named]),
-            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            PortManager::default().max_tcp_participant_id() + 1,
+            PortManager::default(),
         );
         let ports: Vec<u16> = candidates.iter().map(|(addr, _)| addr.port()).collect();
 
@@ -876,7 +897,7 @@ mod tests {
     #[test]
     fn a_configured_host_is_dialable_across_the_whole_domain_block() {
         const DOMAIN: u32 = 3;
-        let first_slot = PortManager::calculate_tcp_physical_port(DOMAIN, 0).unwrap();
+        let first_slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 0).unwrap();
         let cfg = TcpConfig {
             bind_port: Some(0),
             initial_peers: vec![format!("127.0.0.1:{first_slot}").parse().unwrap()],
@@ -892,10 +913,11 @@ mod tests {
         )
         .expect("plugin creation");
 
-        let other_slot = PortManager::calculate_tcp_physical_port(DOMAIN, 7).unwrap();
+        let other_slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 7).unwrap();
         assert!(plugin.should_dial(&format!("127.0.0.1:{other_slot}").parse().unwrap()));
 
-        let next_domain_slot = PortManager::calculate_tcp_physical_port(DOMAIN + 1, 0).unwrap();
+        let next_domain_slot =
+            PortManager::default().calculate_tcp_physical_port(DOMAIN + 1, 0).unwrap();
         assert!(
             !plugin.should_dial(&format!("127.0.0.1:{next_domain_slot}").parse().unwrap()),
             "a port of the next domain is not this domain's to dial"
@@ -929,7 +951,7 @@ mod tests {
         )
         .expect("plugin creation");
 
-        let slot = PortManager::calculate_tcp_physical_port(DOMAIN, 5).unwrap();
+        let slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 5).unwrap();
         assert!(plugin.should_dial(&format!("127.0.0.1:{slot}").parse().unwrap()));
         assert!(
             !plugin.should_dial(&format!("203.0.113.7:{slot}").parse().unwrap()),
@@ -961,7 +983,7 @@ mod tests {
         )
         .expect("plugin creation");
 
-        let slot = PortManager::calculate_tcp_physical_port(DOMAIN, 5).unwrap();
+        let slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 5).unwrap();
         assert!(plugin.should_dial(&SocketAddr::new(own_ip, slot)), "the declared form");
         assert!(
             plugin.should_dial(&format!("127.0.0.1:{slot}").parse().unwrap()),

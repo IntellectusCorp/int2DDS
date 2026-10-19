@@ -14,6 +14,7 @@ use std::sync::Mutex;
 #[derive(Debug)]
 pub(crate) struct UdpSender {
     socket: Mutex<Option<Socket2>>,
+    port_manager: PortManager,
 }
 
 impl UdpSender {
@@ -50,7 +51,7 @@ impl UdpSender {
             log::warn!("[udp_sender] Extended discovery init failed: {}", e);
         }
 
-        Ok(Self { socket: Mutex::new(Some(socket)) })
+        Ok(Self { socket: Mutex::new(Some(socket)), port_manager: udp_config.port_manager })
     }
 
     /// Force close the socket even when there are other Arc references.
@@ -80,7 +81,7 @@ impl UdpSender {
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
-        let port = PortManager::calculate_discovery_traffic_multicast_port(domain_id)?;
+        let port = self.port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
         let multicast_target: SocketAddr = SocketAddr::new(IpAddr::V4(MULTICAST_IP), port);
         let sock_addr = SockAddr::from(multicast_target);
 

@@ -7,7 +7,6 @@ use std::sync::Mutex;
 
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
-use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::UdpConfig;
@@ -50,10 +49,12 @@ impl UdpTransportPlugin {
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
         let sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
+        let port_manager = udp_config.port_manager;
 
         // Create multicast listeners (shared ports, no conflict)
-        let discovery_mc_port = PortManager::calculate_discovery_traffic_multicast_port(domain_id)?;
-        let user_mc_port = PortManager::calculate_user_traffic_multicast_port(domain_id)?;
+        let discovery_mc_port =
+            port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
+        let user_mc_port = port_manager.calculate_user_traffic_multicast_port(domain_id)?;
         let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
         let user_mc = Some(UdpListener::new_multicast(user_mc_port, &working_ips)?);
 
@@ -63,9 +64,9 @@ impl UdpTransportPlugin {
         // Listener stays bound (no probe-and-release race).
         let (discovery_uc, user_uc) = loop {
             let disc_port =
-                PortManager::calculate_discovery_traffic_unicast_port(domain_id, participant_id)?;
+                port_manager.calculate_discovery_traffic_unicast_port(domain_id, participant_id)?;
             let user_port =
-                PortManager::calculate_user_traffic_unicast_port(domain_id, participant_id)?;
+                port_manager.calculate_user_traffic_unicast_port(domain_id, participant_id)?;
 
             match UdpListener::new(disc_port) {
                 Ok(disc_listener) => match UdpListener::new(user_port) {

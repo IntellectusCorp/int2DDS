@@ -851,6 +851,23 @@ pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
 /// `INT2DDS_TRANSPORT` env var when absent.
 pub const PROP_TRANSPORT: &str = "int2dds.transport";
 
+// Port number parameters shared by the UDP and TCP port formulas. Each one
+// defaults to the RTPS value, and a value that does not parse keeps the default.
+// PB. Default `7400`.
+pub const PROP_PORT_BASE: &str = "int2dds.transport.port_base";
+// DG. Default `250`.
+pub const PROP_DOMAIN_ID_GAIN: &str = "int2dds.transport.domain_id_gain";
+// PG, at least `1`. Default `2`.
+pub const PROP_PARTICIPANT_ID_GAIN: &str = "int2dds.transport.participant_id_gain";
+// d0. Default `0`.
+pub const PROP_DISCOVERY_MULTICAST_OFFSET: &str = "int2dds.transport.discovery_multicast_offset";
+// d1. Default `10`.
+pub const PROP_DISCOVERY_UNICAST_OFFSET: &str = "int2dds.transport.discovery_unicast_offset";
+// d2. Default `1`.
+pub const PROP_USER_MULTICAST_OFFSET: &str = "int2dds.transport.user_multicast_offset";
+// d3. Default `11`.
+pub const PROP_USER_UNICAST_OFFSET: &str = "int2dds.transport.user_unicast_offset";
+
 /// SPDP initial peers, comma-separated `ip:port` list. Port `0` is a wildcard
 /// the TCP transport reads as every participant slot of the domain on that host;
 /// any other port names one exact address. Falls back to the
