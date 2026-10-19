@@ -139,6 +139,11 @@ impl DomainParticipantFactory {
                 })
         };
 
+        if domain_id < 0 {
+            log::error!("Rejecting participant creation for negative domain id {}", domain_id);
+            return Err(DdsError::BadParameter);
+        }
+
         // Resolution chain for QosKind::Default: registered default → configured
         // default profile → spec default. QosKind::Specific is used as-is.
         let qos_list = match qos_list.into() {
@@ -1117,5 +1122,38 @@ mod factory_test {
             Some("32"),
             "property must be reachable on the resolved DomainParticipantQos"
         );
+    }
+
+    #[test]
+    fn negative_domain_id_is_rejected() {
+        let factory = DomainParticipantFactory::get_instance();
+
+        let result = factory.create_participant(
+            -2,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        );
+
+        assert!(matches!(result, Err(DdsError::BadParameter)));
+    }
+
+    #[test]
+    fn domain_id_whose_port_exceeds_65535_is_rejected() {
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Discovery multicast port of domain 233: 7400 + 250 * 233 = 65650
+        let result = factory.create_participant(
+            233,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        );
+
+        match result {
+            Err(DdsError::Error(message)) => assert!(message.contains("65650"), "{message}"),
+            Err(other) => panic!("unexpected error {other:?}"),
+            Ok(_) => panic!("domain 233 must be rejected"),
+        }
     }
 }

@@ -2,6 +2,7 @@ use bytes::Bytes;
 
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::common::locator::udp_locator_kind;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
@@ -109,7 +110,11 @@ impl DiscoveryUnicastListeningTask {
                             let _ = poll.registry().deregister(listener.socket());
                             return Ok(());
                         }
-                        let _ = self.process_rtps_message(buffer, from_addr);
+                        let _ = self.process_rtps_message(
+                            buffer,
+                            from_addr,
+                            udp_locator_kind(&from_addr.ip()),
+                        );
                     }
                 }
             }
@@ -120,8 +125,10 @@ impl DiscoveryUnicastListeningTask {
         &mut self,
         bytes: Bytes,
         from_addr: SocketAddr,
+        locator_kind: i32,
     ) -> RtpsResult<()> {
-        let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
+        let mut message_receiver =
+            MessageReceiver::new_with_locator_kind(self.guid_prefix, &from_addr, locator_kind);
         let rtps_message = message_receiver.init(&bytes)?;
 
         // Ignore messages sent by myself

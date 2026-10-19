@@ -4460,4 +4460,23 @@ mod tests {
 
         assert!(!writer.matched_reader_is_matched(ignored_reader_guid));
     }
+
+    #[test]
+    fn participant_data_from_another_domain_does_not_start_liveliness_monitoring() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let sedp_logic =
+            SedpLogic::new(participant.clone(), Arc::new(CountingTransport::default()));
+        let remote =
+            SPDPDiscoveredParticipantData::new(1, [7u8; 12], Participant::init_builtin_endpoints());
+
+        sedp_logic
+            .handle_discovered_participant_data(
+                remote,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7410),
+            )
+            .expect("discovery is handled");
+
+        let monitor = participant.liveliness_monitor();
+        assert!(monitor.lock().expect("liveliness monitor lock").is_none());
+    }
 }
