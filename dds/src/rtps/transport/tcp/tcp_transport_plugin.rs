@@ -907,6 +907,46 @@ mod tests {
     }
 
     #[test]
+    fn configured_search_width_preserves_valid_and_explicit_candidates() {
+        use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
+        use crate::rtps::transport::TransportConfig;
+
+        let wildcard: PeerSpec = "192.168.0.5:0".parse().unwrap();
+        let explicit: PeerSpec = "192.168.0.6:7400".parse().unwrap();
+        for (domain, base, requested, expected) in [
+            (0, 40000, u32::MAX, 8512),
+            (0, 40000, 2, 2),
+            (0, 65535, u32::MAX, 1),
+            (0, 65536, u32::MAX, 0),
+            (1, 40000, u32::MAX, 0),
+        ] {
+            let mut property = PropertyQosPolicy::default();
+            for (name, value) in [
+                ("int2dds.transport.port_base", base.to_string()),
+                ("int2dds.transport.domain_id_gain", u32::MAX.to_string()),
+                ("int2dds.transport.participant_id_gain", "3".to_string()),
+                ("int2dds.transport.TCPv4.peer_search_slots", requested.to_string()),
+            ] {
+                property.add_property(name, value, false);
+            }
+            let config = TcpConfig::from_property(&property, domain);
+            assert_eq!(config.peer_search_slots, expected);
+            let candidates = TcpTransportPlugin::candidates(
+                domain,
+                &[wildcard, explicit],
+                config.peer_search_slots,
+                config.port_manager,
+            );
+            assert_eq!(candidates.len(), expected as usize + 1);
+            for (id, (addr, declared)) in candidates[..expected as usize].iter().enumerate() {
+                assert_eq!(addr.port() as u32, base + 3 * id as u32);
+                assert!(!declared);
+            }
+            assert_eq!(candidates.last(), Some(&("192.168.0.6:7400".parse().unwrap(), true)));
+        }
+    }
+
+    #[test]
     fn a_fixed_participant_id_is_not_searched_around() {
         let domain_id = next_test_domain();
         let searched = TcpConfig::default();

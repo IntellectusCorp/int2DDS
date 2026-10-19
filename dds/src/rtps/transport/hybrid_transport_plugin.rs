@@ -225,7 +225,7 @@ mod tests {
             "127.0.0.1".to_string(),
             vec!["127.0.0.1".to_string()],
             [0u8; 12],
-            HybridConfig::from_property(&property),
+            HybridConfig::from_property(&property, domain_id),
         )
         .expect("hybrid plugin");
 
