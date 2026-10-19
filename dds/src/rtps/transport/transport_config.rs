@@ -193,7 +193,7 @@ fn peer_search_slots(property: &PropertyQosPolicy, max_slots: u32) -> u32 {
 }
 
 // PB, DG, PG, d0..d3 from the participant properties. A value that does not parse,
-// or PG = 0, logs a warning and keeps the default.
+// or DG or PG = 0, logs a warning and keeps the default.
 fn port_manager_from_property(property: &PropertyQosPolicy) -> PortManager {
     let defaults = PortManager::default();
     let parameter = |key: &str, default: u32| match property.find_property(key) {
@@ -205,6 +205,17 @@ fn port_manager_from_property(property: &PropertyQosPolicy) -> PortManager {
                 default
             }
         },
+    };
+
+    let domain_id_gain = match parameter(PROP_DOMAIN_ID_GAIN, defaults.domain_id_gain) {
+        0 => {
+            log::warn!(
+                "{PROP_DOMAIN_ID_GAIN} = 0 is invalid (min 1); using {}",
+                defaults.domain_id_gain
+            );
+            defaults.domain_id_gain
+        }
+        gain => gain,
     };
 
     let participant_id_gain =
@@ -221,7 +232,7 @@ fn port_manager_from_property(property: &PropertyQosPolicy) -> PortManager {
 
     PortManager {
         port_base: parameter(PROP_PORT_BASE, defaults.port_base),
-        domain_id_gain: parameter(PROP_DOMAIN_ID_GAIN, defaults.domain_id_gain),
+        domain_id_gain,
         participant_id_gain,
         discovery_multicast_offset: parameter(
             PROP_DISCOVERY_MULTICAST_OFFSET,
@@ -360,7 +371,7 @@ mod tests {
     fn invalid_port_parameters_keep_their_default() {
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_PORT_BASE, "abc", false);
-        p.add_property(PROP_DOMAIN_ID_GAIN, "-1", false);
+        p.add_property(PROP_DOMAIN_ID_GAIN, "0", false);
         p.add_property(PROP_PARTICIPANT_ID_GAIN, "0", false);
         p.add_property(PROP_USER_UNICAST_OFFSET, "", false);
 

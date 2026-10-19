@@ -94,10 +94,10 @@ impl PortManager {
     }
 
     /// Highest participant id whose TCP port still falls inside its own domain
-    /// block: one step further the offset equals DG, which is the next domain's
+    /// block: one step further the offset reaches DG, which is the next domain's
     /// base port.
     pub(crate) fn max_tcp_participant_id(&self) -> u32 {
-        (self.domain_id_gain / self.participant_id_gain.max(1)).saturating_sub(1)
+        self.domain_id_gain.saturating_sub(1) / self.participant_id_gain.max(1)
     }
 
     /// Calculate the TCP physical port for one participant
@@ -110,7 +110,7 @@ impl PortManager {
         self.calculate_port(domain_id, 0, Some(participant_id))
     }
 
-    // PB + DG * domain_id + offset (+ PG * participant_id for unicast), rejected when above 65535
+    // PB + DG * domain_id + offset (+ PG * participant_id for unicast), rejected when 0 or above 65535
     fn calculate_port(
         &self,
         domain_id: u32,
@@ -122,7 +122,7 @@ impl PortManager {
             + u64::from(offset)
             + participant_id.map_or(0, |id| u64::from(self.participant_id_gain) * u64::from(id));
 
-        u16::try_from(port).map_err(|_| {
+        let port = u16::try_from(port).map_err(|_| {
             let message = match participant_id {
                 Some(id) => {
                     format!(
@@ -133,7 +133,17 @@ impl PortManager {
                 None => format!("port {} for domain {} exceeds 65535", port, domain_id),
             };
             io::Error::new(io::ErrorKind::InvalidInput, message)
-        })
+        })?;
+
+        // Binding port 0 would take an ephemeral port instead of the computed one
+        if port == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("computed port 0 for domain {} is not a bindable port", domain_id),
+            ));
+        }
+
+        Ok(port)
     }
 }
 
@@ -246,5 +256,30 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(error.to_string(), "port 65536 for domain 232 participant 68 exceeds 65535");
+    }
+
+    #[test]
+    fn port_zero_is_rejected_instead_of_bound_as_ephemeral() {
+        let ports = PortManager { port_base: 0, ..PortManager::default() };
+
+        // 0 + 250*0 + 2*0 = 0
+        let error = ports.calculate_tcp_physical_port(0, 0).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        // 0 + 250*0 + 0 = 0
+        let error = ports.calculate_discovery_traffic_multicast_port(0).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn last_tcp_participant_id_counts_a_partial_last_slot() {
+        let ports = PortManager { domain_id_gain: 21, ..PortManager::default() };
+
+        // (21 - 1) / 2 = 10
+        assert_eq!(ports.max_tcp_participant_id(), 10);
+
+        // 7400 + 2*10 = 7420 stays below the next domain base 7400 + 21 = 7421
+        let last_port = ports.calculate_tcp_physical_port(0, 10).unwrap();
+        assert!(last_port < ports.calculate_tcp_physical_port(1, 0).unwrap());
     }
 }
