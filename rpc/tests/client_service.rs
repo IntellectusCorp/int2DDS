@@ -66,10 +66,14 @@ impl RequestHandler<AddCall, AddReturn> for UnsupportedHandler {
     }
 }
 
-static DOMAIN_ID: AtomicI32 = AtomicI32::new(180);
+// The last domain whose whole port block stays below 32768, where the ephemeral
+// port range of every supported OS starts at the earliest
+const LAST_DOMAIN_ID: i32 = 100;
+
+static DOMAIN_ID: AtomicI32 = AtomicI32::new(0);
 
 fn next_domain_id() -> i32 {
-    DOMAIN_ID.fetch_add(1, Ordering::SeqCst)
+    DOMAIN_ID.fetch_add(1, Ordering::SeqCst) % (LAST_DOMAIN_ID + 1)
 }
 
 fn make_participant(

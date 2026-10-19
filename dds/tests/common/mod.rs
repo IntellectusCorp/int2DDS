@@ -96,8 +96,9 @@ impl KeyedDataType {
 
 static DOMAIN_ID: AtomicI32 = AtomicI32::new(0);
 
-// Highest domain id whose default ports stay within 65535
-const LAST_DOMAIN_ID: i32 = 232;
+// The last domain whose whole default port block stays below 32768, where the
+// ephemeral port range of every supported OS starts at the earliest
+const LAST_DOMAIN_ID: i32 = 100;
 
 pub fn next_domain_id() -> i32 {
     let base = (std::process::id() % 200) as i32;
