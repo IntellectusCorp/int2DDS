@@ -13,12 +13,14 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
-    PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
-    PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
-    PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PEER_SEARCH_SLOTS, PROP_TCP_PUBLIC_ADDRESS,
-    PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_DISCOVERY_MULTICAST_OFFSET,
+    PROP_DISCOVERY_UNICAST_OFFSET, PROP_DOMAIN_ID_GAIN, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
+    PROP_PARTICIPANT_ID, PROP_PARTICIPANT_ID_GAIN, PROP_PORT_BASE, PROP_TCP_BIND_PORT,
+    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
+    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
+    PROP_TCP_PEER_SEARCH_SLOTS, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PROP_USER_MULTICAST_OFFSET, PROP_USER_UNICAST_OFFSET,
 };
 use crate::rtps::transport::peer_spec::{PeerSpec, DEFAULT_PARTICIPANTS_PER_HOST};
 use crate::rtps::transport::port_manager::PortManager;
@@ -31,7 +33,7 @@ pub(crate) const DEFAULT_MULTICAST_TTL: u8 = 1;
 pub(crate) trait TransportConfig {
     /// Resolve this mode's config from a participant's `PropertyQosPolicy`,
     /// applying property → env → default precedence per field.
-    fn from_property(property: &PropertyQosPolicy) -> Self
+    fn from_property(property: &PropertyQosPolicy, domain_id: u32) -> Self
     where
         Self: Sized;
 }
@@ -40,10 +42,15 @@ pub(crate) trait TransportConfig {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UdpConfig {
     pub multicast_ttl: u8,
+    pub port_manager: PortManager,
+    pub participant_id: Option<u32>,
 }
 
 impl TransportConfig for UdpConfig {
-    fn from_property(property: &PropertyQosPolicy) -> Self {
+    fn from_property(property: &PropertyQosPolicy, _domain_id: u32) -> Self {
+        let port_manager = port_manager_from_property(property);
+        let participant_id = participant_id_from_property(property);
+
         // Multicast TTL: property → env → default. A per-key typo logs a warning
         // and falls back rather than aborting `DomainParticipant` creation.
         let multicast_ttl = property
@@ -62,7 +69,7 @@ impl TransportConfig for UdpConfig {
             })
             .or_else(crate::common::env::get_multicast_ttl_override)
             .unwrap_or(DEFAULT_MULTICAST_TTL);
-        Self { multicast_ttl }
+        Self { multicast_ttl, port_manager, participant_id }
     }
 }
 
@@ -85,13 +92,18 @@ pub(crate) struct TcpConfig {
     pub keepalive_max_misses: u32,
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
+    pub port_manager: PortManager,
+    pub participant_id: Option<u32>,
 }
 
 impl TransportConfig for TcpConfig {
-    fn from_property(property: &PropertyQosPolicy) -> Self {
+    fn from_property(property: &PropertyQosPolicy, domain_id: u32) -> Self {
         let ms = |key, default| {
             Duration::from_millis(prop_parse::<u64>(property, key).unwrap_or(default))
         };
+        let port_manager = port_manager_from_property(property);
+        let participant_id = participant_id_from_property(property);
+
         Self {
             transport_type: property
                 .find_property(PROP_TRANSPORT)
@@ -107,7 +119,7 @@ impl TransportConfig for TcpConfig {
                         .map(|peers| crate::rtps::transport::peer_spec::parse_peer_specs(&peers))
                         .unwrap_or_default()
                 }),
-            peer_search_slots: peer_search_slots(property),
+            peer_search_slots: peer_search_slots(property, domain_id, &port_manager),
             accept_undefined_peers: prop_parse::<bool>(property, PROP_ACCEPT_UNDEFINED_PEERS)
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
@@ -131,13 +143,15 @@ impl TransportConfig for TcpConfig {
             },
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
+            port_manager,
+            participant_id,
         }
     }
 }
 
 impl Default for TcpConfig {
     fn default() -> Self {
-        Self::from_property(&PropertyQosPolicy::default())
+        Self::from_property(&PropertyQosPolicy::default(), 0)
     }
 }
 
@@ -149,27 +163,118 @@ pub(crate) struct HybridConfig {
 }
 
 impl TransportConfig for HybridConfig {
-    fn from_property(property: &PropertyQosPolicy) -> Self {
-        Self { udp: UdpConfig::from_property(property), tcp: TcpConfig::from_property(property) }
+    fn from_property(property: &PropertyQosPolicy, domain_id: u32) -> Self {
+        Self {
+            udp: UdpConfig::from_property(property, domain_id),
+            tcp: TcpConfig::from_property(property, domain_id),
+        }
     }
 }
 
-fn peer_search_slots(property: &PropertyQosPolicy) -> u32 {
-    const MAX_SLOTS: u32 = PortManager::MAX_TCP_PARTICIPANT_ID + 1;
+fn peer_search_slots(
+    property: &PropertyQosPolicy,
+    domain_id: u32,
+    port_manager: &PortManager,
+) -> u32 {
+    let port_slots = port_manager
+        .calculate_tcp_physical_port(domain_id, 0)
+        .map(|first_port| {
+            (u32::from(u16::MAX) - u32::from(first_port)) / port_manager.participant_id_gain.max(1)
+                + 1
+        })
+        .unwrap_or(0);
+    let max_slots = (port_manager.max_tcp_participant_id() + 1).min(port_slots);
+    if max_slots == 0 {
+        log::warn!("No TCP search ports available for domain {domain_id}; using 0 search slots");
+        return 0;
+    }
 
     let configured = prop_parse::<u32>(property, PROP_TCP_PEER_SEARCH_SLOTS)
         .or_else(crate::common::env::get_tcp_peer_search_slots);
 
     match configured {
-        None => DEFAULT_PARTICIPANTS_PER_HOST,
-        Some(slots) if (1..=MAX_SLOTS).contains(&slots) => slots,
+        // Keep the default search within both the domain block and the port range.
+        None => DEFAULT_PARTICIPANTS_PER_HOST.min(max_slots),
+        Some(slots) if (1..=max_slots).contains(&slots) => slots,
         Some(slots) => {
-            let clamped = slots.clamp(1, MAX_SLOTS);
+            let clamped = slots.clamp(1, max_slots);
             log::warn!(
-                "{PROP_TCP_PEER_SEARCH_SLOTS} = {slots} is outside 1..={MAX_SLOTS}, one domain's \
-                 port block; using {clamped}"
+                "{PROP_TCP_PEER_SEARCH_SLOTS} = {slots} is outside the valid TCP search range \
+                 1..={max_slots}; using {clamped}"
             );
             clamped
+        }
+    }
+}
+
+// PB, DG, PG, d0..d3 from the participant properties. A value that does not parse,
+// or DG or PG = 0, logs a warning and keeps the default.
+fn port_manager_from_property(property: &PropertyQosPolicy) -> PortManager {
+    let defaults = PortManager::default();
+    let parameter = |key: &str, default: u32| match property.find_property(key) {
+        None => default,
+        Some(raw) => match raw.trim().parse::<u32>() {
+            Ok(value) => value,
+            Err(error) => {
+                log::warn!("invalid {key} property value '{raw}': {error}. Using {default}");
+                default
+            }
+        },
+    };
+
+    let domain_id_gain = match parameter(PROP_DOMAIN_ID_GAIN, defaults.domain_id_gain) {
+        0 => {
+            log::warn!(
+                "{PROP_DOMAIN_ID_GAIN} = 0 is invalid (min 1); using {}",
+                defaults.domain_id_gain
+            );
+            defaults.domain_id_gain
+        }
+        gain => gain,
+    };
+
+    let participant_id_gain =
+        match parameter(PROP_PARTICIPANT_ID_GAIN, defaults.participant_id_gain) {
+            0 => {
+                log::warn!(
+                    "{PROP_PARTICIPANT_ID_GAIN} = 0 is invalid (min 1); using {}",
+                    defaults.participant_id_gain
+                );
+                defaults.participant_id_gain
+            }
+            gain => gain,
+        };
+
+    PortManager {
+        port_base: parameter(PROP_PORT_BASE, defaults.port_base),
+        domain_id_gain,
+        participant_id_gain,
+        discovery_multicast_offset: parameter(
+            PROP_DISCOVERY_MULTICAST_OFFSET,
+            defaults.discovery_multicast_offset,
+        ),
+        discovery_unicast_offset: parameter(
+            PROP_DISCOVERY_UNICAST_OFFSET,
+            defaults.discovery_unicast_offset,
+        ),
+        user_multicast_offset: parameter(
+            PROP_USER_MULTICAST_OFFSET,
+            defaults.user_multicast_offset,
+        ),
+        user_unicast_offset: parameter(PROP_USER_UNICAST_OFFSET, defaults.user_unicast_offset),
+    }
+}
+
+// The fixed participant id, or None when the id is to be searched from 0.
+// A value that does not parse logs a warning and is treated as absent.
+fn participant_id_from_property(property: &PropertyQosPolicy) -> Option<u32> {
+    let raw = property.find_property(PROP_PARTICIPANT_ID)?;
+
+    match raw.trim().parse::<u32>() {
+        Ok(participant_id) => Some(participant_id),
+        Err(error) => {
+            log::warn!("invalid {PROP_PARTICIPANT_ID} property value '{raw}': {error}. Ignoring");
+            None
         }
     }
 }
@@ -192,7 +297,7 @@ mod tests {
     fn default_when_property_missing() {
         clear_env();
         assert_eq!(
-            UdpConfig::from_property(&PropertyQosPolicy::default()).multicast_ttl,
+            UdpConfig::from_property(&PropertyQosPolicy::default(), 0).multicast_ttl,
             DEFAULT_MULTICAST_TTL
         );
     }
@@ -201,43 +306,125 @@ mod tests {
     fn the_search_width_is_configurable_and_bounded_by_the_domain_block() {
         clear_env();
         assert_eq!(
-            TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
+            TcpConfig::from_property(&PropertyQosPolicy::default(), 0).peer_search_slots,
             DEFAULT_PARTICIPANTS_PER_HOST
         );
 
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "40", false);
-        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 40);
+        assert_eq!(TcpConfig::from_property(&p, 0).peer_search_slots, 40);
 
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "0", false);
-        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 1, "a search of nothing");
+        assert_eq!(TcpConfig::from_property(&p, 0).peer_search_slots, 1, "a search of nothing");
 
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "100000", false);
         assert_eq!(
-            TcpConfig::from_property(&p).peer_search_slots,
-            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            TcpConfig::from_property(&p, 0).peer_search_slots,
+            PortManager::default().max_tcp_participant_id() + 1,
             "a slot past the block belongs to the next domain"
         );
 
         // The env var carries the width where no QoS property can be set, and
         // the property still wins wherever one is.
         unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "40") };
-        assert_eq!(TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots, 40);
+        assert_eq!(
+            TcpConfig::from_property(&PropertyQosPolicy::default(), 0).peer_search_slots,
+            40
+        );
 
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "8", false);
-        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 8);
+        assert_eq!(TcpConfig::from_property(&p, 0).peer_search_slots, 8);
 
         unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "100000") };
         assert_eq!(
-            TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
-            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            TcpConfig::from_property(&PropertyQosPolicy::default(), 0).peer_search_slots,
+            PortManager::default().max_tcp_participant_id() + 1,
             "the ceiling holds whichever way the width arrives"
         );
 
         clear_env();
+    }
+
+    #[test]
+    fn port_parameters_default_to_the_rtps_values() {
+        assert_eq!(
+            UdpConfig::from_property(&PropertyQosPolicy::default(), 0).port_manager,
+            PortManager::default()
+        );
+        assert_eq!(
+            TcpConfig::from_property(&PropertyQosPolicy::default(), 0).port_manager,
+            PortManager::default()
+        );
+    }
+
+    #[test]
+    fn port_parameters_are_read_from_properties_for_udp_and_tcp_alike() {
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_PORT_BASE, "10000", false);
+        p.add_property(PROP_DOMAIN_ID_GAIN, "100", false);
+        p.add_property(PROP_PARTICIPANT_ID_GAIN, "4", false);
+        p.add_property(PROP_DISCOVERY_MULTICAST_OFFSET, "1", false);
+        p.add_property(PROP_DISCOVERY_UNICAST_OFFSET, "2", false);
+        p.add_property(PROP_USER_MULTICAST_OFFSET, "3", false);
+        p.add_property(PROP_USER_UNICAST_OFFSET, " 5 ", false);
+        let expected = PortManager {
+            port_base: 10000,
+            domain_id_gain: 100,
+            participant_id_gain: 4,
+            discovery_multicast_offset: 1,
+            discovery_unicast_offset: 2,
+            user_multicast_offset: 3,
+            user_unicast_offset: 5,
+        };
+
+        assert_eq!(UdpConfig::from_property(&p, 0).port_manager, expected);
+        assert_eq!(TcpConfig::from_property(&p, 0).port_manager, expected);
+        assert_eq!(HybridConfig::from_property(&p, 0).tcp.port_manager, expected);
+    }
+
+    #[test]
+    fn invalid_port_parameters_keep_their_default() {
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_PORT_BASE, "abc", false);
+        p.add_property(PROP_DOMAIN_ID_GAIN, "0", false);
+        p.add_property(PROP_PARTICIPANT_ID_GAIN, "0", false);
+        p.add_property(PROP_USER_UNICAST_OFFSET, "", false);
+
+        assert_eq!(UdpConfig::from_property(&p, 0).port_manager, PortManager::default());
+    }
+
+    #[test]
+    fn participant_id_is_absent_unless_a_valid_property_names_one() {
+        // No property at all: the id is searched from 0
+        assert_eq!(UdpConfig::from_property(&PropertyQosPolicy::default(), 0).participant_id, None);
+
+        // A valid value, with surrounding whitespace, reaches both transports
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_PARTICIPANT_ID, " 7 ", false);
+        assert_eq!(UdpConfig::from_property(&p, 0).participant_id, Some(7));
+        assert_eq!(TcpConfig::from_property(&p, 0).participant_id, Some(7));
+
+        // A value that does not parse as u32 is ignored, as if the property were absent
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_PARTICIPANT_ID, "-1", false);
+        assert_eq!(UdpConfig::from_property(&p, 0).participant_id, None);
+    }
+
+    #[test]
+    fn peer_search_slots_follow_a_smaller_domain_block() {
+        clear_env();
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_DOMAIN_ID_GAIN, "20", false);
+        p.add_property(PROP_PARTICIPANT_ID_GAIN, "2", false);
+
+        // 20 / 2 = 10 slots per domain, below the default width of 16
+        assert_eq!(TcpConfig::from_property(&p, 0).peer_search_slots, 10);
+
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "100", false);
+        assert_eq!(TcpConfig::from_property(&p, 0).peer_search_slots, 10);
     }
 
     #[test]
@@ -247,7 +434,7 @@ mod tests {
             let mut p = PropertyQosPolicy::default();
             p.add_property(PROP_MULTICAST_TTL, raw, false);
             assert_eq!(
-                UdpConfig::from_property(&p).multicast_ttl,
+                UdpConfig::from_property(&p, 0).multicast_ttl,
                 raw.parse::<u8>().unwrap(),
                 "parse {raw}"
             );
@@ -261,7 +448,7 @@ mod tests {
             let mut p = PropertyQosPolicy::default();
             p.add_property(PROP_MULTICAST_TTL, bad, false);
             assert_eq!(
-                UdpConfig::from_property(&p).multicast_ttl,
+                UdpConfig::from_property(&p, 0).multicast_ttl,
                 DEFAULT_MULTICAST_TTL,
                 "{bad} should fall back"
             );
@@ -272,7 +459,7 @@ mod tests {
     // these defaults are independent of any INT2DDS_TCP_* env var.
     #[test]
     fn tcp_config_defaults_when_property_missing() {
-        let cfg = TcpConfig::from_property(&PropertyQosPolicy::default());
+        let cfg = TcpConfig::from_property(&PropertyQosPolicy::default(), 0);
         assert_eq!(cfg.bind_port, None);
         assert_eq!(cfg.public_address, None);
         assert!(cfg.nodelay);
@@ -300,7 +487,7 @@ mod tests {
         // Invalid value must be ignored (falls back to default), not panic.
         p.add_property(PROP_TCP_SO_RCVBUF, "not-a-number", false);
 
-        let cfg = TcpConfig::from_property(&p);
+        let cfg = TcpConfig::from_property(&p, 0);
         assert_eq!(cfg.bind_port, Some(17400));
         assert!(!cfg.nodelay);
         assert_eq!(cfg.connect_timeout, Duration::from_millis(1111));
@@ -317,6 +504,6 @@ mod tests {
         // through to the OS where it would be rejected.
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "0", false);
-        assert_eq!(TcpConfig::from_property(&p).keepalive_max_misses, 1);
+        assert_eq!(TcpConfig::from_property(&p, 0).keepalive_max_misses, 1);
     }
 }

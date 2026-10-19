@@ -20,7 +20,7 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix, GUIDPREFIX_UNKNOWN},
             locator::{
-                Locator, LOCATOR_ADDRESS_INVALID, LOCATOR_INVALID, LOCATOR_KIND_UDP_V4,
+                udp_locator_kind, Locator, LOCATOR_ADDRESS_INVALID, LOCATOR_INVALID,
                 LOCATOR_PORT_INVALID,
             },
             parameters::{ParameterId, ParameterId as CommonParameterId, ParameterList},
@@ -88,18 +88,33 @@ pub(crate) struct MessageReceiver {
 impl MessageReceiver {
     // 8.3.4 Initial state of Receiver
     pub(crate) fn new(participant_guid_prefix: GuidPrefix, from_addr: &SocketAddr) -> Self {
+        let locator_kind = udp_locator_kind(&from_addr.ip());
+
+        Self::new_with_locator_kind(participant_guid_prefix, from_addr, locator_kind)
+    }
+
+    // Initial state of a Receiver whose reply locators carry the kind of the
+    // transport the message arrived on.
+    pub(crate) fn new_with_locator_kind(
+        participant_guid_prefix: GuidPrefix,
+        from_addr: &SocketAddr,
+        locator_kind: i32,
+    ) -> Self {
+        let source_address = Locator::from_ip(from_addr.ip(), LOCATOR_PORT_INVALID).address;
+
         Self {
             source_version: ProtocolVersion::PROTOCOLVERSION,
             source_vendor_id: VENDORID_UNKNOWN,
             source_guid_prefix: GUIDPREFIX_UNKNOWN,
             dest_guid_prefix: participant_guid_prefix,
             participant_guid_prefix,
-            unicast_reply_locator_list: SmallVec::from_buf([Locator::from_ip(
-                from_addr.ip(),
+            unicast_reply_locator_list: SmallVec::from_buf([Locator::new(
+                locator_kind,
                 LOCATOR_PORT_INVALID,
+                source_address,
             )]),
             multicast_reply_locator_list: SmallVec::from_buf([Locator::new(
-                LOCATOR_KIND_UDP_V4,
+                locator_kind,
                 LOCATOR_PORT_INVALID,
                 LOCATOR_ADDRESS_INVALID,
             )]),
@@ -433,6 +448,17 @@ impl MessageReceiver {
             match &parameter.value {
                 ParameterValue::Locator(locator) => {
                     let rtps_locator = self.convert_locator(locator);
+
+                    if !rtps_locator.is_port_valid() {
+                        log::warn!(
+                            "Ignoring locator {} with port {} out of range in parameter 0x{:04X}",
+                            rtps_locator,
+                            rtps_locator.port(),
+                            parameter.id as u16
+                        );
+                        continue;
+                    }
+
                     match parameter.id {
                         CommonParameterId::PidMetatrafficUnicastLocator => {
                             if log_on {
@@ -639,6 +665,13 @@ impl MessageReceiver {
                 for parameter in parameter_list.parameters() {
                     if parameter.parameter_id() == ParameterId::PidMetatrafficUnicastLocator {
                         match Locator::read_from_buffer(parameter.value()) {
+                            Ok(locator) if !locator.is_port_valid() => {
+                                log::warn!(
+                                    "Ignoring metatraffic unicast locator {} with port {} out of range",
+                                    locator,
+                                    locator.port()
+                                );
+                            }
                             Ok(locator) => {
                                 spdp_data.add_metatraffic_unicast_locator(locator);
                             }
@@ -752,9 +785,32 @@ impl MessageReceiver {
 mod tests {
     use super::*;
     use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
+    use crate::rtps::common::locator::{LOCATOR_KIND_SHM, LOCATOR_KIND_UDP_V4};
 
     fn receiver() -> MessageReceiver {
         MessageReceiver::new(GUIDPREFIX_UNKNOWN, &"127.0.0.1:0".parse().unwrap())
+    }
+
+    #[test]
+    fn reply_locators_carry_the_receiving_transport_kind() {
+        let from_addr: SocketAddr = "127.0.0.1:7410".parse().unwrap();
+
+        let udp = MessageReceiver::new(GUIDPREFIX_UNKNOWN, &from_addr);
+        assert_eq!(udp.unicast_reply_locator_list[0].kind(), LOCATOR_KIND_UDP_V4);
+        assert_eq!(udp.multicast_reply_locator_list[0].kind(), LOCATOR_KIND_UDP_V4);
+
+        let shm = MessageReceiver::new_with_locator_kind(
+            GUIDPREFIX_UNKNOWN,
+            &from_addr,
+            LOCATOR_KIND_SHM,
+        );
+        assert_eq!(shm.unicast_reply_locator_list[0].kind(), LOCATOR_KIND_SHM);
+        assert_eq!(shm.unicast_reply_locator_list[0].port(), LOCATOR_PORT_INVALID);
+        assert_eq!(
+            shm.unicast_reply_locator_list[0].to_ip_v4_addr(),
+            std::net::Ipv4Addr::LOCALHOST
+        );
+        assert_eq!(shm.multicast_reply_locator_list[0].kind(), LOCATOR_KIND_SHM);
     }
 
     /// A datagram whose last submessage header claims more bytes than the datagram holds.
@@ -801,6 +857,35 @@ mod tests {
         receiver().process_discovery_parameters(&parameters, &mut proxy, VENDORID_INT2);
 
         assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    #[test]
+    fn discovery_locators_with_an_out_of_range_port_are_dropped() {
+        let locator_parameter = |id: ParameterId, port: u32| Parameter {
+            id,
+            value: ParameterValue::Locator(Locator::new(
+                LOCATOR_KIND_UDP_V4,
+                port,
+                LOCATOR_ADDRESS_INVALID,
+            )),
+        };
+        let mut proxy = empty_proxy();
+        let parameters = vec![
+            locator_parameter(ParameterId::PidMetatrafficUnicastLocator, 0),
+            locator_parameter(ParameterId::PidMetatrafficUnicastLocator, 65536),
+            locator_parameter(ParameterId::PidMetatrafficUnicastLocator, 7410),
+            locator_parameter(ParameterId::PidDefaultUnicastLocator, 0),
+            locator_parameter(ParameterId::PidDefaultUnicastLocator, 7411),
+        ];
+
+        receiver().process_discovery_parameters(&parameters, &mut proxy, VENDORID_INT2);
+
+        let metatraffic_ports: Vec<u32> =
+            proxy.metatraffic_unicast_locator_list().iter().map(Locator::port).collect();
+        let default_ports: Vec<u32> =
+            proxy.default_unicast_locator_list().iter().map(Locator::port).collect();
+        assert_eq!(metatraffic_ports, vec![7410]);
+        assert_eq!(default_ports, vec![7411]);
     }
 
     // A legitimate value, from our own vendor, must round-trip unchanged.

@@ -364,12 +364,28 @@ impl ParsedBuiltinTopicData {
             }
             ParameterId::PidUnicastLocator => {
                 if let ParameterValue::Locator(locator) = parameter.value {
-                    self.unicast_locator_list.push(locator);
+                    if locator.is_port_valid() {
+                        self.unicast_locator_list.push(locator);
+                    } else {
+                        log::warn!(
+                            "Ignoring unicast locator {} with port {} out of range",
+                            locator,
+                            locator.port()
+                        );
+                    }
                 }
             }
             ParameterId::PidMulticastLocator => {
                 if let ParameterValue::Locator(locator) = parameter.value {
-                    self.multicast_locator_list.push(locator);
+                    if locator.is_port_valid() {
+                        self.multicast_locator_list.push(locator);
+                    } else {
+                        log::warn!(
+                            "Ignoring multicast locator {} with port {} out of range",
+                            locator,
+                            locator.port()
+                        );
+                    }
                 }
             }
             ParameterId::PidDataRepresentation => {
@@ -446,6 +462,34 @@ impl ParsedBuiltinTopicData {
 mod tests {
     use super::*;
     use crate::infrastructure::qos_policy::{DataRepresentationId, DataRepresentationQosPolicy};
+    use crate::rtps::common::locator::{Locator, LOCATOR_ADDRESS_INVALID, LOCATOR_KIND_UDP_V4};
+    use crate::rtps::common::parameters::PlCdrParameter;
+
+    #[test]
+    fn endpoint_locators_with_an_out_of_range_port_are_dropped() {
+        let locator_parameter = |id: ParameterId, port: u32| PlCdrParameter {
+            id,
+            value: ParameterValue::Locator(Locator::new(
+                LOCATOR_KIND_UDP_V4,
+                port,
+                LOCATOR_ADDRESS_INVALID,
+            )),
+        };
+        let mut parsed = ParsedBuiltinTopicData::default();
+
+        parsed.apply_parameter(locator_parameter(ParameterId::PidUnicastLocator, 0)).unwrap();
+        parsed.apply_parameter(locator_parameter(ParameterId::PidUnicastLocator, 65536)).unwrap();
+        parsed.apply_parameter(locator_parameter(ParameterId::PidUnicastLocator, 7411)).unwrap();
+        parsed.apply_parameter(locator_parameter(ParameterId::PidMulticastLocator, 0)).unwrap();
+        parsed.apply_parameter(locator_parameter(ParameterId::PidMulticastLocator, 7401)).unwrap();
+
+        let unicast_ports: Vec<u32> =
+            parsed.unicast_locator_list.iter().map(Locator::port).collect();
+        let multicast_ports: Vec<u32> =
+            parsed.multicast_locator_list.iter().map(Locator::port).collect();
+        assert_eq!(unicast_ports, vec![7411]);
+        assert_eq!(multicast_ports, vec![7401]);
+    }
 
     // B1: an endpoint whose DataRepresentation QoS is left unset (empty list)
     // must still advertise the resolved default on the wire, so peers observe

@@ -201,7 +201,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
-                    UdpConfig::from_property(property),
+                    UdpConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -214,7 +214,7 @@ impl TransportPluginFactory {
                     working_ips,
                     guid_prefix,
                     tls_config,
-                    TcpConfig::from_property(property),
+                    TcpConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -227,7 +227,7 @@ impl TransportPluginFactory {
                     multicast_if_ip,
                     working_ips,
                     guid_prefix,
-                    HybridConfig::from_property(property),
+                    HybridConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -239,7 +239,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
-                    UdpConfig::from_property(property),
+                    UdpConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }
