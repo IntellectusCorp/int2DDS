@@ -306,14 +306,23 @@ impl Publisher {
 
         let qos = self.resolve_datawriter_qos(qos.into());
 
-        let type_support = self.get_participant()?.find_typesupport(topic.get_type_name());
-        if type_support.is_none() {
-            return Err(DdsError::Error("Failed to create DataWriter: Topic does not belong to the same DomainParticipant as Publisher.".to_string()));
-        }
-        let type_support =
-            type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+        self.check_topic_participant(topic)?;
+        let type_support = self
+            .get_participant()?
+            .find_typesupport(topic.get_type_name())
+            .ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
 
         self.create_datawriter_impl(type_support, topic, qos, listener, mask)
+    }
+
+    /// A writer may only use a topic created by this publisher's participant.
+    fn check_topic_participant(&self, topic: &Topic) -> DdsResult<()> {
+        if topic.get_participant()?.get_instance_handle()?
+            != self.get_participant()?.get_instance_handle()?
+        {
+            return Err(DdsError::BadParameter);
+        }
+        Ok(())
     }
 
     /// Internal implementation for creating a DataWriter with a provided TypeSupport.
@@ -331,6 +340,7 @@ impl Publisher {
         }
         let _ = self.cleanup_dead_writers();
 
+        self.check_topic_participant(topic)?;
         let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
 
         qos.is_consistent()?;

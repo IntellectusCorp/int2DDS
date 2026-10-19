@@ -1,2 +1,2 @@
-pub(crate) mod notify;
+pub mod notify;
 pub(crate) mod timer;
