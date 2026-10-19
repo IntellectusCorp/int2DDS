@@ -19,30 +19,35 @@ pub(crate) fn dial(addr: SocketAddr, wait: Duration) -> io::Result<TcpStream> {
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
-    if let Err(error) = refuse_without_syn_retransmission(&socket) {
+    let rtt_ms = wait.as_millis().clamp(MIN_INITIAL_RTO_MS as u128, MAX_INITIAL_RTO_MS as u128);
+    if let Err(error) = refuse_without_syn_retransmission(&socket, rtt_ms as u16) {
         log::debug!("TCP connect to {addr} keeps retransmitting its SYN: {error}");
     }
     socket.connect_timeout(&addr.into(), wait)?;
     Ok(socket.into())
 }
 
-/// Keeps the system's initial retransmission timeout.
+/// With its one SYN never resent, a dial to a silent host ends after a single
+/// initial retransmission timeout, which the kernel holds to this range, so the
+/// connect timeout is honored only up to the upper bound.
 #[cfg(windows)]
-const TCP_INITIAL_RTO_UNSPECIFIED_RTT: u16 = 0xFFFF;
+const MIN_INITIAL_RTO_MS: u16 = 300;
+#[cfg(windows)]
+const MAX_INITIAL_RTO_MS: u16 = 3000;
 
 /// No SYN retransmission at all, as the SDK header defines it: `(UCHAR)-2`.
 #[cfg(windows)]
 const TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS: u8 = 254;
 
 #[cfg(windows)]
-fn refuse_without_syn_retransmission(socket: &socket2::Socket) -> io::Result<()> {
+fn refuse_without_syn_retransmission(socket: &socket2::Socket, rtt_ms: u16) -> io::Result<()> {
     use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Networking::WinSock::{
         WSAIoctl, SIO_TCP_INITIAL_RTO, SOCKET, TCP_INITIAL_RTO_PARAMETERS,
     };
 
     let params = TCP_INITIAL_RTO_PARAMETERS {
-        Rtt: TCP_INITIAL_RTO_UNSPECIFIED_RTT,
+        Rtt: rtt_ms,
         MaxSynRetransmissions: TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS,
     };
     let mut returned = 0u32;
@@ -87,17 +92,20 @@ mod tests {
     }
 
     /// A rejected option leaves the dial on the slow refusal without a word,
-    /// so its acceptance is checked here instead.
+    /// so its acceptance is checked here at both ends of the timeout range.
     #[test]
     fn the_syn_retransmission_option_is_accepted() {
-        let socket = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::STREAM,
-            Some(socket2::Protocol::TCP),
-        )
-        .unwrap();
+        for rtt_ms in [MIN_INITIAL_RTO_MS, MAX_INITIAL_RTO_MS] {
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )
+            .unwrap();
 
-        refuse_without_syn_retransmission(&socket).expect("the kernel rejected the option");
+            refuse_without_syn_retransmission(&socket, rtt_ms)
+                .unwrap_or_else(|error| panic!("the kernel rejected Rtt {rtt_ms} ms: {error}"));
+        }
     }
 
     /// An accepted option whose meaning has changed would still retry the SYN,
