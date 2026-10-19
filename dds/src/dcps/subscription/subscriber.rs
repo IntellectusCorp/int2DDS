@@ -303,15 +303,23 @@ impl Subscriber {
 
         let qos = self.resolve_datareader_qos(qos.into());
 
-        let type_support =
-            self.get_participant()?.find_typesupport(topic_description.get_type_name());
-        if type_support.is_none() {
-            return Err(DdsError::Error("Failed to create DataReader: Topic does not belong to the same DomainParticipant as Subscriber.".to_string()));
-        }
-        let type_support =
-            type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+        self.check_topic_participant(topic_description)?;
+        let type_support = self
+            .get_participant()?
+            .find_typesupport(topic_description.get_type_name())
+            .ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
 
         self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
+    }
+
+    /// A reader may only use a topic created by this subscriber's participant.
+    fn check_topic_participant(&self, topic_description: &dyn TopicDescription) -> DdsResult<()> {
+        if topic_description.get_participant()?.get_instance_handle()?
+            != self.get_participant()?.get_instance_handle()?
+        {
+            return Err(DdsError::BadParameter);
+        }
+        Ok(())
     }
 
     /// Internal implementation for creating a DataReader with a provided TypeSupport.
@@ -333,6 +341,7 @@ impl Subscriber {
             .ok_or(DdsError::Error("Subscriber is not properly initialized".to_string()))?;
 
         let participant = self.get_participant()?;
+        self.check_topic_participant(topic_description)?;
         let entity_kind = if type_support.is_compute_key_provided() {
             EntityKind::USER_DEFINED_READER_WITH_KEY
         } else {
@@ -2761,5 +2770,73 @@ mod tests {
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn create_endpoint_rejects_topic_of_another_participant() {
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let other = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        // Same type registered on both participants, so only the ownership check can reject it.
+        let _own_topic = participant
+            .create_topic::<HelloWorld>(
+                "own",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let foreign_topic = other
+            .create_topic::<HelloWorld>(
+                "foreign",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let res = subscriber.create_datareader::<HelloWorld>(
+            &foreign_topic,
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+        );
+        assert!(matches!(res, Err(DdsError::BadParameter)));
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let res = publisher.create_datawriter::<HelloWorld>(
+            &foreign_topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        );
+        assert!(matches!(res, Err(DdsError::BadParameter)));
+
+        participant.delete_contained_entities().unwrap();
+        other.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+        factory.delete_participant(other).unwrap();
     }
 }
