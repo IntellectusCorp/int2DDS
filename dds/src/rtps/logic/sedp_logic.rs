@@ -2618,7 +2618,9 @@ impl SedpLogic {
             })?;
 
         writer_proxy.mark_change_received(seq_num, None);
-        writer_proxy.increment_expected_sn();
+        // Move the cursor only over announcements already settled. The heartbeat answer is clamped
+        // at the cursor, so stepping past one still owed would stop it from ever being requested.
+        writer_proxy.advance_expected_sn_over_settled();
         Ok(())
     }
 }
@@ -3239,17 +3241,13 @@ impl UnicastMessageProcessor for SedpLogic {
             irrelevant_changes.last()
         );
 
-        if irrelevant_changes.last().unwrap_or(&SequenceNumber::new(0, 0))
-            > &writer_proxy.expected_sn()
-        {
-            writer_proxy.set_expected_sn(SequenceNumber::from_i64(
-                irrelevant_changes.last().unwrap().to_i64() + 1,
-            ));
-        }
-
         for seq_num in irrelevant_changes {
             writer_proxy.irrelevant_change_set(seq_num);
         }
+
+        // Step over the settled run at the cursor only. Jumping to the end of the GAP would carry
+        // the cursor over announcements between its entries that may still be owed.
+        writer_proxy.advance_expected_sn_over_settled();
 
         Ok(())
     }
@@ -3348,6 +3346,164 @@ mod tests {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .expect("the proxy was added above");
         proxy.missing_changes_for_heartbeat(seq_num, seq_num).contains(&seq_num)
+    }
+
+    fn proxy_heartbeat(
+        participant: &Participant,
+        remote_writer_guid: Guid,
+        first: i64,
+        last: i64,
+    ) -> (SequenceNumber, Vec<SequenceNumber>) {
+        let reader = participant.sedp_builtin_publications_reader();
+        let proxies = reader.writer_proxies();
+        let mut guard = proxies.lock().expect("writer proxies lock");
+        let proxy = guard
+            .iter_mut()
+            .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+            .expect("the proxy was added above");
+        proxy.process_heartbeat(SequenceNumber::from_i64(first), SequenceNumber::from_i64(last))
+    }
+
+    /// Announcement 5 is lost and 6 arrives twice. The cursor must stay on 5, or the clamped
+    /// heartbeat answer stops requesting 5 and the endpoint behind it is never discovered.
+    #[test]
+    fn a_duplicate_announcement_does_not_push_the_cursor_past_a_lost_one() {
+        let (sedp_logic, participant, remote_writer_guid) = sedp_logic_with_matched_writer();
+        let reader = participant.sedp_builtin_publications_reader();
+        proxy_heartbeat(&participant, remote_writer_guid, 1, 6);
+        for sn in [1, 2, 3, 4, 6, 6] {
+            sedp_logic
+                .mark_as_received_in_writer_proxy(
+                    &reader,
+                    remote_writer_guid,
+                    SequenceNumber::from_i64(sn),
+                )
+                .expect("mark received");
+        }
+        let (base, missing) = proxy_heartbeat(&participant, remote_writer_guid, 1, 6);
+        assert_eq!(base, SequenceNumber::from_i64(5));
+        assert_eq!(missing, vec![SequenceNumber::from_i64(5)]);
+    }
+
+    /// Announcement 5 is lost and the writer answers a later request with GAP(7). The GAP starts
+    /// beyond the hole, so it must not carry the cursor over 5.
+    #[test]
+    fn a_gap_beyond_a_lost_announcement_does_not_hide_it_from_the_heartbeat_answer() {
+        let (mut sedp_logic, participant, remote_writer_guid) = sedp_logic_with_matched_writer();
+        let reader = participant.sedp_builtin_publications_reader();
+        proxy_heartbeat(&participant, remote_writer_guid, 1, 7);
+        for sn in [1, 2, 3, 4, 6] {
+            sedp_logic
+                .mark_as_received_in_writer_proxy(
+                    &reader,
+                    remote_writer_guid,
+                    SequenceNumber::from_i64(sn),
+                )
+                .expect("mark received");
+        }
+        let gap = Gap::new(
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            SequenceNumber::from_i64(7),
+            SequenceNumberSet::new_empty_with_base(SequenceNumber::from_i64(8)),
+            None,
+            None,
+        );
+        sedp_logic
+            .handle_gap_message(&Header::new(remote_writer_guid.prefix()), &gap)
+            .expect("gap handled");
+        let (base, missing) = proxy_heartbeat(&participant, remote_writer_guid, 1, 7);
+        assert_eq!(base, SequenceNumber::from_i64(5));
+        assert_eq!(missing, vec![SequenceNumber::from_i64(5)]);
+    }
+
+    /// The cursor waits on 2 and the writer's GAP names 2, 3 and 6. Announcement 4 arrives, 5 is
+    /// lost, 7 arrives. The heartbeat answer must still request 5.
+    #[test]
+    fn a_sparse_gap_does_not_hide_an_announcement_between_its_entries() {
+        let (mut sedp_logic, participant, remote_writer_guid) = sedp_logic_with_matched_writer();
+        let reader = participant.sedp_builtin_publications_reader();
+        proxy_heartbeat(&participant, remote_writer_guid, 1, 7);
+        sedp_logic
+            .mark_as_received_in_writer_proxy(
+                &reader,
+                remote_writer_guid,
+                SequenceNumber::from_i64(1),
+            )
+            .expect("mark received");
+        let gap = Gap::new(
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            SequenceNumber::from_i64(2),
+            SequenceNumberSet::from_vec(
+                SequenceNumber::from_i64(4),
+                vec![SequenceNumber::from_i64(6)],
+            ),
+            None,
+            None,
+        );
+        sedp_logic
+            .handle_gap_message(&Header::new(remote_writer_guid.prefix()), &gap)
+            .expect("gap handled");
+        for sn in [4, 7] {
+            sedp_logic
+                .mark_as_received_in_writer_proxy(
+                    &reader,
+                    remote_writer_guid,
+                    SequenceNumber::from_i64(sn),
+                )
+                .expect("mark received");
+        }
+        let (_, missing) = proxy_heartbeat(&participant, remote_writer_guid, 1, 7);
+        assert_eq!(missing, vec![SequenceNumber::from_i64(5)]);
+    }
+
+    /// Announcement 5 arrives before 4. While 4 is owed the answer requests it; once it arrives
+    /// nothing is requested.
+    #[test]
+    fn an_out_of_order_announcement_is_requested_until_it_arrives() {
+        let (sedp_logic, participant, remote_writer_guid) = sedp_logic_with_matched_writer();
+        let reader = participant.sedp_builtin_publications_reader();
+        proxy_heartbeat(&participant, remote_writer_guid, 1, 5);
+        for sn in [1, 2, 3, 5] {
+            sedp_logic
+                .mark_as_received_in_writer_proxy(
+                    &reader,
+                    remote_writer_guid,
+                    SequenceNumber::from_i64(sn),
+                )
+                .expect("mark received");
+        }
+        let (_, missing) = proxy_heartbeat(&participant, remote_writer_guid, 1, 5);
+        assert_eq!(missing, vec![SequenceNumber::from_i64(4)]);
+        sedp_logic
+            .mark_as_received_in_writer_proxy(
+                &reader,
+                remote_writer_guid,
+                SequenceNumber::from_i64(4),
+            )
+            .expect("mark received");
+        let (_, missing) = proxy_heartbeat(&participant, remote_writer_guid, 1, 5);
+        assert!(missing.is_empty());
+    }
+
+    /// Announcement 1 is lost and 2 to 5 arrive before any heartbeat has named the range.
+    /// The first heartbeat answer must request 1.
+    #[test]
+    fn an_announcement_lost_before_the_first_heartbeat_is_requested() {
+        let (sedp_logic, participant, remote_writer_guid) = sedp_logic_with_matched_writer();
+        let reader = participant.sedp_builtin_publications_reader();
+        for sn in [2, 3, 4, 5] {
+            sedp_logic
+                .mark_as_received_in_writer_proxy(
+                    &reader,
+                    remote_writer_guid,
+                    SequenceNumber::from_i64(sn),
+                )
+                .expect("mark received");
+        }
+        let (_, missing) = proxy_heartbeat(&participant, remote_writer_guid, 1, 5);
+        assert_eq!(missing, vec![SequenceNumber::from_i64(1)]);
     }
 
     /// A truncated payload reaches the handler fully defaulted, and storing it files a phantom
