@@ -20,17 +20,17 @@ mkdir -p "$out_dir"
 # Artifacts arrive as <artifact_root>/<artifact-name>/<file>.
 # int2dds-ffi-*.tar.gz is the vendor tarball built by the ffi-vendor job. It
 # goes to a different repository's releases, not this one's, so it must not land
-# here -- it would be a 26th file and trip the count check below.
+# here -- it would be a 28th file and trip the count check below.
 find "$artifact_root" -type f \
   \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.nupkg' -o -name '*.snupkg' -o -name '*.whl' \
-     -o -name '*.jar' \) \
+     -o -name '*.jar' -o -name '*.spdx.json' -o -name '*.cdx.json' \) \
   -not -name 'int2dds-ffi-*' \
   -exec cp {} "$out_dir/" \;
 
-expected=25
+expected=27
 actual="$(find "$out_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')"
 if [[ "$actual" -ne "$expected" ]]; then
-  echo "ERROR: expected $expected release archives, found $actual" >&2
+  echo "ERROR: expected $expected release assets, found $actual" >&2
   ls -1 "$out_dir" >&2
   exit 1
 fi
@@ -82,8 +82,15 @@ if [[ ! -f "$out_dir/int2dds-api-$base_version.jar" ]]; then
   exit 1
 fi
 
+for f in "int2dds-$version.spdx.json" "int2dds-$version.cdx.json"; do
+  if [[ ! -f "$out_dir/$f" ]]; then
+    echo "ERROR: missing SBOM $f" >&2
+    exit 1
+  fi
+done
+
 ( cd "$out_dir" && sha256sum ./* > SHA256SUMS )
 
 echo "== release assets =="
 ls -1 "$out_dir"
-echo "total: $(find "$out_dir" -maxdepth 1 -type f | wc -l | tr -d ' ') files (25 archives + SHA256SUMS)"
+echo "total: $(find "$out_dir" -maxdepth 1 -type f | wc -l | tr -d ' ') files (25 archives + 2 SBOMs + SHA256SUMS)"
