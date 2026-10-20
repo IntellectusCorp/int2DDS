@@ -9,18 +9,20 @@ use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 #[derive(Debug)]
 pub(crate) struct UdpSender {
-    socket: Mutex<Option<Socket2>>,
+    // Data sends share the socket (send_to takes &self). force_close and send_multicast take it
+    // exclusively: the enterprise discovery hook in send_multicast gets the raw socket handle.
+    socket: RwLock<Option<Socket2>>,
     port_manager: PortManager,
 }
 
 impl UdpSender {
     pub(crate) fn port(&self) -> u16 {
         self.socket
-            .lock()
+            .read()
             .ok()
             .and_then(|guard| {
                 guard
@@ -51,13 +53,13 @@ impl UdpSender {
             log::warn!("[udp_sender] Extended discovery init failed: {}", e);
         }
 
-        Ok(Self { socket: Mutex::new(Some(socket)), port_manager: udp_config.port_manager })
+        Ok(Self { socket: RwLock::new(Some(socket)), port_manager: udp_config.port_manager })
     }
 
     /// Force close the socket even when there are other Arc references.
     /// This can be called with &self, unlike close() which requires ownership.
     pub(crate) fn force_close(&self) {
-        if let Ok(mut guard) = self.socket.lock() {
+        if let Ok(mut guard) = self.socket.write() {
             if let Some(socket) = guard.take() {
                 log::info!("[UdpSender] Socket force closed");
                 drop(socket);
@@ -66,7 +68,7 @@ impl UdpSender {
     }
 
     pub(crate) fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
+        let guard = self.socket.read().map_err(|_| io::Error::other("Mutex poisoned"))?;
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
@@ -77,7 +79,7 @@ impl UdpSender {
     }
 
     pub(crate) fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
-        let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
+        let guard = self.socket.write().map_err(|_| io::Error::other("Mutex poisoned"))?;
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
