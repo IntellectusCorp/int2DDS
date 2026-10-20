@@ -242,8 +242,11 @@ impl ReaderHistoryCache {
         }
 
         // A coherent reader holds set members back until their set closes; any other
-        // arrival from a writer with an open set ends that set implicitly.
-        if self.is_coherent_access() {
+        // arrival from a writer with an open set ends that set implicitly. Only a set member or a
+        // writer with an open set can take that path, so the reader is asked only then.
+        if (coherent_set.is_some() || self.coherent_pending.contains_key(&writer_guid))
+            && self.is_coherent_access()
+        {
             match coherent_set {
                 Some(set_id) => {
                     // A member of a different set closes the previous set first.
