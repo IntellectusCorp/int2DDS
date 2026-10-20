@@ -251,6 +251,17 @@ impl PeerMap {
         }
     }
 
+    /// `forget` every cached peer whose slot is free. A sweep in another
+    /// participant may have freed it first, and then ours never sees it stale.
+    pub(crate) fn forget_departed(&self, own: &OwnedSegment, registry: &Registry) {
+        // Collected first: `forget` locks the shard the `iter()` guard holds.
+        let departed: Vec<[u8; 12]> =
+            self.peers.iter().filter(|e| registry.is_free(e.slot)).map(|e| *e.key()).collect();
+        for prefix in departed {
+            self.forget(own, registry, &prefix);
+        }
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.peers.len()
     }
@@ -431,6 +442,7 @@ impl ShmRuntime {
         for slot in self.slot.sweep() {
             self.peers.forget_slot(&self.own, self.registry(), slot);
         }
+        self.peers.forget_departed(&self.own, self.registry());
     }
 }
 
@@ -616,6 +628,33 @@ mod tests {
         f.peer_bit_set(r.order, r.index, new_slot);
         map.forget_slot(&f.mine, f.reg.registry(), new_slot);
         assert_ne!(f.peer_bit(r.order, r.index, new_slot), 0);
+    }
+
+    #[test]
+    fn a_peer_whose_slot_another_sweep_freed_is_forgotten() {
+        let f = fixture(244);
+        let (dead_slot, dead_epoch) =
+            f.reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
+        let (live_slot, _) =
+            f.reg.registry().claim(std::process::id(), [8; 12], now_tick()).unwrap();
+        unlink_segment(f.domain, live_slot);
+        let _live = OwnedSegment::create(f.domain, live_slot, 1, TEST_POOL_SIZE, 4).unwrap();
+        let map = PeerMap::new(f.domain, ME);
+        map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
+        map.resolve(&f.mine, f.reg.registry(), [8; 12]).unwrap();
+        let lease = f.mine.owner_mut().acquire(8).unwrap();
+        let r = f.mine.owner_mut().commit(lease, 1);
+        f.peer_bit_set(r.order, r.index, dead_slot);
+        f.peer_bit_set(r.order, r.index, live_slot);
+
+        // Freed by someone else's sweep, so our `sweep_dead` never reports it.
+        f.reg.registry().release(dead_slot, dead_epoch);
+        map.forget_departed(&f.mine, f.reg.registry());
+
+        assert_eq!(map.len(), 1, "only the departed peer is evicted");
+        assert_eq!(f.peer_bit(r.order, r.index, dead_slot), 0);
+        assert_ne!(f.peer_bit(r.order, r.index, live_slot), 0, "a live peer's bits stay");
+        unlink_segment(f.domain, live_slot);
     }
 
     const RECV_DOMAIN: u32 = 232;
