@@ -16,8 +16,8 @@ pub enum Kind {
     /// Caller-supplied text buffer the FFI *writes*, i.e. `*mut c_char`.
     ///
     /// Same trap as [`Kind::ByteArrayOut`], and easier to miss because the
-    /// pointee type is identical to the in direction. 12 functions take one —
-    /// every "get the name / the string / the last error" call in the API. The
+    /// pointee type is identical to the in direction. 13 functions take one —
+    /// every "get the name / the string / the last error / the version" call in the API. The
     /// forwarder must hand the FFI a scratch buffer and copy it back.
     CStringOut,
     /// Array of C strings, carried as `byte[][]`.
@@ -240,7 +240,7 @@ mod tests {
             .flat_map(|f| f.params.iter())
             .filter(|p| map_type(&p.ty).map(|m| m.kind) == Some(Kind::CStringOut))
             .count();
-        assert_eq!(n, 12, "*mut c_char out buffers");
+        assert_eq!(n, 13, "*mut c_char out buffers");
     }
 
     #[test]
@@ -280,10 +280,10 @@ mod tests {
                 .filter(|m| m.map(|m| m.kind) == Some(k))
                 .count()
         };
-        // 19 `*mut [u8; N]` out-parameters total: 3 are caller-sized arrays
-        // (each followed by a `capacity`), the other 16 are single fixed outs.
-        assert_eq!(count(Kind::ByteArrayOut), 16, "*mut [u8; N] single fixed out parameters");
-        assert_eq!(count(Kind::ByteArrayOutSized), 3, "*mut [u8; N] caller-sized array parameters");
+        // 23 `*mut [u8; N]` out-parameters total: 4 are caller-sized arrays
+        // (each followed by a `capacity`), the other 19 are single fixed outs.
+        assert_eq!(count(Kind::ByteArrayOut), 19, "*mut [u8; N] single fixed out parameters");
+        assert_eq!(count(Kind::ByteArrayOutSized), 4, "*mut [u8; N] caller-sized array parameters");
         assert!(count(Kind::ByteArrayIn) > 0, "*const [u8; N] in parameters");
     }
 

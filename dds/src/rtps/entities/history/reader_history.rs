@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex, Weak},
 };
 
@@ -7,6 +7,7 @@ use log::debug;
 
 use crate::{
     common::instance_handle::InstanceHandle,
+    core::types::LENGTH_UNLIMITED,
     infrastructure::history_cache::HistoryCache as dcps_history_cache,
     rtps::{
         builtin::builtin_endpoints::BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY,
@@ -33,6 +34,27 @@ struct PendingCoherentSet {
     changes: Vec<CacheChange>,
 }
 
+// The outcome of closing a remote writer's open coherent set.
+#[derive(Debug)]
+pub(crate) enum CoherentSetCloseResult {
+    // The writer had no open set to close.
+    NoOpenSet,
+    // A member is missing or out of place, so none of the set is delivered.
+    Incomplete,
+    // Every member of the set arrived, in order.
+    Complete(Vec<CacheChange>),
+}
+
+impl CoherentSetCloseResult {
+    // The members of a set that closed complete, and nothing for the other two outcomes.
+    pub(crate) fn into_complete_members(self) -> Vec<CacheChange> {
+        match self {
+            Self::Complete(members) => members,
+            Self::NoOpenSet | Self::Incomplete => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 #[allow(clippy::type_complexity)]
 pub struct ReaderHistoryCache {
@@ -44,8 +66,8 @@ pub struct ReaderHistoryCache {
     pool: CacheChangePool,
     // Open coherent sets per remote writer, held back until each set completes.
     coherent_pending: HashMap<Guid, PendingCoherentSet>,
-    // Max buffered members per open set (reader max_samples); oversized sets are discarded.
-    coherent_pending_cap: usize,
+    // Samples buffered for this reader before they reach its history.
+    presentation_buffer_limit: usize,
 }
 
 impl HistoryCache for ReaderHistoryCache {
@@ -113,7 +135,7 @@ impl ReaderHistoryCache {
             // Steady-state size converges to history depth.
             pool: CacheChangePool::with_capacity(0),
             coherent_pending: HashMap::new(),
-            coherent_pending_cap: usize::MAX,
+            presentation_buffer_limit: usize::MAX,
         }
     }
 
@@ -121,9 +143,9 @@ impl ReaderHistoryCache {
         self.pool.acquire()
     }
 
-    // Number of members buffered for a remote writer's currently open coherent set.
+    // Pending coherent set changes buffered for one remote writer's open set.
     #[cfg(test)]
-    pub(crate) fn pending_coherent_len(&self, writer_guid: Guid) -> usize {
+    pub(crate) fn coherent_pending_change_count_for_writer(&self, writer_guid: Guid) -> usize {
         self.coherent_pending.get(&writer_guid).map_or(0, |set| set.changes.len())
     }
 
@@ -147,11 +169,27 @@ impl ReaderHistoryCache {
         // changes are retained; with cap 0 the pool drops everything.
         if let Some(cache) = self.datareader_cache.as_ref().and_then(|w| w.upgrade()) {
             if let Ok(guard) = cache.lock() {
-                let depth = guard.get_max_samples().max(0) as usize;
-                self.pool.set_cap(depth.min(MAX_POOL_CAP));
-                self.coherent_pending_cap = if depth > 0 { depth } else { usize::MAX };
+                let max_samples = guard.get_max_samples();
+
+                self.pool.set_cap((max_samples.max(0) as usize).min(MAX_POOL_CAP));
             }
         }
+    }
+
+    pub(crate) fn set_buffer_limit(&mut self, buffer_limit: usize) {
+        self.presentation_buffer_limit = buffer_limit;
+    }
+
+    // Twice the RESOURCE_LIMITS max_samples, with LENGTH_UNLIMITED read as i32::MAX the way the
+    // history reads it. Any other negative value counts as zero.
+    pub(crate) fn buffer_limit_of(resource_limits_max_samples: i32) -> usize {
+        let max_samples = if resource_limits_max_samples == LENGTH_UNLIMITED {
+            i32::MAX
+        } else {
+            resource_limits_max_samples
+        };
+
+        (max_samples.max(0) as usize).saturating_mul(2)
     }
 
     /// Add CacheChange to ReaderHistoryCache.
@@ -164,17 +202,43 @@ impl ReaderHistoryCache {
         a_change: CacheChange,
         apply_filter: bool,
     ) -> RtpsResult<Vec<Arc<CacheChange>>> {
+        let changes = self.prepare_changes_to_commit(a_change, apply_filter);
+
+        self.commit_changes_to_datareader_cache(changes)
+    }
+
+    // Decides what one arrival lets through right now: the sample itself, the members of a
+    // coherent set it closes, or nothing while its set is still open. Stores nothing.
+    pub(crate) fn prepare_changes_to_commit(
+        &mut self,
+        a_change: CacheChange,
+        apply_filter: bool,
+    ) -> Vec<(CacheChange, bool)> {
         let coherent_set = a_change.presentation_info().coherent_set;
         let writer_guid = a_change.writer_guid();
 
-        // End marker: a payload-less Data closes the writer's open set and is never stored,
-        // regardless of this reader's presentation QoS. Accepts both an explicit
-        // PID_COHERENT_SET=UNKNOWN and a payload-less Data carrying no coherent set id.
+        // TOPIC: a payload-less Data carrying no coherent set id closes this writer's open set and
+        // is never stored, regardless of this reader's presentation QoS.
         if a_change.is_coherent_end_marker() {
-            let members = self.close_and_take_coherent_set(writer_guid, a_change.sequence_number());
-            return self.commit_changes_to_datareader_cache(
-                members.into_iter().map(|c| (c, false)).collect(),
+            return self
+                .close_and_take_coherent_set(writer_guid, a_change.sequence_number())
+                .into_complete_members()
+                .into_iter()
+                .map(|member| (member, false))
+                .collect();
+        }
+
+        // GROUP: an End Coherent Set marker belongs to the group cursor, not to this cache. Drop it
+        // rather than store a payload-less sample.
+        if a_change.is_end_coherent_set() {
+            debug!(
+                "End Coherent Set marker at sequence number {} from writer {} reached the reader \
+                 history cache, which does not handle group coherent sets",
+                a_change.sequence_number().to_i64(),
+                writer_guid
             );
+
+            return Vec::new();
         }
 
         // A coherent reader holds set members back until their set closes; any other
@@ -193,6 +257,7 @@ impl ReaderHistoryCache {
                             writer_guid,
                             a_change.sequence_number().previous(),
                         )
+                        .into_complete_members()
                     } else {
                         Vec::new()
                     };
@@ -200,19 +265,18 @@ impl ReaderHistoryCache {
                     // Hold this member back until its own set closes.
                     self.buffer_coherent_member(writer_guid, set_id, a_change);
 
-                    return self.commit_changes_to_datareader_cache(
-                        members.into_iter().map(|c| (c, false)).collect(),
-                    );
+                    return members.into_iter().map(|c| (c, false)).collect();
                 }
                 None => {
-                    // A non-coherent sample closes this writer's open set (if any); commit that
-                    // set and this sample together so a take() sees all of it or none.
+                    // A non-coherent sample closes this writer's open set (if any). The set and
+                    // this sample are stored or dropped separately.
                     let members = if self.coherent_pending.contains_key(&writer_guid) {
                         // This sample sits one past the open set's (possibly lost) end marker.
                         self.close_and_take_coherent_set(
                             writer_guid,
                             a_change.sequence_number().previous(),
                         )
+                        .into_complete_members()
                     } else {
                         Vec::new()
                     };
@@ -220,18 +284,18 @@ impl ReaderHistoryCache {
                     let mut batch: Vec<(CacheChange, bool)> =
                         members.into_iter().map(|c| (c, false)).collect();
                     batch.push((a_change, apply_filter));
-                    return self.commit_changes_to_datareader_cache(batch);
+                    return batch;
                 }
             }
         }
 
-        self.commit_changes_to_datareader_cache(vec![(a_change, apply_filter)])
+        vec![(a_change, apply_filter)]
     }
 
     // Insert a batch of changes into the DCPS and RTPS histories under a single DataReader
     // cache lock, so a concurrent take() never observes a partially-committed coherent set.
     // Each entry carries its own apply_filter; returns the changes actually stored.
-    fn commit_changes_to_datareader_cache(
+    pub(crate) fn commit_changes_to_datareader_cache(
         &mut self,
         changes: Vec<(CacheChange, bool)>,
     ) -> RtpsResult<Vec<Arc<CacheChange>>> {
@@ -249,49 +313,69 @@ impl ReaderHistoryCache {
                     )
                 })?;
 
-                // A coherent set that cannot be stored in full is dropped whole, never partially:
-                // a member lost to History/ResourceLimits would make the set incomplete.
-                // len > 1 limits this to real sets; a lone sample keeps the normal evict/reject path.
-                if datareader_cache.is_coherent_access() && changes.len() > 1 {
-                    let mut len_per_instance: HashMap<InstanceHandle, usize> = HashMap::new();
-                    for (change, _) in &changes {
-                        *len_per_instance.entry(change.instance_handle()).or_insert(0) += 1;
-                    }
-                    let fits = datareader_cache
-                        .ensure_capacity_dry(&len_per_instance)
-                        .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
-                    if !fits {
-                        return Ok(available);
-                    }
-                }
+                let is_coherent_access = datareader_cache.is_coherent_access();
+                let mut remaining = VecDeque::from(changes);
 
-                for (mut change, apply_filter) in changes {
-                    // Mutate the change before making it immutable
-                    datareader_cache
-                        .add_info_to_cache_change(&mut change)
-                        .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+                while !remaining.is_empty() {
+                    // Count set's length if this change belongs to a coherent set under coherent
+                    // access. Otherwise the length is 1.
+                    let coherent_set_len = if is_coherent_access {
+                        1 + remaining
+                            .iter()
+                            .zip(remaining.iter().skip(1))
+                            .take_while(|((previous, _), (next, _))| {
+                                Self::is_same_coherent_set(previous, next)
+                            })
+                            .count()
+                    } else {
+                        1
+                    };
 
-                    // Wrap in Arc once — no deep copy
-                    let shared = Arc::new(change);
-
-                    // Insert into DataReaderHistoryCache (Arc::clone only)
-                    let (removed, filtered) = datareader_cache
-                        .add_change_with_cleanup(Arc::clone(&shared), apply_filter)
-                        .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
-
-                    // Held by TIME_BASED_FILTER: not stored in either history, no notification.
-                    if filtered {
-                        continue;
-                    }
-
-                    // Insert into RTPS ReaderHistoryCache (Arc::clone only)
-                    self.changes.push(Arc::clone(&shared));
-
-                    if let Some(removed_change) = removed {
-                        self.remove_change(removed_change)?;
+                    // A coherent set that cannot be stored in full is dropped whole, never
+                    // partially: a member lost to History/ResourceLimits leaves the set incomplete.
+                    if coherent_set_len > 1 {
+                        let mut len_per_instance: HashMap<InstanceHandle, usize> = HashMap::new();
+                        for (change, _) in remaining.iter().take(coherent_set_len) {
+                            *len_per_instance.entry(change.instance_handle()).or_insert(0) += 1;
+                        }
+                        let fits = datareader_cache
+                            .ensure_capacity_dry(&len_per_instance)
+                            .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+                        if !fits {
+                            remaining.drain(..coherent_set_len);
+                            continue;
+                        }
                     }
 
-                    available.push(shared);
+                    for (mut change, apply_filter) in remaining.drain(..coherent_set_len) {
+                        // Mutate the change before making it immutable
+                        datareader_cache
+                            .add_info_to_cache_change(&mut change)
+                            .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+
+                        // Wrap in Arc once — no deep copy
+                        let shared = Arc::new(change);
+
+                        // Insert into DataReaderHistoryCache (Arc::clone only)
+                        let (removed, filtered) = datareader_cache
+                            .add_change_with_cleanup(Arc::clone(&shared), apply_filter)
+                            .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+
+                        // Held by TIME_BASED_FILTER: not stored in either history, no
+                        // notification.
+                        if filtered {
+                            continue;
+                        }
+
+                        // Insert into RTPS ReaderHistoryCache (Arc::clone only)
+                        self.changes.push(Arc::clone(&shared));
+
+                        if let Some(removed_change) = removed {
+                            self.remove_change(removed_change)?;
+                        }
+
+                        available.push(shared);
+                    }
                 }
 
                 return Ok(available);
@@ -323,41 +407,66 @@ impl ReaderHistoryCache {
         }
     }
 
-    // Buffer a coherent member until its set closes; an oversized set is discarded whole.
+    fn is_same_coherent_set(previous: &CacheChange, next: &CacheChange) -> bool {
+        let previous_info = previous.presentation_info();
+        let next_info = next.presentation_info();
+
+        match (previous_info.group_coherent_set, next_info.group_coherent_set) {
+            (Some(previous_set), Some(next_set)) => previous_set == next_set,
+            (None, None) => {
+                previous_info.coherent_set.is_some()
+                    && previous_info.coherent_set == next_info.coherent_set
+                    && previous.writer_guid() == next.writer_guid()
+            }
+            _ => false,
+        }
+    }
+
+    // Buffer a coherent member until its set closes. Past the reader's buffer limit the arriving
+    // portion keeps its entry with no members, so closing it reports Incomplete.
     fn buffer_coherent_member(
         &mut self,
         writer_guid: Guid,
         set_id: SequenceNumber,
         change: CacheChange,
     ) {
-        let cap = self.coherent_pending_cap;
+        let cap = self.presentation_buffer_limit;
+        let coherent_pending_change_count = self.coherent_pending_change_count();
+
         let pending = self
             .coherent_pending
             .entry(writer_guid)
             .or_insert_with(|| PendingCoherentSet { set_start_sn: set_id, changes: Vec::new() });
         pending.changes.push(change);
-        if pending.changes.len() > cap {
+
+        if coherent_pending_change_count >= cap {
             debug!(
-                "Discarding coherent set {} from writer {}: exceeds max_samples {}",
+                "Discarding coherent set {} from writer {}: the reader already buffers its \
+                 buffer limit {}",
                 set_id.to_i64(),
                 writer_guid,
                 cap
             );
-            self.coherent_pending.remove(&writer_guid);
+            pending.changes.clear();
         }
+    }
+
+    // Pending coherent set changes buffered for every remote writer with an open set.
+    fn coherent_pending_change_count(&self) -> usize {
+        self.coherent_pending.values().map(|pending| pending.changes.len()).sum()
     }
 
     // Close a writer's open coherent set and return its members ready for commit (coherent
     // id cleared), or an empty Vec when the set is incomplete or none is open. The caller
     // stores the returned members under one lock so the whole set is committed atomically.
-    fn close_and_take_coherent_set(
+    pub(crate) fn close_and_take_coherent_set(
         &mut self,
         writer_guid: Guid,
         end_sn: SequenceNumber,
-    ) -> Vec<CacheChange> {
+    ) -> CoherentSetCloseResult {
         // Removing closes the set; its members will not be buffered again.
         let Some(pending) = self.coherent_pending.remove(&writer_guid) else {
-            return Vec::new();
+            return CoherentSetCloseResult::NoOpenSet;
         };
 
         // A complete set holds exactly one member per seq in [set_start_sn, end_sn), in order.
@@ -366,25 +475,15 @@ impl ReaderHistoryCache {
         for (idx, sn) in (start..end_sn.to_i64()).enumerate() {
             if pending.changes.get(idx).map(|m| m.sequence_number().to_i64()) != Some(sn) {
                 debug!("Discarding incomplete coherent set {} from writer {} since sequence number {} is missing", start, writer_guid, sn);
-                return Vec::new();
+                return CoherentSetCloseResult::Incomplete;
             }
         }
 
-        // Clear each member's coherent id so re-insertion is not taken as a set boundary.
-        pending
-            .changes
-            .into_iter()
-            .map(|mut member| {
-                let mut info = member.presentation_info().clone();
-                info.coherent_set = None;
-                member.set_presentation_info(info);
-                member
-            })
-            .collect()
+        CoherentSetCloseResult::Complete(pending.changes)
     }
 
     // True when the attached DCPS reader requests coherent access (INSTANCE or TOPIC scope).
-    fn is_coherent_access(&self) -> bool {
+    pub(crate) fn is_coherent_access(&self) -> bool {
         let Some(cache) = self.datareader_cache.as_ref().and_then(|weak| weak.upgrade()) else {
             return false;
         };
@@ -419,6 +518,7 @@ impl ReaderHistoryCache {
 mod tests {
     use super::*;
     use crate::rtps::common::{entity_kind::EntityKind, types::ChangeKind};
+    use crate::rtps::entities::history::cache_change::PresentationInfo;
 
     fn writer_guid() -> Guid {
         Guid::new([1; 12], EntityId::new([0, 0, 2], EntityKind::USER_DEFINED_WRITER_WITH_KEY))
@@ -441,6 +541,115 @@ mod tests {
         ReaderHistoryCache::new(owner, None)
     }
 
+    // A dispose of a member of the group coherent set named by `group_coherent_set`. It carries
+    // the key as its payload.
+    fn disposed_coherent_member(seq: i64, group_coherent_set: i64) -> CacheChange {
+        let mut change = CacheChange::new(
+            ChangeKind::NotAliveDisposed,
+            writer_guid(),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(seq),
+            vec![0u8; 4],
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            group_coherent_set: Some(SequenceNumber::from_i64(group_coherent_set)),
+            ..PresentationInfo::default()
+        });
+
+        change
+    }
+
+    // An End Coherent Set marker at the given seq, closing the group coherent set named by
+    // `group_coherent_set`. `coherent_set` is the writer's own first seq in the set, absent when
+    // the writer wrote nothing in it.
+    fn end_coherent_set(
+        seq: i64,
+        group_coherent_set: i64,
+        coherent_set: Option<i64>,
+    ) -> CacheChange {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid(),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(seq),
+            Vec::new(),
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: coherent_set.map(SequenceNumber::from_i64),
+            group_coherent_set: Some(SequenceNumber::from_i64(group_coherent_set)),
+            ..PresentationInfo::default()
+        });
+
+        change
+    }
+
+    // An End Coherent Set from a writer that wrote in the set carries PID_COHERENT_SET, one from a
+    // writer that wrote nothing does not. Both carry PID_GROUP_COHERENT_SET and no payload.
+    #[test]
+    fn recognizes_an_end_coherent_set_by_its_empty_payload() {
+        assert!(end_coherent_set(13, 10, Some(10)).is_end_coherent_set());
+        assert!(end_coherent_set(1, 10, None).is_end_coherent_set());
+        // A set member carries a payload.
+        assert!(!coherent_member(10).is_end_coherent_set());
+        // A dispose of a set member carries the key as its payload.
+        assert!(!disposed_coherent_member(11, 10).is_end_coherent_set());
+    }
+
+    // The group cursor owns the markers, so a reader cache that knows nothing of group coherent
+    // sets stores none of them.
+    #[test]
+    fn prepare_drops_an_end_coherent_set_marker() {
+        let mut cache = reader_cache();
+
+        let prepared = cache.prepare_changes_to_commit(end_coherent_set(13, 10, Some(10)), true);
+
+        assert!(prepared.is_empty());
+        assert!(cache.changes.is_empty());
+    }
+
+    // A reader that never buffers a set still receives the markers of a GROUP Publisher.
+    #[test]
+    fn closing_a_set_a_reader_never_buffered_reports_no_open_set() {
+        let mut cache = reader_cache();
+
+        let closed = cache.close_and_take_coherent_set(writer_guid(), SequenceNumber::from_i64(13));
+
+        assert!(matches!(closed, CoherentSetCloseResult::NoOpenSet), "got {closed:?}");
+    }
+
+    // The judgement and the storing are separate steps, so a caller may hold the change back
+    // between them.
+    #[test]
+    fn prepare_hands_back_a_plain_sample_without_storing_it() {
+        let mut cache = reader_cache();
+
+        let prepared = cache.prepare_changes_to_commit(coherent_member(1), true);
+
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared[0].1);
+        assert!(cache.changes.is_empty());
+    }
+
+    // An oversized portion loses its members where they are buffered, and closing it reports
+    // the portion incomplete so the group cursor hears about it.
+    #[test]
+    fn closing_an_oversized_portion_reports_it_incomplete() {
+        let mut cache = reader_cache();
+        let guid = writer_guid();
+        let set_id = SequenceNumber::from_i64(10);
+        cache.presentation_buffer_limit = 2;
+
+        for seq in [10, 11, 12] {
+            cache.buffer_coherent_member(guid, set_id, coherent_member(seq));
+        }
+
+        let closed = cache.close_and_take_coherent_set(guid, SequenceNumber::from_i64(13));
+
+        assert!(matches!(closed, CoherentSetCloseResult::Incomplete), "got {closed:?}");
+    }
+
     #[test]
     fn implicit_close_discards_set_with_lost_tail() {
         let mut cache = reader_cache();
@@ -452,10 +661,13 @@ mod tests {
         cache.buffer_coherent_member(guid, set_id, coherent_member(11));
 
         // Set B's first member at seq 14 implicitly closes A: end_sn = 14 - 1 = 13.
-        let committed =
+        let closed =
             cache.close_and_take_coherent_set(guid, SequenceNumber::from_i64(14).previous());
 
-        assert!(committed.is_empty(), "set with a lost tail must be discarded on implicit close");
+        assert!(
+            matches!(closed, CoherentSetCloseResult::Incomplete),
+            "set with a lost tail must be discarded on implicit close, got {closed:?}"
+        );
     }
 
     #[test]
@@ -470,8 +682,9 @@ mod tests {
         }
 
         // Set B's first member at seq 14 implicitly closes A: end_sn = 13, last(12).next() == 13.
-        let committed =
-            cache.close_and_take_coherent_set(guid, SequenceNumber::from_i64(14).previous());
+        let committed = cache
+            .close_and_take_coherent_set(guid, SequenceNumber::from_i64(14).previous())
+            .into_complete_members();
 
         let seqs: Vec<i64> = committed.iter().map(|c| c.sequence_number().to_i64()).collect();
         assert_eq!(

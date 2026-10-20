@@ -1,10 +1,17 @@
 package kr.co.intellectus.int2dds.core;
 
 import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
 import kr.co.intellectus.int2dds.conditions.InstanceState;
+import kr.co.intellectus.int2dds.conditions.SampleState;
 import kr.co.intellectus.int2dds.conditions.StatusCondition;
+import kr.co.intellectus.int2dds.conditions.ViewState;
 import kr.co.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import kr.co.intellectus.int2dds.exceptions.DdsErrorException;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
@@ -31,6 +38,8 @@ import kr.co.intellectus.int2dds.xtypes.DynamicTypeSupport;
 public final class Subscriber extends NativeEntity {
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
+
+    private static final int HANDLE_SIZE = 16;
 
     /**
      * @param qos may be null for the core's default Subscriber QoS; {@link
@@ -274,6 +283,91 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
+     * Reads this subscriber's current QoS off the native side. Policies with no native getter come
+     * back null; see {@link QosMarshal#readSubscriberQos}.
+     */
+    public SubscriberQos getQos() {
+        long[] qosOut = new long[1];
+        int rc = FfiAccess.getSubscriberQos(handle(), qosOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long qosHandle = qosOut[0];
+        try {
+            return QosMarshal.readSubscriberQos(qosHandle);
+        } finally {
+            FfiAccess.destroySubscriberQos(qosHandle);
+        }
+    }
+
+    /**
+     * Opens a sample access block. Under GROUP access scope it is required before reading from this
+     * subscriber's datareaders or calling {@link #getDataReaders}; under other scopes it has no
+     * effect. Calls may be nested.
+     */
+    public void beginAccess() {
+        int rc = FfiAccess.subscriberBeginAccess(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Closes the access block opened by {@link #beginAccess}.
+     *
+     * @throws kr.co.intellectus.int2dds.exceptions.DdsPreconditionNotMetException under GROUP
+     *     access scope if no access block is open
+     */
+    public void endAccess() {
+        int rc = FfiAccess.subscriberEndAccess(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** {@link #getDataReaders(int, int, int)} with every state mask set to ANY. */
+    public List<DataReader<?>> getDataReaders() {
+        return getDataReaders(SampleState.ANY, ViewState.ANY, InstanceState.ANY);
+    }
+
+    /**
+     * The datareaders of this subscriber holding samples that match the state masks. Under GROUP
+     * access scope with ordered access the list is in sample order, one entry per sample, so a
+     * reader can appear more than once; read one sample from each entry in turn. Datareaders
+     * created through {@link #createDynamicDataReader} are not included.
+     *
+     * @throws kr.co.intellectus.int2dds.exceptions.DdsPreconditionNotMetException under GROUP
+     *     access scope outside an access block
+     */
+    public List<DataReader<?>> getDataReaders(
+            int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        List<InstanceHandle> readerHandles =
+                getDataReaderHandles(sampleStateMask, viewStateMask, instanceStateMask);
+
+        Map<InstanceHandle, DataReader<?>> readersByHandle =
+                new HashMap<InstanceHandle, DataReader<?>>();
+        for (NativeEntity child : openChildren()) {
+            if (child instanceof DataReader) {
+                DataReader<?> reader = (DataReader<?>) child;
+                readersByHandle.put(new InstanceHandle(reader.getGuid()), reader);
+            }
+        }
+
+        List<DataReader<?>> readers = new ArrayList<DataReader<?>>(readerHandles.size());
+        for (InstanceHandle readerHandle : readerHandles) {
+            DataReader<?> reader = readersByHandle.get(readerHandle);
+            if (reader != null) {
+                readers.add(reader);
+            }
+        }
+        return readers;
+    }
+
+    /** Invokes the {@code onDataAvailable} listener of every datareader of this subscriber. */
+    public void notifyDataReaders() {
+        int rc = FfiAccess.subscriberNotifyDatareaders(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
      * A fresh StatusCondition for this subscriber's status changes; attach it to a WaitSet to wait
      * on status transitions.
      */
@@ -296,6 +390,46 @@ public final class Subscriber extends NativeEntity {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return StatusMask.of(out[0]);
+    }
+
+    /**
+     * The reader instance handles {@code int2dds_subscriber_get_datareaders} reports, in its order.
+     * Grow-and-retry on capacity, the same shape as {@link DataReader#getMatchedPublications}.
+     */
+    private List<InstanceHandle> getDataReaderHandles(
+            int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        long h = handle();
+        int capacity = 8;
+        byte[] handles = new byte[capacity * HANDLE_SIZE];
+        int count;
+        while (true) {
+            long[] countOut = new long[1];
+            int rc =
+                    FfiAccess.subscriberGetDatareaders(
+                            h,
+                            sampleStateMask,
+                            viewStateMask,
+                            instanceStateMask,
+                            handles,
+                            capacity,
+                            countOut);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+            count = (int) countOut[0];
+            if (count <= capacity) {
+                break;
+            }
+            capacity = count;
+            handles = new byte[capacity * HANDLE_SIZE];
+        }
+
+        List<InstanceHandle> readerHandles = new ArrayList<InstanceHandle>(count);
+        for (int i = 0; i < count; i++) {
+            readerHandles.add(
+                    new InstanceHandle(
+                            Arrays.copyOfRange(handles, i * HANDLE_SIZE, (i + 1) * HANDLE_SIZE)));
+        }
+        return readerHandles;
     }
 
     /**

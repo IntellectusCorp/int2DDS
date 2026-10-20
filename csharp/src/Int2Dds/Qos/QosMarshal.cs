@@ -1,4 +1,7 @@
 using System;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
@@ -58,7 +61,7 @@ namespace Int2Dds.Qos
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_transport_priority(
                     qosHandle, qos.TransportPriority.Value));
 
-            if (qos.UserData != null && qos.UserData.Data != null && qos.UserData.Data.Length > 0)
+            if (qos.UserData != null && qos.UserData.Data != null)
             {
                 unsafe
                 {
@@ -92,7 +95,7 @@ namespace Int2Dds.Qos
         }
 
         /// <summary>Read every policy off a native writer QoS handle.</summary>
-        internal static DataWriterQos ReadWriterQos(IntPtr h)
+        internal static unsafe DataWriterQos ReadWriterQos(IntPtr h)
         {
             NativeMethods.int2dds_datawriter_qos_get_reliability(h, out var relKind, out var relTime);
             NativeMethods.int2dds_datawriter_qos_get_durability(h, out var durKind);
@@ -127,6 +130,7 @@ namespace Int2Dds.Qos
                 LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
                 WriterDataLifecycle = new WriterDataLifecycle(autoDispose),
                 DataFrag = dataFrag,
+                UserData = new UserData(ReadBytes(h, NativeMethods.int2dds_datawriter_qos_get_user_data)),
             };
         }
 
@@ -170,7 +174,7 @@ namespace Int2Dds.Qos
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_latency_budget(
                     qosHandle, qos.LatencyBudget.DurationNs));
 
-            if (qos.UserData != null && qos.UserData.Data != null && qos.UserData.Data.Length > 0)
+            if (qos.UserData != null && qos.UserData.Data != null)
             {
                 unsafe
                 {
@@ -201,7 +205,7 @@ namespace Int2Dds.Qos
         }
 
         /// <summary>Read every policy off a native reader QoS handle.</summary>
-        internal static DataReaderQos ReadReaderQos(IntPtr h)
+        internal static unsafe DataReaderQos ReadReaderQos(IntPtr h)
         {
             NativeMethods.int2dds_datareader_qos_get_reliability(h, out var relKind, out var relTime);
             NativeMethods.int2dds_datareader_qos_get_durability(h, out var durKind);
@@ -234,7 +238,129 @@ namespace Int2Dds.Qos
                 ReaderDataLifecycle = new ReaderDataLifecycle(
                     TimeSpan.FromTicks(purgeNowriterNs / 100),
                     TimeSpan.FromTicks(purgeDisposedNs / 100)),
+                UserData = new UserData(ReadBytes(h, NativeMethods.int2dds_datareader_qos_get_user_data)),
             };
+        }
+
+        /// <summary>True when <paramref name="qos"/> carries a policy that must reach a native publisher QoS handle.</summary>
+        internal static bool HasPublisherPolicies(PublisherQos qos) =>
+            qos.Partition is { Names: { Length: var len } } && len > 0 || qos.Presentation != null
+            || qos.GroupData is { Data: { Length: var dataLen } } && dataLen > 0;
+
+        /// <summary>Write the non-null policies of <paramref name="qos"/> onto a native publisher QoS handle.</summary>
+        internal static unsafe void ApplyPublisherQos(IntPtr qosHandle, PublisherQos qos)
+        {
+            if (qos.Partition is { Names: { Length: var len } } partition && len > 0)
+                ApplyPartition(qosHandle, partition, NativeMethods.int2dds_publisher_qos_set_partition);
+
+            if (qos.Presentation != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_qos_set_presentation(
+                    qosHandle, (int)qos.Presentation.AccessScope, qos.Presentation.CoherentAccess,
+                    qos.Presentation.OrderedAccess));
+
+            if (qos.GroupData != null && qos.GroupData.Data != null)
+            {
+                fixed (byte* pData = qos.GroupData.Data)
+                {
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_qos_set_group_data(
+                        qosHandle, pData, (UIntPtr)qos.GroupData.Data.Length));
+                }
+            }
+        }
+
+        /// <summary>Read the policies that have a native getter off a publisher QoS handle. Partition is left null.</summary>
+        internal static unsafe PublisherQos ReadPublisherQos(IntPtr h)
+        {
+            NativeMethods.int2dds_publisher_qos_get_presentation(h, out var scope, out var coherent, out var ordered);
+
+            return new PublisherQos
+            {
+                Presentation = new Presentation((PresentationAccessScopeKind)scope, coherent, ordered),
+                GroupData = new GroupData(ReadBytes(h, NativeMethods.int2dds_publisher_qos_get_group_data)),
+            };
+        }
+
+        /// <summary>True when <paramref name="qos"/> carries a policy that must reach a native subscriber QoS handle.</summary>
+        internal static bool HasSubscriberPolicies(SubscriberQos qos) =>
+            qos.Partition is { Names: { Length: var len } } && len > 0 || qos.Presentation != null
+            || qos.GroupData is { Data: { Length: var dataLen } } && dataLen > 0;
+
+        /// <summary>Write the non-null policies of <paramref name="qos"/> onto a native subscriber QoS handle.</summary>
+        internal static unsafe void ApplySubscriberQos(IntPtr qosHandle, SubscriberQos qos)
+        {
+            if (qos.Partition is { Names: { Length: var len } } partition && len > 0)
+                ApplyPartition(qosHandle, partition, NativeMethods.int2dds_subscriber_qos_set_partition);
+
+            if (qos.Presentation != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_set_presentation(
+                    qosHandle, (int)qos.Presentation.AccessScope, qos.Presentation.CoherentAccess,
+                    qos.Presentation.OrderedAccess));
+
+            if (qos.GroupData != null && qos.GroupData.Data != null)
+            {
+                fixed (byte* pData = qos.GroupData.Data)
+                {
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_set_group_data(
+                        qosHandle, pData, (UIntPtr)qos.GroupData.Data.Length));
+                }
+            }
+        }
+
+        /// <summary>Read the policies that have a native getter off a subscriber QoS handle. Partition is left null.</summary>
+        internal static unsafe SubscriberQos ReadSubscriberQos(IntPtr h)
+        {
+            NativeMethods.int2dds_subscriber_qos_get_presentation(h, out var scope, out var coherent, out var ordered);
+
+            return new SubscriberQos
+            {
+                Presentation = new Presentation((PresentationAccessScopeKind)scope, coherent, ordered),
+                GroupData = new GroupData(ReadBytes(h, NativeMethods.int2dds_subscriber_qos_get_group_data)),
+            };
+        }
+
+        internal unsafe delegate int GetBytesFn(IntPtr qos, byte* buf, UIntPtr capacity, out UIntPtr sizeOut);
+
+        /// <summary>Read a byte sequence policy: query the size with a null buffer, then copy.</summary>
+        internal static unsafe byte[] ReadBytes(IntPtr qosHandle, GetBytesFn getBytes)
+        {
+            ReturnCodeHelper.CheckReturn(getBytes(qosHandle, null, UIntPtr.Zero, out var size));
+            int len = (int)(uint)size;
+            if (len == 0) return new byte[0];
+
+            var buf = new byte[len];
+            fixed (byte* p = buf)
+            {
+                ReturnCodeHelper.CheckReturn(getBytes(qosHandle, p, (UIntPtr)len, out size));
+            }
+            return buf;
+        }
+
+        private unsafe delegate int SetPartitionFn(IntPtr qos, byte** partitions, UIntPtr partitionCount);
+
+        private static unsafe void ApplyPartition(IntPtr qosHandle, Partition partition, SetPartitionFn setPartition)
+        {
+            var partitionByteArrays = partition.Names
+                .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
+                .ToArray();
+            var pinnedArrays = new GCHandle[partitionByteArrays.Length];
+            for (int i = 0; i < partitionByteArrays.Length; i++)
+                pinnedArrays[i] = GCHandle.Alloc(partitionByteArrays[i], GCHandleType.Pinned);
+
+            try
+            {
+                var ptrs = new byte*[partitionByteArrays.Length];
+                for (int i = 0; i < ptrs.Length; i++)
+                    ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
+                fixed (byte** pPartitions = ptrs)
+                {
+                    ReturnCodeHelper.CheckReturn(setPartition(qosHandle, pPartitions, (UIntPtr)partition.Names.Length));
+                }
+            }
+            finally
+            {
+                foreach (var pin in pinnedArrays)
+                    pin.Free();
+            }
         }
     }
 }

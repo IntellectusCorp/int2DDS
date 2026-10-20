@@ -120,6 +120,10 @@ namespace Int2Dds.Interop
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_dynamic_data_set_f64(IntPtr data, byte* field, double value);
 
+        // float128 values cross the ABI as 16 little-endian bytes behind a pointer.
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_data_set_f128(IntPtr data, byte* field, byte* value);
+
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_dynamic_data_set_char8(IntPtr data, byte* field, byte value);
 
@@ -166,6 +170,9 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_dynamic_value_f64(double value, out IntPtr value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_value_f128(byte* value, out IntPtr value_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_dynamic_value_byte(byte value, out IntPtr value_out);
@@ -249,6 +256,18 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_dynamic_value_as_f64(IntPtr value, out double out_value);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_value_as_f128(IntPtr value, byte* out_value);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_float128_parse(byte* text, byte* out_value);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_float128_from_f64(double value, byte* out_value);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_float128_to_f64(byte* value, out double out_value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_dynamic_value_as_char8(IntPtr value, out byte out_value);

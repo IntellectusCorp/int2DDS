@@ -12,6 +12,7 @@
 //! C users receive raw CDR bytes via `int2dds_datareader_take_serialized` / `int2dds_datareader_read_serialized`
 //! and deserialize them with IDL-generated code.
 
+use int2dds::utils::notify::notify_user;
 use std::ffi::CStr;
 use std::sync::{Arc, RwLock};
 
@@ -201,6 +202,103 @@ pub unsafe extern "C" fn int2dds_subscriber_get_instance_handle(
     INT2DDS_RET_OK
 }
 
+/// Begin a sample access block on a Subscriber.
+///
+/// Required before reading or calling `int2dds_subscriber_get_datareaders` under
+/// GROUP access scope. Has no effect under other access scopes. Calls may be nested.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_begin_access(
+    subscriber: *const Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+
+    ffi_try!((*subscriber).inner.begin_access());
+
+    INT2DDS_RET_OK
+}
+
+/// End the sample access block started by `int2dds_subscriber_begin_access`.
+///
+/// Returns PRECONDITION_NOT_MET under GROUP access scope without a matching begin call.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_end_access(
+    subscriber: *const Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+
+    ffi_try!((*subscriber).inner.end_access());
+
+    INT2DDS_RET_OK
+}
+
+/// Get the DataReaders of a Subscriber that hold samples matching the state masks.
+///
+/// Writes up to `capacity` reader instance handles into `handles_out`. A handle equals
+/// the bytes from `int2dds_datareader_get_guid`. `count_out` receives the total count
+/// (may be greater than `capacity`). Under GROUP access scope with ordered access the
+/// result is a list in sample order and a reader may appear more than once.
+/// A state mask of 0 selects "any".
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `handles_out` may be null to query only the count; otherwise it must point to
+///   `capacity` 16-byte handles
+/// - `count_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_get_datareaders(
+    subscriber: *const Int2DdsSubscriber,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    handles_out: *mut [u8; 16],
+    capacity: usize,
+    count_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(count_out);
+
+    let (sample_states, view_states, instance_states) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
+
+    let readers = ffi_try!((*subscriber).inner.get_datareaders(
+        &sample_states,
+        &view_states,
+        &instance_states
+    ));
+
+    *count_out = readers.len();
+    if !handles_out.is_null() {
+        let copy_count = std::cmp::min(readers.len(), capacity);
+        for (i, reader) in readers.iter().take(copy_count).enumerate() {
+            let handle = ffi_try!(reader.get_instance_handle());
+            *handles_out.add(i) = *handle.value();
+        }
+    }
+
+    INT2DDS_RET_OK
+}
+
+/// Invoke the on_data_available listener of every DataReader of a Subscriber.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_notify_datareaders(
+    subscriber: *const Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+
+    ffi_try!((*subscriber).inner.notify_datareaders());
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Subscriber
 ///
 /// # Safety
@@ -270,14 +368,18 @@ unsafe fn attach_reader_listener(
     if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
         if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
             if status.current_count() > 0 {
-                listener_arc.on_subscription_matched(&reader_handle.inner, &status);
+                notify_user("re-notify on_subscription_matched", || {
+                    listener_arc.on_subscription_matched(&reader_handle.inner, &status)
+                });
             }
         }
     }
     if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
         if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
             if status.total_count() > 0 {
-                listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
+                notify_user("re-notify on_requested_incompatible_qos", || {
+                    listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status)
+                });
             }
         }
     }
@@ -516,6 +618,26 @@ pub unsafe extern "C" fn int2dds_datareader_get_listener(
         *listener_out = std::mem::zeroed();
         INT2DDS_RET_OK
     }
+}
+
+/// Get the 16-byte instance handle of a DataReader.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_instance_handle(
+    reader: *const Int2DdsDataReader,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(handle_out);
+
+    let reader_ref = &*reader;
+    let handle = ffi_try!(reader_ref.inner.get_instance_handle());
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
 }
 
 /// Set QoS on a DataReader
@@ -1690,6 +1812,130 @@ mod tests {
             int2dds_delete_subscriber(subscriber);
             participant::int2dds_delete_participant(participant);
             context::int2dds_domain_participant_factory_finalize(factory);
+        }
+    }
+
+    // A matched callback re-notified inside create_datareader runs on the caller's thread;
+    // it must still count as a listener callback, so deletes from it are refused.
+    #[test]
+    fn delete_from_renotified_matched_callback_is_illegal() {
+        use crate::{publisher, status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED, topic};
+        use std::ffi::{c_void, CString};
+        use std::sync::atomic::{AtomicI32, Ordering};
+
+        const NOT_CALLED: i32 = -1;
+
+        struct Ctx {
+            victim: *mut Int2DdsSubscriber,
+            ret: AtomicI32,
+        }
+
+        unsafe extern "C" fn delete_victim(
+            _reader: *mut Int2DdsDataReader,
+            _status: *const Int2DdsSubscriptionMatchedStatus,
+            user_context: *mut c_void,
+        ) {
+            let ctx = &*(user_context as *const Ctx);
+            if ctx.ret.load(Ordering::SeqCst) == NOT_CALLED {
+                ctx.ret.store(int2dds_delete_subscriber(ctx.victim), Ordering::SeqCst);
+            }
+        }
+
+        unsafe {
+            let mut factory = ptr::null_mut();
+            assert_eq!(
+                context::int2dds_domain_participant_factory_get_instance(&mut factory),
+                INT2DDS_RET_OK
+            );
+            let mut participant = ptr::null_mut();
+            assert_eq!(
+                participant::int2dds_create_participant(
+                    factory,
+                    164,
+                    ptr::null(),
+                    &mut participant
+                ),
+                INT2DDS_RET_OK
+            );
+
+            let (name, type_name) =
+                (CString::new("RenotifyTopic").unwrap(), CString::new("RenotifyType").unwrap());
+            let mut topic = ptr::null_mut();
+            assert_eq!(
+                topic::int2dds_create_topic(
+                    participant,
+                    name.as_ptr(),
+                    type_name.as_ptr(),
+                    0,
+                    ptr::null(),
+                    &mut topic
+                ),
+                INT2DDS_RET_OK
+            );
+
+            let mut publisher = ptr::null_mut();
+            assert_eq!(
+                publisher::int2dds_create_publisher(participant, ptr::null(), &mut publisher),
+                INT2DDS_RET_OK
+            );
+            let mut subscriber = ptr::null_mut();
+            assert_eq!(
+                int2dds_create_subscriber(participant, ptr::null(), &mut subscriber),
+                INT2DDS_RET_OK
+            );
+            let mut victim = ptr::null_mut();
+            assert_eq!(
+                int2dds_create_subscriber(participant, ptr::null(), &mut victim),
+                INT2DDS_RET_OK
+            );
+
+            let mut writer = ptr::null_mut();
+            assert_eq!(
+                publisher::int2dds_create_datawriter(
+                    publisher,
+                    topic,
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    &mut writer
+                ),
+                INT2DDS_RET_OK
+            );
+
+            let ctx = Ctx { victim, ret: AtomicI32::new(NOT_CALLED) };
+            let listener = Int2DdsDataReaderListener {
+                on_data_available: None,
+                on_subscription_matched: Some(delete_victim),
+                on_sample_rejected: None,
+                on_liveliness_changed: None,
+                on_requested_deadline_missed: None,
+                on_requested_incompatible_qos: None,
+                on_sample_lost: None,
+                user_context: &ctx as *const Ctx as *mut c_void,
+            };
+            let mut reader = ptr::null_mut();
+            assert_eq!(
+                int2dds_create_datareader(
+                    subscriber,
+                    topic,
+                    ptr::null(),
+                    &listener,
+                    INT2DDS_STATUS_SUBSCRIPTION_MATCHED,
+                    &mut reader
+                ),
+                INT2DDS_RET_OK
+            );
+
+            // The writer was already matched, so the callback ran inside create_datareader.
+            assert_eq!(ctx.ret.load(Ordering::SeqCst), INT2DDS_RET_ILLEGAL_OPERATION);
+
+            assert_eq!(int2dds_delete_datareader(reader), INT2DDS_RET_OK);
+            assert_eq!(publisher::int2dds_delete_datawriter(writer), INT2DDS_RET_OK);
+            assert_eq!(int2dds_delete_subscriber(victim), INT2DDS_RET_OK);
+            assert_eq!(int2dds_delete_subscriber(subscriber), INT2DDS_RET_OK);
+            assert_eq!(publisher::int2dds_delete_publisher(publisher), INT2DDS_RET_OK);
+            assert_eq!(topic::int2dds_delete_topic(topic), INT2DDS_RET_OK);
+            assert_eq!(participant::int2dds_delete_participant(participant), INT2DDS_RET_OK);
         }
     }
 }

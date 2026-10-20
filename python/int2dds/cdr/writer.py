@@ -10,7 +10,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Iterator
 
 if TYPE_CHECKING:
-    pass
+    from int2dds.cdr.float128 import Float128
 
 
 class Extensibility(IntEnum):
@@ -186,6 +186,11 @@ class CdrWriter:
         fmt = "<d" if self._le else ">d"
         self._buf.extend(struct.pack(fmt, val))
 
+    def write_f128(self, val: Float128) -> None:
+        """Write an IEEE binary128 (``float128``)."""
+        self._align(4 if self._xcdr2 else 8)
+        self._buf.extend(val.to_bytes(self._le))
+
     def write_char(self, val: str) -> None:
         """Write a single character (1 byte)."""
         self._buf.append(ord(val[0]) if val else 0)
@@ -209,15 +214,11 @@ class CdrWriter:
         """
         Write a wide string (UTF-16) with length prefix.
 
-        Length is the number of UTF-16 code units (NOT bytes, NOT including null).
-        No null terminator is written.
+        Length is the number of bytes (XTypes 1.3 7.4.1.1.2). No null terminator.
         """
-        # Encode as UTF-16 without BOM
         encoding = "utf-16-le" if self._le else "utf-16-be"
         encoded = val.encode(encoding)
-        # Number of UTF-16 code units = bytes / 2
-        code_units = len(encoded) // 2
-        self.write_u32(code_units)
+        self.write_u32(len(encoded))
         self._align(2)
         self._buf.extend(encoded)
 

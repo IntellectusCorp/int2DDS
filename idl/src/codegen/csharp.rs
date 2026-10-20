@@ -979,6 +979,7 @@ impl<'a> CsGen<'a> {
             ResolvedType::U64 => "ulong".to_string(),
             ResolvedType::F32 => "float".to_string(),
             ResolvedType::F64 => "double".to_string(),
+            ResolvedType::F128 => "Float128".to_string(),
             ResolvedType::Char => "char".to_string(),
             ResolvedType::WChar => "char".to_string(),
             ResolvedType::String { .. } => "string".to_string(),
@@ -1014,19 +1015,28 @@ impl<'a> CsGen<'a> {
         )
     }
 
-    /// Per DDS-XTypes 7.4.3.5.4, sequences/arrays of non-primitive elements are
-    /// preceded by a DHEADER carrying the byte size of the payload. Matches
-    /// Rust `XcdrSerialize for Vec<T>` where T::IS_PRIMITIVE == false.
+    /// DDS-XTypes 7.4.3.5.3 (9)/(12): XCDR2 collections of non-primitive elements are
+    /// framed by a DHEADER. Matches Rust `XcdrSerialize` where `T::IS_PRIMITIVE == false`
+    /// (enums and bitmasks included).
     fn is_non_primitive_element(element: &ResolvedType) -> bool {
         matches!(
             element,
             ResolvedType::String { .. }
                 | ResolvedType::WString { .. }
                 | ResolvedType::Struct(_)
+                | ResolvedType::Enum(_)
+                | ResolvedType::Bitmask(_)
                 | ResolvedType::Sequence { .. }
                 | ResolvedType::Array { .. }
                 | ResolvedType::Map { .. }
         )
+    }
+
+    /// Octet elements are written byte-by-byte with no alignment, so a whole
+    /// octet collection can go through the bulk `WriteBytes`/`ReadBytes` path
+    /// with an identical wire format.
+    fn is_octet_element(element: &ResolvedType) -> bool {
+        matches!(element, ResolvedType::U8 | ResolvedType::UInt8)
     }
 
     fn default_value(&self, ty: &ResolvedType) -> String {
@@ -1038,6 +1048,7 @@ impl<'a> CsGen<'a> {
             ResolvedType::I64 | ResolvedType::U64 => "0".to_string(),
             ResolvedType::F32 => "0.0f".to_string(),
             ResolvedType::F64 => "0.0".to_string(),
+            ResolvedType::F128 => "default(Float128)".to_string(),
             ResolvedType::Char => "'\\0'".to_string(),
             ResolvedType::WChar => "'\\0'".to_string(),
             ResolvedType::String { .. } => "\"\"".to_string(),
@@ -1139,6 +1150,7 @@ impl<'a> CsGen<'a> {
             ResolvedType::U64 => self.line(&format!("w.WriteU64({});", accessor)),
             ResolvedType::F32 => self.line(&format!("w.WriteF32({});", accessor)),
             ResolvedType::F64 => self.line(&format!("w.WriteF64({});", accessor)),
+            ResolvedType::F128 => self.line(&format!("w.WriteF128({});", accessor)),
             ResolvedType::Char => {
                 self.line(&format!("w.WriteU8((byte){});", accessor));
             }
@@ -1162,7 +1174,17 @@ impl<'a> CsGen<'a> {
             ResolvedType::Struct(_) => {
                 self.line(&format!("{}.SerializeCdrInline(w);", accessor));
             }
+            ResolvedType::Sequence { element, .. } if Self::is_octet_element(element) => {
+                self.line(&format!("w.WriteSeqHeader((uint){}.Count);", accessor));
+                self.line(&format!("w.WriteBytes({}.ToArray());", accessor));
+            }
             ResolvedType::Sequence { element, .. } => {
+                let non_prim = Self::is_non_primitive_element(element);
+                if non_prim {
+                    self.line("{");
+                    self.indent += 1;
+                    self.line("var _seqDt = w.DheaderBegin();");
+                }
                 self.line(&format!("w.WriteSeqHeader((uint){}.Count);", accessor));
                 self.line(&format!("foreach (var _item in {})", accessor));
                 self.line("{");
@@ -1170,14 +1192,30 @@ impl<'a> CsGen<'a> {
                 self.emit_write_field(element, "_item");
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line("w.DheaderFinalize(_seqDt);");
+                    self.indent -= 1;
+                    self.line("}");
+                }
             }
             ResolvedType::Array { element, .. } => {
+                let non_prim = Self::is_non_primitive_element(element);
+                if non_prim {
+                    self.line("{");
+                    self.indent += 1;
+                    self.line("var _arrDt = w.DheaderBegin();");
+                }
                 self.line(&format!("foreach (var _item in {})", accessor));
                 self.line("{");
                 self.indent += 1;
                 self.emit_write_field(element, "_item");
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line("w.DheaderFinalize(_arrDt);");
+                    self.indent -= 1;
+                    self.line("}");
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let non_prim =
@@ -1469,6 +1507,9 @@ impl<'a> CsGen<'a> {
             ResolvedType::F64 => {
                 self.line(&format!("{}.{} = r.ReadF64();", obj, name));
             }
+            ResolvedType::F128 => {
+                self.line(&format!("{}.{} = r.ReadF128();", obj, name));
+            }
             ResolvedType::Char => {
                 self.line(&format!("{}.{} = (char)r.ReadU8();", obj, name));
             }
@@ -1495,9 +1536,23 @@ impl<'a> CsGen<'a> {
                 let cs_name = cs_type_ref(struct_name);
                 self.line(&format!("{}.{} = {}.DeserializeCdrInline(r);", obj, name, cs_name));
             }
+            ResolvedType::Sequence { element, .. } if Self::is_octet_element(element) => {
+                let count_var = format!("_{name}Count");
+                self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
+                self.line(&format!(
+                    "{}.{} = new List<byte>(r.ReadBytes((int){}));",
+                    obj, name, count_var
+                ));
+            }
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("_{name}Count");
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("_{name}SeqSize");
+                let start_var = format!("_{name}SeqStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
                     "{}.{} = new List<{}>((int){});",
@@ -1510,9 +1565,18 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{}.Add(_item);", obj, name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Array { element, size } => {
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("_{name}ArrSize");
+                let start_var = format!("_{name}ArrStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("{}.{} = new {}[{}];", obj, name, cs_elem, size));
                 self.line(&format!("for (var _i = 0; _i < {}; _i++)", size));
                 self.line("{");
@@ -1521,6 +1585,9 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{}[_i] = _item;", obj, name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("_{name}Count");
@@ -1589,6 +1656,9 @@ impl<'a> CsGen<'a> {
             ResolvedType::F64 => {
                 self.line(&format!("var {} = r.ReadF64();", var_name));
             }
+            ResolvedType::F128 => {
+                self.line(&format!("var {} = r.ReadF128();", var_name));
+            }
             ResolvedType::Char => {
                 self.line(&format!("var {} = (char)r.ReadU8();", var_name));
             }
@@ -1615,9 +1685,23 @@ impl<'a> CsGen<'a> {
                 let cs_name = cs_type_ref(struct_name);
                 self.line(&format!("var {} = {}.DeserializeCdrInline(r);", var_name, cs_name));
             }
+            ResolvedType::Sequence { element, .. } if Self::is_octet_element(element) => {
+                let count_var = format!("{var_name}Count");
+                self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
+                self.line(&format!(
+                    "var {} = new List<byte>(r.ReadBytes((int){}));",
+                    var_name, count_var
+                ));
+            }
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("{var_name}Count");
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("{var_name}SeqSize");
+                let start_var = format!("{var_name}SeqStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
                     "var {} = new List<{}>((int){});",
@@ -1630,9 +1714,18 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.Add(_inner);", var_name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Array { element, size } => {
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("{var_name}ArrSize");
+                let start_var = format!("{var_name}ArrStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("var {} = new {}[{}];", var_name, cs_elem, size));
                 self.line(&format!("for (var _j = 0; _j < {}; _j++)", size));
                 self.line("{");
@@ -1641,6 +1734,9 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}[_j] = _inner;", var_name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("{var_name}Count");
@@ -1857,6 +1953,35 @@ mod tests {
             "explicit xcdr2 overload must stay for QoS-driven writes: {}",
             code
         );
+    }
+
+    /// `sequence<octet>` keeps its `List<byte>` API but (de)serializes through the
+    /// bulk byte path instead of a per-element loop; other sequences keep the loop.
+    #[test]
+    fn test_octet_sequence_uses_bulk_bytes() {
+        let defs = parse_idl(
+            r#"
+            struct Blob {
+                sequence<octet> data;
+                sequence<sequence<octet> > chunks;
+                sequence<long> values;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Blob.idl", &CSharpOptions::default());
+        assert!(code.contains("public List<byte> Data"), "{}", code);
+        assert!(code.contains("w.WriteBytes(Data.ToArray());"), "{}", code);
+        assert!(code.contains("new List<byte>(r.ReadBytes((int)_DataCount));"), "{}", code);
+        assert!(code.contains("w.WriteBytes(_item.ToArray());"), "{}", code);
+        assert!(
+            code.contains("var _item = new List<byte>(r.ReadBytes((int)_itemCount));"),
+            "{}",
+            code
+        );
+        assert!(code.contains("w.WriteI32(_item);"), "{}", code);
+        assert!(!code.contains("w.WriteU8(_item);"), "{}", code);
     }
 
     #[test]

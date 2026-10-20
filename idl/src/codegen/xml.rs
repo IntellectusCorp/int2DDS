@@ -313,7 +313,7 @@ impl<'a> XmlGen<'a> {
         match key {
             ResolvedType::String { .. } => Ok("string"),
             ResolvedType::WString { .. } => Ok("wstring"),
-            ResolvedType::F32 | ResolvedType::F64 => {
+            ResolvedType::F32 | ResolvedType::F64 | ResolvedType::F128 => {
                 Err(format!("XML codegen: map key {:?} must be integral or string", key))
             }
             ResolvedType::Bool
@@ -399,6 +399,7 @@ fn scalar_name(ty: &ResolvedType) -> &'static str {
         ResolvedType::U64 => "uint64",
         ResolvedType::F32 => "float32",
         ResolvedType::F64 => "float64",
+        ResolvedType::F128 => "float128",
         ResolvedType::Char => "char8",
         ResolvedType::WChar => "char16",
         _ => "",

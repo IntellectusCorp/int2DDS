@@ -154,6 +154,28 @@ namespace Int2Dds.Qos
         }
     }
 
+    public class TopicData
+    {
+        public byte[] Data { get; set; } = Int2Dds.Internal.EmptyArrayHolder<byte>.Value;
+
+        public TopicData() { }
+        public TopicData(byte[] data)
+        {
+            Data = data;
+        }
+    }
+
+    public class GroupData
+    {
+        public byte[] Data { get; set; } = Int2Dds.Internal.EmptyArrayHolder<byte>.Value;
+
+        public GroupData() { }
+        public GroupData(byte[] data)
+        {
+            Data = data;
+        }
+    }
+
     public class WriterDataLifecycle
     {
         public bool AutodisposeUnregisteredInstances { get; set; } = true;
@@ -252,6 +274,22 @@ namespace Int2Dds.Qos
         public Partition(string[] names)
         {
             Names = names;
+        }
+    }
+
+    public class Presentation
+    {
+        public PresentationAccessScopeKind AccessScope { get; set; } = PresentationAccessScopeKind.Instance;
+        public bool CoherentAccess { get; set; }
+        public bool OrderedAccess { get; set; }
+
+        public Presentation() { }
+        public Presentation(PresentationAccessScopeKind accessScope = PresentationAccessScopeKind.Instance,
+            bool coherentAccess = false, bool orderedAccess = false)
+        {
+            AccessScope = accessScope;
+            CoherentAccess = coherentAccess;
+            OrderedAccess = orderedAccess;
         }
     }
 

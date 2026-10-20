@@ -237,6 +237,19 @@ namespace Int2Dds.Cdr
             }
         }
 
+        /// <summary>Read an IEEE binary128 (<c>float128</c>) with 8-byte alignment.</summary>
+        public Float128 ReadF128()
+        {
+            Align(8);
+            EnsureRemaining(16);
+            var span = _data.AsSpan(_pos);
+            Float128 value = _littleEndian
+                ? new Float128(BinaryPrimitives.ReadUInt64LittleEndian(span), BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(8)))
+                : new Float128(BinaryPrimitives.ReadUInt64BigEndian(span.Slice(8)), BinaryPrimitives.ReadUInt64BigEndian(span));
+            _pos += 16;
+            return value;
+        }
+
         /// <summary>Read a 64-bit double with 8-byte alignment.</summary>
         public double ReadF64()
         {
@@ -270,23 +283,22 @@ namespace Int2Dds.Cdr
         }
 
         /// <summary>
-        /// Read a CDR wstring (wide string): uint32 length (number of UTF-16 code units including null)
-        /// + UTF-16 code units (each 2 bytes) + null terminator.
-        /// Returns the decoded string (without null terminator).
+        /// Read a CDR wstring (wide string): uint32 length in bytes (XTypes 1.3 7.4.1.1.2)
+        /// + UTF-16 code units (each 2 bytes). No null terminator.
         /// </summary>
         public string ReadWString()
         {
-            uint cdrLen = ReadU32(); // number of UTF-16 code units including null
-            if (cdrLen == 0)
-                return string.Empty;
+            uint byteLen = ReadU32();
+            if (byteLen > (uint)Remaining)
+                throw new CdrUnderflowException(
+                    $"wstring length {byteLen} exceeds {Remaining} remaining bytes.");
 
-            int strLen = (int)(cdrLen - 1); // exclude null terminator
+            int strLen = (int)(byteLen / 2);
             var chars = new char[strLen];
             for (int i = 0; i < strLen; i++)
             {
                 chars[i] = (char)ReadU16();
             }
-            ReadU16(); // consume null terminator
             return new string(chars);
         }
 

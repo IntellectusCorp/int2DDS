@@ -88,6 +88,9 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_dynamic_data_get_f64(IntPtr data, byte* field_path, out double value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_data_get_f128(IntPtr data, byte* field_path, byte* value);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_dynamic_data_get_char8(IntPtr data, byte* field_path, out byte value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -137,6 +140,9 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_dynamic_sample_get_f64(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out double value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_f128(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, byte* value_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_dynamic_sample_get_string(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, byte* out_buf, UIntPtr buf_cap, out UIntPtr out_len);

@@ -2,6 +2,7 @@ package kr.co.intellectus.int2dds.xtypes;
 
 import java.nio.charset.Charset;
 import java.util.concurrent.atomic.AtomicBoolean;
+import kr.co.intellectus.int2dds.cdr.Float128;
 import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeHandle;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
@@ -171,6 +172,14 @@ public final class DynamicValue implements AutoCloseable {
     public static DynamicValue f64(double value) {
         long[] out = new long[1];
         int rc = FfiAccess.dynamicValueF64(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code float128} value. */
+    public static DynamicValue f128(Float128 value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueF128(value.toBytes(), out);
         ReturnCodes.check(rc);
         return new DynamicValue(out[0]);
     }
@@ -508,6 +517,16 @@ public final class DynamicValue implements AutoCloseable {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return out[0];
+    }
+
+    /** Reads this value as a {@code float128}. Throws if it is not numeric floating point. */
+    public Float128 asF128() {
+        long v = handle();
+        byte[] out = new byte[16];
+        int rc = FfiAccess.dynamicValueAsF128(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return Float128.fromBytes(out, 0);
     }
 
     /**

@@ -28,6 +28,19 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_subscriber_delete_contained_entities(IntPtr subscriber);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_begin_access(IntPtr subscriber);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_end_access(IntPtr subscriber);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscriber_get_datareaders(IntPtr subscriber, uint sample_state_mask,
+            uint view_state_mask, uint instance_state_mask, byte* handles_out, UIntPtr capacity, out UIntPtr count_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_notify_datareaders(IntPtr subscriber);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_create_datareader(IntPtr subscriber, IntPtr topic, IntPtr qos, NativeDataReaderListener* listener, uint mask, out IntPtr reader_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -174,6 +187,9 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datareader_get_guid(IntPtr reader, byte* guid_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_get_instance_handle(IntPtr reader, byte* handle_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datareader_has_data(IntPtr reader, [MarshalAs(UnmanagedType.U1)] out bool has_data_out);

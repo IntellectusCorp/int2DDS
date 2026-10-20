@@ -133,6 +133,20 @@ impl Xcdr2Serializer {
         self.buffer[position..position + 4].copy_from_slice(&bytes);
     }
 
+    /// Write `f` framed by a DHEADER holding the byte size of what it wrote
+    /// (DDS-XTypes 7.4.3.5.3: collections of non-primitive elements).
+    pub fn serialize_delimited<F>(&mut self, f: F) -> Result<(), CdrError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), CdrError>,
+    {
+        let dheader = self.reserve_dheader();
+        let start = self.position();
+        f(self)?;
+        let size = (self.position() - start) as u32;
+        self.write_dheader_at(dheader, size);
+        Ok(())
+    }
+
     /// Insert 4 zero bytes at the given position, shifting subsequent bytes right.
     /// Used when an EMHEADER's payload length overflows 16 bits and the codegen
     /// needs to retroactively switch from compact (LC=0..3) to LC=4 (NEXTINT) encoding.

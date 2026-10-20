@@ -122,6 +122,13 @@ pub(crate) trait TransportPlugin: Send + Sync {
         None
     }
 
+    /// Whether the periodic SPDP announcement already goes, one by one, to every participant
+    /// discovered so far. A transport that broadcasts instead cannot tell who heard it, so the
+    /// discovery layer repeats the announcement to each known peer on top.
+    fn announces_to_each_known_peer(&self) -> bool {
+        false
+    }
+
     /// Take ownership of the discovery multicast message source.
     ///
     /// Returns `None` if the transport does not support multicast (e.g., TCP).
@@ -209,7 +216,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
-                    UdpConfig::from_property(property),
+                    UdpConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -222,7 +229,7 @@ impl TransportPluginFactory {
                     working_ips,
                     guid_prefix,
                     tls_config,
-                    TcpConfig::from_property(property),
+                    TcpConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -235,7 +242,7 @@ impl TransportPluginFactory {
                     multicast_if_ip,
                     working_ips,
                     guid_prefix,
-                    HybridConfig::from_property(property),
+                    HybridConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -248,7 +255,7 @@ impl TransportPluginFactory {
                     multicast_if_ip,
                     working_ips,
                     guid_prefix,
-                    UdpConfig::from_property(property),
+                    UdpConfig::from_property(property, domain_id),
                 )?;
                 Ok(Box::new(plugin))
             }

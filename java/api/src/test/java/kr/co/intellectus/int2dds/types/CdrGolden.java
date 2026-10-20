@@ -84,15 +84,23 @@ public final class CdrGolden implements IDdsType {
         writer.writeU8(this.charVal & 0xFF);
         writer.writeF32(this.f32Val);
         writer.writeF64(this.f64Val);
-        writer.writeSeqHeader(this.wstrSeq.length);
-        for (int i0 = 0; i0 < this.wstrSeq.length; i0++) {
-            writer.writeWString(this.wstrSeq[i0]);
+        {
+            int dh = writer.dheaderBegin();
+            writer.writeSeqHeader(this.wstrSeq.length);
+            for (int i0 = 0; i0 < this.wstrSeq.length; i0++) {
+                writer.writeWString(this.wstrSeq[i0]);
+            }
+            writer.dheaderFinalize(dh);
         }
         if (this.wstrArr.length != 2) {
             throw new IllegalStateException("wstrArr must hold exactly 2 elements");
         }
-        for (int i0 = 0; i0 < 2; i0++) {
-            writer.writeWString(this.wstrArr[i0]);
+        {
+            int dh = writer.dheaderBegin();
+            for (int i0 = 0; i0 < 2; i0++) {
+                writer.writeWString(this.wstrArr[i0]);
+            }
+            writer.dheaderFinalize(dh);
         }
         writer.writeWString(this.unboundedWstr);
         if (this.boundedWstr.length() > 32) {
@@ -114,23 +122,39 @@ public final class CdrGolden implements IDdsType {
         }
         writer.writeSeqHeader(this.byteSeq.length);
         writer.writeBytes(this.byteSeq);
-        writer.writeSeqHeader(this.strSeq.length);
-        for (int i0 = 0; i0 < this.strSeq.length; i0++) {
-            writer.writeString(this.strSeq[i0]);
+        {
+            int dh = writer.dheaderBegin();
+            writer.writeSeqHeader(this.strSeq.length);
+            for (int i0 = 0; i0 < this.strSeq.length; i0++) {
+                writer.writeString(this.strSeq[i0]);
+            }
+            writer.dheaderFinalize(dh);
         }
-        writer.writeSeqHeader(this.colorSeq.length);
-        for (int i0 = 0; i0 < this.colorSeq.length; i0++) {
-            writer.writeEnum(this.colorSeq[i0].value());
+        {
+            int dh = writer.dheaderBegin();
+            writer.writeSeqHeader(this.colorSeq.length);
+            for (int i0 = 0; i0 < this.colorSeq.length; i0++) {
+                writer.writeEnum(this.colorSeq[i0].value());
+            }
+            writer.dheaderFinalize(dh);
         }
-        writer.writeSeqHeader(this.innerSeq.length);
-        for (int i0 = 0; i0 < this.innerSeq.length; i0++) {
-            this.innerSeq[i0].serializeCdr(writer);
+        {
+            int dh = writer.dheaderBegin();
+            writer.writeSeqHeader(this.innerSeq.length);
+            for (int i0 = 0; i0 < this.innerSeq.length; i0++) {
+                this.innerSeq[i0].serializeCdr(writer);
+            }
+            writer.dheaderFinalize(dh);
         }
         if (this.pointArr.length != 2) {
             throw new IllegalStateException("pointArr must hold exactly 2 elements");
         }
-        for (int i0 = 0; i0 < 2; i0++) {
-            this.pointArr[i0].serializeCdr(writer);
+        {
+            int dh = writer.dheaderBegin();
+            for (int i0 = 0; i0 < 2; i0++) {
+                this.pointArr[i0].serializeCdr(writer);
+            }
+            writer.dheaderFinalize(dh);
         }
         writer.dheaderFinalize(token);
     }
@@ -154,12 +178,20 @@ public final class CdrGolden implements IDdsType {
         this.charVal = (byte) reader.readU8();
         this.f32Val = reader.readF32();
         this.f64Val = reader.readF64();
-        this.wstrSeq = new String[reader.readSeqHeader()];
-        for (int i0 = 0; i0 < this.wstrSeq.length; i0++) {
-            this.wstrSeq[i0] = reader.readWString();
+        {
+            CdrReader.Dheader dh = reader.readDheader();
+            this.wstrSeq = new String[reader.readSeqHeader()];
+            for (int i0 = 0; i0 < this.wstrSeq.length; i0++) {
+                this.wstrSeq[i0] = reader.readWString();
+            }
+            reader.readDheaderEnd(dh);
         }
-        for (int i0 = 0; i0 < 2; i0++) {
-            this.wstrArr[i0] = reader.readWString();
+        {
+            CdrReader.Dheader dh = reader.readDheader();
+            for (int i0 = 0; i0 < 2; i0++) {
+                this.wstrArr[i0] = reader.readWString();
+            }
+            reader.readDheaderEnd(dh);
         }
         this.unboundedWstr = reader.readWString();
         this.boundedWstr = reader.readWString();
@@ -176,22 +208,38 @@ public final class CdrGolden implements IDdsType {
             this.f64Arr[i0] = reader.readF64();
         }
         this.byteSeq = reader.readBytes(reader.readSeqHeader());
-        this.strSeq = new String[reader.readSeqHeader()];
-        for (int i0 = 0; i0 < this.strSeq.length; i0++) {
-            this.strSeq[i0] = reader.readString();
+        {
+            CdrReader.Dheader dh = reader.readDheader();
+            this.strSeq = new String[reader.readSeqHeader()];
+            for (int i0 = 0; i0 < this.strSeq.length; i0++) {
+                this.strSeq[i0] = reader.readString();
+            }
+            reader.readDheaderEnd(dh);
         }
-        this.colorSeq = new CdrGoldenColor[reader.readSeqHeader()];
-        for (int i0 = 0; i0 < this.colorSeq.length; i0++) {
-            this.colorSeq[i0] = CdrGoldenColor.fromValue(reader.readEnum());
+        {
+            CdrReader.Dheader dh = reader.readDheader();
+            this.colorSeq = new CdrGoldenColor[reader.readSeqHeader()];
+            for (int i0 = 0; i0 < this.colorSeq.length; i0++) {
+                this.colorSeq[i0] = CdrGoldenColor.fromValue(reader.readEnum());
+            }
+            reader.readDheaderEnd(dh);
         }
-        this.innerSeq = new CdrGoldenInner[reader.readSeqHeader()];
-        for (int i0 = 0; i0 < this.innerSeq.length; i0++) {
-            this.innerSeq[i0] = new CdrGoldenInner();
-            this.innerSeq[i0].deserializeCdr(reader);
+        {
+            CdrReader.Dheader dh = reader.readDheader();
+            this.innerSeq = new CdrGoldenInner[reader.readSeqHeader()];
+            for (int i0 = 0; i0 < this.innerSeq.length; i0++) {
+                this.innerSeq[i0] = new CdrGoldenInner();
+                this.innerSeq[i0].deserializeCdr(reader);
+            }
+            reader.readDheaderEnd(dh);
         }
-        for (int i0 = 0; i0 < 2; i0++) {
-            this.pointArr[i0] = new CdrGoldenPoint();
-            this.pointArr[i0].deserializeCdr(reader);
+        {
+            CdrReader.Dheader dh = reader.readDheader();
+            for (int i0 = 0; i0 < 2; i0++) {
+                this.pointArr[i0] = new CdrGoldenPoint();
+                this.pointArr[i0].deserializeCdr(reader);
+            }
+            reader.readDheaderEnd(dh);
         }
         reader.readDheaderEnd(d);
     }

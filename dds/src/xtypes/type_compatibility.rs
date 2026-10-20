@@ -22,8 +22,9 @@ use crate::dcps::infrastructure::qos_policy::{
     TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind,
 };
 use crate::xtypes::{
-    spec_hash, CompleteStructMember, CompleteStructType, EquivalenceHash, ExtensibilityKind,
-    MinimalStructMember, MinimalStructType, TypeIdentifier, TypeObject,
+    compute_name_hash, spec_hash, CommonDiscriminatorMember, CompleteStructMember,
+    CompleteStructType, CompleteTypeObject, EquivalenceHash, ExtensibilityKind, MemberFlag,
+    MinimalStructMember, MinimalStructType, MinimalTypeObject, TypeIdentifier, TypeObject,
 };
 
 /// Error type for type compatibility checking.
@@ -35,8 +36,17 @@ pub enum TypeCompatibilityError {
     /// Type kinds are fundamentally incompatible (e.g., struct vs enum).
     IncompatibleKind { writer: String, reader: String },
 
-    /// Required member in reader is missing from writer.
+    /// A key or must_understand member exists on one side only.
     MissingRequiredMember { member_name: String, member_id: u32 },
+
+    /// Same name with different ids, or same id with different names.
+    MemberIdentityMismatch { writer: String, reader: String },
+
+    /// No member id (struct) or non-default label (union) in common.
+    NoCommonMember,
+
+    /// Appendable/final member order, final member set or final union label set differs.
+    LayoutMismatch { detail: String },
 
     /// Member types are incompatible.
     MemberTypeMismatch { member_name: String, writer_type: String, reader_type: String },
@@ -73,11 +83,14 @@ impl fmt::Display for TypeCompatibilityError {
                 write!(f, "Incompatible type kinds: writer={}, reader={}", writer, reader)
             }
             TypeCompatibilityError::MissingRequiredMember { member_name, member_id } => {
-                write!(
-                    f,
-                    "Missing required member '{}' (id={}) in writer type",
-                    member_name, member_id
-                )
+                write!(f, "Member '{}' (id={}) must exist on both sides", member_name, member_id)
+            }
+            TypeCompatibilityError::MemberIdentityMismatch { writer, reader } => {
+                write!(f, "Member name/id mismatch: writer={}, reader={}", writer, reader)
+            }
+            TypeCompatibilityError::NoCommonMember => write!(f, "No member in common"),
+            TypeCompatibilityError::LayoutMismatch { detail } => {
+                write!(f, "Member layout mismatch: {}", detail)
             }
             TypeCompatibilityError::MemberTypeMismatch {
                 member_name,
@@ -198,12 +211,19 @@ fn cross_ek_via_complete(
 struct CompatCtx<'a> {
     resolver: &'a dyn TypeResolver,
     tce: &'a TypeConsistencyEnforcementQosPolicy,
+    /// Table 19 key member rules; off in `INT2DDS_XTYPES_RTI_KEY_COMPAT` mode.
+    key_rules: bool,
     visited: std::cell::RefCell<std::collections::HashSet<(EquivalenceHash, EquivalenceHash)>>,
 }
 
 impl<'a> CompatCtx<'a> {
     fn new(resolver: &'a dyn TypeResolver, tce: &'a TypeConsistencyEnforcementQosPolicy) -> Self {
-        Self { resolver, tce, visited: std::cell::RefCell::new(std::collections::HashSet::new()) }
+        Self {
+            resolver,
+            tce,
+            key_rules: !crate::common::env::get_xtypes_rti_key_compat(),
+            visited: std::cell::RefCell::new(std::collections::HashSet::new()),
+        }
     }
 
     fn enter(&self, pair: (EquivalenceHash, EquivalenceHash)) -> bool {
@@ -358,55 +378,14 @@ fn compat_allow_coercion(
         if writer_id.equivalence_hash() == reader_id.equivalence_hash() {
             return TypeCompatibility::Compatible;
         }
-
         if is_cross_ek(writer_id, reader_id) {
             return cross_ek_via_complete(writer_id, reader_id, ctx);
         }
-
-        let w_obj = writer_type_obj.cloned().or_else(|| ctx.resolver.resolve(writer_id));
-        let r_obj = reader_type_obj.cloned().or_else(|| ctx.resolver.resolve(reader_id));
-        return match (w_obj, r_obj) {
-            (Some(w), Some(r)) if same_object_kind(&w, &r) => {
-                check_type_object_compatibility(&w, &r, ctx)
-            }
-            (Some(_), Some(_)) => {
-                match (ctx.resolver.resolve(writer_id), ctx.resolver.resolve(reader_id)) {
-                    (Some(w), Some(r)) => check_type_object_compatibility(&w, &r, ctx),
-                    _ => TypeCompatibility::Indeterminate,
-                }
-            }
-            _ => TypeCompatibility::Indeterminate,
-        };
     }
 
-    if writer_id.is_primitive() && reader_id.is_primitive() {
-        return from_result(check_primitive_coercion(writer_id, reader_id));
-    }
-
-    if writer_id.is_string() && reader_id.is_string() {
-        return from_result(check_string_compatibility(
-            writer_id,
-            reader_id,
-            ctx.tce.ignore_string_bounds,
-        ));
-    }
-
-    if writer_id.is_collection() && reader_id.is_collection() {
-        return check_collection_compatibility(writer_id, reader_id, ctx);
-    }
-
-    TypeCompatibility::Incompatible(TypeCompatibilityError::IncompatibleKind {
-        writer: format!("{:?}", writer_id),
-        reader: format!("{:?}", reader_id),
-    })
-}
-
-fn same_object_kind(a: &TypeObject, b: &TypeObject) -> bool {
-    matches!(
-        (a, b),
-        (TypeObject::Minimal(_), TypeObject::Minimal(_))
-            | (TypeObject::Complete(_), TypeObject::Complete(_))
-    )
+    let w = node_from_id(writer_id, writer_type_obj, ctx);
+    let r = node_from_id(reader_id, reader_type_obj, ctx);
+    assignable_nodes(w, r, "", ctx)
 }
 
 fn check_type_object_compatibility(
@@ -414,598 +393,245 @@ fn check_type_object_compatibility(
     reader_obj: &TypeObject,
     ctx: &CompatCtx,
 ) -> TypeCompatibility {
-    match (writer_obj, reader_obj) {
-        (TypeObject::Minimal(w), TypeObject::Minimal(r)) => {
-            check_minimal_type_object_compatibility(w, r, ctx)
-        }
-        (TypeObject::Complete(w), TypeObject::Complete(r)) => {
-            check_complete_type_object_compatibility(w, r, ctx)
-        }
-        // Mixed Minimal/Complete cannot be structurally compared: defer instead of trusting.
-        _ => TypeCompatibility::Indeterminate,
-    }
+    let w = unalias(Some(writer_obj.clone()), ctx);
+    let r = unalias(Some(reader_obj.clone()), ctx);
+    assignable_nodes(w, r, "", ctx)
 }
 
-fn check_minimal_type_object_compatibility(
-    writer_obj: &crate::xtypes::MinimalTypeObject,
-    reader_obj: &crate::xtypes::MinimalTypeObject,
-    ctx: &CompatCtx,
-) -> TypeCompatibility {
-    use crate::xtypes::MinimalTypeObject;
-
-    match (writer_obj, reader_obj) {
-        (MinimalTypeObject::Struct(w_struct), MinimalTypeObject::Struct(r_struct)) => {
-            check_minimal_struct_compatibility(w_struct, r_struct, ctx)
-        }
-        (MinimalTypeObject::Enum(w_enum), MinimalTypeObject::Enum(r_enum)) => {
-            from_result(check_minimal_enum_compatibility(w_enum, r_enum))
-        }
-        _ => TypeCompatibility::Incompatible(TypeCompatibilityError::IncompatibleKind {
-            writer: format!("{:?}", std::mem::discriminant(writer_obj)),
-            reader: format!("{:?}", std::mem::discriminant(reader_obj)),
-        }),
-    }
+/// A type with aliases resolved (XTypes 1.3 Table 14): either a plain `TypeIdentifier`
+/// (primitive, string, collection) or a resolved aggregated/enumerated `TypeObject`.
+enum Node {
+    Plain(TypeIdentifier),
+    Object(TypeObject),
+    Unresolved,
 }
 
-/// Check structural compatibility between MinimalStructTypes.
-fn check_minimal_struct_compatibility(
-    writer: &MinimalStructType,
-    reader: &MinimalStructType,
-    ctx: &CompatCtx,
-) -> TypeCompatibility {
-    let tce_policy = ctx.tce;
-    let w_ext = writer.struct_flags.extensibility();
-    let r_ext = reader.struct_flags.extensibility();
-
-    if (w_ext == ExtensibilityKind::Final || r_ext == ExtensibilityKind::Final) && w_ext != r_ext {
-        return TypeCompatibility::Incompatible(TypeCompatibilityError::ExtensibilityMismatch {
-            writer: format!("{:?}", w_ext),
-            reader: format!("{:?}", r_ext),
-        });
+fn node_from_id(id: &TypeIdentifier, obj: Option<&TypeObject>, ctx: &CompatCtx) -> Node {
+    if !id.is_complex() {
+        return Node::Plain(id.clone());
     }
-
-    let writer_members = build_member_map(&writer.member_seq, tce_policy.ignore_member_names);
-
-    let mut indeterminate = false;
-    for r_member in &reader.member_seq {
-        let key = get_member_key(r_member, tce_policy.ignore_member_names);
-        let member_name = format!("hash:{:08x}", r_member.name_hash);
-
-        match writer_members.get(&key) {
-            Some(w_member) => {
-                match check_member_type_compatibility(
-                    &w_member.common.member_type_id,
-                    &r_member.common.member_type_id,
-                    &member_name,
-                    ctx,
-                ) {
-                    TypeCompatibility::Compatible => {}
-                    TypeCompatibility::Incompatible(e) => {
-                        return TypeCompatibility::Incompatible(e)
-                    }
-                    TypeCompatibility::Indeterminate => indeterminate = true,
-                }
-
-                if w_member.common.member_flags.is_key() != r_member.common.member_flags.is_key() {
-                    return TypeCompatibility::Incompatible(
-                        TypeCompatibilityError::KeyMemberMismatch { member_name },
-                    );
-                }
-            }
-            None => {
-                if !r_member.common.member_flags.is_optional() {
-                    return TypeCompatibility::Incompatible(
-                        TypeCompatibilityError::MissingRequiredMember {
-                            member_name,
-                            member_id: r_member.common.member_id,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    if tce_policy.prevent_type_widening {
-        let reader_members = build_member_map(&reader.member_seq, tce_policy.ignore_member_names);
-
-        let extra_members: Vec<String> = writer
-            .member_seq
-            .iter()
-            .filter(|w_m| {
-                let key = get_member_key(w_m, tce_policy.ignore_member_names);
-                !reader_members.contains_key(&key)
-            })
-            .map(|m| format!("hash:{:08x}", m.name_hash))
-            .collect();
-
-        if !extra_members.is_empty() {
-            return TypeCompatibility::Incompatible(
-                TypeCompatibilityError::TypeWideningNotAllowed { extra_members },
-            );
-        }
-    }
-
-    if indeterminate {
-        TypeCompatibility::Indeterminate
-    } else {
-        TypeCompatibility::Compatible
-    }
+    unalias(obj.cloned().or_else(|| ctx.resolver.resolve(id)), ctx)
 }
 
-/// Build a HashMap from member sequence for O(1) lookup.
-fn build_member_map(
-    members: &[MinimalStructMember],
-    ignore_member_names: bool,
-) -> HashMap<u32, &MinimalStructMember> {
-    members.iter().map(|m| (get_member_key(m, ignore_member_names), m)).collect()
-}
-
-/// Get the key used for member matching.
-fn get_member_key(member: &MinimalStructMember, ignore_member_names: bool) -> u32 {
-    if ignore_member_names {
-        member.common.member_id
-    } else {
-        member.name_hash
-    }
-}
-
-fn check_complete_type_object_compatibility(
-    writer_obj: &crate::xtypes::CompleteTypeObject,
-    reader_obj: &crate::xtypes::CompleteTypeObject,
-    ctx: &CompatCtx,
-) -> TypeCompatibility {
-    use crate::xtypes::CompleteTypeObject;
-
-    match (writer_obj, reader_obj) {
-        (CompleteTypeObject::Struct(w), CompleteTypeObject::Struct(r)) => {
-            check_complete_struct_compatibility(w, r, ctx)
-        }
-        (CompleteTypeObject::Enum(w), CompleteTypeObject::Enum(r)) => {
-            from_result(check_complete_enum_compatibility(w, r))
-        }
-        (CompleteTypeObject::Union(w), CompleteTypeObject::Union(r)) => {
-            check_complete_union_compatibility(w, r, ctx)
-        }
-        _ => TypeCompatibility::Incompatible(TypeCompatibilityError::IncompatibleKind {
-            writer: format!("{:?}", std::mem::discriminant(writer_obj)),
-            reader: format!("{:?}", std::mem::discriminant(reader_obj)),
-        }),
-    }
-}
-
-fn check_complete_struct_compatibility(
-    writer: &crate::xtypes::CompleteStructType,
-    reader: &crate::xtypes::CompleteStructType,
-    ctx: &CompatCtx,
-) -> TypeCompatibility {
-    let tce_policy = ctx.tce;
-    let w_ext = writer.struct_flags.extensibility();
-    let r_ext = reader.struct_flags.extensibility();
-
-    if (w_ext == ExtensibilityKind::Final || r_ext == ExtensibilityKind::Final) && w_ext != r_ext {
-        return TypeCompatibility::Incompatible(TypeCompatibilityError::ExtensibilityMismatch {
-            writer: format!("{:?}", w_ext),
-            reader: format!("{:?}", r_ext),
-        });
-    }
-
-    let writer_members: HashMap<String, &crate::xtypes::CompleteStructMember> = writer
-        .member_seq
-        .iter()
-        .map(|m| {
-            let key = if tce_policy.ignore_member_names {
-                m.common.member_id.to_string()
-            } else {
-                m.detail.name.clone()
-            };
-            (key, m)
-        })
-        .collect();
-
-    let mut indeterminate = false;
-    for r_member in &reader.member_seq {
-        let key = if tce_policy.ignore_member_names {
-            r_member.common.member_id.to_string()
-        } else {
-            r_member.detail.name.clone()
+fn unalias(mut obj: Option<TypeObject>, ctx: &CompatCtx) -> Node {
+    for _ in 0..32 {
+        let Some(current) = obj else { return Node::Unresolved };
+        let target = match &current {
+            TypeObject::Minimal(MinimalTypeObject::Alias(a)) => a.body.related_type.clone(),
+            TypeObject::Complete(CompleteTypeObject::Alias(a)) => a.body.related_type.clone(),
+            _ => return Node::Object(current),
         };
-
-        match writer_members.get(&key) {
-            Some(w_member) => {
-                match check_member_type_compatibility(
-                    &w_member.common.member_type_id,
-                    &r_member.common.member_type_id,
-                    &r_member.detail.name,
-                    ctx,
-                ) {
-                    TypeCompatibility::Compatible => {}
-                    TypeCompatibility::Incompatible(e) => {
-                        return TypeCompatibility::Incompatible(e)
-                    }
-                    TypeCompatibility::Indeterminate => indeterminate = true,
-                }
-
-                if w_member.common.member_flags.is_key() != r_member.common.member_flags.is_key() {
-                    return TypeCompatibility::Incompatible(
-                        TypeCompatibilityError::KeyMemberMismatch {
-                            member_name: r_member.detail.name.clone(),
-                        },
-                    );
-                }
-            }
-            None => {
-                if !r_member.common.member_flags.is_optional() {
-                    return TypeCompatibility::Incompatible(
-                        TypeCompatibilityError::MissingRequiredMember {
-                            member_name: r_member.detail.name.clone(),
-                            member_id: r_member.common.member_id,
-                        },
-                    );
-                }
-            }
+        if !target.is_complex() {
+            return Node::Plain(target);
         }
+        obj = ctx.resolver.resolve(&target);
     }
-
-    if tce_policy.prevent_type_widening {
-        let reader_members: HashMap<String, &crate::xtypes::CompleteStructMember> = reader
-            .member_seq
-            .iter()
-            .map(|m| {
-                let key = if tce_policy.ignore_member_names {
-                    m.common.member_id.to_string()
-                } else {
-                    m.detail.name.clone()
-                };
-                (key, m)
-            })
-            .collect();
-
-        let extra_members: Vec<String> = writer
-            .member_seq
-            .iter()
-            .filter(|w_m| {
-                let key = if tce_policy.ignore_member_names {
-                    w_m.common.member_id.to_string()
-                } else {
-                    w_m.detail.name.clone()
-                };
-                !reader_members.contains_key(&key)
-            })
-            .map(|m| m.detail.name.clone())
-            .collect();
-
-        if !extra_members.is_empty() {
-            return TypeCompatibility::Incompatible(
-                TypeCompatibilityError::TypeWideningNotAllowed { extra_members },
-            );
-        }
-    }
-
-    if indeterminate {
-        TypeCompatibility::Indeterminate
-    } else {
-        TypeCompatibility::Compatible
-    }
+    Node::Unresolved
 }
 
-fn check_complete_enum_compatibility(
-    writer: &crate::xtypes::CompleteEnumeratedType,
-    reader: &crate::xtypes::CompleteEnumeratedType,
-) -> TypeCompatibilityResult {
-    let writer_literals: HashMap<&str, i32> =
-        writer.literal_seq.iter().map(|l| (l.detail.name.as_str(), l.common.value)).collect();
-
-    for r_literal in &reader.literal_seq {
-        if r_literal.common.flags.is_default() {
-            continue;
-        }
-        match writer_literals.get(r_literal.detail.name.as_str()) {
-            Some(&w_value) => {
-                if w_value != r_literal.common.value {
-                    return Err(TypeCompatibilityError::MemberTypeMismatch {
-                        member_name: r_literal.detail.name.clone(),
-                        writer_type: format!("enum value {}", w_value),
-                        reader_type: format!("enum value {}", r_literal.common.value),
-                    });
-                }
-            }
-            None => {
-                return Err(TypeCompatibilityError::MissingRequiredMember {
-                    member_name: r_literal.detail.name.clone(),
-                    member_id: r_literal.common.value as u32,
-                });
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn check_minimal_enum_compatibility(
-    writer: &crate::xtypes::MinimalEnumeratedType,
-    reader: &crate::xtypes::MinimalEnumeratedType,
-) -> TypeCompatibilityResult {
-    let writer_literals: HashMap<u32, i32> =
-        writer.literal_seq.iter().map(|l| (l.name_hash, l.common.value)).collect();
-
-    for r_literal in &reader.literal_seq {
-        if r_literal.common.flags.is_default() {
-            continue;
-        }
-        match writer_literals.get(&r_literal.name_hash) {
-            Some(&w_value) => {
-                if w_value != r_literal.common.value {
-                    return Err(TypeCompatibilityError::MemberTypeMismatch {
-                        member_name: format!("hash:{:08x}", r_literal.name_hash),
-                        writer_type: format!("enum value {}", w_value),
-                        reader_type: format!("enum value {}", r_literal.common.value),
-                    });
-                }
-            }
-            None => {
-                return Err(TypeCompatibilityError::MissingRequiredMember {
-                    member_name: format!("hash:{:08x}", r_literal.name_hash),
-                    member_id: r_literal.common.value as u32,
-                });
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn check_complete_union_compatibility(
-    writer: &crate::xtypes::CompleteUnionType,
-    reader: &crate::xtypes::CompleteUnionType,
+/// `reader` is-assignable-from `writer` for arbitrary type identifiers (recursive entry).
+fn assignable_ids(
+    writer: &TypeIdentifier,
+    reader: &TypeIdentifier,
+    member: &str,
     ctx: &CompatCtx,
 ) -> TypeCompatibility {
-    let mut indeterminate = false;
-    match check_member_type_compatibility(
-        &writer.discriminator.type_id,
-        &reader.discriminator.type_id,
-        "__discriminator",
-        ctx,
-    ) {
-        TypeCompatibility::Compatible => {}
-        TypeCompatibility::Incompatible(e) => return TypeCompatibility::Incompatible(e),
-        TypeCompatibility::Indeterminate => indeterminate = true,
-    }
-
-    let writer_members: HashMap<&str, &crate::xtypes::CompleteUnionMember> =
-        writer.member_seq.iter().map(|m| (m.detail.name.as_str(), m)).collect();
-
-    for r_member in &reader.member_seq {
-        if r_member.common.member_flags.is_default() {
-            continue;
-        }
-        match writer_members.get(r_member.detail.name.as_str()) {
-            Some(w_member) => {
-                match check_member_type_compatibility(
-                    &w_member.common.member_type_id,
-                    &r_member.common.member_type_id,
-                    &r_member.detail.name,
-                    ctx,
-                ) {
-                    TypeCompatibility::Compatible => {}
-                    TypeCompatibility::Incompatible(e) => {
-                        return TypeCompatibility::Incompatible(e)
-                    }
-                    TypeCompatibility::Indeterminate => indeterminate = true,
-                }
-            }
-            None => {
-                return TypeCompatibility::Incompatible(
-                    TypeCompatibilityError::MissingRequiredMember {
-                        member_name: r_member.detail.name.clone(),
-                        member_id: r_member.common.member_id,
-                    },
-                );
-            }
-        }
-    }
-
-    if indeterminate {
-        TypeCompatibility::Indeterminate
-    } else {
-        TypeCompatibility::Compatible
-    }
-}
-
-fn check_member_type_compatibility(
-    writer_type: &TypeIdentifier,
-    reader_type: &TypeIdentifier,
-    member_name: &str,
-    ctx: &CompatCtx,
-) -> TypeCompatibility {
-    let tce_policy = ctx.tce;
-    if writer_type == reader_type {
+    if writer == reader {
         return TypeCompatibility::Compatible;
     }
-
-    if writer_type.is_primitive() && reader_type.is_primitive() {
-        return from_result(check_primitive_coercion(writer_type, reader_type).map_err(|_| {
-            TypeCompatibilityError::MemberTypeMismatch {
-                member_name: member_name.to_string(),
-                writer_type: format!("{:?}", writer_type),
-                reader_type: format!("{:?}", reader_type),
-            }
-        }));
-    }
-
-    if writer_type.is_string() && reader_type.is_string() {
-        return from_result(check_string_compatibility_with_name(
-            writer_type,
-            reader_type,
-            member_name,
-            tce_policy.ignore_string_bounds,
-        ));
-    }
-
-    if is_sequence_type(writer_type) && is_sequence_type(reader_type) {
-        let w_elem = get_sequence_element(writer_type);
-        let r_elem = get_sequence_element(reader_type);
-
-        let mut indeterminate = false;
-        if let (Some(w_elem), Some(r_elem)) = (w_elem, r_elem) {
-            match check_member_type_compatibility(w_elem, r_elem, member_name, ctx) {
-                TypeCompatibility::Compatible => {}
-                TypeCompatibility::Incompatible(e) => return TypeCompatibility::Incompatible(e),
-                TypeCompatibility::Indeterminate => indeterminate = true,
-            }
-        }
-
-        let w = get_sequence_bound(writer_type);
-        let r = get_sequence_bound(reader_type);
-
-        if !tce_policy.ignore_sequence_bounds && w > 0 && r > 0 && w > r {
-            return TypeCompatibility::Incompatible(
-                TypeCompatibilityError::SequenceBoundExceeded {
-                    member_name: member_name.to_string(),
-                    writer_bound: w,
-                    reader_bound: r,
-                },
-            );
-        }
-
-        return if indeterminate {
-            TypeCompatibility::Indeterminate
-        } else {
-            TypeCompatibility::Compatible
-        };
-    }
-
-    if writer_type.is_complex() && reader_type.is_complex() {
-        if writer_type.equivalence_hash() == reader_type.equivalence_hash() {
+    if writer.is_complex() && reader.is_complex() {
+        if writer.equivalence_hash() == reader.equivalence_hash() {
             return TypeCompatibility::Compatible;
         }
-
         if let (Some(wh), Some(rh)) =
-            (writer_type.equivalence_hash().copied(), reader_type.equivalence_hash().copied())
+            (writer.equivalence_hash().copied(), reader.equivalence_hash().copied())
         {
             if !ctx.enter((wh, rh)) {
                 return TypeCompatibility::Compatible;
             }
         }
-
-        // Same type advertised under different equivalence kinds: reconcile via Complete.
-        if is_cross_ek(writer_type, reader_type) {
-            return cross_ek_via_complete(writer_type, reader_type, ctx);
+        if is_cross_ek(writer, reader) {
+            return cross_ek_via_complete(writer, reader, ctx);
         }
-
-        let w_obj = ctx.resolver.resolve(writer_type);
-        let r_obj = ctx.resolver.resolve(reader_type);
-        return match (w_obj, r_obj) {
-            (Some(w), Some(r)) => check_type_object_compatibility(&w, &r, ctx),
-            _ => TypeCompatibility::Indeterminate,
-        };
     }
+    let w = node_from_id(writer, None, ctx);
+    let r = node_from_id(reader, None, ctx);
+    assignable_nodes(w, r, member, ctx)
+}
 
-    TypeCompatibility::Incompatible(TypeCompatibilityError::MemberTypeMismatch {
-        member_name: member_name.to_string(),
-        writer_type: format!("{:?}", writer_type),
-        reader_type: format!("{:?}", reader_type),
+fn assignable_nodes(
+    writer: Node,
+    reader: Node,
+    member: &str,
+    ctx: &CompatCtx,
+) -> TypeCompatibility {
+    match (writer, reader) {
+        (Node::Unresolved, _) | (_, Node::Unresolved) => TypeCompatibility::Indeterminate,
+        (Node::Plain(w), Node::Plain(r)) => assignable_plain(&w, &r, member, ctx),
+        (Node::Object(w), Node::Object(r)) => assignable_objects(&w, &r, member, ctx),
+        // Table 15 / Table 18: unsigned integers and bitmasks of a matching bit bound.
+        (Node::Object(w), Node::Plain(r)) => match bitmask_bound(&w) {
+            Some(bound) if uint_fits_bitmask(&r, bound) => TypeCompatibility::Compatible,
+            _ => kind_mismatch(member, &object_kind(&w), &format!("{:?}", r)),
+        },
+        (Node::Plain(w), Node::Object(r)) => match bitmask_bound(&r) {
+            Some(bound) if uint_fits_bitmask(&w, bound) => TypeCompatibility::Compatible,
+            _ => kind_mismatch(member, &format!("{:?}", w), &object_kind(&r)),
+        },
+    }
+}
+
+fn kind_mismatch(member: &str, writer: &str, reader: &str) -> TypeCompatibility {
+    TypeCompatibility::Incompatible(if member.is_empty() {
+        TypeCompatibilityError::IncompatibleKind {
+            writer: writer.to_string(),
+            reader: reader.to_string(),
+        }
+    } else {
+        TypeCompatibilityError::MemberTypeMismatch {
+            member_name: member.to_string(),
+            writer_type: writer.to_string(),
+            reader_type: reader.to_string(),
+        }
     })
 }
 
-/// Check if primitive type coercion is allowed.
-fn check_primitive_coercion(
-    writer_id: &TypeIdentifier,
-    reader_id: &TypeIdentifier,
-) -> TypeCompatibilityResult {
-    if writer_id == reader_id {
-        return Ok(());
+fn uint_fits_bitmask(uint: &TypeIdentifier, bound: u16) -> bool {
+    matches!(
+        (uint, bound),
+        (TypeIdentifier::Uint8, 1..=8)
+            | (TypeIdentifier::Uint16, 9..=16)
+            | (TypeIdentifier::Uint32, 17..=32)
+            | (TypeIdentifier::Uint64, 33..=64)
+    )
+}
+
+fn bitmask_bound(obj: &TypeObject) -> Option<u16> {
+    match obj {
+        TypeObject::Minimal(MinimalTypeObject::Bitmask(b)) => Some(b.header.bit_bound),
+        TypeObject::Complete(CompleteTypeObject::Bitmask(b)) => Some(b.header.common.bit_bound),
+        _ => None,
     }
+}
 
-    let is_coercion_allowed = match (writer_id, reader_id) {
-        // Integer widening (signed)
-        (TypeIdentifier::Int8, TypeIdentifier::Int16)
-        | (TypeIdentifier::Int8, TypeIdentifier::Int32)
-        | (TypeIdentifier::Int8, TypeIdentifier::Int64)
-        | (TypeIdentifier::Int16, TypeIdentifier::Int32)
-        | (TypeIdentifier::Int16, TypeIdentifier::Int64)
-        | (TypeIdentifier::Int32, TypeIdentifier::Int64) => true,
-
-        // Integer widening (unsigned)
-        (TypeIdentifier::Uint8, TypeIdentifier::Uint16)
-        | (TypeIdentifier::Uint8, TypeIdentifier::Uint32)
-        | (TypeIdentifier::Uint8, TypeIdentifier::Uint64)
-        | (TypeIdentifier::Uint16, TypeIdentifier::Uint32)
-        | (TypeIdentifier::Uint16, TypeIdentifier::Uint64)
-        | (TypeIdentifier::Uint32, TypeIdentifier::Uint64) => true,
-
-        // Float widening
-        (TypeIdentifier::Float32, TypeIdentifier::Float64) => true,
-
-        // Char widening
-        (TypeIdentifier::Char8, TypeIdentifier::Char16) => true,
-
-        // All other cases are not allowed
-        _ => false,
+fn object_kind(obj: &TypeObject) -> String {
+    let kind = match obj {
+        TypeObject::Minimal(m) => match m {
+            MinimalTypeObject::Struct(_) => "struct",
+            MinimalTypeObject::Enum(_) => "enum",
+            MinimalTypeObject::Union(_) => "union",
+            MinimalTypeObject::Alias(_) => "alias",
+            MinimalTypeObject::Bitmask(_) => "bitmask",
+            MinimalTypeObject::Bitset(_) => "bitset",
+        },
+        TypeObject::Complete(c) => match c {
+            CompleteTypeObject::Struct(_) => "struct",
+            CompleteTypeObject::Enum(_) => "enum",
+            CompleteTypeObject::Union(_) => "union",
+            CompleteTypeObject::Alias(_) => "alias",
+            CompleteTypeObject::Bitmask(_) => "bitmask",
+            CompleteTypeObject::Bitset(_) => "bitset",
+        },
     };
+    kind.to_string()
+}
 
-    if is_coercion_allowed {
-        Ok(())
-    } else {
-        Err(TypeCompatibilityError::IncompatibleKind {
-            writer: format!("{:?}", writer_id),
-            reader: format!("{:?}", reader_id),
-        })
+/// Tables 15-17: primitives, strings and collections. Unbounded (0) means no limit.
+fn assignable_plain(
+    writer: &TypeIdentifier,
+    reader: &TypeIdentifier,
+    member: &str,
+    ctx: &CompatCtx,
+) -> TypeCompatibility {
+    if writer == reader {
+        return TypeCompatibility::Compatible;
     }
-}
+    let mismatch = || kind_mismatch(member, &format!("{:?}", writer), &format!("{:?}", reader));
 
-/// Check string type compatibility.
-fn check_string_compatibility(
-    writer_type: &TypeIdentifier,
-    reader_type: &TypeIdentifier,
-    ignore_string_bounds: bool,
-) -> TypeCompatibilityResult {
-    check_string_compatibility_with_name(writer_type, reader_type, "string", ignore_string_bounds)
-}
+    if writer.is_string() && reader.is_string() {
+        if is_wide_string(writer) != is_wide_string(reader) {
+            return mismatch();
+        }
+        let (w, r) = (get_string_bound(writer), get_string_bound(reader));
+        if !ctx.tce.ignore_string_bounds && !bound_fits(w, r) {
+            return TypeCompatibility::Incompatible(TypeCompatibilityError::StringBoundExceeded {
+                member_name: member.to_string(),
+                writer_bound: w,
+                reader_bound: r,
+            });
+        }
+        return TypeCompatibility::Compatible;
+    }
 
-/// Check string type compatibility with member name for error reporting.
-fn check_string_compatibility_with_name(
-    writer_type: &TypeIdentifier,
-    reader_type: &TypeIdentifier,
-    member_name: &str,
-    ignore_string_bounds: bool,
-) -> TypeCompatibilityResult {
-    // Get bounds (0 = unbounded)
-    let writer_bound = get_string_bound(writer_type);
-    let reader_bound = get_string_bound(reader_type);
+    if let (Some((w_elem, w_bound)), Some((r_elem, r_bound))) =
+        (sequence_info(writer), sequence_info(reader))
+    {
+        if !ctx.tce.ignore_sequence_bounds && !bound_fits(w_bound, r_bound) {
+            return TypeCompatibility::Incompatible(
+                TypeCompatibilityError::SequenceBoundExceeded {
+                    member_name: member.to_string(),
+                    writer_bound: w_bound,
+                    reader_bound: r_bound,
+                },
+            );
+        }
+        return assignable_ids(w_elem, r_elem, member, ctx);
+    }
 
-    // Check string type compatibility (String8 vs String16)
-    let writer_is_wide = is_wide_string(writer_type);
-    let reader_is_wide = is_wide_string(reader_type);
+    if let (Some((w_elem, w_dims)), Some((r_elem, r_dims))) =
+        (array_info(writer), array_info(reader))
+    {
+        if w_dims != r_dims {
+            return kind_mismatch(
+                member,
+                &format!("array{:?}", w_dims),
+                &format!("array{:?}", r_dims),
+            );
+        }
+        return assignable_ids(w_elem, r_elem, member, ctx);
+    }
 
-    if writer_is_wide != reader_is_wide {
-        return Err(TypeCompatibilityError::MemberTypeMismatch {
-            member_name: member_name.to_string(),
-            writer_type: format!("{:?}", writer_type),
-            reader_type: format!("{:?}", reader_type),
+    if let (Some((w_key, w_elem, w_bound)), Some((r_key, r_elem, r_bound))) =
+        (map_info(writer), map_info(reader))
+    {
+        if !ctx.tce.ignore_sequence_bounds && !bound_fits(w_bound, r_bound) {
+            return TypeCompatibility::Incompatible(
+                TypeCompatibilityError::SequenceBoundExceeded {
+                    member_name: member.to_string(),
+                    writer_bound: w_bound,
+                    reader_bound: r_bound,
+                },
+            );
+        }
+        return combine(assignable_ids(w_key, r_key, member, ctx), || {
+            assignable_ids(w_elem, r_elem, member, ctx)
         });
     }
 
-    if ignore_string_bounds {
-        return Ok(());
-    }
-
-    // Check bounds: reader must accept all writer data
-    // writer_bound > 0 means bounded, 0 means unbounded
-    if writer_bound > 0 && reader_bound > 0 && writer_bound > reader_bound {
-        return Err(TypeCompatibilityError::StringBoundExceeded {
-            member_name: member_name.to_string(),
-            writer_bound,
-            reader_bound,
-        });
-    }
-
-    Ok(())
+    mismatch()
 }
 
-/// Get string bound from TypeIdentifier (0 = unbounded).
+fn combine(
+    first: TypeCompatibility,
+    second: impl FnOnce() -> TypeCompatibility,
+) -> TypeCompatibility {
+    match first {
+        TypeCompatibility::Incompatible(e) => TypeCompatibility::Incompatible(e),
+        TypeCompatibility::Indeterminate => match second() {
+            TypeCompatibility::Incompatible(e) => TypeCompatibility::Incompatible(e),
+            _ => TypeCompatibility::Indeterminate,
+        },
+        TypeCompatibility::Compatible => second(),
+    }
+}
+
+/// L1 >= L2 where 0 is unbounded (XTypes 1.3 7.6.3.3).
+fn bound_fits(writer: u32, reader: u32) -> bool {
+    reader == 0 || (writer != 0 && writer <= reader)
+}
+
 fn get_string_bound(type_id: &TypeIdentifier) -> u32 {
     match type_id {
-        TypeIdentifier::String8 | TypeIdentifier::String16 => 0, // unbounded
         TypeIdentifier::String8Small { bound } | TypeIdentifier::String16Small { bound } => {
             *bound as u32
         }
@@ -1014,7 +640,6 @@ fn get_string_bound(type_id: &TypeIdentifier) -> u32 {
     }
 }
 
-/// Check if string type is wide (String16).
 fn is_wide_string(type_id: &TypeIdentifier) -> bool {
     matches!(
         type_id,
@@ -1024,159 +649,623 @@ fn is_wide_string(type_id: &TypeIdentifier) -> bool {
     )
 }
 
-/// Check collection (sequence/array/map) compatibility.
-fn check_collection_compatibility(
-    writer_type: &TypeIdentifier,
-    reader_type: &TypeIdentifier,
-    ctx: &CompatCtx,
-) -> TypeCompatibility {
-    let tce_policy = ctx.tce;
-    if is_sequence_type(writer_type) && is_sequence_type(reader_type) {
-        let w_elem = get_sequence_element(writer_type);
-        let r_elem = get_sequence_element(reader_type);
-
-        let mut indeterminate = false;
-        if let (Some(w), Some(r)) = (w_elem, r_elem) {
-            match check_member_type_compatibility(w, r, "sequence_element", ctx) {
-                TypeCompatibility::Compatible => {}
-                TypeCompatibility::Incompatible(e) => return TypeCompatibility::Incompatible(e),
-                TypeCompatibility::Indeterminate => indeterminate = true,
-            }
+fn sequence_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, u32)> {
+    match type_id {
+        TypeIdentifier::PlainSequenceSmall { element_identifier, bound, .. } => {
+            Some((element_identifier, *bound as u32))
         }
-
-        if !tce_policy.ignore_sequence_bounds {
-            let w_bound = get_sequence_bound(writer_type);
-            let r_bound = get_sequence_bound(reader_type);
-
-            if w_bound > 0 && r_bound > 0 && w_bound > r_bound {
-                return TypeCompatibility::Incompatible(
-                    TypeCompatibilityError::SequenceBoundExceeded {
-                        member_name: "sequence".to_string(),
-                        writer_bound: w_bound,
-                        reader_bound: r_bound,
-                    },
-                );
-            }
+        TypeIdentifier::PlainSequenceLarge { element_identifier, bound, .. } => {
+            Some((element_identifier, *bound))
         }
-
-        return if indeterminate {
-            TypeCompatibility::Indeterminate
-        } else {
-            TypeCompatibility::Compatible
-        };
+        _ => None,
     }
+}
 
-    if is_array_type(writer_type) && is_array_type(reader_type) {
-        let w_info = get_array_info(writer_type);
-        let r_info = get_array_info(reader_type);
-
-        if let (Some((w_elem, w_dims)), Some((r_elem, r_dims))) = (w_info, r_info) {
-            if w_dims != r_dims {
-                return TypeCompatibility::Incompatible(TypeCompatibilityError::IncompatibleKind {
-                    writer: format!("array[{} dims]", w_dims),
-                    reader: format!("array[{} dims]", r_dims),
-                });
-            }
-
-            return check_member_type_compatibility(w_elem, r_elem, "array_element", ctx);
+fn array_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, Vec<u32>)> {
+    match type_id {
+        TypeIdentifier::PlainArraySmall { element_identifier, array_bound_seq, .. } => {
+            Some((element_identifier, array_bound_seq.iter().map(|b| *b as u32).collect()))
         }
-
-        return TypeCompatibility::Compatible;
-    }
-
-    if is_map_type(writer_type) && is_map_type(reader_type) {
-        let w_info = get_map_info(writer_type);
-        let r_info = get_map_info(reader_type);
-
-        if let (Some((w_key, w_elem)), Some((r_key, r_elem))) = (w_info, r_info) {
-            let mut indeterminate = false;
-            match check_member_type_compatibility(w_key, r_key, "map_key", ctx) {
-                TypeCompatibility::Compatible => {}
-                TypeCompatibility::Incompatible(e) => return TypeCompatibility::Incompatible(e),
-                TypeCompatibility::Indeterminate => indeterminate = true,
-            }
-            match check_member_type_compatibility(w_elem, r_elem, "map_element", ctx) {
-                TypeCompatibility::Compatible => {}
-                TypeCompatibility::Incompatible(e) => return TypeCompatibility::Incompatible(e),
-                TypeCompatibility::Indeterminate => indeterminate = true,
-            }
-            return if indeterminate {
-                TypeCompatibility::Indeterminate
-            } else {
-                TypeCompatibility::Compatible
-            };
+        TypeIdentifier::PlainArrayLarge { element_identifier, array_bound_seq, .. } => {
+            Some((element_identifier, array_bound_seq.clone()))
         }
-
-        return TypeCompatibility::Compatible;
+        _ => None,
     }
+}
 
-    TypeCompatibility::Incompatible(TypeCompatibilityError::IncompatibleKind {
-        writer: format!("{:?}", writer_type),
-        reader: format!("{:?}", reader_type),
+fn map_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, &TypeIdentifier, u32)> {
+    match type_id {
+        TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, bound, .. } => {
+            Some((key_identifier, element_identifier, *bound as u32))
+        }
+        TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, bound, .. } => {
+            Some((key_identifier, element_identifier, *bound))
+        }
+        _ => None,
+    }
+}
+
+/// Minimal/Complete-agnostic member view used by the Table 18/19 rules.
+struct Member {
+    id: u32,
+    flags: MemberFlag,
+    ty: TypeIdentifier,
+    name_hash: u32,
+    name: String,
+    labels: Vec<i32>,
+}
+
+struct Aggregate {
+    ext: ExtensibilityKind,
+    members: Vec<Member>,
+    discriminator: Option<CommonDiscriminatorMember>,
+}
+
+struct Literal {
+    value: i32,
+    name_hash: u32,
+    name: String,
+}
+
+enum View {
+    Struct(Aggregate),
+    Union(Aggregate),
+    Enum(Vec<Literal>),
+    Bitmask(u16),
+    Bitset(Vec<(u16, u8, TypeIdentifier)>),
+}
+
+fn hash_name(name_hash: u32) -> String {
+    format!("hash:{:08x}", name_hash)
+}
+
+fn view_of(obj: &TypeObject, ctx: &CompatCtx) -> Result<View, TypeCompatibility> {
+    Ok(match obj {
+        TypeObject::Minimal(m) => match m {
+            MinimalTypeObject::Struct(s) => View::Struct(Aggregate {
+                ext: s.struct_flags.extensibility(),
+                members: struct_members(obj, ctx, 0)?,
+                discriminator: None,
+            }),
+            MinimalTypeObject::Union(u) => View::Union(Aggregate {
+                ext: u.union_flags.extensibility(),
+                members: u
+                    .member_seq
+                    .iter()
+                    .map(|m| Member {
+                        id: m.common.member_id,
+                        flags: m.common.member_flags,
+                        ty: m.common.member_type_id.clone(),
+                        name_hash: m.name_hash,
+                        name: hash_name(m.name_hash),
+                        labels: m.common.label_seq.clone(),
+                    })
+                    .collect(),
+                discriminator: Some(u.discriminator.clone()),
+            }),
+            MinimalTypeObject::Enum(e) => View::Enum(
+                e.literal_seq
+                    .iter()
+                    .map(|l| Literal {
+                        value: l.common.value,
+                        name_hash: l.name_hash,
+                        name: hash_name(l.name_hash),
+                    })
+                    .collect(),
+            ),
+            MinimalTypeObject::Bitmask(b) => View::Bitmask(b.header.bit_bound),
+            MinimalTypeObject::Bitset(b) => View::Bitset(
+                b.field_seq
+                    .iter()
+                    .map(|f| (f.common.position, f.common.bitcount, f.common.holder_type.clone()))
+                    .collect(),
+            ),
+            MinimalTypeObject::Alias(_) => return Err(TypeCompatibility::Indeterminate),
+        },
+        TypeObject::Complete(c) => match c {
+            CompleteTypeObject::Struct(s) => View::Struct(Aggregate {
+                ext: s.struct_flags.extensibility(),
+                members: struct_members(obj, ctx, 0)?,
+                discriminator: None,
+            }),
+            CompleteTypeObject::Union(u) => View::Union(Aggregate {
+                ext: u.union_flags.extensibility(),
+                members: u
+                    .member_seq
+                    .iter()
+                    .map(|m| Member {
+                        id: m.common.member_id,
+                        flags: m.common.member_flags,
+                        ty: m.common.member_type_id.clone(),
+                        name_hash: compute_name_hash(&m.detail.name),
+                        name: m.detail.name.clone(),
+                        labels: m.common.label_seq.clone(),
+                    })
+                    .collect(),
+                discriminator: Some(u.discriminator.clone()),
+            }),
+            CompleteTypeObject::Enum(e) => View::Enum(
+                e.literal_seq
+                    .iter()
+                    .map(|l| Literal {
+                        value: l.common.value,
+                        name_hash: compute_name_hash(&l.detail.name),
+                        name: l.detail.name.clone(),
+                    })
+                    .collect(),
+            ),
+            CompleteTypeObject::Bitmask(b) => View::Bitmask(b.header.common.bit_bound),
+            CompleteTypeObject::Bitset(b) => View::Bitset(
+                b.field_seq
+                    .iter()
+                    .map(|f| (f.common.position, f.common.bitcount, f.common.holder_type.clone()))
+                    .collect(),
+            ),
+            CompleteTypeObject::Alias(_) => return Err(TypeCompatibility::Indeterminate),
+        },
     })
 }
 
-/// Get sequence bound from TypeIdentifier (0 = unbounded).
-fn get_sequence_bound(type_id: &TypeIdentifier) -> u32 {
-    match type_id {
-        TypeIdentifier::PlainSequenceSmall { bound, .. } => *bound as u32,
-        TypeIdentifier::PlainSequenceLarge { bound, .. } => *bound,
-        _ => 0,
+/// Struct members with inherited members flattened in front (base first), as the
+/// member_index rules of Table 19 see them.
+fn struct_members(
+    obj: &TypeObject,
+    ctx: &CompatCtx,
+    depth: usize,
+) -> Result<Vec<Member>, TypeCompatibility> {
+    if depth > 32 {
+        return Err(TypeCompatibility::Indeterminate);
     }
-}
-
-/// Check if type is a sequence type.
-fn is_sequence_type(type_id: &TypeIdentifier) -> bool {
-    matches!(
-        type_id,
-        TypeIdentifier::PlainSequenceSmall { .. } | TypeIdentifier::PlainSequenceLarge { .. }
-    )
-}
-
-/// Get sequence element type.
-fn get_sequence_element(type_id: &TypeIdentifier) -> Option<&TypeIdentifier> {
-    match type_id {
-        TypeIdentifier::PlainSequenceSmall { element_identifier, .. }
-        | TypeIdentifier::PlainSequenceLarge { element_identifier, .. } => Some(element_identifier),
-        _ => None,
-    }
-}
-
-/// Check if type is an array type.
-fn is_array_type(type_id: &TypeIdentifier) -> bool {
-    matches!(
-        type_id,
-        TypeIdentifier::PlainArraySmall { .. } | TypeIdentifier::PlainArrayLarge { .. }
-    )
-}
-
-/// Get array element type and dimension count.
-fn get_array_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, usize)> {
-    match type_id {
-        TypeIdentifier::PlainArraySmall { element_identifier, array_bound_seq, .. } => {
-            Some((element_identifier, array_bound_seq.len()))
+    let (base, own): (Option<&TypeIdentifier>, Vec<Member>) = match obj {
+        TypeObject::Minimal(MinimalTypeObject::Struct(s)) => (
+            s.header.base_type.as_ref(),
+            s.member_seq
+                .iter()
+                .map(|m| Member {
+                    id: m.common.member_id,
+                    flags: m.common.member_flags,
+                    ty: m.common.member_type_id.clone(),
+                    name_hash: m.name_hash,
+                    name: hash_name(m.name_hash),
+                    labels: Vec::new(),
+                })
+                .collect(),
+        ),
+        TypeObject::Complete(CompleteTypeObject::Struct(s)) => (
+            s.header.base_type.as_ref(),
+            s.member_seq
+                .iter()
+                .map(|m| Member {
+                    id: m.common.member_id,
+                    flags: m.common.member_flags,
+                    ty: m.common.member_type_id.clone(),
+                    name_hash: compute_name_hash(&m.detail.name),
+                    name: m.detail.name.clone(),
+                    labels: Vec::new(),
+                })
+                .collect(),
+        ),
+        _ => {
+            return Err(TypeCompatibility::Incompatible(TypeCompatibilityError::IncompatibleKind {
+                writer: "struct".to_string(),
+                reader: object_kind(obj),
+            }))
         }
-        TypeIdentifier::PlainArrayLarge { element_identifier, array_bound_seq, .. } => {
-            Some((element_identifier, array_bound_seq.len()))
-        }
-        _ => None,
+    };
+    let mut members = match base {
+        Some(base_id) => match unalias(ctx.resolver.resolve(base_id), ctx) {
+            Node::Object(base_obj) => struct_members(&base_obj, ctx, depth + 1)?,
+            _ => return Err(TypeCompatibility::Indeterminate),
+        },
+        None => Vec::new(),
+    };
+    members.extend(own);
+    Ok(members)
+}
+
+fn assignable_objects(
+    writer: &TypeObject,
+    reader: &TypeObject,
+    member: &str,
+    ctx: &CompatCtx,
+) -> TypeCompatibility {
+    let (w, r) = match (view_of(writer, ctx), view_of(reader, ctx)) {
+        (Ok(w), Ok(r)) => (w, r),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    match (w, r) {
+        (View::Struct(w), View::Struct(r)) => assignable_structs(&w, &r, ctx),
+        (View::Union(w), View::Union(r)) => assignable_unions(&w, &r, ctx),
+        (View::Enum(w), View::Enum(r)) => assignable_enums(&w, &r),
+        (View::Bitmask(w), View::Bitmask(r)) if w == r => TypeCompatibility::Compatible,
+        (View::Bitset(w), View::Bitset(r)) if w == r => TypeCompatibility::Compatible,
+        _ => kind_mismatch(member, &object_kind(writer), &object_kind(reader)),
     }
 }
 
-/// Check if type is a map type.
-fn is_map_type(type_id: &TypeIdentifier) -> bool {
-    matches!(type_id, TypeIdentifier::PlainMapSmall { .. } | TypeIdentifier::PlainMapLarge { .. })
+/// Table 19, STRUCTURE_TYPE. `reader` is T1, `writer` is T2.
+fn assignable_structs(
+    writer: &Aggregate,
+    reader: &Aggregate,
+    ctx: &CompatCtx,
+) -> TypeCompatibility {
+    let tce = ctx.tce;
+    if writer.ext != reader.ext {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::ExtensibilityMismatch {
+            writer: format!("{:?}", writer.ext),
+            reader: format!("{:?}", reader.ext),
+        });
+    }
+    if !tce.ignore_member_names {
+        if let Some(e) = name_id_inconsistency(&writer.members, &reader.members) {
+            return TypeCompatibility::Incompatible(e);
+        }
+    }
+
+    let writer_by_id: HashMap<u32, &Member> = writer.members.iter().map(|m| (m.id, m)).collect();
+    let reader_by_id: HashMap<u32, &Member> = reader.members.iter().map(|m| (m.id, m)).collect();
+    let required =
+        |m: &Member| m.flags.is_key() || (m.flags.is_must_understand() && !m.flags.is_optional());
+
+    let mut common = 0;
+    let mut indeterminate = false;
+    let mut widening = Vec::new();
+    for m1 in &reader.members {
+        match writer_by_id.get(&m1.id) {
+            Some(m2) => {
+                common += 1;
+                let mut result = assignable_ids(&m2.ty, &m1.ty, &m1.name, ctx);
+                if ctx.key_rules && (m1.flags.is_key() || m2.flags.is_key()) {
+                    result = combine(result, || assignable_key(&m2.ty, &m1.ty, &m1.name, ctx, 0));
+                }
+                match result {
+                    TypeCompatibility::Compatible => {}
+                    TypeCompatibility::Incompatible(e) => {
+                        return TypeCompatibility::Incompatible(e)
+                    }
+                    TypeCompatibility::Indeterminate => indeterminate = true,
+                }
+            }
+            None if required(m1) => return missing(m1),
+            None if tce.prevent_type_widening && !m1.flags.is_optional() => {
+                widening.push(m1.name.clone())
+            }
+            None => {}
+        }
+    }
+    if let Some(m2) =
+        writer.members.iter().find(|m| required(m) && !reader_by_id.contains_key(&m.id))
+    {
+        return missing(m2);
+    }
+    if common == 0 {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::NoCommonMember);
+    }
+    if !widening.is_empty() {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::TypeWideningNotAllowed {
+            extra_members: widening,
+        });
+    }
+
+    if reader.ext != ExtensibilityKind::Mutable {
+        for (index, (m1, m2)) in reader.members.iter().zip(&writer.members).enumerate() {
+            if m1.id != m2.id || m1.flags.is_optional() != m2.flags.is_optional() {
+                return layout_mismatch(format!(
+                    "member index {index}: writer '{}' (id={}), reader '{}' (id={})",
+                    m2.name, m2.id, m1.name, m1.id
+                ));
+            }
+        }
+        if reader.ext == ExtensibilityKind::Final && reader.members.len() != writer.members.len() {
+            return layout_mismatch(format!(
+                "final struct member count: writer={}, reader={}",
+                writer.members.len(),
+                reader.members.len()
+            ));
+        }
+    }
+
+    if indeterminate {
+        TypeCompatibility::Indeterminate
+    } else {
+        TypeCompatibility::Compatible
+    }
 }
 
-/// Get map key and element types.
-fn get_map_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, &TypeIdentifier)> {
-    match type_id {
-        TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, .. }
-        | TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, .. } => {
-            Some((key_identifier, element_identifier))
+fn missing(m: &Member) -> TypeCompatibility {
+    TypeCompatibility::Incompatible(TypeCompatibilityError::MissingRequiredMember {
+        member_name: m.name.clone(),
+        member_id: m.id,
+    })
+}
+
+fn layout_mismatch(detail: String) -> TypeCompatibility {
+    TypeCompatibility::Incompatible(TypeCompatibilityError::LayoutMismatch { detail })
+}
+
+/// Same name => same id and same id => same name, across the two member lists.
+fn name_id_inconsistency(writer: &[Member], reader: &[Member]) -> Option<TypeCompatibilityError> {
+    let by_id: HashMap<u32, &Member> = writer.iter().map(|m| (m.id, m)).collect();
+    let by_name: HashMap<u32, &Member> = writer.iter().map(|m| (m.name_hash, m)).collect();
+    for m1 in reader {
+        let clash = by_id
+            .get(&m1.id)
+            .filter(|m2| m2.name_hash != m1.name_hash)
+            .or_else(|| by_name.get(&m1.name_hash).filter(|m2| m2.id != m1.id));
+        if let Some(m2) = clash {
+            return Some(TypeCompatibilityError::MemberIdentityMismatch {
+                writer: format!("'{}' (id={})", m2.name, m2.id),
+                reader: format!("'{}' (id={})", m1.name, m1.id),
+            });
         }
-        _ => None,
     }
+    None
+}
+
+/// Table 19, UNION_TYPE. Members correspond by label; a default member counts as the
+/// label `default` for the final-union rule.
+fn assignable_unions(writer: &Aggregate, reader: &Aggregate, ctx: &CompatCtx) -> TypeCompatibility {
+    let tce = ctx.tce;
+    if writer.ext != reader.ext {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::ExtensibilityMismatch {
+            writer: format!("{:?}", writer.ext),
+            reader: format!("{:?}", reader.ext),
+        });
+    }
+    let (Some(w_disc), Some(r_disc)) = (&writer.discriminator, &reader.discriminator) else {
+        return TypeCompatibility::Indeterminate;
+    };
+    let mut indeterminate = false;
+    match assignable_ids(&w_disc.type_id, &r_disc.type_id, "discriminator", ctx) {
+        TypeCompatibility::Compatible => {}
+        TypeCompatibility::Incompatible(e) => return TypeCompatibility::Incompatible(e),
+        TypeCompatibility::Indeterminate => indeterminate = true,
+    }
+    if w_disc.member_flags.is_key() != r_disc.member_flags.is_key() {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::KeyMemberMismatch {
+            member_name: "discriminator".to_string(),
+        });
+    }
+    if !tce.ignore_member_names {
+        if let Some(e) = name_id_inconsistency(&writer.members, &reader.members) {
+            return TypeCompatibility::Incompatible(e);
+        }
+    }
+
+    let w_default = writer.members.iter().find(|m| m.flags.is_default());
+    let r_default = reader.members.iter().find(|m| m.flags.is_default());
+    let labels = |members: &[Member]| -> HashMap<i32, usize> {
+        members
+            .iter()
+            .enumerate()
+            .flat_map(|(i, m)| m.labels.iter().map(move |l| (*l, i)))
+            .collect()
+    };
+    let w_labels = labels(&writer.members);
+    let r_labels = labels(&reader.members);
+
+    let mut check = |m2: &Member, m1: &Member| -> Option<TypeCompatibility> {
+        match assignable_ids(&m2.ty, &m1.ty, &m1.name, ctx) {
+            TypeCompatibility::Compatible => None,
+            TypeCompatibility::Incompatible(e) => Some(TypeCompatibility::Incompatible(e)),
+            TypeCompatibility::Indeterminate => {
+                indeterminate = true;
+                None
+            }
+        }
+    };
+    for m2 in &writer.members {
+        for label in &m2.labels {
+            let m1 = r_labels.get(label).map(|&i| &reader.members[i]).or(r_default);
+            if let Some(m1) = m1 {
+                if let Some(e) = check(m2, m1) {
+                    return e;
+                }
+            }
+        }
+    }
+    if let Some(wd) = w_default {
+        for m1 in &reader.members {
+            if m1.labels.iter().any(|l| !w_labels.contains_key(l)) {
+                if let Some(e) = check(wd, m1) {
+                    return e;
+                }
+            }
+        }
+        if let Some(rd) = r_default {
+            if let Some(e) = check(wd, rd) {
+                return e;
+            }
+        }
+    }
+
+    let common = w_labels.keys().any(|l| r_labels.contains_key(l));
+    if reader.ext == ExtensibilityKind::Final {
+        let same_labels = w_labels.len() == r_labels.len()
+            && w_labels.keys().all(|l| r_labels.contains_key(l))
+            && w_default.is_some() == r_default.is_some();
+        if !same_labels {
+            return layout_mismatch("final union label sets differ".to_string());
+        }
+    } else if !common {
+        return TypeCompatibility::Incompatible(TypeCompatibilityError::NoCommonMember);
+    }
+
+    if indeterminate {
+        TypeCompatibility::Indeterminate
+    } else {
+        TypeCompatibility::Compatible
+    }
+}
+
+/// Table 18, ENUMERATION_TYPE. Extensibility is not compared: enum flags are unused on
+/// the wire, so both sides always decode as the default.
+fn assignable_enums(writer: &[Literal], reader: &[Literal]) -> TypeCompatibility {
+    let by_name: HashMap<u32, &Literal> = writer.iter().map(|l| (l.name_hash, l)).collect();
+    let by_value: HashMap<i32, &Literal> = writer.iter().map(|l| (l.value, l)).collect();
+    for l1 in reader {
+        let clash = by_name
+            .get(&l1.name_hash)
+            .filter(|l2| l2.value != l1.value)
+            .or_else(|| by_value.get(&l1.value).filter(|l2| l2.name_hash != l1.name_hash));
+        if let Some(l2) = clash {
+            return TypeCompatibility::Incompatible(TypeCompatibilityError::MemberTypeMismatch {
+                member_name: l1.name.clone(),
+                writer_type: format!("literal {}={}", l2.name, l2.value),
+                reader_type: format!("literal {}={}", l1.name, l1.value),
+            });
+        }
+    }
+    TypeCompatibility::Compatible
+}
+
+/// Table 19 key member rules (writer key m2 → reader key m1), on top of plain assignability:
+/// the writer key must map onto the reader key without aliasing or loss. Bounds are
+/// checked even when the ignore_*_bounds flags are set.
+fn assignable_key(
+    writer: &TypeIdentifier,
+    reader: &TypeIdentifier,
+    member: &str,
+    ctx: &CompatCtx,
+    depth: usize,
+) -> TypeCompatibility {
+    if depth > 32 {
+        return TypeCompatibility::Indeterminate;
+    }
+    let (w, r) = match (node_from_id(writer, None, ctx), node_from_id(reader, None, ctx)) {
+        (Node::Unresolved, _) | (_, Node::Unresolved) => return TypeCompatibility::Indeterminate,
+        (Node::Plain(w), Node::Plain(r)) => return key_bounds(&w, &r, member),
+        (Node::Object(w), Node::Object(r)) => (w, r),
+        _ => return TypeCompatibility::Compatible,
+    };
+    let (w, r) = match (view_of(&w, ctx), view_of(&r, ctx)) {
+        (Ok(w), Ok(r)) => (w, r),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    match (w, r) {
+        (View::Enum(w), View::Enum(r)) => {
+            if w.iter().all(|l2| r.iter().any(|l1| l1.value == l2.value)) {
+                TypeCompatibility::Compatible
+            } else {
+                key_mismatch(member)
+            }
+        }
+        (View::Struct(w), View::Struct(r)) => key_holder_members(&w, &r, member, ctx, depth),
+        (View::Union(w), View::Union(r)) => key_union_labels(&w, &r, member, ctx, depth),
+        _ => TypeCompatibility::Compatible,
+    }
+}
+
+fn key_mismatch(member: &str) -> TypeCompatibility {
+    TypeCompatibility::Incompatible(TypeCompatibilityError::KeyMemberMismatch {
+        member_name: member.to_string(),
+    })
+}
+
+/// String, sequence and map key members: L1 >= L2.
+fn key_bounds(writer: &TypeIdentifier, reader: &TypeIdentifier, member: &str) -> TypeCompatibility {
+    if writer.is_string() && reader.is_string() {
+        let (w, r) = (get_string_bound(writer), get_string_bound(reader));
+        if !bound_fits(w, r) {
+            return TypeCompatibility::Incompatible(TypeCompatibilityError::StringBoundExceeded {
+                member_name: member.to_string(),
+                writer_bound: w,
+                reader_bound: r,
+            });
+        }
+        return TypeCompatibility::Compatible;
+    }
+    let bounds = match (sequence_info(writer), sequence_info(reader)) {
+        (Some((_, w)), Some((_, r))) => Some((w, r)),
+        _ => match (map_info(writer), map_info(reader)) {
+            (Some((_, _, w)), Some((_, _, r))) => Some((w, r)),
+            _ => None,
+        },
+    };
+    match bounds {
+        Some((w, r)) if !bound_fits(w, r) => {
+            TypeCompatibility::Incompatible(TypeCompatibilityError::SequenceBoundExceeded {
+                member_name: member.to_string(),
+                writer_bound: w,
+                reader_bound: r,
+            })
+        }
+        _ => TypeCompatibility::Compatible,
+    }
+}
+
+/// KeyHolder(T1) is-assignable-from KeyHolder(T2) for structs: the key members, or every
+/// member when there is none, appear on both sides and follow the key rules.
+fn key_holder_members(
+    writer: &Aggregate,
+    reader: &Aggregate,
+    member: &str,
+    ctx: &CompatCtx,
+    depth: usize,
+) -> TypeCompatibility {
+    let holder = |a: &Aggregate| -> Vec<(u32, TypeIdentifier, String)> {
+        let any_key = a.members.iter().any(|m| m.flags.is_key());
+        a.members
+            .iter()
+            .filter(|m| !any_key || m.flags.is_key())
+            .map(|m| (m.id, m.ty.clone(), m.name.clone()))
+            .collect()
+    };
+    let (w_keys, r_keys) = (holder(writer), holder(reader));
+    if r_keys.iter().any(|(id, ..)| !w_keys.iter().any(|(w_id, ..)| w_id == id)) {
+        return key_mismatch(member);
+    }
+    let mut result = TypeCompatibility::Compatible;
+    for (id, w_ty, _) in &w_keys {
+        let Some((_, r_ty, r_name)) = r_keys.iter().find(|(r_id, ..)| r_id == id) else {
+            return key_mismatch(member);
+        };
+        result = combine(result, || assignable_key(w_ty, r_ty, r_name, ctx, depth + 1));
+        if matches!(result, TypeCompatibility::Incompatible(_)) {
+            return result;
+        }
+    }
+    result
+}
+
+/// Union key members: every discriminator value that selects a writer member m22 selects a
+/// reader member m11 whose key accepts m22's.
+fn key_union_labels(
+    writer: &Aggregate,
+    reader: &Aggregate,
+    member: &str,
+    ctx: &CompatCtx,
+    depth: usize,
+) -> TypeCompatibility {
+    let r_default = reader.members.iter().find(|m| m.flags.is_default());
+    let w_labels: Vec<i32> = writer.members.iter().flat_map(|m| m.labels.iter().copied()).collect();
+    let mut result = TypeCompatibility::Compatible;
+    for m22 in &writer.members {
+        let mut targets = Vec::new();
+        for label in &m22.labels {
+            match reader.members.iter().find(|m| m.labels.contains(label)).or(r_default) {
+                Some(m11) => targets.push(m11),
+                None => return key_mismatch(member),
+            }
+        }
+        // The writer default selects every value outside the writer labels; only a reader
+        // default is guaranteed to select all of them.
+        if m22.flags.is_default() {
+            let Some(rd) = r_default else { return key_mismatch(member) };
+            targets.push(rd);
+            targets.extend(reader.members.iter().filter(|m| {
+                !m.flags.is_default() && m.labels.iter().any(|l| !w_labels.contains(l))
+            }));
+        }
+        for m11 in targets {
+            result =
+                combine(result, || assignable_key(&m22.ty, &m11.ty, &m11.name, ctx, depth + 1));
+            if matches!(result, TypeCompatibility::Incompatible(_)) {
+                return result;
+            }
+        }
+    }
+    result
 }
 
 /// Project a `MinimalStructType` by retaining only members whose flags lack the `@key` bit.
@@ -1288,7 +1377,8 @@ mod tests {
     }
 
     #[test]
-    fn test_primitive_widening_allowed() {
+    fn test_primitive_widening_rejected() {
+        // XTypes 1.3 Table 15: a primitive is assignable only from the same primitive.
         let writer_id = TypeIdentifier::Int16;
         let reader_id = TypeIdentifier::Int32;
         let policy = allow_coercion_policy();
@@ -1300,7 +1390,7 @@ mod tests {
             None,
             &policy
         )
-        .is_ok());
+        .is_err());
     }
 
     #[test]
@@ -1434,7 +1524,7 @@ mod tests {
 
     #[test]
     fn test_prevent_type_widening() {
-        // Create struct types for TypeObject
+        // The reader is the wider type: its non-optional "field2" is absent from the writer.
         let mut writer_struct = MinimalStructType::new(
             TypeFlag::new(ExtensibilityKind::Appendable, false, false),
             None,
@@ -1444,12 +1534,6 @@ mod tests {
             MemberFlag::default(),
             TypeIdentifier::Int32,
             "field1",
-        ));
-        writer_struct.add_member(MinimalStructMember::new(
-            1,
-            MemberFlag::default(),
-            TypeIdentifier::Int32,
-            "field2", // Extra field
         ));
 
         let mut reader_struct = MinimalStructType::new(
@@ -1461,6 +1545,12 @@ mod tests {
             MemberFlag::default(),
             TypeIdentifier::Int32,
             "field1",
+        ));
+        reader_struct.add_member(MinimalStructMember::new(
+            1,
+            MemberFlag::default(),
+            TypeIdentifier::Int32,
+            "field2",
         ));
 
         let writer_obj = TypeObject::Minimal(MinimalTypeObject::Struct(writer_struct));
@@ -1489,7 +1579,7 @@ mod tests {
 
     #[test]
     fn test_missing_required_member() {
-        // Writer missing a required member that reader needs
+        // A must_understand member has to exist on both sides (Table 19).
         let mut writer_struct = MinimalStructType::new(
             TypeFlag::new(ExtensibilityKind::Appendable, false, false),
             None,
@@ -1513,7 +1603,7 @@ mod tests {
         ));
         reader_struct.add_member(MinimalStructMember::new(
             1,
-            MemberFlag::default(), // Not optional
+            MemberFlag::new(TryConstructKind::Discard, false, false, true, false, false),
             TypeIdentifier::Int32,
             "field2",
         ));
@@ -1850,17 +1940,17 @@ mod tests {
 
     #[test]
     fn test_nested_member_incompatibility_detected_via_resolver() {
-        // Writer.inner has an extra required member that reader.inner lacks under
+        // Reader.inner has an extra required member that writer.inner lacks under
         // prevent_type_widening -> deep comparison must reject, not pass.
-        let w_inner = TypeObject::Minimal(MinimalTypeObject::Struct(appendable_struct(&[
-            (0, "a", TypeIdentifier::Int32),
-            (1, "b", TypeIdentifier::Int32),
-        ])));
-        let r_inner = TypeObject::Minimal(MinimalTypeObject::Struct(appendable_struct(&[(
+        let w_inner = TypeObject::Minimal(MinimalTypeObject::Struct(appendable_struct(&[(
             0,
             "a",
             TypeIdentifier::Int32,
         )])));
+        let r_inner = TypeObject::Minimal(MinimalTypeObject::Struct(appendable_struct(&[
+            (0, "a", TypeIdentifier::Int32),
+            (1, "b", TypeIdentifier::Int32),
+        ])));
         let w_inner_hash = w_inner.compute_hash();
         let r_inner_hash = r_inner.compute_hash();
 
@@ -2039,9 +2129,9 @@ mod tests {
 
     #[test]
     fn cross_ek_different_types_incompatible() {
-        // Reader requires a member the writer lacks -> structurally incompatible.
+        // No member id in common -> structurally incompatible.
         let w_obj = complete_struct_obj("W", &[(0, "a")]);
-        let r_obj = complete_struct_obj("R", &[(0, "a"), (1, "b")]);
+        let r_obj = complete_struct_obj("R", &[(1, "b")]);
         let hc = EquivalenceHash::new([3; 14]);
         let hm = EquivalenceHash::new([4; 14]);
         let w_id = TypeIdentifier::CompleteTypeId(hc);

@@ -202,7 +202,7 @@ pub(crate) trait HistoryCache {
         let mut expired = Vec::new();
         let mut earliest_survivor = None;
         for change in self.get_changes().iter() {
-            if change.writer_guid() != writer_guid {
+            if change.writer_guid() != writer_guid || change.is_end_coherent_set() {
                 continue;
             }
             let Some(expiry) = sample_expiry(

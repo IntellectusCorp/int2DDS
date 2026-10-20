@@ -117,3 +117,73 @@ fn topic_ordered_reader_gets_publication_order_instance_reader_gets_blocks() {
         instance_keys
     );
 }
+
+// A KEEP_LAST reader under TOPIC ordered access keeps the latest samples of an instance.
+#[test]
+fn topic_ordered_keep_last_reader_keeps_the_latest_samples() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let reliable = ReliabilityQosPolicy {
+        kind: ReliabilityQosPolicyKind::Reliable,
+        max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+    };
+    let topic_ordered = PresentationQosPolicy {
+        access_scope: PresentationQosAccessScopeKind::Topic,
+        coherent_access: false,
+        ordered_access: true,
+    };
+
+    let writer = create_datawriter(
+        &participant,
+        PublisherQos { presentation: topic_ordered, ..Default::default() },
+        DataWriterQos {
+            reliability: reliable,
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        },
+    );
+    let reader = create_datareader(
+        &participant,
+        SubscriberQos { presentation: topic_ordered, ..Default::default() },
+        DataReaderQos {
+            reliability: reliable,
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: true },
+            ..Default::default()
+        },
+    );
+
+    wait_for_reader_status(&reader, StatusMask::SUBSCRIPTION_MATCHED, Duration::from_seconds(2))
+        .unwrap();
+    wait_for_writer_status(&writer, StatusMask::PUBLICATION_MATCHED, Duration::from_seconds(2))
+        .unwrap();
+
+    let subscriber = reader.get_subscriber().unwrap();
+    subscriber.begin_access().unwrap();
+
+    for value in 0..5 {
+        writer.write(&KeyedDataType::new(1, value), InstanceHandle::NIL).unwrap();
+    }
+
+    thread::sleep(std::time::Duration::from_millis(300));
+
+    subscriber.end_access().unwrap();
+
+    let values: Vec<i16> = reader
+        .take(
+            10,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+        )
+        .map(|samples| samples.iter().map(|sample| sample.data().unwrap().value).collect())
+        .unwrap_or_default();
+
+    assert_eq!(values, vec![4]);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
+}

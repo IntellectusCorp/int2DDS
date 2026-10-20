@@ -182,16 +182,6 @@ pub struct SubscriberQos {
 }
 
 impl Qos for SubscriberQos {
-    fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if
-        // || self.partition != PartitionQosPolicy::default()
-        self.group_data != GroupDataQosPolicy::default() {
-            return Err(DdsError::Unsupported);
-        }
-
-        Ok(())
-    }
-
     fn check_immutable_change(&self, new_qos: &Self) -> DdsResult<()> {
         if self.presentation != new_qos.presentation {
             return Err(DdsError::ImmutablePolicy);

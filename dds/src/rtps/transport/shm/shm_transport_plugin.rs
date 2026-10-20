@@ -10,7 +10,6 @@ use log::{debug, info};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
-use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::shm::ring::{RingError, SPILL_NONE};
 use crate::rtps::transport::shm::runtime::ShmRuntime;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -42,6 +41,8 @@ pub(crate) struct ShmTransportPlugin {
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
     user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
+    discovery_unicast_port: u16,
+    user_unicast_port: u16,
 }
 
 impl ShmTransportPlugin {
@@ -70,7 +71,7 @@ impl ShmTransportPlugin {
     /// then behaves as a UDP transport.
     fn with_runtime(
         domain_id: u32,
-        mut participant_id: u32,
+        participant_id: u32,
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
@@ -84,44 +85,33 @@ impl ShmTransportPlugin {
             Some(ext_ip) => vec![ext_ip],
             None => host_ip_addrs.clone(),
         };
+        let port_manager = udp_config.port_manager;
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).
-        let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let user_mc = UdpListener::new_multicast(user_mc_port, &working_ips).ok();
+        let discovery_mc_port =
+            port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
+        let user_mc_port = port_manager.calculate_user_traffic_multicast_port(domain_id)?;
+        let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
+        let user_mc = Some(UdpListener::new_multicast(user_mc_port, &working_ips)?);
 
         // Unicast listeners — both must bind at the same participant_id
-        // (matches develop's Socket contract). If either fails, close any
-        // partial bind, increment participant_id, and retry.
-        let (discovery_uc, user_uc) = loop {
-            let disc_port =
-                PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
-            let user_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
-            match UdpListener::new(disc_port) {
-                Ok(disc_listener) => match UdpListener::new(user_port) {
-                    Ok(user_listener) => break (Some(disc_listener), Some(user_listener)),
-                    Err(_) => {
-                        log::info!(
-                            "[ShmTransportPlugin] User port {} in use, closing discovery and trying participant_id {}",
-                            user_port,
-                            participant_id + 1
-                        );
-                        let mut disc_listener = disc_listener;
-                        disc_listener.close();
-                        participant_id += 1;
-                    }
-                },
-                Err(_) => {
-                    log::info!(
-                        "[ShmTransportPlugin] Discovery port {} in use, trying participant_id {}",
-                        disc_port,
-                        participant_id + 1
-                    );
-                    participant_id += 1;
-                }
-            }
+        // (matches develop's Socket contract).
+        let (first_participant_id, is_participant_id_fixed) = match udp_config.participant_id {
+            // int2dds.participant_id property: only this id is tried
+            Some(fixed_participant_id) => (fixed_participant_id, true),
+            // No property: search upwards from the id the caller passed in (0 from Socket)
+            None => (participant_id, false),
         };
+        let (discovery_uc, user_uc, participant_id) =
+            UdpListener::bind_discovery_and_user_unicast_listeners(
+                &port_manager,
+                domain_id,
+                first_participant_id,
+                is_participant_id_fixed,
+            )?;
+        let discovery_unicast_port = discovery_uc.port();
+        let user_unicast_port = user_uc.port();
+
         info!(
             "[ShmTransportPlugin] Created (domain={}, pid={}, zero_copy={})",
             domain_id,
@@ -137,9 +127,11 @@ impl ShmTransportPlugin {
             host_ip_addrs,
             runtime,
             discovery_multicast_listener: Mutex::new(discovery_mc),
-            discovery_unicast_listener: Mutex::new(discovery_uc),
+            discovery_unicast_listener: Mutex::new(Some(discovery_uc)),
             user_multicast_listener: Mutex::new(user_mc),
-            user_unicast_listener: Mutex::new(user_uc),
+            user_unicast_listener: Mutex::new(Some(user_uc)),
+            discovery_unicast_port,
+            user_unicast_port,
         })
     }
 
@@ -213,15 +205,11 @@ impl TransportPlugin for ShmTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        let port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id)
-                as u32;
-        self.udp_locators(port)
+        self.udp_locators(self.discovery_unicast_port as u32)
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
+        let user_port = self.user_unicast_port as u32;
         let mut locators = Vec::new();
         // Advertised only with the runtime up: the locator promises a
         // descriptor will be read.
@@ -289,6 +277,7 @@ impl TransportPlugin for ShmTransportPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::port_manager::PortManager;
     use crate::rtps::transport::shm::registry::{now_tick, unlink_registry};
     use crate::rtps::transport::shm::ring::RING_INLINE;
     use crate::rtps::transport::shm::runtime::{DEFAULT_POOL_SIZE, DEFAULT_RING_ENTRIES};
@@ -305,7 +294,11 @@ mod tests {
             "127.0.0.1".to_string(),
             vec!["127.0.0.1".to_string()],
             prefix,
-            UdpConfig { multicast_ttl: 1 },
+            UdpConfig {
+                multicast_ttl: 1,
+                port_manager: PortManager::default(),
+                participant_id: None,
+            },
         )
         .unwrap()
     }
@@ -321,7 +314,11 @@ mod tests {
             "127.0.0.1".to_string(),
             vec!["127.0.0.1".to_string()],
             None,
-            UdpConfig { multicast_ttl: 1 },
+            UdpConfig {
+                multicast_ttl: 1,
+                port_manager: PortManager::default(),
+                participant_id: None,
+            },
         )
         .unwrap();
 

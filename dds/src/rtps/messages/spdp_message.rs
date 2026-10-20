@@ -149,6 +149,7 @@ impl SpdpMessage {
             vendor_id,
             entity_name,
             locators,
+            local_participant_proxy_data.user_data(),
             receive_buffer_size,
         ) {
             Ok(bytes) => Ok(bytes::Bytes::from(bytes)),

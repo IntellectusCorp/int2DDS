@@ -16,6 +16,7 @@ import kr.co.intellectus.int2dds.internal.NativeCleaner;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.QosMarshal;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
+import kr.co.intellectus.int2dds.internal.StatusDecoder;
 import kr.co.intellectus.int2dds.internal.ffi.FfiAccess;
 import kr.co.intellectus.int2dds.listeners.DataWriterListener;
 import kr.co.intellectus.int2dds.qos.DataRepresentationKind;
@@ -260,32 +261,30 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         return guid;
     }
 
+    /** This writer's own DDS instance handle. */
+    public InstanceHandle getInstanceHandle() {
+        byte[] h = new byte[16];
+        int rc = FfiAccess.datawriterGetInstanceHandle(handle(), h);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new InstanceHandle(h);
+    }
+
     /**
      * This writer's PUBLICATION_MATCHED status: how many DataReaders it has matched, and the change
      * since last read. Per DDS, reading this status clears its {@code *Change} fields.
      */
     public PublicationMatchedStatus getPublicationMatchedStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.PUBLICATION_MATCHED_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datawriterGetPublicationMatchedStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        int currentCount = buf.getInt(8);
-        int currentCountChange = buf.getInt(12);
-        byte[] lastSubscriptionHandle = new byte[16];
-        for (int i = 0; i < 16; i++) {
-            lastSubscriptionHandle[i] = buf.get(16 + i);
-        }
-        return new PublicationMatchedStatus(
-                totalCount,
-                totalCountChange,
-                currentCount,
-                currentCountChange,
-                lastSubscriptionHandle);
+        return StatusDecoder.publicationMatched(buf);
     }
 
     /**
@@ -294,16 +293,16 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      * reading this status clears its {@code *Change} field.
      */
     public LivelinessLostStatus getLivelinessLostStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.COUNT_PAIR_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datawriterGetLivelinessLostStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        return new LivelinessLostStatus(totalCount, totalCountChange);
+        return StatusDecoder.livelinessLost(buf);
     }
 
     /**
@@ -312,20 +311,16 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      * clears its {@code *Change} field.
      */
     public OfferedDeadlineMissedStatus getOfferedDeadlineMissedStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.DEADLINE_MISSED_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datawriterGetOfferedDeadlineMissedStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        byte[] lastInstanceHandle = new byte[16];
-        for (int i = 0; i < 16; i++) {
-            lastInstanceHandle[i] = buf.get(8 + i);
-        }
-        return new OfferedDeadlineMissedStatus(totalCount, totalCountChange, lastInstanceHandle);
+        return StatusDecoder.offeredDeadlineMissed(buf);
     }
 
     /**
@@ -334,19 +329,16 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      * DDS, reading this status clears its {@code *Change} field.
      */
     public OfferedIncompatibleQosStatus getOfferedIncompatibleQosStatus() {
-        ByteBuffer buf = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        ByteBuffer buf =
+                ByteBuffer.allocateDirect(StatusDecoder.INCOMPATIBLE_QOS_SIZE)
+                        .order(ByteOrder.nativeOrder());
         int rc =
                 FfiAccess.datawriterGetOfferedIncompatibleQosStatus(
                         handle(), FfiAccess.directBufferAddress(buf));
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(buf);
         ReturnCodes.check(rc);
-        int totalCount = buf.getInt(0);
-        int totalCountChange = buf.getInt(4);
-        int lastPolicyId = buf.getInt(8);
-        int policiesCount = buf.getInt(12);
-        return new OfferedIncompatibleQosStatus(
-                totalCount, totalCountChange, lastPolicyId, policiesCount);
+        return StatusDecoder.offeredIncompatibleQos(buf);
     }
 
     /**

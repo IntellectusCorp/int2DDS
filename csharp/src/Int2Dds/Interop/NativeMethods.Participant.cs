@@ -22,6 +22,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_participant_get_domain_id(IntPtr participant, out int domain_id_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_get_instance_handle(IntPtr participant, byte* handle_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_delete_contained_entities(IntPtr participant);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

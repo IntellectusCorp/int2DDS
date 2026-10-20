@@ -4,7 +4,7 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use log::debug;
 
@@ -16,8 +16,9 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
+    domain::qos::DomainParticipantQos,
     infrastructure::{
-        qos_policy::ReliabilityQosPolicyKind,
+        qos_policy::{ReliabilityQosPolicyKind, UserDataQosPolicy},
         status::{StatusInfo, StatusKind},
     },
     rtps::{
@@ -36,7 +37,10 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::{cache_change::CacheChange, history_cache::HistoryCache},
+            history::{
+                cache_change::CacheChange, history_cache::HistoryCache,
+                subscriber_history::SubscriberHistoryCache,
+            },
             participant::Participant,
             reader::{Reader, StatefulReader, StatelessReader},
             writer::{StatefulWriter, StatelessWriter, Writer},
@@ -76,10 +80,8 @@ pub(crate) struct DcpsBridge {
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
 
 impl DcpsBridge {
-    pub(crate) fn new(
-        domain_id: DomainId,
-        property: &crate::infrastructure::qos_policy::PropertyQosPolicy,
-    ) -> RtpsResult<Self> {
+    pub(crate) fn new(domain_id: DomainId, qos: &DomainParticipantQos) -> RtpsResult<Self> {
+        let property = &qos.property;
         let mut socket = Socket::new(domain_id);
 
         let transport_type = property
@@ -136,7 +138,7 @@ impl DcpsBridge {
         let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
-        let mut participant = Participant::with_guid_prefix(
+        let participant = Participant::with_guid_prefix(
             guid_prefix,
             domain_id,
             participant_id,
@@ -145,6 +147,12 @@ impl DcpsBridge {
             default_unicast_locators,
         );
         participant.set_local_receive_buffer_size(transport.advertised_receive_buffer_size());
+        participant.set_local_user_data(qos.user_data.clone());
+        if socket.is_working_ips_from_feature() {
+            if let Some(pinned) = socket.working_ips().first().and_then(|ip| ip.parse().ok()) {
+                participant.set_pinned_egress_ipv4(pinned);
+            }
+        }
         let participant = Arc::new(participant);
 
         participant.init_logics(transport.clone(), property);
@@ -345,6 +353,19 @@ impl DcpsBridge {
         Ok(Arc::try_unwrap(self.participant.clone()).unwrap_or_else(|a| (*a).clone()))
     }
 
+    pub(crate) fn update_participant(&self, user_data: UserDataQosPolicy) -> RtpsResult<()> {
+        self.participant.set_local_user_data(user_data);
+
+        log::debug!(
+            "Participant {} updated, sending SPDP once through multicast",
+            self.participant.guid()
+        );
+        match self.spdp_logic.as_ref() {
+            Some(spdp_logic) => spdp_logic.trigger_send_spdp_multicast(),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn delete_rtps_writer(
         &mut self,
         topic_name: String,
@@ -370,6 +391,8 @@ impl DcpsBridge {
         content_filter_property: Option<ContentFilterProperty>,
         change_callback: Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>,
         status_callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
+        subscriber_guid: Guid,
+        subscriber_history_cache: Option<Arc<Mutex<SubscriberHistoryCache>>>,
     ) -> Result<Arc<dyn Reader + Send + Sync>, RtpsError> {
         let datareader_guid = subscription_builtin_topic_data.endpoint_guid();
         let entity_kind = datareader_guid.entity_kind();
@@ -397,7 +420,7 @@ impl DcpsBridge {
 
         let reader: Arc<dyn Reader + Send + Sync> = if subscription_builtin_topic_data.is_reliable()
         {
-            Arc::new(StatefulReader::new(
+            let stateful_reader = StatefulReader::new(
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::Reliable,
@@ -409,8 +432,30 @@ impl DcpsBridge {
                 status_callback,
                 subscription_builtin_topic_data.clone(),
                 self.participant.guid(),
-            ))
+            );
+
+            // Planted before the reader is registered and matched, so no writer or sample gets
+            // past the gate.
+            if let Some(subscriber_history_cache) = subscriber_history_cache {
+                stateful_reader.set_subscriber_history_cache(Arc::clone(&subscriber_history_cache));
+                self.participant.register_subscriber_history_cache(
+                    subscriber_guid,
+                    Arc::downgrade(&subscriber_history_cache),
+                )?;
+            }
+
+            Arc::new(stateful_reader)
         } else {
+            // A best effort reader tracks no Heartbeat or Gap, so it cannot meet the group order
+            // conditions and is left out of it.
+            if subscriber_history_cache.is_some() {
+                debug!(
+                    "Reader {} is best effort, so the group order of Subscriber {} skips it",
+                    datareader_guid,
+                    subscriber_guid.to_hex_string()
+                );
+            }
+
             Arc::new(StatelessReader::new(
                 datareader_guid,
                 topic_kind,
@@ -691,6 +736,12 @@ impl DcpsBridge {
             })?
             .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
+        self.participant
+            .remote_subscriptions()
+            .entry(subscription_builtin_topic_data.topic_name().to_string())
+            .or_default()
+            .insert(datareader_guid, subscription_builtin_topic_data.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             subscription_builtin_topic_data.topic_name().as_str(),
@@ -761,6 +812,12 @@ impl DcpsBridge {
                 )
             })?
             .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
+
+        self.participant
+            .remote_publications()
+            .entry(publication_builtin_topic_data.topic_name().to_string())
+            .or_default()
+            .insert(datawriter_guid, publication_builtin_topic_data.clone());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -990,6 +1047,147 @@ mod tests {
         }
     }
 
+    /// Pins egress to a non-loopback IPv4 of this host, or `None` on a host without one.
+    fn pin_a_host_address() -> Option<std::net::IpAddr> {
+        let pinned = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|iface| iface.ip())
+            .find(|ip| ip.is_ipv4() && !ip.is_loopback())?;
+        unsafe {
+            std::env::set_var("INT2DDS_NETWORK_IP", pinned.to_string());
+            std::env::remove_var("INT2DDS_DISABLE_SAME_HOST_LOOPBACK");
+        }
+        Some(pinned)
+    }
+
+    fn assert_all_at(pinned: std::net::IpAddr, unicast: &[Locator]) {
+        assert!(!unicast.is_empty());
+        for locator in unicast {
+            assert_eq!(
+                std::net::IpAddr::V4(locator.to_ip_v4_addr()),
+                pinned,
+                "same-host locator {locator} is not the pinned address: {unicast:?}"
+            );
+        }
+    }
+
+    /// A sender bound to a pinned address may be refused a 127.0.0.1 destination
+    /// by the host, so a co-located peer has to be reached at the pinned address.
+    #[test]
+    fn same_host_peer_is_reached_at_the_pinned_address() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(pinned) = pin_a_host_address() else {
+            return;
+        };
+
+        let domain_id = unique_domain_id() as u32;
+        let mut bridge_a = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_a.init().unwrap();
+        let mut bridge_b = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_b.init().unwrap();
+        let guid_b = bridge_b.participant.guid();
+
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(15);
+        let a_view_of_b = loop {
+            if let Some(found) =
+                bridge_a.participant.find_remote_participant_proxy_data(guid_b.prefix())
+            {
+                break found;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "participants did not discover each other"
+            );
+            thread::sleep(StdDuration::from_millis(50));
+        };
+
+        let unicast: Vec<Locator> = a_view_of_b
+            .metatraffic_unicast_locator_list()
+            .iter()
+            .chain(a_view_of_b.default_unicast_locator_list())
+            .cloned()
+            .collect();
+
+        let _ = bridge_a.disable();
+        let _ = bridge_b.disable();
+        unsafe { std::env::remove_var("INT2DDS_NETWORK_IP") };
+
+        assert_all_at(pinned, &unicast);
+    }
+
+    #[test]
+    fn same_host_endpoints_are_reached_at_the_pinned_address() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(pinned) = pin_a_host_address() else {
+            return;
+        };
+        let topic_name = "pinned_same_host_topic";
+        let reliability = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::new(0, 100_000_000),
+        };
+
+        let domain_id = unique_domain_id() as u32;
+        let mut bridge_a = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_a.init().unwrap();
+        let mut bridge_b = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_b.init().unwrap();
+
+        let mut publication = PublicationBuiltinTopicData::new(
+            &DataWriterQos { reliability: reliability.clone(), ..Default::default() },
+            &PublisherQos::default(),
+            &TopicQos::default(),
+        );
+        publication.set_topic_name(topic_name.to_string());
+        publication.set_type_name("HelloWorld".to_string());
+        publication
+            .set_endpoint_guid(bridge_a.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY));
+        let writer = bridge_a.create_rtps_writer(publication, None).unwrap();
+
+        let mut subscription = SubscriptionBuiltinTopicData::new(
+            &DataReaderQos { reliability, ..Default::default() },
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+        subscription.set_topic_name(topic_name.to_string());
+        subscription.set_type_name("HelloWorld".to_string());
+        subscription
+            .set_endpoint_guid(bridge_b.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY));
+        let reader = bridge_b
+            .create_rtps_reader(subscription, None, None, None, Guid::UNKNOWN, None)
+            .unwrap();
+
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let stateful_reader = reader.as_any().downcast_ref::<StatefulReader>().unwrap();
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(15);
+        let unicast: Vec<Locator> = loop {
+            let reader_proxies = stateful_writer.reader_proxies();
+            let writer_proxies = stateful_reader.writer_proxies();
+            let reader_proxies = reader_proxies.lock().unwrap();
+            let writer_proxies = writer_proxies.lock().unwrap();
+            if let (Some(reader_proxy), Some(writer_proxy)) =
+                (reader_proxies.first(), writer_proxies.first())
+            {
+                break reader_proxy
+                    .unicast_locator_list()
+                    .iter()
+                    .chain(writer_proxy.unicast_locator_list())
+                    .cloned()
+                    .collect();
+            }
+            drop((reader_proxies, writer_proxies));
+            assert!(std::time::Instant::now() < deadline, "endpoints did not match");
+            thread::sleep(StdDuration::from_millis(50));
+        };
+
+        let _ = bridge_a.disable();
+        let _ = bridge_b.disable();
+        unsafe { std::env::remove_var("INT2DDS_NETWORK_IP") };
+
+        assert_all_at(pinned, &unicast);
+    }
+
     fn change_callback(change: Arc<CacheChange>) {
         log::info!("change: {}", change);
     }
@@ -1051,6 +1249,8 @@ mod tests {
                         None,
                         Some(Arc::new(tests::change_callback)),
                         Some(Arc::new(tests::status_callback)),
+                        Guid::UNKNOWN,
+                        None,
                     )
                     .unwrap();
 
@@ -1176,6 +1376,8 @@ mod tests {
                     None,
                     Some(Arc::new(tests::change_callback)),
                     Some(Arc::new(tests::status_callback)),
+                    Guid::UNKNOWN,
+                    None,
                 )
                 .unwrap();
 
@@ -1188,6 +1390,8 @@ mod tests {
                     None,
                     Some(Arc::new(tests::change_callback)),
                     Some(Arc::new(tests::status_callback)),
+                    Guid::UNKNOWN,
+                    None,
                 )
                 .unwrap();
 
@@ -1490,6 +1694,8 @@ mod tests {
                         None,
                         Some(Arc::new(tests::change_callback)),
                         Some(Arc::new(tests::status_callback)),
+                        Guid::UNKNOWN,
+                        None,
                     )
                     .unwrap();
 
@@ -1550,6 +1756,8 @@ mod tests {
                 None,
                 Some(Arc::new(tests::change_callback)),
                 Some(Arc::new(tests::status_callback)),
+                Guid::UNKNOWN,
+                None,
             )
             .unwrap();
 

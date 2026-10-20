@@ -1,6 +1,7 @@
 use bytes::Bytes;
 
 use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::common::locator::udp_locator_kind;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
@@ -92,15 +93,25 @@ impl UserUnicastListeningTask {
                             let _ = poll.registry().deregister(listener.socket());
                             return Ok(());
                         }
-                        self.process_rtps_message(buffer, from_addr);
+                        self.process_rtps_message(
+                            buffer,
+                            from_addr,
+                            udp_locator_kind(&from_addr.ip()),
+                        );
                     }
                 }
             }
         }
     }
 
-    pub(crate) fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
-        let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
+    pub(crate) fn process_rtps_message(
+        &mut self,
+        bytes: Bytes,
+        from_addr: SocketAddr,
+        locator_kind: i32,
+    ) {
+        let mut message_receiver =
+            MessageReceiver::new_with_locator_kind(self.guid_prefix, &from_addr, locator_kind);
         let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);

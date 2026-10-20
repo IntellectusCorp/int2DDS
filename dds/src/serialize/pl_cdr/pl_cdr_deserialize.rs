@@ -448,6 +448,23 @@ impl PlCdrParser {
                 let guid = self.parse_guid(data)?;
                 ParameterValue::EndpointGuid(guid)
             }
+            ParameterId::PidGroupGuid => {
+                let guid = self.parse_guid(data)?;
+                ParameterValue::GroupGuid(guid)
+            }
+            ParameterId::PidGroupEntityId => {
+                if data.len() < 4 {
+                    return Err(format!(
+                        "Insufficient data for EntityId: need 4 bytes, got {}",
+                        data.len()
+                    ));
+                }
+                let entity_id_bytes = <[u8; 4]>::try_from(&data[0..4])
+                    .map_err(|_| "Invalid EntityId data".to_string())?;
+                ParameterValue::GroupEntityId(crate::rtps::common::entity_id::EntityId::from_bytes(
+                    entity_id_bytes,
+                ))
+            }
             ParameterId::PidParticipantLeaseDuration
             | ParameterId::PidDeadline
             | ParameterId::PidLatencyBudget
@@ -714,8 +731,13 @@ impl PlCdrParser {
                 } else {
                     let mut reader = PlCdrReader::new(data, self.endianness);
                     let kind_u16 = reader.read_u16().unwrap_or(0);
-                    let kind = TypeConsistencyKind::from_u16(kind_u16)
-                        .unwrap_or(TypeConsistencyKind::DisallowTypeCoercion);
+                    // 2 is a coercing kind on the wire: OpenDDS ALLOW_TYPE_COERCION,
+                    // RTI AUTO_TYPE_COERCION.
+                    let kind = match kind_u16 {
+                        2 => TypeConsistencyKind::AllowTypeCoercion,
+                        k => TypeConsistencyKind::from_u16(k)
+                            .unwrap_or(TypeConsistencyKind::DisallowTypeCoercion),
+                    };
 
                     // Read boolean flags (1 byte each)
                     let ignore_sequence_bounds =

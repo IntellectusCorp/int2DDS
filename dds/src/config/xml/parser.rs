@@ -35,14 +35,16 @@ const MEMBER_ONLY_ATTRS: &[&str] = &[
     "external",
     "mustUnderstand",
     "try_construct",
+    "tryConstruct",
     "visibility",
 ];
-const ENUM_ATTRS: &[&str] = &["name", "bit_bound", "bitBound"];
+const ENUM_ATTRS: &[&str] = &["name", "bit_bound", "bitBound", "extensibility"];
 const ENUMERATOR_ATTRS: &[&str] = &["name", "value", "default_literal", "defaultLiteral"];
 const UNION_ATTRS: &[&str] = &["name", "extensibility"];
+const DISCRIMINATOR_ATTRS: &[&str] = &["key", "try_construct", "tryConstruct"];
 const CASE_LABEL_ATTRS: &[&str] = &["value"];
 const BITMASK_ATTRS: &[&str] = &["name", "bit_bound", "bitBound"];
-const BIT_VALUE_ATTRS: &[&str] = &["name", "position"];
+const BIT_VALUE_ATTRS: &[&str] = &["name", "position", "value"];
 const BITSET_ATTRS: &[&str] = &["name"];
 const BITFIELD_ATTRS: &[&str] = &["name", "bit_bound", "bitBound", "type"];
 const CONST_ATTRS: &[&str] = &["name", "type", "value"];
@@ -240,6 +242,15 @@ fn parse_enum(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<Xm
             n
         }
     };
+    let extensibility = match node.attribute("extensibility") {
+        None => None,
+        Some(_) => match extensibility_attr(doc, node)? {
+            ExtensibilityKind::Mutable => {
+                return Err(err_at(doc, node, "enum extensibility must be final or appendable"))
+            }
+            kind => Some(kind),
+        },
+    };
 
     let mut literals = Vec::new();
     for child in node.children().filter(Node::is_element) {
@@ -273,7 +284,7 @@ fn parse_enum(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<Xm
         return Err(err_at(doc, node, "enum requires at least one enumerator"));
     }
 
-    Ok(XmlEnum { name: qualify(cx.scope, name), bit_bound, literals })
+    Ok(XmlEnum { name: qualify(cx.scope, name), bit_bound, extensibility, literals })
 }
 
 fn parse_union(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<XmlUnion> {
@@ -282,6 +293,8 @@ fn parse_union(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<X
     let extensibility = extensibility_attr(doc, node)?;
 
     let mut discriminator = None;
+    let mut discriminator_key = false;
+    let mut discriminator_try_construct = TryConstructKind::Discard;
     let mut cases = Vec::new();
     for child in node.children().filter(Node::is_element) {
         match child.tag_name().name() {
@@ -289,7 +302,9 @@ fn parse_union(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<X
                 if discriminator.is_some() {
                     return Err(err_at(doc, child, "union has more than one <discriminator>"));
                 }
-                check_attrs_split(doc, child, &[], lenient)?;
+                check_attrs_split(doc, child, DISCRIMINATOR_ATTRS, lenient)?;
+                discriminator_key = bool_attr(doc, child, "key")?;
+                discriminator_try_construct = try_construct_attr(doc, child)?;
                 let ty = parse_type_spec(doc, child, cx)?;
                 if !is_valid_discriminator(&ty) {
                     return Err(err_at(
@@ -316,7 +331,14 @@ fn parse_union(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<X
         return Err(err_at(doc, node, "union has more than one default case"));
     }
 
-    Ok(XmlUnion { name: qualify(cx.scope, name), extensibility, discriminator, cases })
+    Ok(XmlUnion {
+        name: qualify(cx.scope, name),
+        extensibility,
+        discriminator,
+        discriminator_key,
+        discriminator_try_construct,
+        cases,
+    })
 }
 
 fn parse_union_case(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<XmlUnionCase> {
@@ -331,7 +353,10 @@ fn parse_union_case(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsRes
                 let value = required_attr(doc, child, "value")?;
                 if value == "default" {
                     is_default = true;
-                } else if let Ok(n) = value.parse::<i32>() {
+                } else if let Some(n) = resolve_int_token(cx, value) {
+                    let n = i32::try_from(n).map_err(|_| {
+                        err_at(doc, child, &format!("case label '{value}' out of i32 range"))
+                    })?;
                     labels.push(XmlCaseLabel::Int(n));
                 } else {
                     labels.push(XmlCaseLabel::Name(value.to_string()));
@@ -352,7 +377,14 @@ fn parse_union_case(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsRes
     if labels.is_empty() && !is_default {
         return Err(err_at(doc, node, "union case requires a <caseDiscriminator>"));
     }
-    Ok(XmlUnionCase { name: member.name, ty: member.ty, labels, is_default })
+    Ok(XmlUnionCase {
+        name: member.name,
+        ty: member.ty,
+        id: member.id,
+        try_construct: member.try_construct,
+        labels,
+        is_default,
+    })
 }
 
 fn is_valid_discriminator(ty: &XmlMemberType) -> bool {
@@ -396,16 +428,18 @@ fn parse_bitmask(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult
     let mut flags = Vec::new();
     for child in node.children().filter(Node::is_element) {
         match child.tag_name().name() {
-            "bit_value" => {
+            // <flag value=".."/> is an alias of <bit_value position=".."/>.
+            "bit_value" | "flag" => {
                 check_attrs(doc, child, BIT_VALUE_ATTRS, lenient)?;
                 let fname = required_attr(doc, child, "name")?;
-                let position = match child.attribute("position") {
-                    None => u16::try_from(flags.len())
-                        .map_err(|_| err_at(doc, child, "too many bit flags"))?,
-                    Some(v) => v.parse::<u16>().map_err(|e| {
-                        err_at(doc, child, &format!("invalid 'position' value '{v}': {e}"))
-                    })?,
-                };
+                let position =
+                    match child.attribute("position").or_else(|| child.attribute("value")) {
+                        None => u16::try_from(flags.len())
+                            .map_err(|_| err_at(doc, child, "too many bit flags"))?,
+                        Some(v) => v.parse::<u16>().map_err(|e| {
+                            err_at(doc, child, &format!("invalid 'position' value '{v}': {e}"))
+                        })?,
+                    };
                 flags.push(XmlBitflag { name: fname.to_string(), position });
             }
             other => {
@@ -522,12 +556,7 @@ fn parse_member(doc: &Document, node: Node, cx: Cx, lenient: bool) -> DdsResult<
     if id.is_some() && hashid.is_some() {
         return Err(err_at(doc, node, "'id' and 'hashid' cannot both be specified"));
     }
-    let try_construct = match node.attribute("try_construct") {
-        None | Some("discard") => TryConstructKind::Discard,
-        Some("use_default") => TryConstructKind::UseDefault,
-        Some("trim") => TryConstructKind::Trim,
-        Some(v) => return Err(err_at(doc, node, &format!("invalid try_construct '{v}'"))),
-    };
+    let try_construct = try_construct_attr(doc, node)?;
 
     Ok(XmlMember {
         name: name.to_string(),
@@ -616,6 +645,15 @@ fn parse_type_spec(doc: &Document, node: Node, cx: Cx) -> DdsResult<XmlMemberTyp
         (Some(bound), None) => XmlMemberType::Sequence { element: Box::new(scalar), bound },
         (None, Some(dims)) => XmlMemberType::Array { element: Box::new(scalar), dims },
         (None, None) => scalar,
+    })
+}
+
+fn try_construct_attr(doc: &Document, node: Node) -> DdsResult<TryConstructKind> {
+    Ok(match node.attribute("try_construct").or_else(|| node.attribute("tryConstruct")) {
+        None | Some("discard") => TryConstructKind::Discard,
+        Some("use_default") => TryConstructKind::UseDefault,
+        Some("trim") => TryConstructKind::Trim,
+        Some(v) => return Err(err_at(doc, node, &format!("invalid try_construct '{v}'"))),
     })
 }
 
@@ -804,10 +842,16 @@ fn lookup_const<'a>(name: &str, cx: Cx<'a>) -> Option<&'a ConstValue> {
     }
 }
 
-// An integer literal or a reference to an integer const; None if neither.
+// An integer literal (decimal or 0x hex) or a reference to an integer const; None if neither.
 fn resolve_int_token(cx: Cx, raw: &str) -> Option<i64> {
     if let Ok(n) = raw.parse::<i64>() {
         return Some(n);
+    }
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        if hex.starts_with(['+', '-']) {
+            return None;
+        }
+        return i64::from_str_radix(hex, 16).ok();
     }
     match lookup_const(raw, cx) {
         Some(ConstValue::Int(n)) => Some(*n),

@@ -193,6 +193,10 @@ def _apply_topic_qos(handle: CData, qos: "TopicQos") -> None:
     if qos.data_representation is not None:
         check_ret(lib.int2dds_topic_qos_set_data_representation(
             handle, qos.data_representation._kind_int))
+    if qos.topic_data is not None:
+        data_ptr = ffi.from_buffer(qos.topic_data.data) if qos.topic_data.data else ffi.NULL
+        check_ret(lib.int2dds_topic_qos_set_topic_data(
+            handle, data_ptr, len(qos.topic_data.data)))
 
 
 class Topic(Generic[T]):
@@ -427,6 +431,25 @@ class Topic(Generic[T]):
         mask_out = ffi.new("uint32_t *")
         check_ret(lib.int2dds_topic_get_status_changes(self._handle, mask_out))
         return mask_out[0]
+
+    def get_qos(self) -> "TopicQos":
+        """Return the effective QoS in force.
+
+        Reports the policies with a native getter (topic_data). The other TopicQos
+        policies are left unset.
+        """
+        from int2dds.core.discovery import _read_bytes
+        from int2dds.core.qos import TopicData, TopicQos
+
+        qos_ptr = ffi.new("Int2DdsTopicQos **")
+        check_ret(lib.int2dds_topic_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            topic_data = _read_bytes(lib.int2dds_topic_qos_get_topic_data, handle)
+        finally:
+            lib.int2dds_topic_qos_destroy(handle)
+
+        return TopicQos(topic_data=TopicData(data=topic_data))
 
     def set_qos(self, qos: "TopicQos") -> None:
         """Set this topic's QoS.

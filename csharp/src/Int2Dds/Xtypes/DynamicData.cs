@@ -1,5 +1,6 @@
 using System;
 using System.Text;
+using Int2Dds.Cdr;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
@@ -127,6 +128,16 @@ namespace Int2Dds.Xtypes
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_get_f64(_handle, p, out double v));
                 return v;
             }
+        }
+
+        public unsafe Float128 GetF128(string path)
+        {
+            var pb = Encoding.UTF8.GetBytes(path + '\0');
+            var bytes = new byte[16];
+            fixed (byte* p = pb)
+            fixed (byte* pv = bytes)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_get_f128(_handle, p, pv));
+            return Float128.FromBytes(bytes, 0);
         }
 
         public unsafe byte GetChar8(string path)
@@ -270,6 +281,15 @@ namespace Int2Dds.Xtypes
             var f = NativeString.ToCStr(field);
             fixed (byte* p = f)
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_f64(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetF128(string field, Float128 value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+            fixed (byte* pv = value.ToBytes())
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_f128(_handle, p, pv));
             return this;
         }
 

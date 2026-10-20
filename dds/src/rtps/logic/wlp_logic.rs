@@ -566,6 +566,7 @@ impl WlpLogic {
                 last_sn,
                 final_flag,
                 liveliness_flag,
+                None,
             ) {
                 Ok(buf) => buf,
                 Err(_) => continue,
@@ -1159,6 +1160,11 @@ impl WlpLogic {
                 notify_reader_liveliness_changed(&lease, &guid, LivelinessTransition::Lost);
             }
 
+            // The group gate stops waiting for this writer. A failure here is logged where it
+            // is made.
+            let _ =
+                participant.set_remote_writer_liveliness_in_subscriber_history_caches(guid, false);
+
             if let Some(mut remote_writers) = remote_participants.get_mut(&guid.prefix()) {
                 if let Some(writer_info) = remote_writers.get_mut(&guid) {
                     writer_info.set_not_alive();
@@ -1315,6 +1321,13 @@ impl WlpLogic {
                             );
                         }
                     }
+
+                    // The group gate waits for this writer again. A failure here is logged
+                    // where it is made.
+                    let _ = participant.set_remote_writer_liveliness_in_subscriber_history_caches(
+                        writer_guid,
+                        true,
+                    );
                 }
 
                 // LivelinessMonitor Timer Update (re-track if removed after LOST)
@@ -1543,6 +1556,7 @@ impl UnicastMessageProcessor for WlpLogic {
             cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
             false,
             false,
+            None,
         ));
 
         debug!(

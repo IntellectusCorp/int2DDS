@@ -478,6 +478,21 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Gets this DataWriter's instance handle.
+        /// </summary>
+        public unsafe InstanceHandle GetInstanceHandle()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var handle = new byte[16];
+            fixed (byte* p = handle)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_get_instance_handle(_handle, p));
+            }
+            return new InstanceHandle(handle);
+        }
+
+        /// <summary>
         /// Writes pre-serialized CDR bytes through the zero-copy staging path
         /// (prepare a native buffer, copy into it, then commit). Aborts the loan
         /// on failure.

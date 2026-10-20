@@ -27,6 +27,7 @@
 //! | [`TypeConsistencyEnforcementQosPolicy`] | Type consistency enforcement for DDS-XTypes | DataReader |
 //! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
 //! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
+//! | [`PresentationQosPolicy`] | Coherent/ordered access for change groups | Publisher, Subscriber |
 //!
 //! ## int2DDS Extension QoS Policies
 //!
@@ -42,7 +43,6 @@
 //! | Policy | Description | Applicable to |
 //! |--------|-------------|---------------|
 //! | [`UserDataQosPolicy`] | Arbitrary user data attached to entity | DomainParticipant, DataWriter, DataReader |
-//! | [`PresentationQosPolicy`] | Coherent/ordered access for change groups | Publisher, Subscriber |
 //! | [`LatencyBudgetQosPolicy`] | Acceptable delivery delay hint | DataWriter, DataReader, Topic |
 //! | [`TransportPriorityQosPolicy`] | Transport priority for delivery | DataWriter, Topic |
 //! | [`TimeBasedFilterQosPolicy`] | Minimum separation between samples | DataReader |
@@ -712,12 +712,17 @@ impl PresentationQosAccessScopeKind {
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
 ///
-/// **Note**: This QoS policy is currently unsupported.
+/// `coherent_access` and `ordered_access` are independent. `access_scope` is the granularity of
+/// whichever of the two is enabled, and enabling one says nothing about the other: coherent
+/// access alone asks for atomicity, ordered access alone asks for order.
 ///
 /// # Values (access_scope)
 /// - `Instance`: Changes are coherent/ordered at instance level (default)
 /// - `Topic`: Changes are coherent/ordered at topic level
 /// - `Group`: Changes are coherent/ordered at group (Publisher/Subscriber) level
+///
+/// # Default
+/// `access_scope` is `Instance`, `coherent_access` and `ordered_access` are `false`.
 #[derive(DdsType, ConstDefault, Copy, Eq)]
 #[dds_type(crate_path = "crate")]
 pub struct PresentationQosPolicy {
@@ -846,6 +851,26 @@ pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
 /// `INT2DDS_TRANSPORT` env var when absent.
 pub const PROP_TRANSPORT: &str = "int2dds.transport";
 
+// Port number parameters shared by the UDP and TCP port formulas. Each one
+// defaults to the RTPS value, and a value that does not parse keeps the default.
+// PB. Default `7400`.
+pub const PROP_PORT_BASE: &str = "int2dds.transport.port_base";
+// DG. Default `250`.
+pub const PROP_DOMAIN_ID_GAIN: &str = "int2dds.transport.domain_id_gain";
+// PG, at least `1`. Default `2`.
+pub const PROP_PARTICIPANT_ID_GAIN: &str = "int2dds.transport.participant_id_gain";
+// d0. Default `0`.
+pub const PROP_DISCOVERY_MULTICAST_OFFSET: &str = "int2dds.transport.discovery_multicast_offset";
+// d1. Default `10`.
+pub const PROP_DISCOVERY_UNICAST_OFFSET: &str = "int2dds.transport.discovery_unicast_offset";
+// d2. Default `1`.
+pub const PROP_USER_MULTICAST_OFFSET: &str = "int2dds.transport.user_multicast_offset";
+// d3. Default `11`.
+pub const PROP_USER_UNICAST_OFFSET: &str = "int2dds.transport.user_unicast_offset";
+// Participant id used in the port formulas. When absent the first free id from 0
+// is taken. When present only that id is tried and a taken port fails creation.
+pub const PROP_PARTICIPANT_ID: &str = "int2dds.participant_id";
+
 /// SPDP initial peers, comma-separated `ip:port` list. Port `0` is a wildcard
 /// the TCP transport reads as every participant slot of the domain on that host;
 /// any other port names one exact address. Falls back to the
@@ -876,7 +901,8 @@ pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_addres
 pub const PROP_TCP_PEER_SEARCH_SLOTS: &str = "int2dds.transport.TCPv4.peer_search_slots";
 /// Disable Nagle (`TCP_NODELAY`). Default `true`.
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
-/// Outbound connect timeout, milliseconds. Default `1000`.
+/// Outbound connect timeout, milliseconds. Default `1000`. On Windows a host
+/// that never answers is given up after at most `3000`, whatever the value.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
 /// First-frame timeout for an accepted TCP connection, milliseconds.
 ///
@@ -1706,6 +1732,19 @@ impl QosPolicy for DurabilityQosPolicy {
 /// - With `KeepAll`: The `max_samples_per_instance` value is used as the actual limit.
 /// - `max_samples` is capped at `max_instances × max_samples_per_instance`.
 ///
+/// # Interaction with PresentationQosPolicy
+///
+/// With `coherent_access` and access_scope Instance or Topic, a reader buffers the members of a
+/// coherent set until that set closes. The buffer holds twice this `max_samples`, counted across
+/// all remote DataWriters, with `LENGTH_UNLIMITED` counted as `i32::MAX` as it is for the
+/// history. A member arriving at a full buffer discards the coherent set it belongs to.
+///
+/// A coherent set that the history cannot store whole is discarded.
+///
+/// With access_scope Group, this `max_samples` does not bound that buffer. A separate limit of
+/// 32 MiB of payload per remote Publisher applies instead, and it is planned to become
+/// configurable by the user.
+///
 /// # Default
 /// All limits are `LENGTH_UNLIMITED`.
 ///
@@ -1775,7 +1814,8 @@ impl QosPolicy for DurabilityQosPolicy {
 #[dds_type(crate_path = "crate", no_default)]
 #[serde(default)]
 pub struct ResourceLimitsQosPolicy {
-    /// Maximum total number of samples that can be stored.
+    /// Maximum total number of samples that can be stored. Twice this value also bounds the
+    /// coherent set buffer a DataReader's samples pass through before they are stored.
     #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
     #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_samples: i32,

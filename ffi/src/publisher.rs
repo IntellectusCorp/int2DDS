@@ -12,6 +12,7 @@
 //! C users serialize data with IDL-generated code and pass CDR bytes
 //! directly via `int2dds_datawriter_write_serialized`.
 
+use int2dds::utils::notify::notify_user;
 use std::ffi::CStr;
 use std::sync::{Arc, RwLock};
 
@@ -185,6 +186,61 @@ pub unsafe extern "C" fn int2dds_publisher_get_instance_handle(
     INT2DDS_RET_OK
 }
 
+/// Get the 16-byte instance handle of a DataWriter.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_instance_handle(
+    writer: *const Int2DdsDataWriter,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(handle_out);
+
+    let writer_ref = &*writer;
+    let handle = ffi_try!(writer_ref.inner.get_instance_handle());
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
+/// Begin a coherent set on a Publisher.
+///
+/// Samples written by the Publisher's DataWriters until the matching
+/// `int2dds_publisher_end_coherent_changes` form one coherent set. Calls may be nested.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_begin_coherent_changes(
+    publisher: *const Int2DdsPublisher,
+) -> Int2DdsRet {
+    check_null!(publisher);
+
+    ffi_try!((*publisher).inner.begin_coherent_changes());
+
+    INT2DDS_RET_OK
+}
+
+/// End the coherent set started by `int2dds_publisher_begin_coherent_changes`.
+///
+/// Returns PRECONDITION_NOT_MET without a matching begin call.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_end_coherent_changes(
+    publisher: *const Int2DdsPublisher,
+) -> Int2DdsRet {
+    check_null!(publisher);
+
+    ffi_try!((*publisher).inner.end_coherent_changes());
+
+    INT2DDS_RET_OK
+}
+
 /// Set QoS on a DataWriter
 ///
 /// Applies new QoS policies to an existing DataWriter. Some policies can only
@@ -353,14 +409,18 @@ unsafe fn attach_writer_listener(
     if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
         if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
             if status.current_count() > 0 {
-                listener_arc.on_publication_matched(&writer_handle.inner, &status);
+                notify_user("re-notify on_publication_matched", || {
+                    listener_arc.on_publication_matched(&writer_handle.inner, &status)
+                });
             }
         }
     }
     if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
         if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
             if status.total_count() > 0 {
-                listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
+                notify_user("re-notify on_offered_incompatible_qos", || {
+                    listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status)
+                });
             }
         }
     }

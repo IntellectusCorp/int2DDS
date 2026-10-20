@@ -10,12 +10,12 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    net::SocketAddr,
-    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
+    net::{Ipv4Addr, SocketAddr},
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock, Weak},
 };
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 use log::{debug, info};
 
@@ -29,6 +29,7 @@ use crate::{
     },
     infrastructure::{
         liveliness_monitor::LivelinessMonitor,
+        qos_policy::UserDataQosPolicy,
         status::{StatusInfo, StatusKind},
     },
     rtps::{
@@ -53,7 +54,11 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::{cache_change::CacheChange, history_cache::HistoryCache},
+            history::{
+                cache_change::CacheChange,
+                history_cache::HistoryCache,
+                subscriber_history::{PendingSample, SubscriberHistoryCache},
+            },
             reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterCallbackLease, WriterStore},
@@ -75,7 +80,7 @@ pub struct Participant {
     participant_id: ParticipantId,
     builtin_endpoints: Arc<BuiltinEndpoints>,
     // My data
-    local_participant_proxy_data: Arc<SPDPDiscoveredParticipantData>,
+    local_participant_proxy_data: Arc<ArcSwap<SPDPDiscoveredParticipantData>>,
     // Remote participant data
     remote_participant_proxy_datas: Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>>,
 
@@ -104,12 +109,22 @@ pub struct Participant {
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
 
+    // Remote participants, writers and readers the application ignored. Entries are never removed.
+    ignored_participants: Arc<DashSet<GuidPrefix>>,
+    ignored_publications: Arc<DashSet<Guid>>,
+    ignored_subscriptions: Arc<DashSet<Guid>>,
+
+    // Subscriber HistoryCaches of the GROUP access scope Subscribers, keyed by Subscriber GUID.
+    // Weak so a deleted Subscriber drops out on the next walk.
+    subscriber_history_caches: Arc<Mutex<HashMap<Guid, Weak<Mutex<SubscriberHistoryCache>>>>>,
+
     // Dynamic-type registry populated from discovered TypeObjects.
     type_registry: SharedTypeRegistry,
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
     remote_same_host: Arc<DashMap<GuidPrefix, bool>>,
+    pinned_egress_ipv4: OnceLock<Ipv4Addr>,
     terminated: Arc<AtomicBool>,
     wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
@@ -198,7 +213,8 @@ impl Participant {
             local_participant_proxy_data.add_default_unicast_locator(locator);
         }
 
-        let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
+        let local_participant_proxy_data =
+            Arc::new(ArcSwap::from_pointee(local_participant_proxy_data));
         let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
 
         Self {
@@ -220,9 +236,14 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
+            ignored_participants: Arc::new(DashSet::new()),
+            ignored_publications: Arc::new(DashSet::new()),
+            ignored_subscriptions: Arc::new(DashSet::new()),
+            subscriber_history_caches: Arc::new(Mutex::new(HashMap::new())),
             type_registry: new_shared_registry(),
             working_ips,
             remote_same_host: Arc::new(DashMap::new()),
+            pinned_egress_ipv4: OnceLock::new(),
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
             wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
@@ -252,19 +273,25 @@ impl Participant {
     }
 
     pub(crate) fn local_participant_proxy_data(&self) -> Arc<SPDPDiscoveredParticipantData> {
-        self.local_participant_proxy_data.clone()
+        self.local_participant_proxy_data.load_full()
     }
 
-    /// Record this participant's own receive-buffer size for SPDP to advertise.
-    /// Called once, right after construction, while the proxy Arc is still
-    /// uniquely owned - `Arc::get_mut` fails silently (a no-op) otherwise.
-    pub(crate) fn set_local_receive_buffer_size(&mut self, size: Option<usize>) {
-        match Arc::get_mut(&mut self.local_participant_proxy_data) {
-            Some(proxy) => proxy.set_receive_buffer_size(size),
-            None => log::warn!(
-                "local_participant_proxy_data already shared; receive buffer size not recorded"
-            ),
-        }
+    // Record this participant's own receive-buffer size for SPDP to advertise.
+    pub(crate) fn set_local_receive_buffer_size(&self, size: Option<usize>) {
+        self.local_participant_proxy_data.rcu(|current| {
+            let mut proxy = SPDPDiscoveredParticipantData::clone(current);
+            proxy.set_receive_buffer_size(size);
+            proxy
+        });
+    }
+
+    // Record this participant's own USER_DATA for SPDP to advertise.
+    pub(crate) fn set_local_user_data(&self, user_data: UserDataQosPolicy) {
+        self.local_participant_proxy_data.rcu(|current| {
+            let mut proxy = SPDPDiscoveredParticipantData::clone(current);
+            proxy.set_user_data(user_data.clone());
+            proxy
+        });
     }
 
     pub(crate) fn remote_participant_proxy_datas(
@@ -277,6 +304,187 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>> {
         self.remote_publications.clone()
+    }
+
+    // Records the participant as ignored and removes it with all of its endpoints.
+    pub(crate) fn ignore_participant(&self, participant_prefix: GuidPrefix) -> RtpsResult<()> {
+        self.ignored_participants.insert(participant_prefix);
+        debug!("Ignoring remote participant {}", Guid::guid_prefix_to_string(&participant_prefix));
+
+        self.unmatch_with_remote_participant(&Guid::new(participant_prefix, EntityId::PARTICIPANT))
+    }
+
+    pub(crate) fn is_participant_ignored(&self, participant_prefix: GuidPrefix) -> bool {
+        self.ignored_participants.contains(&participant_prefix)
+    }
+
+    // Records the writer as ignored and unmatches it from the local readers.
+    pub(crate) fn ignore_publication(&self, writer_guid: Guid) -> RtpsResult<()> {
+        self.ignored_publications.insert(writer_guid);
+        debug!("Ignoring remote publication {}", writer_guid);
+
+        self.cleanup_remote_writer_by_guid(writer_guid)
+    }
+
+    // True when the writer or its participant is ignored.
+    pub(crate) fn is_publication_ignored(&self, writer_guid: Guid) -> bool {
+        self.ignored_publications.contains(&writer_guid)
+            || self.is_participant_ignored(writer_guid.prefix())
+    }
+
+    // Records the reader as ignored and unmatches it from the local writers.
+    pub(crate) fn ignore_subscription(&self, reader_guid: Guid) -> RtpsResult<()> {
+        self.ignored_subscriptions.insert(reader_guid);
+        debug!("Ignoring remote subscription {}", reader_guid);
+
+        self.cleanup_remote_reader_by_guid(reader_guid)
+    }
+
+    // True when the reader or its participant is ignored.
+    pub(crate) fn is_subscription_ignored(&self, reader_guid: Guid) -> bool {
+        self.ignored_subscriptions.contains(&reader_guid)
+            || self.is_participant_ignored(reader_guid.prefix())
+    }
+
+    // Registering the same Subscriber again replaces its entry, which every reader of that
+    // Subscriber does with the same cache.
+    pub(crate) fn register_subscriber_history_cache(
+        &self,
+        subscriber_guid: Guid,
+        subscriber_history_cache: Weak<Mutex<SubscriberHistoryCache>>,
+    ) -> RtpsResult<()> {
+        self.subscriber_history_caches
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+            .insert(subscriber_guid, subscriber_history_cache);
+
+        Ok(())
+    }
+
+    // Stores samples the Subscriber HistoryCache released, each reader's share under that
+    // reader's cache lock in one go, and hands back what became available.
+    pub(crate) fn commit_released_samples(
+        &self,
+        released: Vec<PendingSample>,
+    ) -> RtpsResult<Vec<(ReaderCallbackLease, Vec<Arc<CacheChange>>)>> {
+        let mut changes_per_reader: HashMap<EntityId, Vec<(CacheChange, bool)>> = HashMap::new();
+        for sample in released {
+            changes_per_reader
+                .entry(sample.reader_id)
+                .or_default()
+                .push((sample.change, sample.apply_filter));
+        }
+
+        let mut available_per_reader = Vec::new();
+
+        for (reader_id, changes) in changes_per_reader {
+            // A reader deleted while its share was held has nowhere to put it.
+            let Some(lease) = self.find_reader_callback_lease_from_entity_id(reader_id) else {
+                debug!(
+                    "Dropping {} released samples of deleted reader {}",
+                    changes.len(),
+                    reader_id
+                );
+                continue;
+            };
+
+            let available = lease
+                .reader_cache()
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+                .commit_changes_to_datareader_cache(changes)?;
+
+            available_per_reader.push((lease, available));
+        }
+
+        Ok(available_per_reader)
+    }
+
+    // Tells each reader what became available. Runs outside the Subscriber HistoryCache lock
+    // because it calls into user listeners.
+    pub(crate) fn notify_available_changes(
+        &self,
+        available_per_reader: Vec<(ReaderCallbackLease, Vec<Arc<CacheChange>>)>,
+    ) {
+        for (lease, changes) in available_per_reader {
+            for change in changes {
+                lease.on_change(change);
+            }
+        }
+    }
+
+    // Tells every Subscriber HistoryCache that a remote writer lost or regained liveliness and
+    // commits whatever the gate releases on it.
+    pub(crate) fn set_remote_writer_liveliness_in_subscriber_history_caches(
+        &self,
+        writer_guid: Guid,
+        is_alive: bool,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.set_writer_liveliness(writer_guid, is_alive);
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
+        Ok(())
+    }
+
+    // Runs the gate of every Subscriber HistoryCache again and commits whatever it releases.
+    pub(crate) fn flush_subscriber_history_caches(&self) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
+        Ok(())
+    }
+
+    // Tells every Subscriber HistoryCache that a remote writer is gone and commits whatever the
+    // gate releases on it.
+    pub(crate) fn remove_matched_writer_from_subscriber_history_caches(
+        &self,
+        writer_guid: Guid,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in self.get_upgraded_subscriber_history_caches()? {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.remove_matched_writer(writer_guid);
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
+        Ok(())
+    }
+
+    // The registered caches whose Subscriber still exists. Entries of deleted Subscribers are
+    // dropped on the way.
+    fn get_upgraded_subscriber_history_caches(
+        &self,
+    ) -> RtpsResult<Vec<Arc<Mutex<SubscriberHistoryCache>>>> {
+        let mut registered = self
+            .subscriber_history_caches
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        registered.retain(|_, cache| cache.strong_count() > 0);
+
+        Ok(registered.values().filter_map(Weak::upgrade).collect())
     }
 
     pub(crate) fn set_endpoint_discovery_cb(
@@ -327,14 +535,17 @@ impl Participant {
         }
     }
 
-    /// Whether the peer behind `remote_prefix` runs on this host. A source
-    /// address decides and keeps the verdict, `None` only reads one, so the
-    /// answer does not depend on which announcement arrived first.
+    /// Whether the peer behind `remote_prefix` runs on this host. For other participants,
+    /// a source address decides and keeps the verdict; `None` only reads one.
     pub(crate) fn remote_is_same_host(
         &self,
         remote_prefix: GuidPrefix,
         from_addr: Option<SocketAddr>,
     ) -> bool {
+        // This participant is always local to itself.
+        if remote_prefix == self.guid.prefix() {
+            return true;
+        }
         match from_addr {
             Some(from_addr) => *self
                 .remote_same_host
@@ -342,6 +553,18 @@ impl Participant {
                 .or_insert_with(|| is_same_host(from_addr)),
             None => self.remote_same_host.get(&remote_prefix).is_some_and(|held| *held),
         }
+    }
+
+    /// Record the IPv4 every send of this participant is bound to.
+    pub(crate) fn set_pinned_egress_ipv4(&self, ip: Ipv4Addr) {
+        let _ = self.pinned_egress_ipv4.set(ip);
+    }
+
+    /// Where a co-located peer is reached over IPv4. A sender bound to a pinned
+    /// address may be refused a loopback destination by the host, while its own
+    /// address always reaches a peer on the same host.
+    pub(crate) fn same_host_ipv4_destination(&self) -> Ipv4Addr {
+        self.pinned_egress_ipv4.get().copied().unwrap_or(Ipv4Addr::LOCALHOST)
     }
 
     pub(crate) fn working_ips(&self) -> Vec<String> {
@@ -832,6 +1055,25 @@ impl Participant {
             }
         }
 
+        // After the drain no delivery can hand this reader's samples to the group gate anymore.
+        // Its held share is dropped, which may let the next position through for the other
+        // readers of the Subscriber.
+        let subscriber_history_cache = reader_arc
+            .as_ref()
+            .and_then(|reader| reader.as_any().downcast_ref::<StatefulReader>())
+            .and_then(StatefulReader::subscriber_history_cache);
+        if let Some(subscriber_history_cache) = subscriber_history_cache {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            cache.remove_reader(entity_id);
+            let released = cache.flush_pending_changes();
+            let available = self.commit_released_samples(released)?;
+            drop(cache);
+
+            self.notify_available_changes(available);
+        }
+
         // The reader is gone, so any reassembly still addressed to it can never complete and
         // will not be reached by the normal completion path -- only by cap-driven eviction,
         // which may not run again for a long time.
@@ -917,6 +1159,12 @@ impl Participant {
     }
 
     pub(crate) fn cleanup_remote_writer_by_guid(&self, writer_guid: Guid) -> RtpsResult<()> {
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_writer(writer_guid);
+            }
+        }
+
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.wlp_logic() {
                 let _ = wlp_logic.deregister_monitored_writer(writer_guid);
@@ -959,6 +1207,9 @@ impl Participant {
                 stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
         }
+        self.forget_type_rejections(writer_guid);
+
+        self.remove_matched_writer_from_subscriber_history_caches(writer_guid)?;
 
         Ok(())
     }
@@ -979,8 +1230,17 @@ impl Participant {
                 stateless_writer.remove_matched_reader_and_update_status(reader_guid)?;
             }
         }
+        self.forget_type_rejections(reader_guid);
 
         Ok(())
+    }
+
+    // Every endpoint removal path ends in the two callers above, so the once-only
+    // type-rejection records are dropped here instead of at each dispose site.
+    fn forget_type_rejections(&self, endpoint_guid: Guid) {
+        if let Some(sedp_logic) = self.sedp_logic.get().and_then(|logic| logic.as_ref().as_ref()) {
+            sedp_logic.forget_type_rejections(endpoint_guid);
+        }
     }
 
     pub(crate) fn find_readers_matched_with_local_writer(
@@ -1170,10 +1430,30 @@ impl Participant {
             }
         }
 
-        // Close transport connections to the now-unmatched peer so its per-peer
-        // resources are released promptly, rather than lingering until OS keepalive.
+        // Release the unmatched peer's connections now rather than at OS keepalive, except at an
+        // address another known participant still lives at: a peer restarted on the same port
+        // under a new prefix would lose its connection.
         if let (Some(transport), Some(locators)) = (self.transport.get(), peer_locators) {
-            transport.disconnect_peer(&locators);
+            let still_used: Vec<Locator> = self
+                .remote_participant_proxy_datas
+                .lock()
+                .map(|datas| {
+                    datas
+                        .iter()
+                        .flat_map(|data| {
+                            data.metatraffic_unicast_locator_list()
+                                .iter()
+                                .chain(data.default_unicast_locator_list().iter())
+                                .cloned()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let released: Vec<Locator> =
+                locators.into_iter().filter(|locator| !still_used.contains(locator)).collect();
+            if !released.is_empty() {
+                transport.disconnect_peer(&released);
+            }
         }
 
         if let Some(transport) = self.transport.get() {
@@ -1366,7 +1646,7 @@ impl Participant {
     }
 
     pub(crate) fn increase_manual_liveliness_count(&self) -> RtpsResult<()> {
-        self.local_participant_proxy_data.increase_manual_liveliness_count()
+        self.local_participant_proxy_data.load().increase_manual_liveliness_count()
     }
 
     pub(crate) fn liveliness_monitor(&self) -> Arc<Mutex<Option<LivelinessMonitor>>> {
@@ -1483,5 +1763,97 @@ mod tests {
             Some(dispose_sn),
             "the advertised range has to reach the dispose"
         );
+    }
+
+    /// A peer that crashes and restarts on the same port is discovered under a new prefix before
+    /// the old prefix's lease runs out. Disconnecting that address when the old prefix expires
+    /// takes it off the announcement list and closes the connection the new peer is using.
+    #[test]
+    fn unmatching_a_participant_leaves_an_address_another_known_participant_lives_at() {
+        use crate::rtps::transport::plugin::{MessageSource, SendTarget};
+        use std::net::Ipv4Addr;
+
+        #[derive(Default)]
+        struct DisconnectRecorder {
+            disconnected: Mutex<Vec<Locator>>,
+        }
+
+        impl TransportPlugin for DisconnectRecorder {
+            fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn can_handle(&self, _locator: &Locator) -> bool {
+                true
+            }
+            fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+                Vec::new()
+            }
+            fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+                Vec::new()
+            }
+            fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+                None
+            }
+            fn port(&self) -> u16 {
+                0
+            }
+            fn participant_id(&self) -> u32 {
+                0
+            }
+            fn close(&self) {}
+            fn disconnect_peer(&self, locators: &[Locator]) {
+                self.disconnected.lock().expect("disconnected").extend_from_slice(locators);
+            }
+        }
+
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(DisconnectRecorder::default());
+        let _ = participant.transport.set(transport.clone());
+
+        let remote_at = |prefix: GuidPrefix, port: u32| {
+            let locator = Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, port);
+            let mut data = SPDPDiscoveredParticipantData::new(
+                0,
+                prefix,
+                Participant::init_builtin_endpoints(),
+            );
+            data.add_metatraffic_unicast_locator(locator.clone());
+            data.add_default_unicast_locator(locator.clone());
+            participant.add_remote_participant_proxy_data(data);
+            locator
+        };
+        let alone = remote_at([1u8; 12], 7420);
+        let restarted_from = remote_at([2u8; 12], 7410);
+        let restarted_as = remote_at([3u8; 12], 7410);
+        assert_eq!(restarted_from, restarted_as);
+
+        participant
+            .unmatch_with_remote_participant(&Guid::new([1u8; 12], EntityId::PARTICIPANT))
+            .expect("unmatch");
+        let disconnected = transport.disconnected.lock().expect("disconnected").clone();
+        assert!(
+            disconnected.contains(&alone),
+            "an address nobody else lives at is released: {disconnected:?}"
+        );
+
+        participant
+            .unmatch_with_remote_participant(&Guid::new([2u8; 12], EntityId::PARTICIPANT))
+            .expect("unmatch");
+        let disconnected = transport.disconnected.lock().expect("disconnected").clone();
+        assert!(
+            !disconnected.contains(&restarted_as),
+            "the restarted peer still lives at this address: {disconnected:?}"
+        );
+
+        TimerHandler::get_instance(participant.guid().prefix())
+            .lock()
+            .expect("timer handler")
+            .terminate();
     }
 }

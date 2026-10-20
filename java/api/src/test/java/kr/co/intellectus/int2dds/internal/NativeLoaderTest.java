@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import kr.co.intellectus.int2dds.exceptions.NativeLoadException;
+import kr.co.intellectus.int2dds.internal.ffi.FfiHandwritten;
 import org.junit.jupiter.api.Test;
 
 class NativeLoaderTest {
@@ -44,13 +45,16 @@ class NativeLoaderTest {
 
     @Test
     void libraryFileNameIsPlatformCorrect() {
-        assertEquals("libint2dds_java.so", NativeLoader.libraryFileName("linux"));
-        assertEquals("int2dds_java.dll", NativeLoader.libraryFileName("windows"));
-        assertEquals("libint2dds_java.dylib", NativeLoader.libraryFileName("mac"));
+        // JDK 8-21 load the JNI library int2dds_java; JDK 22+ the plain C ABI
+        // library int2dds_ffi, through FFM.
+        String lib = FfiHandwritten.backend().equals("ffm") ? "int2dds_ffi" : "int2dds_java";
+        assertEquals("lib" + lib + ".so", NativeLoader.libraryFileName("linux"));
+        assertEquals(lib + ".dll", NativeLoader.libraryFileName("windows"));
+        assertEquals("lib" + lib + ".dylib", NativeLoader.libraryFileName("mac"));
         // os.name is "Mac OS X" on macOS and "Windows 11" on Windows; the match
         // has to be case-insensitive and substring-based, not exact.
-        assertEquals("libint2dds_java.dylib", NativeLoader.libraryFileName("Mac OS X"));
-        assertEquals("int2dds_java.dll", NativeLoader.libraryFileName("Windows 11"));
+        assertEquals("lib" + lib + ".dylib", NativeLoader.libraryFileName("Mac OS X"));
+        assertEquals(lib + ".dll", NativeLoader.libraryFileName("Windows 11"));
     }
 
     @Test

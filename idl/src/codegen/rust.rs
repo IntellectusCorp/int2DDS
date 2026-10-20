@@ -471,6 +471,7 @@ impl<'a> RustGen<'a> {
             ResolvedType::U64 => "u64".to_string(),
             ResolvedType::F32 => "f32".to_string(),
             ResolvedType::F64 => "f64".to_string(),
+            ResolvedType::F128 => format!("{}::serialize::Float128", self.opts.crate_path),
             ResolvedType::Char => "u8".to_string(),
             ResolvedType::WChar => "WChar".to_string(),
             ResolvedType::String { .. } => "String".to_string(),

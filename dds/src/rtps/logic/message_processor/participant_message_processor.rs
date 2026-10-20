@@ -27,7 +27,7 @@ use crate::{
             entity_id::EntityId,
             guid::Guid,
             locator::{
-                loopback_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
+                same_host_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
                 LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             rtps_error_code::RtpsResult,
@@ -68,14 +68,19 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        self.redirect_same_host_locators_to_loopback(
-            &mut spdp_discovered_participant_data,
-            from_addr,
-        )?;
+        self.redirect_same_host_locators(&mut spdp_discovered_participant_data, from_addr)?;
 
         let participant = self.get_upgraded_participant()?;
 
         let participant_guid = spdp_discovered_participant_data.participant_guid();
+
+        if participant.is_participant_ignored(participant_guid.prefix()) {
+            debug!(
+                "Discarding DiscoveredParticipantData of ignored participant {}",
+                participant_guid
+            );
+            return Ok(());
+        }
         log::debug!(
             "Start handling DiscoveredParticipantData {} from {} / [{}]",
             participant_guid,
@@ -88,12 +93,6 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                 .join(", ")
         );
 
-        // Start monitoring liveliness for the discovered participant
-        self.register_remote_participant_liveliness(
-            &spdp_discovered_participant_data.participant_guid(),
-            spdp_discovered_participant_data.lease_duration().into(),
-        )?;
-
         // Check domain ID match
         if participant.domain_id() != spdp_discovered_participant_data.domain_id() {
             log::trace!(
@@ -104,10 +103,16 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
+        // Start monitoring liveliness for the discovered participant
+        self.register_remote_participant_liveliness(
+            &spdp_discovered_participant_data.participant_guid(),
+            spdp_discovered_participant_data.lease_duration().into(),
+        )?;
+
         // Check if this participant data already exists
         let is_exist = participant.remote_participant_proxy_datas().lock().is_ok_and(
-            |remote_participant_datas| {
-                remote_participant_datas.iter().any(|remote_participant_data| {
+            |mut remote_participant_datas| {
+                remote_participant_datas.iter_mut().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
                         log::debug!(
                             "DiscoveredParticipantData already exist {} / [{}]",
@@ -119,6 +124,16 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         );
+
+                        let received_user_data = spdp_discovered_participant_data.user_data();
+                        if remote_participant_data.user_data() != received_user_data {
+                            log::debug!(
+                                "Remote participant {} USER_DATA changed",
+                                participant_guid
+                            );
+                            remote_participant_data.set_user_data(received_user_data.clone());
+                        }
+
                         true
                     } else {
                         false
@@ -147,7 +162,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
     /// Narrow a co-located peer's unicast locator lists before anything is
     /// derived from them. The multicast lists stay untouched - they carry a
     /// group address, not one entry per interface.
-    fn redirect_same_host_locators_to_loopback(
+    fn redirect_same_host_locators(
         &self,
         spdp_discovered_participant_data: &mut SPDPDiscoveredParticipantData,
         from_addr: SocketAddr,
@@ -161,10 +176,15 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        let metatraffic =
-            loopback_locators(spdp_discovered_participant_data.metatraffic_unicast_locator_list());
-        let default =
-            loopback_locators(spdp_discovered_participant_data.default_unicast_locator_list());
+        let destination = participant.same_host_ipv4_destination();
+        let metatraffic = same_host_locators(
+            spdp_discovered_participant_data.metatraffic_unicast_locator_list(),
+            destination,
+        );
+        let default = same_host_locators(
+            spdp_discovered_participant_data.default_unicast_locator_list(),
+            destination,
+        );
 
         debug!(
             "Redirected same-host unicast locators of {} to metatraffic [{}], default [{}]",
@@ -335,7 +355,6 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             Some(ms) => std::time::Duration::from_millis(ms),
             None => crate::rtps::logic::sedp_logic::BUILTIN_SEDP_HB_PERIOD,
         };
-        let spdp_payload = self.create_spdp_message()?;
 
         // Send each SPDP message to the discovered participant before registering periodic timers
         // since timer is not triggered immediately after registration
@@ -343,7 +362,6 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             None,
             period,
             spdp_discovered_participant_data.clone(),
-            spdp_payload.clone(),
         ));
 
         sending_handler.push_message_and_wake(MessageType::PeriodicPublicationHeartbeat(
@@ -374,17 +392,18 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             // it does not know yet.
             sending_handler.push_message_and_wake(MessageType::SedpHistoryPush(remote_prefix));
 
-            let _ = sedp_logic.register_periodic_send_timer(
-                remote_prefix,
-                EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
-                period,
-                MessageType::PeriodicParticipantDataUnicast(
-                    None,
+            if sedp_logic.repeats_spdp_to_each_peer() {
+                let _ = sedp_logic.register_periodic_send_timer(
+                    remote_prefix,
+                    EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
                     period,
-                    spdp_discovered_participant_data.clone(),
-                    spdp_payload,
-                ),
-            );
+                    MessageType::PeriodicParticipantDataUnicast(
+                        None,
+                        period,
+                        spdp_discovered_participant_data.clone(),
+                    ),
+                );
+            }
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,

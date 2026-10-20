@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use mio::{Events, Poll, Waker};
 
+use crate::rtps::common::locator::tcp_locator_kind;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::task::discovery_traffic::discovery_unicast_listening_task::DiscoveryUnicastListeningTask;
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
@@ -81,7 +82,11 @@ impl StreamUnicastListeningTask {
                     let _ = listener.deregister_all(poll.registry());
                     return Ok(());
                 }
-                self.user_task.process_rtps_message(message.data, message.source);
+                self.user_task.process_rtps_message(
+                    message.data,
+                    message.source,
+                    tcp_locator_kind(&message.source.ip()),
+                );
             }
             for event in &events {
                 let token = event.token();
@@ -103,16 +108,26 @@ impl StreamUnicastListeningTask {
 
                 loop {
                     match listener.get_message(token, poll.registry()) {
-                        Ok(Some(message)) => match message.kind {
-                            TcpFrameKind::Discovery => {
-                                let _ = self
-                                    .discovery_task
-                                    .process_rtps_message(message.data, message.source);
+                        Ok(Some(message)) => {
+                            let locator_kind = tcp_locator_kind(&message.source.ip());
+
+                            match message.kind {
+                                TcpFrameKind::Discovery => {
+                                    let _ = self.discovery_task.process_rtps_message(
+                                        message.data,
+                                        message.source,
+                                        locator_kind,
+                                    );
+                                }
+                                TcpFrameKind::UserData => {
+                                    self.user_task.process_rtps_message(
+                                        message.data,
+                                        message.source,
+                                        locator_kind,
+                                    );
+                                }
                             }
-                            TcpFrameKind::UserData => {
-                                self.user_task.process_rtps_message(message.data, message.source);
-                            }
-                        },
+                        }
                         Ok(None) => break,
                         Err(error) => {
                             warn!("TCP connection read failed: {error}");

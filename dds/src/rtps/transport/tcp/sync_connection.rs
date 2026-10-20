@@ -6,7 +6,7 @@
 //! data. A frame is refused only once the peer owes more than the queue
 //! budget, which bounds memory rather than answering congestion.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -16,6 +16,7 @@ use rustls::pki_types::ServerName;
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
+use crate::rtps::transport::tcp::dial::dial;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// How much a peer may owe the stream before frames are refused instead of
@@ -58,6 +59,41 @@ impl Wire {
             Wire::Tls(stream) => stream.flush(),
         }
     }
+
+    /// Whether the peer has closed or reset the stream. Nothing the peer sends
+    /// on this connection is used, but bytes left unread would hide a close
+    /// queued behind them, so they are read and discarded.
+    fn peer_is_gone(&mut self) -> bool {
+        let mut sink = [0u8; 512];
+        match self {
+            Wire::Plain(stream) => loop {
+                match stream.read(&mut sink) {
+                    Ok(0) => return true,
+                    Ok(_) => continue,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(_) => return true,
+                }
+            },
+            Wire::Tls(stream) => loop {
+                match stream.conn.read_tls(&mut stream.sock) {
+                    Ok(0) => return true,
+                    Ok(_) => match stream.conn.process_new_packets() {
+                        Ok(state) if state.peer_has_closed() => return true,
+                        Ok(_) => {
+                            while matches!(stream.conn.reader().read(&mut sink), Ok(read) if read > 0)
+                            {
+                            }
+                        }
+                        Err(_) => return true,
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(_) => return true,
+                }
+            },
+        }
+    }
 }
 
 /// What one `send` did with the frame.
@@ -98,7 +134,7 @@ impl OutboundConnection {
         connect_timeout: Duration,
         tls_handshake_timeout: Duration,
     ) -> io::Result<Self> {
-        let socket = TcpStream::connect_timeout(&addr, connect_timeout).map_err(|error| {
+        let socket = dial(addr, connect_timeout).map_err(|error| {
             let code = match error.kind() {
                 io::ErrorKind::ConnectionRefused => TransportErrorCode::TcpConnectionRefused,
                 _ => TransportErrorCode::TcpConnectionTimeout,
@@ -137,6 +173,15 @@ impl OutboundConnection {
     pub(crate) fn send(&self, frame: &[u8]) -> io::Result<SendOutcome> {
         let mut state = self.lock();
 
+        // A write into a stream the peer has already closed is accepted locally
+        // and then lost, so the frame must not start on it.
+        if state.wire.peer_is_gone() {
+            let peer = state.peer();
+            return Err(self.fail(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                format!("peer {peer} has closed the connection"),
+            )));
+        }
         if let Err(error) = state.drain_pending() {
             return Err(self.fail(error));
         }
@@ -183,6 +228,13 @@ impl OutboundConnection {
 
     fn lock(&self) -> MutexGuard<'_, ConnectionState> {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Closes this side for writing while the peer stays open, so the next
+    /// write fails without the peer having closed anything.
+    #[cfg(test)]
+    pub(crate) fn shutdown_write(&self) {
+        let _ = self.lock().wire.socket().shutdown(std::net::Shutdown::Write);
     }
 }
 
@@ -390,5 +442,90 @@ mod tests {
         drop(connection);
         drop(accepted);
         drop(listener);
+    }
+
+    /// The session tickets a TLS server sends after the handshake sit unread on
+    /// this side, and they must not hide the close that arrives behind them.
+    #[test]
+    fn a_tls_peer_that_closed_behind_its_session_tickets_is_noticed_before_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("cert.pem");
+        let key_file = dir.path().join("key.pem");
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_file, generated.cert.pem()).unwrap();
+        std::fs::write(&key_file, generated.key_pair.serialize_pem()).unwrap();
+        let config = TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file,
+            key_file,
+            server_name: "localhost".to_string(),
+            verify_peer: false,
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = listener.local_addr().unwrap();
+        let server_config = config.build_server_config().unwrap();
+        let frame = b"before the close".to_vec();
+        let frame_len = frame.len();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut received = vec![0u8; frame_len];
+            tls.read_exact(&mut received).unwrap();
+            while tls.conn.wants_write() {
+                tls.conn.write_tls(&mut tls.sock).unwrap();
+            }
+            received
+        });
+
+        let connection = OutboundConnection::connect(
+            peer,
+            &TcpSocketTuning::default(),
+            Some(&config),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+        assert_eq!(server.join().unwrap(), frame);
+
+        let mut probe = [0u8; 1];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(connection.lock().wire.socket().peek(&mut probe), Ok(read) if read > 0) {
+            assert!(Instant::now() < deadline, "the server's session tickets never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Lets the FIN land behind the tickets.
+        std::thread::sleep(Duration::from_millis(100));
+
+        connection
+            .send(b"after the close")
+            .expect_err("a write into a stream the peer has closed must not count as sent");
+        assert!(connection.is_failed());
+
+        drop(connection);
+    }
+
+    /// A closed port must surface as a refusal within the default connect
+    /// timeout, since only a refusal spares a discovery dial the backoff.
+    #[test]
+    fn a_refused_dial_is_reported_within_the_default_connect_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+
+        let error = OutboundConnection::connect(
+            closed,
+            &TcpSocketTuning::default(),
+            None,
+            crate::rtps::transport::TcpConfig::default().connect_timeout,
+            Duration::from_secs(1),
+        )
+        .err()
+        .expect("nothing listens on a closed port");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     }
 }

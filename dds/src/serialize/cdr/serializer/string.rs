@@ -57,9 +57,9 @@ pub trait StringSerialize: CdrSerializerCommon + PrimitiveSerialize {
 
     /// Serialize wide character string (UTF-16)
     fn serialize_wstring16(&mut self, value: &str) -> Result<(), CdrError> {
-        // Length (code units, not bytes) - count first without allocating
+        // Length is in bytes (XTypes 1.3 7.4.1.1.2), no NUL terminator.
         let utf16_len = value.encode_utf16().count();
-        self.serialize_u32(utf16_len as u32)?;
+        self.serialize_u32((utf16_len * 2) as u32)?;
 
         // UTF-16 data - iterate directly without intermediate Vec
         self.align(2);

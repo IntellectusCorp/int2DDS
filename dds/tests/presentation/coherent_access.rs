@@ -198,3 +198,74 @@ fn coherent_set_larger_than_history_is_discarded_whole() {
     participant.delete_contained_entities().unwrap();
     factory.delete_participant(participant).unwrap();
 }
+
+// A coherent set over the reader's max_samples is discarded whole. One member per instance, so
+// only max_samples is exceeded.
+#[test]
+fn topic_coherent_set_larger_than_keep_all_max_samples_is_discarded() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let reliable = ReliabilityQosPolicy {
+        kind: ReliabilityQosPolicyKind::Reliable,
+        max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+    };
+    let keep_all = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+    let topic_coherent = PresentationQosPolicy {
+        access_scope: PresentationQosAccessScopeKind::Topic,
+        coherent_access: true,
+        ordered_access: false,
+    };
+
+    let writer = create_datawriter(
+        &participant,
+        PublisherQos { presentation: topic_coherent, ..Default::default() },
+        DataWriterQos { reliability: reliable, history: keep_all, ..Default::default() },
+    );
+    let reader = create_datareader(
+        &participant,
+        SubscriberQos { presentation: topic_coherent, ..Default::default() },
+        DataReaderQos {
+            reliability: reliable,
+            history: keep_all,
+            resource_limits: ResourceLimitsQosPolicy {
+                max_samples: 2,
+                max_instances: 10,
+                max_samples_per_instance: 2,
+            },
+            ..Default::default()
+        },
+    );
+
+    wait_for_reader_status(&reader, StatusMask::SUBSCRIPTION_MATCHED, Duration::from_seconds(2))
+        .unwrap();
+    wait_for_writer_status(&writer, StatusMask::PUBLICATION_MATCHED, Duration::from_seconds(2))
+        .unwrap();
+
+    let publisher = writer.get_publisher().unwrap();
+    publisher.begin_coherent_changes().unwrap();
+    for key in [1, 2, 3] {
+        writer.write(&KeyedDataType::new(key, key * 10), InstanceHandle::NIL).unwrap();
+    }
+    publisher.end_coherent_changes().unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(800));
+
+    let result = reader.read(
+        10,
+        &[SampleStateKind::ANY_SAMPLE_STATE],
+        &[ViewStateKind::ANY_VIEW_STATE],
+        &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+    );
+    assert!(
+        matches!(result, Err(DdsError::NoData)),
+        "the reader surfaced a partial coherent set: {:?}",
+        result.map(|samples| samples.iter().map(|s| s.data().unwrap().value).collect::<Vec<_>>())
+    );
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
+}

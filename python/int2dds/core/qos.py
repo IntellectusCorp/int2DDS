@@ -52,6 +52,12 @@ class DataRepresentationKind(IntEnum):
     XCDR2 = 2
 
 
+class PresentationAccessScope(IntEnum):
+    INSTANCE = 0
+    TOPIC = 1
+    GROUP = 2
+
+
 # ---------------------------------------------------------------------------
 # QoS Policy dataclasses
 # ---------------------------------------------------------------------------
@@ -176,6 +182,16 @@ class UserData:
 
 
 @dataclass
+class TopicData:
+    data: bytes = b""
+
+
+@dataclass
+class GroupData:
+    data: bytes = b""
+
+
+@dataclass
 class WriterDataLifecycle:
     autodispose_unregistered_instances: bool = True
 
@@ -251,6 +267,17 @@ class Liveliness:
 @dataclass
 class Partition:
     names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Presentation:
+    access_scope: Literal["INSTANCE", "TOPIC", "GROUP"] = "INSTANCE"
+    coherent_access: bool = False
+    ordered_access: bool = False
+
+    @property
+    def _access_scope_int(self) -> int:
+        return PresentationAccessScope[self.access_scope]
 
 
 @dataclass
@@ -335,16 +362,21 @@ class TopicQos:
     lifespan: Lifespan | None = None
     ownership: Ownership | None = None
     data_representation: DataRepresentation | None = None
+    topic_data: TopicData | None = None
 
 
 @dataclass
 class PublisherQos:
     partition: Partition | None = None
+    presentation: Presentation | None = None
+    group_data: GroupData | None = None
 
 
 @dataclass
 class SubscriberQos:
     partition: Partition | None = None
+    presentation: Presentation | None = None
+    group_data: GroupData | None = None
 
 
 @dataclass

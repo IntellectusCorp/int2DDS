@@ -101,6 +101,8 @@ int2dds_publisher_get_qos()                        // Get publisher QoS
 int2dds_delete_publisher()                         // Delete publisher
 int2dds_publisher_delete_contained_entities()      // Delete all contained entities
 int2dds_publisher_wait_for_acknowledgments()       // Wait for acknowledgments
+int2dds_publisher_begin_coherent_changes()         // Open a coherent set (may be nested)
+int2dds_publisher_end_coherent_changes()           // Close the coherent set
 
 // DataWriter (qos NULL = default; listener NULL + mask 0 = no listener)
 int2dds_create_datawriter()                        // Create data writer
@@ -140,6 +142,10 @@ int2dds_subscriber_set_qos()                       // Set subscriber QoS
 int2dds_subscriber_get_qos()                       // Get subscriber QoS
 int2dds_delete_subscriber()                        // Delete subscriber
 int2dds_subscriber_delete_contained_entities()     // Delete all contained entities
+int2dds_subscriber_begin_access()                  // Open a sample access block (GROUP access scope)
+int2dds_subscriber_end_access()                    // Close the sample access block
+int2dds_subscriber_get_datareaders()               // Reader handles holding matching samples
+int2dds_subscriber_notify_datareaders()            // Invoke on_data_available on every reader
 
 // DataReader (qos NULL = default; listener NULL + mask 0 = no listener)
 int2dds_create_datareader()                        // Create data reader
@@ -229,6 +235,8 @@ int2dds_datawriter_qos_set_writer_data_lifecycle()
 int2dds_datawriter_qos_set_transport_priority()
 int2dds_datawriter_qos_set_liveliness()
 int2dds_datawriter_qos_set_deadline()
+int2dds_datawriter_qos_set_user_data()
+int2dds_datawriter_qos_get_user_data()
 int2dds_datawriter_qos_destroy()
 ```
 
@@ -246,6 +254,8 @@ int2dds_datareader_qos_set_reader_data_lifecycle()
 int2dds_datareader_qos_set_transport_priority()
 int2dds_datareader_qos_set_liveliness()
 int2dds_datareader_qos_set_deadline()
+int2dds_datareader_qos_set_user_data()
+int2dds_datareader_qos_get_user_data()
 int2dds_datareader_qos_destroy()
 ```
 
@@ -262,15 +272,33 @@ int2dds_topic_qos_set_transport_priority()
 int2dds_topic_qos_set_lifespan()
 int2dds_topic_qos_set_deadline()
 int2dds_topic_qos_set_liveliness()
+int2dds_topic_qos_set_topic_data()
+int2dds_topic_qos_get_topic_data()
 int2dds_topic_qos_destroy()
 ```
 
 **Publisher / Subscriber QoS:**
 ```c
 int2dds_publisher_qos_create_default()
+int2dds_publisher_qos_set_partition()
+int2dds_publisher_qos_set_presentation()   // access scope, coherent_access, ordered_access
+int2dds_publisher_qos_get_presentation()
+int2dds_publisher_qos_set_group_data()
+int2dds_publisher_qos_get_group_data()
 int2dds_publisher_qos_destroy()
 int2dds_subscriber_qos_create_default()
+int2dds_subscriber_qos_set_partition()
+int2dds_subscriber_qos_set_presentation()
+int2dds_subscriber_qos_get_presentation()
+int2dds_subscriber_qos_set_group_data()
+int2dds_subscriber_qos_get_group_data()
 int2dds_subscriber_qos_destroy()
+```
+
+**DomainParticipant QoS (USER_DATA):**
+```c
+int2dds_participant_qos_set_user_data()
+int2dds_participant_qos_get_user_data()
 ```
 
 #### WaitSet & Conditions
@@ -331,6 +359,9 @@ int2dds_publication_builtin_topic_data_get_key()
 int2dds_publication_builtin_topic_data_get_topic_name()
 int2dds_publication_builtin_topic_data_get_type_name()
 int2dds_publication_builtin_topic_data_get_user_data()
+int2dds_publication_builtin_topic_data_get_presentation()
+int2dds_publication_builtin_topic_data_get_topic_data()
+int2dds_publication_builtin_topic_data_get_group_data()
 int2dds_publication_builtin_topic_data_get_writer_id()
 int2dds_publication_builtin_topic_data_destroy()
 
@@ -339,6 +370,9 @@ int2dds_subscription_builtin_topic_data_get_key()
 int2dds_subscription_builtin_topic_data_get_topic_name()
 int2dds_subscription_builtin_topic_data_get_type_name()
 int2dds_subscription_builtin_topic_data_get_user_data()
+int2dds_subscription_builtin_topic_data_get_presentation()
+int2dds_subscription_builtin_topic_data_get_topic_data()
+int2dds_subscription_builtin_topic_data_get_group_data()
 int2dds_subscription_builtin_topic_data_get_reader_id()
 int2dds_subscription_builtin_topic_data_destroy()
 ```

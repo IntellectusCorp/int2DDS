@@ -27,12 +27,11 @@ pub(crate) enum MessageType {
     P2pHeartbeat(Option<GuidPrefix>),
 
     // Discovery traffic
-    PeriodicParticipantDataMulticast(Option<Instant>, StdDuration, DomainId, Option<Arc<Vec<u8>>>),
+    PeriodicParticipantDataMulticast(Option<Instant>, StdDuration, DomainId),
     PeriodicParticipantDataUnicast(
         Option<Instant>,
         StdDuration,
         Arc<SPDPDiscoveredParticipantData>,
-        Option<Arc<Vec<u8>>>,
     ),
     PeriodicPublicationHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     PeriodicSubscriptionHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),

@@ -71,5 +71,6 @@ pub mod subscriber;
 pub mod topic;
 pub mod type_info;
 pub mod types;
+pub mod version;
 pub mod waitset;
 pub mod xml;

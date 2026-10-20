@@ -135,24 +135,34 @@ class ConfiguredParticipantTest {
                 registry.loadString(TYPES_XML);
                 DynamicTypeSupport support = registry.getTypeSupport("CPSimpleData");
 
+                // Matching completes independently on each side: the writer can
+                // count App2's reader before App2's reader has matched the writer,
+                // and a sample written in that window is never delivered. Wait for
+                // both sides.
                 boolean matched = false;
                 for (int i = 0; i < 200; i++) {
-                    if (writer.publicationMatchedCount() > 0) {
+                    if (writer.publicationMatchedCount() > 0
+                            && remoteReader.subscriptionMatchedCount() > 0) {
                         matched = true;
                         break;
                     }
                     Thread.sleep(50);
                 }
                 if (!matched) {
-                    fail("configured writer never matched App2's reader");
+                    fail("configured writer and App2's reader never matched each other");
                 }
 
                 sent = DynamicData.create(support);
                 sent.setI32("id", 42);
                 sent.setI32("value", 1337);
-                writer.write(sent);
 
+                // The configured endpoints use default QoS, so delivery is not
+                // guaranteed for any single write. Re-send every 500 ms until one
+                // arrives, for up to 10 s in total.
                 for (int i = 0; i < 200 && received == null; i++) {
+                    if (i % 10 == 0) {
+                        writer.write(sent);
+                    }
                     received = remoteReader.take();
                     if (received == null) {
                         Thread.sleep(50);

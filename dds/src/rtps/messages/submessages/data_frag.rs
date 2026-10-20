@@ -5,7 +5,7 @@
 //! reassembled at the receiver.
 
 use crate::rtps::common::time::RtpsTime;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use speedy::{Context, Endianness, Error, Readable, Writable, Writer};
 use std::io;
@@ -31,13 +31,9 @@ const FIXED_BODY_LEN: usize = 32;
 
 // Not spec text: no validity rule bounds total_fragments itself -- a
 // self-consistent sample_size/fragment_size pair can still name far more
-// fragments than any real sample needs (781 is the largest in this file's tests).
-// Caps the fragment count; MAX_SAMPLE_BYTES below caps the bytes.
+// fragments than any real sample needs.
+// Caps the fragment count; sample bytes are bounded by the receiver's reassembly budget.
 pub(crate) const MAX_FRAGMENTS_PER_SAMPLE: u32 = 1_048_576; // 2^20
-
-// Bounds what FragmentBuffer allocates up front -- sample_size bytes, per matched
-// reader. The fragment count cap above does not bound bytes at all.
-const MAX_SAMPLE_BYTES: u32 = 32 * 1024 * 1024; // 32 MiB
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DataFrag<'a> {
@@ -73,6 +69,14 @@ impl<'a> DataFrag<'a> {
             inline_qos: None,
             serialized_data: SubmessagePayload::default(),
         }
+    }
+
+    pub(crate) fn inline_qos(&self) -> Option<ParameterList> {
+        self.inline_qos.clone()
+    }
+
+    pub(crate) fn set_inline_qos_list(&mut self, param_list: ParameterList) {
+        self.inline_qos = Some(param_list);
     }
 
     pub(crate) fn add_serialized_data(&mut self, serialized_data: SubmessagePayload<'a>) {
@@ -255,13 +259,6 @@ impl<'a> DataFrag<'a> {
             ));
         }
 
-        if sample_size > MAX_SAMPLE_BYTES {
-            return Err(RtpsError::new(
-                RtpsErrorCode::InvalidSubmessageBody,
-                "Sample size exceeds the maximum allowed for a fragmented sample",
-            ));
-        }
-
         // Also enforces 8.3.7.3.3's "fragmentStartingNum ... exceeds the total
         // number of fragments": for fragment_size > 0, offset >= sample_size
         // holds exactly when fragment_starting_num > total_fragments_num.
@@ -348,7 +345,7 @@ pub(crate) struct FragmentBuffer {
     pub total_size: u32,
     // One contiguous buffer for the whole sample, left uninitialized: fragments are
     // written into spare capacity and len is set only when the buffer is handed out.
-    pub buf: BytesMut,
+    pub buf: Vec<u8>,
     // Which fragment slots have arrived, so retransmits do not over-count.
     pub filled: Vec<bool>,
     // number of filled slots, for completion check
@@ -356,6 +353,8 @@ pub(crate) struct FragmentBuffer {
     pub total_fragments: u32,
     pub fragment_size: u16,
     pub source_timestamp: Option<RtpsTime>,
+    // Inline QoS of the sample, carried only by its first fragment.
+    pub inline_qos: Option<ParameterList>,
     pub created_at: Instant,
     pub last_updated: Instant,
 }
@@ -366,23 +365,28 @@ impl FragmentBuffer {
         sequence_number: SequenceNumber,
         total_size: u32,
         fragment_size: u16,
-    ) -> Self {
+    ) -> Option<Self> {
+        // Fallible: sample_size comes off the wire, and a failed allocation must drop
+        // the sample rather than abort the process.
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(total_size as usize).ok()?;
         let total_fragments = (total_size / fragment_size as u32)
             + if !total_size.is_multiple_of(fragment_size as u32) { 1 } else { 0 };
         let now = Instant::now();
 
-        Self {
+        Some(Self {
             sequence_number,
             total_size,
-            buf: BytesMut::with_capacity(total_size as usize),
+            buf,
             filled: vec![false; total_fragments as usize],
             received_count: 0,
             total_fragments,
             fragment_size,
             source_timestamp: None,
+            inline_qos: None,
             created_at: now,
             last_updated: now,
-        }
+        })
     }
 
     pub(crate) fn all_fragments_received(&self) -> bool {
@@ -426,12 +430,12 @@ impl FragmentBuffer {
     // buffer over without another copy.
     pub(crate) fn assemble(mut self) -> Vec<u8> {
         self.expose_payload();
-        self.buf.to_vec()
+        self.buf
     }
 
     pub(crate) fn into_bytes(mut self) -> Bytes {
         self.expose_payload();
-        self.buf.freeze()
+        Bytes::from(self.buf)
     }
 
     // Zero the slots that never arrived, then expose all `total_size` bytes.
@@ -595,33 +599,13 @@ mod tests {
         }
     }
 
-    // A sample_size can clear the fragment-count cap and still be far too large to
-    // hold: 32 MiB + 1 with fragment_size 64 names 524,289 fragments, well under
-    // MAX_FRAGMENTS_PER_SAMPLE, yet asks for a 32 MiB buffer per matched reader.
+    // No per-sample byte cap: a 190 MiB sample, as real payloads reach, must parse.
     #[test]
-    fn test_datafrag_rejects_sample_size_over_the_byte_cap() {
+    fn test_datafrag_accepts_a_190_mib_sample() {
         let mut datafrag = create_dummy_datafrag();
-        datafrag.fragment_size = 64;
-        datafrag.sample_size = MAX_SAMPLE_BYTES + 1;
-        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; 64]));
-
-        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
-        let header = create_dummy_submessage_header(buffer.len() as u16);
-
-        let result = DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header);
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
-        }
-    }
-
-    // The byte cap must not reject a sample that is merely large but legal.
-    #[test]
-    fn test_datafrag_accepts_sample_size_at_the_byte_cap() {
-        let mut datafrag = create_dummy_datafrag();
-        datafrag.fragment_size = 64;
-        datafrag.sample_size = MAX_SAMPLE_BYTES;
-        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; 64]));
+        datafrag.fragment_size = 1344;
+        datafrag.sample_size = 190 * 1024 * 1024;
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; 1344]));
 
         let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
         let header = create_dummy_submessage_header(buffer.len() as u16);
@@ -733,7 +717,7 @@ mod tests {
 
     // total_size 5, fragment_size 2 -> 3 fragments: [_,_][_,_][_]
     fn three_fragment_buffer() -> FragmentBuffer {
-        FragmentBuffer::new(SequenceNumber::new(0, 1), 5, 2)
+        FragmentBuffer::new(SequenceNumber::new(0, 1), 5, 2).unwrap()
     }
 
     #[test]

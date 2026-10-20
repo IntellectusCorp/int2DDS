@@ -346,6 +346,7 @@ fn dynamic_value_to_parameter(value: &DynamicValue) -> DdsResult<Parameter> {
         DynamicValue::Uint64(v) => Ok(Parameter::IntegerValue(*v as i128)),
         DynamicValue::Float32(v) => Ok(Parameter::FloatValue(*v as f64)),
         DynamicValue::Float64(v) => Ok(Parameter::FloatValue(*v)),
+        DynamicValue::Float128(v) => Ok(Parameter::FloatValue(v.to_f64())),
         DynamicValue::String(v) => Ok(Parameter::String(v.clone())),
         DynamicValue::WString(v) => Ok(Parameter::String(v.clone())),
         DynamicValue::Char8(v) => Ok(Parameter::CharValue(*v)),

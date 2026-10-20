@@ -102,7 +102,17 @@ pub trait ArraySerialize: CdrSerializerCommon + StringSerialize {
 
 // Implement ArraySerialize for both serializer types
 impl ArraySerialize for CdrSerializer {}
-impl ArraySerialize for Xcdr2Serializer {}
+impl ArraySerialize for Xcdr2Serializer {
+    /// XCDR2: strings are non-primitive, so the array carries a DHEADER.
+    fn serialize_string_array(&mut self, data: &[String]) -> Result<(), CdrError> {
+        self.serialize_delimited(|s| {
+            for value in data {
+                s.serialize_string(value)?;
+            }
+            Ok(())
+        })
+    }
+}
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -150,6 +160,9 @@ mod cdr_array_tests {
         assert_eq!(result, value);
     }
 
+    /// A nested Rust array is advertised as an array whose element is itself an
+    /// array (non-primitive), so XCDR2 frames the outer level with a DHEADER while
+    /// the inner primitive arrays stay flat.
     #[test]
     fn test_xcdr2_multidim_array_row_major() {
         let value: [[u16; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
@@ -159,8 +172,10 @@ mod cdr_array_tests {
         value.serialize_xcdr(&mut serializer).unwrap();
 
         let bytes = serializer.into_bytes();
-        let expected: &[u8] =
-            &[0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00];
+        let expected: &[u8] = &[
+            12, 0, 0, 0, // DHEADER: 6 x u16
+            0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00,
+        ];
         assert_eq!(&bytes[4..], expected);
 
         let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
@@ -181,8 +196,15 @@ mod cdr_array_tests {
         let result = <[[[u8; 2]; 3]; 2]>::deserialize_xcdr(&mut deserializer).unwrap();
         assert_eq!(result, value);
 
+        // Outer DHEADER, then each [[u8; 2]; 3] element framed (its element is an
+        // array), the innermost [u8; 2] flat; the second inner DHEADER is 4-aligned.
         let payload = &bytes[4..];
-        let expected: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let expected: &[u8] = &[
+            22, 0, 0, 0, // outer DHEADER
+            6, 0, 0, 0, 1, 2, 3, 4, 5, 6, // first [[u8; 2]; 3]
+            0, 0, // padding
+            6, 0, 0, 0, 7, 8, 9, 10, 11, 12, // second [[u8; 2]; 3]
+        ];
         assert_eq!(payload, expected);
     }
 

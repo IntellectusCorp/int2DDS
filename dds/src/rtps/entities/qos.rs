@@ -26,7 +26,6 @@ pub(crate) fn check_qos_compatibility(
         || (!offered.presentation().ordered_access && requested.presentation().ordered_access)
         || offered.destination_order().kind < requested.destination_order().kind
         || offered.latency_budget().duration > requested.latency_budget().duration
-        || offered.type_name() != requested.type_name()
         || !is_data_representation_compatible(
             requested.data_representation(),
             offered.data_representation(),

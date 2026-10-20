@@ -37,6 +37,7 @@ namespace Int2Dds.Core
         }
 
         private readonly IntPtr _handle;
+        private readonly Subscriber _subscriber;
         private readonly Topic<T> _topic;
         private byte[] _buffer;
         private IntPtr _listenerContextHandle;
@@ -46,8 +47,9 @@ namespace Int2Dds.Core
         /// Creates a new DataReader. Normally called via Subscriber.CreateDataReader.
         /// </summary>
         internal DataReader(Subscriber subscriber, Topic<T> topic, DataReaderQos? qos = null,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
         {
+            _subscriber = subscriber;
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
@@ -117,8 +119,9 @@ namespace Int2Dds.Core
         /// Normally called via Subscriber.CreateDataReaderWithProfile.
         /// </summary>
         internal DataReader(Subscriber subscriber, Topic<T> topic, string qosPath,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
         {
+            _subscriber = subscriber;
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
@@ -542,6 +545,21 @@ namespace Int2Dds.Core
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_guid(_handle, p));
             }
             return guid;
+        }
+
+        /// <summary>
+        /// Gets this DataReader's instance handle.
+        /// </summary>
+        public unsafe InstanceHandle GetInstanceHandle()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var handle = new byte[16];
+            fixed (byte* p = handle)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datareader_get_instance_handle(_handle, p));
+            }
+            return new InstanceHandle(handle);
         }
 
         /// <summary>Returns whether the reader currently has any data available.</summary>
@@ -1165,36 +1183,56 @@ namespace Int2Dds.Core
 
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                for (UIntPtr i = UIntPtr.Zero; (int)i < length; i = (UIntPtr)((int)i + 1))
                 {
-                    for (UIntPtr i = UIntPtr.Zero; (int)i < length; i = (UIntPtr)((int)i + 1))
+                    // Get sample info
+                    NativeSampleInfo nativeInfo;
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_sample_seq_get_info(seqHandle, i, &nativeInfo));
+
+                    var info = ConvertSampleInfo(ref nativeInfo);
+
+                    if (nativeInfo.ValidData)
                     {
-                        // Get sample info
-                        NativeSampleInfo nativeInfo;
-                        ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_sample_seq_get_info(seqHandle, i, &nativeInfo));
-
-                        var info = ConvertSampleInfo(ref nativeInfo);
-
-                        if (nativeInfo.ValidData)
-                        {
-                            // Get sample data
-                            ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_sample_seq_get_data(seqHandle, i, pBuffer,
-                                    (UIntPtr)_buffer.Length, out var actualSize));
-
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
-                            results.Add((new Sample<T>(data, true), info));
-                        }
-                        else
-                        {
-                            results.Add((new Sample<T>(default, false), info));
-                        }
+                        var data = s_deserializer(CopySequenceData(seqHandle, i));
+                        results.Add((new Sample<T>(data, true), info));
+                    }
+                    else
+                    {
+                        results.Add((new Sample<T>(default, false), info));
                     }
                 }
             }
 
             return results;
+        }
+
+        /// <summary>
+        /// Copies the serialized data of one sample in a sequence, growing the
+        /// buffer when the sample is larger than it.
+        /// </summary>
+        private byte[] CopySequenceData(IntPtr seqHandle, UIntPtr index)
+        {
+            unsafe
+            {
+                while (true)
+                {
+                    fixed (byte* pBuffer = _buffer)
+                    {
+                        var ret = NativeMethods.int2dds_sample_seq_get_data(
+                            seqHandle, index, pBuffer, (UIntPtr)_buffer.Length, out var actualSize);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        return CopyBuffer((int)actualSize);
+                    }
+                }
+            }
         }
 
         internal static unsafe SampleInfo ConvertSampleInfo(ref NativeSampleInfo native)
@@ -1240,6 +1278,7 @@ namespace Int2Dds.Core
                 _listenerContextHandle = IntPtr.Zero;
             }
 
+            _subscriber.UnregisterReader(this);
             NativeMethods.int2dds_delete_datareader(_handle);
             ArrayPool<byte>.Shared.Return(_buffer);
         }

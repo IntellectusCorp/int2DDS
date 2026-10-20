@@ -42,23 +42,32 @@ pub unsafe extern "C" fn int2dds_clear_last_error() {
 pub unsafe extern "C" fn int2dds_last_error_message(buf: *mut c_char, buf_len: i32) -> i32 {
     LAST_ERROR.with(|slot| {
         let borrow = slot.borrow();
-        let msg = borrow.as_deref().unwrap_or("");
-        let full_len = msg.len();
-
-        if buf.is_null() || buf_len <= 0 {
-            return full_len as i32;
-        }
-
-        // Reserve one byte for the NUL terminator.
-        let max_bytes = (buf_len as usize) - 1;
-        let mut end = max_bytes.min(full_len);
-        while end > 0 && !msg.is_char_boundary(end) {
-            end -= 1;
-        }
-        std::ptr::copy_nonoverlapping(msg.as_ptr() as *const c_char, buf, end);
-        *buf.add(end) = 0;
-        full_len as i32
+        write_c_string(borrow.as_deref().unwrap_or(""), buf, buf_len)
     })
+}
+
+/// Copy `text` into `buf` as UTF-8 plus a NUL, under the buffer contract
+/// documented on [`int2dds_last_error_message`]. Returns `text`'s full byte
+/// length, excluding the NUL.
+///
+/// # Safety
+/// `buf` must be null or point to at least `buf_len` writable bytes.
+pub(crate) unsafe fn write_c_string(text: &str, buf: *mut c_char, buf_len: i32) -> i32 {
+    let full_len = text.len();
+
+    if buf.is_null() || buf_len <= 0 {
+        return full_len as i32;
+    }
+
+    // Reserve one byte for the NUL terminator.
+    let max_bytes = (buf_len as usize) - 1;
+    let mut end = max_bytes.min(full_len);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, end);
+    *buf.add(end) = 0;
+    full_len as i32
 }
 
 #[cfg(test)]

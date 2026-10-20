@@ -5,6 +5,7 @@ Provides pure Python CDR (Common Data Representation) serialization
 for DDS data types.
 """
 
+from int2dds.cdr.float128 import Float128
 from int2dds.cdr.reader import CdrReader
 from int2dds.cdr.writer import CdrWriter, Extensibility
 
@@ -12,4 +13,5 @@ __all__ = [
     "CdrWriter",
     "CdrReader",
     "Extensibility",
+    "Float128",
 ]
