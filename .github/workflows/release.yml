@@ -149,20 +149,6 @@ jobs:
           path: target/${{ matrix.triple }}/release/libint2dds_java.so
           if-no-files-found: error
 
-      # Built here, not in verify-glibc-floor, so the loader inherits this
-      # image's glibc 2.28 floor and runs in every target container without a
-      # compiler or python — ubi8 and the ubuntu base images ship neither.
-      - name: Build the glibc floor smoke-test loader
-        if: matrix.triple == 'x86_64-unknown-linux-gnu'
-        run: gcc -O2 -o glibc-floor-check .github/scripts/ci/glibc-floor-check.c -ldl
-
-      - uses: actions/upload-artifact@v4
-        if: matrix.triple == 'x86_64-unknown-linux-gnu'
-        with:
-          name: glibc-floor-check
-          path: glibc-floor-check
-          if-no-files-found: error
-
   # Proves the "build low, run high" claim instead of trusting it: the glibc
   # 2.28 artifact is loaded on every OS the RMW layer targets. dlopen(RTLD_NOW)
   # forces full relocation, so a missing symbol version fails here rather than
@@ -180,15 +166,24 @@ jobs:
           - { image: "ubuntu:22.04", glibc: "2.35" }   # ROS 2 Humble
           - { image: "ubuntu:24.04", glibc: "2.39" }   # ROS 2 Jazzy / Kilted / Rolling
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts/ci/glibc-floor-check.c
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v4
         with:
           name: native-linux-x86_64
           path: art
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: glibc-floor-check
-          path: checker
+      # Built in the same glibc 2.28 manylinux image as the library, so the
+      # loader runs in every target container without a compiler or python —
+      # ubi8 and the ubuntu base images ship neither.
+      - name: Build the glibc floor smoke-test loader
+        run: |
+          mkdir -p checker
+          docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux_2_28_x86_64 \
+            gcc -O2 -o checker/glibc-floor-check .github/scripts/ci/glibc-floor-check.c -ldl
 
       - name: Unpack the archive
         env:
@@ -197,7 +192,6 @@ jobs:
           set -euo pipefail
           mkdir -p unpacked
           tar -xzf "art/int2dds-$VERSION-linux-x86_64.tar.gz" -C unpacked
-          chmod +x checker/glibc-floor-check
 
       - name: Load the library on ${{ matrix.image }}
         env:
