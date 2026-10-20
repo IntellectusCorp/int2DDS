@@ -68,7 +68,7 @@ impl UdpSender {
     }
 
     pub(crate) fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let guard = self.socket.read().map_err(|_| io::Error::other("Mutex poisoned"))?;
+        let guard = self.socket.read().map_err(|_| io::Error::other("lock poisoned"))?;
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
@@ -79,7 +79,7 @@ impl UdpSender {
     }
 
     pub(crate) fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
-        let guard = self.socket.write().map_err(|_| io::Error::other("Mutex poisoned"))?;
+        let guard = self.socket.write().map_err(|_| io::Error::other("lock poisoned"))?;
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
