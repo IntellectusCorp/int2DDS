@@ -907,7 +907,7 @@ impl UserLogic {
                     plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    selected.len(),
+                    copy_to.len(),
                     piggyback,
                 );
 
@@ -1058,7 +1058,8 @@ impl UserLogic {
         let reliable = reader_proxy.is_reliable();
         let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
         // Same for every change below, and one datagram is written once per locator.
-        let locator_count = self.locators_to_send_to(reader_proxy.unicast_locator_list()).len();
+        let locator_count =
+            self.non_shm_locators_to_send_to(reader_proxy.unicast_locator_list()).len();
         let dst_prefix = remote_reader_guid.prefix();
 
         let timestamp = Utc::now();
@@ -1389,7 +1390,7 @@ impl UserLogic {
                     plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    selected.len(),
+                    copy_to.len(),
                     is_piggyback_wanted,
                 );
 
@@ -1582,7 +1583,7 @@ impl UserLogic {
                                 plan,
                                 a_change.fragment_size() as usize,
                                 a_change.data_value().len(),
-                                selected.len(),
+                                copy_to.len(),
                                 reliable && piggyback,
                             );
 
@@ -4842,6 +4843,29 @@ mod tests {
             "the whole {total}-fragment sample went out in one go, so nothing bounded it"
         );
         assert_datagrams_tile(&round, "first transmission");
+    }
+
+    /// The copy goes to the non-SHM locators only, so SHM locators it skips must not
+    /// charge the window: with more SHM than UDP locators the burst used to shrink.
+    #[test]
+    fn shm_locators_the_copy_skips_do_not_charge_the_window() {
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let sent_fragments = |locators: Vec<Locator>| -> u32 {
+            let (_participant, user_logic, recorder, writer, _) =
+                windowed_writer_with_locators(1, locators, Some(WINDOW_TEST_ADVERTISED));
+            stage_fragmented_sample(&writer, 1024 * 1024);
+            let round = first_transmission(&user_logic, &writer, &recorder);
+            assert!(round.iter().all(|d| !d.locator.is_shm()), "a copy reached an SHM locator");
+            round.iter().map(|d| d.fragment_count as u32).sum()
+        };
+
+        let udp_only = sent_fragments(vec![udp.clone()]);
+        let with_shm = sent_fragments(vec![
+            Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411),
+            Locator::from_shm(&Ipv4Addr::new(192, 168, 0, 10), 7411),
+            udp,
+        ]);
+        assert_eq!(with_shm, udp_only);
     }
 
     #[test]
