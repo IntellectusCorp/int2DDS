@@ -53,7 +53,7 @@ Sets the transport protocol type.
 | `udp`    | UDP transport (default)                          |
 | `tcp`    | TCP transport                                    |
 | `hybrid` | UDP + TCP simultaneous use                       |
-| `shm`    | Shared memory for high-performance intra-host    |
+| `shm`    | UDP, plus shared memory for user data between participants on the same host |
 
 #### Configuration
 
