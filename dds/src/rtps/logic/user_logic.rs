@@ -153,21 +153,10 @@ impl NackFragRequest {
             let outstanding =
                 proxy.first_incomplete_fragmented_sn(SequenceNumber::ZERO, self.last_sn).is_some();
 
-            // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with
-            // can_handle guarding the local-side reachability.
-            let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
-            let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
-                let v: Vec<&Locator> = locs
-                    .iter()
-                    .copied()
-                    .filter(|l| is_kind(l) && self.transport.can_handle(l))
-                    .collect();
-                (!v.is_empty()).then_some(v)
-            };
-            let chosen: Vec<Locator> = try_kind(Locator::is_shm)
-                .or_else(|| try_kind(Locator::is_tcp))
-                .or_else(|| try_kind(Locator::is_udp))
-                .unwrap_or(locs)
+            // Same pick as send_rtps_message_to_locators: `send` cannot reach an SHM locator.
+            let plain: Vec<&Locator> =
+                proxy.unicast_locator_list().iter().filter(|l| !l.is_shm()).collect();
+            let chosen: Vec<Locator> = pick_locators(plain, |l| self.transport.can_handle(l))
                 .into_iter()
                 .cloned()
                 .collect();
@@ -2702,15 +2691,14 @@ impl UserLogic {
         pick_locators(locators, |l| self.transport.can_handle(l))
     }
 
-    /// Send `buffer` via the highest-priority transport reachable on both
-    /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
-    /// a single copy. Associated fn so `&self`-less closures (e.g. the
-    /// NACK_FRAG timer) can route through the same path.
+    /// Send `buffer` via the highest-priority non-SHM transport reachable on
+    /// both sides (TCP > UDP); a peer advertising multiple transports gets a
+    /// single copy. SHM is skipped: `send` refuses it, only `send_to_peer` reaches it.
     fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
     where
         T: IntoIterator<Item = &'a Locator>,
     {
-        self.send_rtps_message_to_selected(&self.locators_to_send_to(locators), buffer)
+        self.send_rtps_message_to_selected(&self.non_shm_locators_to_send_to(locators), buffer)
     }
 
     /// True when every picked locator is SHM and the destination is another
@@ -4815,6 +4803,27 @@ mod tests {
 
         drop(segment);
         unlink_segment(DOMAIN, SLOT);
+    }
+
+    /// HEARTBEAT, ACKNACK and GAP go through `send`, which refuses an SHM locator;
+    /// picking SHM for them dropped every one toward a peer that advertises it.
+    #[test]
+    fn a_message_without_a_descriptor_goes_to_the_non_shm_locator() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let recorder = Arc::new(DatagramRecorder::default());
+        let user_logic = UserLogic::new(participant, recorder.clone());
+
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        user_logic.send_rtps_message_to_locators([&shm, &udp], &[0u8; 20]).unwrap();
+
+        let sent: Vec<Locator> = recorder.take().into_iter().map(|d| d.locator).collect();
+        assert_eq!(sent, vec![udp]);
+        assert!(
+            user_logic.send_rtps_message_to_locators([&shm], &[0u8; 20]).is_err(),
+            "an SHM-only destination has nothing `send` can reach"
+        );
+        assert!(recorder.take().is_empty());
     }
 
     #[test]
