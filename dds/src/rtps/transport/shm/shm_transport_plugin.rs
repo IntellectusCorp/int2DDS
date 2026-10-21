@@ -357,7 +357,8 @@ mod tests {
         let locator = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7410);
         plugin.send_to_peer(b"descriptor", &locator, PEER_PREFIX).unwrap();
         let mut out = [0u8; RING_INLINE];
-        let (len, _) = peer.ring_mut().pop(&mut out).expect("the peer's ring must carry it");
+        let (len, _) =
+            peer.ring_mut().pop(&mut out, |_| true).expect("the peer's ring must carry it");
         assert_eq!(&out[..len as usize], b"descriptor");
 
         // Another host's SHM locator, and a UDP one, are not zero-copy targets.

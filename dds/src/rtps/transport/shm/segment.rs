@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use crate::rtps::transport::shm::platform::SharedMemory;
 use crate::rtps::transport::shm::pool::{Pool, PoolLayout, PoolOwner, PoolReader};
-use crate::rtps::transport::shm::ring::{Notifier, Ring, RingError};
+use crate::rtps::transport::shm::ring::{producer_tag, Notifier, Ring, RingError};
 use crate::rtps::transport::shm::{LayoutError, SHARED_ALIGN};
 
 const SEGMENT_MAGIC: u64 = 0x494E_5432_5A43_5347; // "INT2ZCSG"
-const SEGMENT_VERSION: u32 = 1;
+const SEGMENT_VERSION: u32 = 2;
 const HEADER_RESERVE: u64 = 64;
 
 pub(crate) fn segment_name(domain: u32, slot: u32) -> String {
@@ -217,16 +217,23 @@ pub(crate) struct PeerSegment {
     pub(crate) ring: Ring,
     pub(crate) notifier: Notifier,
     pub(crate) epoch: u64,
+    /// Ours, as the cells we claim in this peer's ring carry it.
+    pub(crate) tag: u32,
     // Declared last: see `OwnedSegment`.
     _shm: SharedMemory,
 }
 
 impl PeerSegment {
-    pub(crate) fn attach(domain: u32, slot: u32, my_slot: u32) -> io::Result<PeerSegment> {
+    pub(crate) fn attach(
+        domain: u32,
+        slot: u32,
+        my_slot: u32,
+        my_epoch: u64,
+    ) -> io::Result<PeerSegment> {
         let name = segment_name(domain, slot);
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
-            match Self::try_attach(domain, slot, my_slot, &name) {
+            match Self::try_attach(domain, slot, my_slot, my_epoch, &name) {
                 Ok(seg) => return Ok(seg),
                 Err(e) if Instant::now() < deadline => {
                     if e.kind() != io::ErrorKind::WouldBlock {
@@ -239,7 +246,13 @@ impl PeerSegment {
         }
     }
 
-    fn try_attach(domain: u32, slot: u32, my_slot: u32, name: &str) -> io::Result<PeerSegment> {
+    fn try_attach(
+        domain: u32,
+        slot: u32,
+        my_slot: u32,
+        my_epoch: u64,
+        name: &str,
+    ) -> io::Result<PeerSegment> {
         // Map the header alone to learn the real size, then remap exactly.
         let probe = SharedMemory::new(name, HEADER_RESERVE as usize, false)?;
         // Safety: `probe` maps exactly one header. The magic is read through a
@@ -275,13 +288,14 @@ impl PeerSegment {
             ring,
             notifier,
             epoch,
+            tag: producer_tag(my_slot, my_epoch),
             _shm: shm,
         })
     }
 
     /// Pushes into the owner's ring and wakes it only if it is waiting.
     pub(crate) fn push_and_signal(&self, payload: &[u8], spill: u32) -> Result<(), RingError> {
-        self.ring.push(payload, spill)?;
+        self.ring.push(payload, spill, self.tag)?;
         std::sync::atomic::fence(Ordering::SeqCst);
         if self.ring.waiters().load(Ordering::SeqCst) > 0 {
             self.notifier.signal();
@@ -349,16 +363,16 @@ mod tests {
     fn owner_and_peer_share_one_segment() {
         unlink_segment(DOMAIN, 0);
         let owned = OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap();
-        let peer = PeerSegment::attach(DOMAIN, 0, 1).unwrap();
-        assert!(PeerSegment::attach(DOMAIN, 63, 1).is_err(), "no such segment");
+        let peer = PeerSegment::attach(DOMAIN, 0, 1, 1).unwrap();
+        assert!(PeerSegment::attach(DOMAIN, 63, 1, 1).is_err(), "no such segment");
 
         let mut lease = { owned.owner_mut().acquire(8) }.unwrap();
         lease.bytes_mut()[..4].copy_from_slice(b"ping");
         let r = owned.owner_mut().commit(lease, 4);
 
-        peer.ring.push(&r.encode(), SPILL_NONE).unwrap();
+        peer.ring.push(&r.encode(), SPILL_NONE, peer.tag).unwrap();
         let mut out = [0u8; RING_INLINE];
-        let (len, _) = owned.ring_mut().pop(&mut out).unwrap();
+        let (len, _) = owned.ring_mut().pop(&mut out, |_| true).unwrap();
         let decoded = SlotRef::decode(&out[..len as usize]).unwrap();
 
         let claimed = peer.reader.claim(&decoded).unwrap();
@@ -377,7 +391,7 @@ mod tests {
         }
         unlink_segment(DOMAIN, 2);
         let owned = Arc::new(OwnedSegment::create(DOMAIN, 2, 1, TEST_POOL_SIZE, 4).unwrap());
-        let peer = PeerSegment::attach(DOMAIN, 2, 3).unwrap();
+        let peer = PeerSegment::attach(DOMAIN, 2, 3, 1).unwrap();
 
         let waiter = {
             let owned = Arc::clone(&owned);
@@ -394,7 +408,7 @@ mod tests {
         assert!(waited < Duration::from_secs(1), "owner was not woken: {waited:?}");
 
         let mut out = [0u8; RING_INLINE];
-        let (len, _) = owned.ring_mut().pop(&mut out).unwrap();
+        let (len, _) = owned.ring_mut().pop(&mut out, |_| true).unwrap();
         assert_eq!(&out[..len as usize], b"wake");
         assert_eq!(owned.ring_mut().waiters().load(Ordering::SeqCst), 0);
 
@@ -407,7 +421,7 @@ mod tests {
     fn waiting_returns_at_once_when_a_message_is_already_queued() {
         unlink_segment(DOMAIN, 4);
         let owned = OwnedSegment::create(DOMAIN, 4, 1, TEST_POOL_SIZE, 4).unwrap();
-        let peer = PeerSegment::attach(DOMAIN, 4, 5).unwrap();
+        let peer = PeerSegment::attach(DOMAIN, 4, 5, 1).unwrap();
         peer.push_and_signal(b"early", SPILL_NONE).unwrap();
 
         let start = Instant::now();

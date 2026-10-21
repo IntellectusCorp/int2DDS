@@ -719,7 +719,8 @@ impl UserLogic {
                 task.get_or_insert_with(|| UserUnicastListeningTask::new(Arc::clone(&participant)))
                     .process_rtps_message(Bytes::copy_from_slice(bytes), from_addr)
             };
-            Some((runtime.own_arc(), sink))
+            let own = runtime.own_arc();
+            Some((own, move |tag| runtime.producer_alive(tag), sink))
         });
     }
 }

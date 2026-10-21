@@ -12,7 +12,7 @@ use log::{debug, info, warn};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::shm::pool::{valid_pool_size, SlotLease};
 use crate::rtps::transport::shm::registry::{ParticipantSlot, Registry, HEARTBEAT_PERIOD};
-use crate::rtps::transport::shm::ring::RING_INLINE;
+use crate::rtps::transport::shm::ring::{tag_epoch_matches, tag_slot, RING_INLINE};
 use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment, PeerSegment};
 use crate::rtps::transport::shm::slot::ShmSlotHandle;
 
@@ -152,12 +152,13 @@ struct Peer {
 pub(crate) struct PeerMap {
     domain: u32,
     my_slot: u32,
+    my_epoch: u64,
     peers: DashMap<[u8; 12], Peer>,
 }
 
 impl PeerMap {
-    pub(crate) fn new(domain: u32, my_slot: u32) -> PeerMap {
-        PeerMap { domain, my_slot, peers: DashMap::new() }
+    pub(crate) fn new(domain: u32, my_slot: u32, my_epoch: u64) -> PeerMap {
+        PeerMap { domain, my_slot, my_epoch, peers: DashMap::new() }
     }
 
     /// Clear a departed peer's bits unless the slot looks re-issued: refs
@@ -205,7 +206,8 @@ impl PeerMap {
             debug!("[shm] peer slot {slot} was re-issued; re-resolving");
         }
         let (slot, epoch) = self.find_peer(registry, &prefix)?;
-        let segment = match PeerSegment::attach(self.domain, slot, self.my_slot) {
+        let attached = PeerSegment::attach(self.domain, slot, self.my_slot, self.my_epoch);
+        let segment = match attached {
             Ok(segment) => Arc::new(segment),
             Err(e) => {
                 debug!("[shm] cannot attach to peer slot {slot}: {e}");
@@ -274,12 +276,16 @@ pub(crate) const RECV_WAIT: Duration = Duration::from_secs(1);
 
 /// Pops until the ring is empty, handing each message to `sink`. Every `pop`
 /// takes and releases the ring guard in its own statement, so no guard is
-/// alive when `sink` runs or when the caller waits.
-pub(crate) fn drain<F: FnMut(&[u8])>(segment: &OwnedSegment, mut sink: F) -> usize {
+/// alive when `sink` runs or when the caller waits. `alive` is `pop`'s.
+pub(crate) fn drain<A: Fn(u32) -> bool, F: FnMut(&[u8])>(
+    segment: &OwnedSegment,
+    alive: A,
+    mut sink: F,
+) -> usize {
     let mut buf = [0u8; RING_INLINE];
     let mut delivered = 0;
     loop {
-        let popped = segment.ring_mut().pop(&mut buf);
+        let popped = segment.ring_mut().pop(&mut buf, &alive);
         let Some((len, _spill)) = popped else { return delivered };
         sink(&buf[..len as usize]);
         delivered += 1;
@@ -289,24 +295,26 @@ pub(crate) fn drain<F: FnMut(&[u8])>(segment: &OwnedSegment, mut sink: F) -> usi
 /// Runs until `session` returns `None`. The sink is built fresh each round
 /// and dropped before the wait: a DDS-layer sink transitively owns the
 /// `ShmRuntime` whose absence is this loop's exit condition.
-pub(crate) fn recv_loop<S, F>(mut session: S)
+pub(crate) fn recv_loop<S, A, F>(mut session: S)
 where
-    S: FnMut() -> Option<(Arc<OwnedSegment>, F)>,
+    S: FnMut() -> Option<(Arc<OwnedSegment>, A, F)>,
+    A: Fn(u32) -> bool,
     F: FnMut(&[u8]),
 {
     loop {
-        let Some((segment, sink)) = session() else { return };
+        let Some((segment, alive, sink)) = session() else { return };
         // Drain first: `pop` is the only thing that recovers a wedged cell.
-        drain(&segment, sink);
+        drain(&segment, alive, sink);
         segment.wait_for_message(RECV_WAIT);
     }
 }
 
 /// Failing to spawn is not fatal: the ring goes unread and the send side
 /// falls back to the copy path once it fills.
-pub(crate) fn spawn_receiver<S, F>(session: S)
+pub(crate) fn spawn_receiver<S, A, F>(session: S)
 where
-    S: FnMut() -> Option<(Arc<OwnedSegment>, F)> + Send + 'static,
+    S: FnMut() -> Option<(Arc<OwnedSegment>, A, F)> + Send + 'static,
+    A: Fn(u32) -> bool,
     F: FnMut(&[u8]),
 {
     let spawned = std::thread::Builder::new().name("int2dds-shm-recv".into()).spawn(move || {
@@ -332,34 +340,49 @@ impl ShmRuntime {
     /// `None` whenever SHM cannot be brought up; every caller falls back to
     /// the copy path.
     pub(crate) fn start(domain: u32, guid_prefix: GuidPrefix) -> Option<Arc<ShmRuntime>> {
-        let slot = match ParticipantSlot::claim(domain, guid_prefix) {
-            Ok(slot) => slot,
-            Err(e) => {
-                warn!("[shm] no registry slot, falling back to the copy path: {e}");
-                return None;
+        // Slots whose name is still taken stay claimed until we have one, so
+        // `claim` moves on instead of handing the same slot back.
+        let mut taken = Vec::new();
+        let (slot, own) = loop {
+            let slot = match ParticipantSlot::claim(domain, guid_prefix) {
+                Ok(slot) => slot,
+                Err(e) => {
+                    warn!("[shm] no registry slot, falling back to the copy path: {e}");
+                    return None;
+                }
+            };
+
+            // A slot just claimed may still carry a dead predecessor's segment.
+            // No-op on Windows, where a peer's lingering handle keeps the name.
+            unlink_segment(domain, slot.slot());
+
+            match OwnedSegment::create(
+                domain,
+                slot.slot(),
+                slot.epoch(),
+                pool_size_from_env(),
+                DEFAULT_RING_ENTRIES,
+            ) {
+                Ok(own) => break (slot, own),
+                // Windows answers `PermissionDenied` when the held segment is smaller.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    debug!("[shm] slot {} still has a segment, trying another", slot.slot());
+                    taken.push(slot);
+                }
+                Err(e) => {
+                    warn!("[shm] cannot create segment, falling back to the copy path: {e}");
+                    return None;
+                }
             }
         };
+        drop(taken);
 
-        // A slot just claimed may still carry a dead predecessor's segment.
-        // No-op on Windows, where a peer's lingering handle makes `create`
-        // fail with `AlreadyExists` and this participant stays on UDP.
-        unlink_segment(domain, slot.slot());
-
-        let own = match OwnedSegment::create(
-            domain,
-            slot.slot(),
-            slot.epoch(),
-            pool_size_from_env(),
-            DEFAULT_RING_ENTRIES,
-        ) {
-            Ok(own) => own,
-            Err(e) => {
-                warn!("[shm] cannot create segment, falling back to the copy path: {e}");
-                return None;
-            }
-        };
-
-        let peers = PeerMap::new(domain, slot.slot());
+        let peers = PeerMap::new(domain, slot.slot(), slot.epoch());
         info!("[shm] runtime started on domain {domain} slot {}", slot.slot());
         let runtime = Arc::new(ShmRuntime {
             own: Arc::new(own),
@@ -430,6 +453,14 @@ impl ShmRuntime {
         self.slot.slot()
     }
 
+    /// Whether the producer a ring cell's `producer_tag` names still holds
+    /// its registry slot.
+    pub(crate) fn producer_alive(&self, tag: u32) -> bool {
+        let slot = tag_slot(tag);
+        let registry = self.registry();
+        !registry.is_free(slot) && registry.epoch(slot).is_some_and(|e| tag_epoch_matches(tag, e))
+    }
+
     /// DDS unmatch is not death: only drops the cached mapping.
     pub(crate) fn peer_lost(&self, prefix: GuidPrefix) {
         self.peers.drop_mapping(&prefix);
@@ -451,7 +482,9 @@ mod tests {
     use super::*;
     use crate::rtps::transport::shm::pool::TEST_POOL_SIZE;
     use crate::rtps::transport::shm::registry::{now_tick, unlink_registry, RegistrySegment};
-    use crate::rtps::transport::shm::ring::{notify_supported, POLL_INTERVAL, SPILL_NONE};
+    use crate::rtps::transport::shm::ring::{
+        notify_supported, producer_tag, POLL_INTERVAL, SPILL_NONE,
+    };
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Mutex;
 
@@ -535,7 +568,7 @@ mod tests {
         let f = fixture(245);
         let (slot, _) = f.reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
         assert_eq!(slot, PEER);
-        let map = PeerMap::new(f.domain, ME);
+        let map = PeerMap::new(f.domain, ME, 1);
 
         let first = map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
         let second = map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
@@ -551,7 +584,7 @@ mod tests {
     fn forget_clears_the_peers_bit_but_drop_mapping_keeps_it() {
         let f = fixture(246);
         let (slot, _) = f.reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
-        let map = PeerMap::new(f.domain, ME);
+        let map = PeerMap::new(f.domain, ME, 1);
         map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
 
         let lease = f.mine.owner_mut().acquire(8).unwrap();
@@ -574,7 +607,7 @@ mod tests {
         let f = fixture(247);
         let (slot, epoch) =
             f.reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
-        let map = PeerMap::new(f.domain, ME);
+        let map = PeerMap::new(f.domain, ME, 1);
         map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
 
         let lease = f.mine.owner_mut().acquire(8).unwrap();
@@ -604,7 +637,7 @@ mod tests {
         let f = fixture(248);
         let (dead_slot, dead_epoch) =
             f.reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
-        let map = PeerMap::new(f.domain, ME);
+        let map = PeerMap::new(f.domain, ME, 1);
         let lease = f.mine.owner_mut().acquire(8).unwrap();
         let r = f.mine.owner_mut().commit(lease, 1);
 
@@ -639,7 +672,7 @@ mod tests {
             f.reg.registry().claim(std::process::id(), [8; 12], now_tick()).unwrap();
         unlink_segment(f.domain, live_slot);
         let _live = OwnedSegment::create(f.domain, live_slot, 1, TEST_POOL_SIZE, 4).unwrap();
-        let map = PeerMap::new(f.domain, ME);
+        let map = PeerMap::new(f.domain, ME, 1);
         map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
         map.resolve(&f.mine, f.reg.registry(), [8; 12]).unwrap();
         let lease = f.mine.owner_mut().acquire(8).unwrap();
@@ -663,7 +696,7 @@ mod tests {
     fn the_loop_drains_every_queued_message_before_it_waits() {
         unlink_segment(RECV_DOMAIN, 0);
         let owned = Arc::new(OwnedSegment::create(RECV_DOMAIN, 0, 1, TEST_POOL_SIZE, 8).unwrap());
-        let peer = PeerSegment::attach(RECV_DOMAIN, 0, 1).unwrap();
+        let peer = PeerSegment::attach(RECV_DOMAIN, 0, 1, 1).unwrap();
         for msg in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
             peer.push_and_signal(msg, SPILL_NONE).unwrap();
         }
@@ -679,9 +712,13 @@ mod tests {
                         return None;
                     }
                     let tx = tx.clone();
-                    Some((Arc::clone(&segment), move |bytes: &[u8]| {
-                        let _ = tx.send(bytes.to_vec());
-                    }))
+                    Some((
+                        Arc::clone(&segment),
+                        |_: u32| true,
+                        move |bytes: &[u8]| {
+                            let _ = tx.send(bytes.to_vec());
+                        },
+                    ))
                 });
             })
         };
@@ -718,7 +755,7 @@ mod tests {
                         return None;
                     }
                     rounds.fetch_add(1, Ordering::Relaxed);
-                    Some((Arc::clone(&segment), |_: &[u8]| {}))
+                    Some((Arc::clone(&segment), |_: u32| true, |_: &[u8]| {}))
                 });
             })
         };
@@ -755,15 +792,62 @@ mod tests {
     }
 
     #[test]
+    fn a_producer_is_alive_only_while_it_holds_its_slot() {
+        const DOMAIN: u32 = 238;
+        unlink_registry(DOMAIN);
+        let rt = ShmRuntime::start(DOMAIN, [23; 12]).unwrap();
+        let reg = rt.registry();
+        let (slot, epoch) = reg.claim(std::process::id(), [24; 12], now_tick()).unwrap();
+        let tag = producer_tag(slot, epoch);
+        assert!(rt.producer_alive(tag));
+
+        reg.release(slot, epoch);
+        assert!(!rt.producer_alive(tag), "a released slot");
+        let (again, _) = reg.claim(std::process::id(), [25; 12], now_tick()).unwrap();
+        assert_eq!(again, slot);
+        assert!(!rt.producer_alive(tag), "a re-issued slot");
+
+        let own = rt.slot();
+        drop(rt);
+        unlink_registry(DOMAIN);
+        unlink_segment(DOMAIN, own);
+    }
+
+    #[test]
+    fn start_skips_free_slots_whose_segment_is_still_held() {
+        const DOMAIN: u32 = 236;
+        unlink_registry(DOMAIN);
+        (0..3).for_each(|s| unlink_segment(DOMAIN, s));
+        // Dead participants' segments someone still maps; their slots are free.
+        // A smaller one fails `create` differently on Windows than a same-size one.
+        let smaller = OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap();
+        let same =
+            OwnedSegment::create(DOMAIN, 1, 1, DEFAULT_POOL_SIZE, DEFAULT_RING_ENTRIES).unwrap();
+
+        let rt = ShmRuntime::start(DOMAIN, [22; 12]).expect("a runtime on another slot");
+        #[cfg(windows)]
+        assert_eq!(rt.slot(), 2, "both slots whose name is held are skipped");
+        assert_eq!(rt.registry().find_active(&[22; 12]).map(|(s, _)| s), Some(rt.slot()));
+        for s in (0..2).filter(|&s| s != rt.slot()) {
+            assert!(rt.registry().is_free(s), "skipped slot {s} is given back");
+        }
+
+        drop(rt);
+        drop((smaller, same));
+        unlink_registry(DOMAIN);
+        (0..3).for_each(|s| unlink_segment(DOMAIN, s));
+    }
+
+    #[test]
     fn drain_hands_each_message_to_the_sink_in_order() {
         unlink_segment(RECV_DOMAIN, 8);
         let owned = OwnedSegment::create(RECV_DOMAIN, 8, 1, TEST_POOL_SIZE, 8).unwrap();
-        let peer = PeerSegment::attach(RECV_DOMAIN, 8, 9).unwrap();
+        let peer = PeerSegment::attach(RECV_DOMAIN, 8, 9, 1).unwrap();
         for msg in [b"a".as_slice(), b"b".as_slice()] {
             peer.push_and_signal(msg, SPILL_NONE).unwrap();
         }
         let seen = Mutex::new(Vec::new());
-        assert_eq!(drain(&owned, |b| seen.lock().unwrap().push(b.to_vec())), 2);
+        assert_eq!(drain(&owned, |_| true, |b| seen.lock().unwrap().push(b.to_vec())), 2);
         assert_eq!(seen.into_inner().unwrap(), vec![b"a".to_vec(), b"b".to_vec()]);
         drop(peer);
         drop(owned);

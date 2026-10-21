@@ -52,7 +52,17 @@ impl WindowsSharedMemory {
             (Self::open_mapping(&name_cstr)?, false)
         };
 
-        let ptr = Self::map_view(handle, size)?;
+        let ptr = match Self::map_view(handle, size) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                // A leaked handle would keep the name alive for this whole process.
+                #[cfg(windows)]
+                unsafe {
+                    CloseHandle(handle);
+                }
+                return Err(e);
+            }
+        };
 
         Ok(Self { handle, ptr, size, is_creator })
     }

@@ -192,7 +192,7 @@ mod tests {
         const DOMAIN: u32 = 251;
         unlink_segment(DOMAIN, 0);
         let owned = OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap();
-        let peer = Arc::new(PeerSegment::attach(DOMAIN, 0, 1).unwrap());
+        let peer = Arc::new(PeerSegment::attach(DOMAIN, 0, 1, 1).unwrap());
 
         let mut lease = owned.owner_mut().acquire(8).unwrap();
         lease.bytes_mut()[..3].copy_from_slice(b"abc");
