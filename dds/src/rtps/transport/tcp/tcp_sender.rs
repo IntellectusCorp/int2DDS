@@ -4,26 +4,31 @@
 //! is opened by the first frame that needs it and is dropped as soon as a write
 //! fails. There is no application-level connection handshake.
 //!
-//! Opening a slot is the one blocking step, so the discovery fan-out never takes
-//! it on the calling thread: it hands the dial to a worker and moves on to the
-//! next peer. A peer nobody answers therefore costs the announcement nothing,
-//! however many such peers are configured.
+//! The calling thread never opens a connection itself. A frame for a peer with
+//! no connection waits in the slot while the dial loop opens one, so a peer
+//! nobody answers costs the caller nothing, however many such peers there are.
+
+mod dial_loop;
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{mpsc, Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use log::{debug, warn};
+use mio::{Poll, Waker};
 
+use self::dial_loop::{DialLoop, DIAL_WAKE_TOKEN};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
 use crate::rtps::transport::tcp::framing::{encode_frame, validate_payload_size, TcpFrameKind};
-use crate::rtps::transport::tcp::sync_connection::{OutboundConnection, SendOutcome};
+use crate::rtps::transport::tcp::sync_connection::{
+    OutboundConnection, SendOutcome, SEND_QUEUE_BYTE_BUDGET,
+};
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::TcpConfig;
 
@@ -58,10 +63,27 @@ struct SendStats {
     connect_failed: DropCounter,
     backoff: DropCounter,
     peer_stalled: DropCounter,
-    write_error: DropCounter,
 }
 
 type ConnectionKey = (SocketAddr, TcpFrameKind);
+
+enum Slot {
+    /// Frames sent before the connection exists, in order, under the same
+    /// byte budget the connection's own send queue has.
+    Connecting {
+        frames: Vec<Vec<u8>>,
+        bytes: usize,
+        cancelled: Arc<AtomicBool>,
+    },
+    Live(Arc<OutboundConnection>),
+}
+
+impl Slot {
+    fn waiting_with(frame: Vec<u8>) -> Self {
+        let bytes = frame.len();
+        Slot::Connecting { frames: vec![frame], bytes, cancelled: Arc::new(AtomicBool::new(false)) }
+    }
+}
 
 pub(crate) struct TcpSender {
     working_ips: Vec<String>,
@@ -73,15 +95,13 @@ pub(crate) struct TcpSender {
     stats: Arc<SendStats>,
     tls_config: Option<Arc<TlsConfig>>,
     shared: Arc<ConnectionRegistry>,
-    connections: Arc<DashMap<ConnectionKey, Arc<OutboundConnection>>>,
+    slots: DashMap<ConnectionKey, Slot>,
     shutdown: Arc<AtomicBool>,
 
-    pending_dials: Arc<DashMap<ConnectionKey, Vec<u8>>>,
-    dial_wakeup: Sender<ConnectionKey>,
+    /// Set only once the dial loop runs, so its absence means no connection
+    /// can ever be opened.
+    dial_waker: OnceLock<Waker>,
 }
-
-/// How long the dial worker waits before checking whether it should still run.
-const DIAL_WORKER_IDLE_TICK: Duration = Duration::from_millis(200);
 
 impl TcpSender {
     #[allow(clippy::too_many_arguments)]
@@ -96,7 +116,6 @@ impl TcpSender {
         tcp_config: &TcpConfig,
         shutdown: Arc<AtomicBool>,
     ) -> Arc<Self> {
-        let (dial_wakeup, dial_requests) = mpsc::channel();
         let sender = Arc::new(Self {
             working_ips,
             listener_port,
@@ -105,83 +124,43 @@ impl TcpSender {
             stats: Arc::new(SendStats::default()),
             tls_config,
             shared,
-            connections: Arc::new(DashMap::new()),
+            slots: DashMap::new(),
             shutdown,
-            pending_dials: Arc::new(DashMap::new()),
-            dial_wakeup,
+            dial_waker: OnceLock::new(),
         });
-        Self::spawn_dial_worker(&sender, dial_requests);
+        if let Err(error) = Self::spawn_dial_worker(&sender) {
+            log::error!(
+                "TcpSender: no dial worker, no new TCP connection can be opened: {}",
+                error
+            );
+        }
         sender
     }
 
-    fn spawn_dial_worker(sender: &Arc<Self>, requests: Receiver<ConnectionKey>) {
+    fn spawn_dial_worker(sender: &Arc<Self>) -> io::Result<()> {
+        let poll = Poll::new()?;
+        let waker = Waker::new(poll.registry(), DIAL_WAKE_TOKEN)?;
         let weak = Arc::downgrade(sender);
-        let spawned = std::thread::Builder::new().name("tcp_discovery_dial".to_string()).spawn(
-            move || loop {
-                let requested = match requests.recv_timeout(DIAL_WORKER_IDLE_TICK) {
-                    Ok(key) => Some(key),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => return,
-                };
-                let Some(sender) = weak.upgrade() else {
-                    return;
-                };
-                if sender.shutdown.load(Ordering::Acquire) {
-                    return;
-                }
-                if let Some(key) = requested {
-                    sender.dial_pending(key);
-                }
-            },
-        );
-        if let Err(error) = spawned {
-            warn!("TcpSender: no dial worker, discovery will connect inline: {}", error);
-        }
+        let dial_loop = DialLoop::new(poll);
+        std::thread::Builder::new()
+            .name("tcp_dial".to_string())
+            .spawn(move || dial_loop.run_until_shutdown(weak))?;
+        let _ = sender.dial_waker.set(waker);
+        Ok(())
     }
 
     /// Announce to one peer without ever waiting on a connection.
-    ///
-    /// An established peer is written to on this thread, which is the whole
-    /// point of keeping the slot. A peer with no slot yet is handed to the dial
-    /// worker with this announcement attached, so it still receives this round
-    /// once the connection comes up, and an unreachable peer costs the caller
-    /// nothing beyond the handoff.
     pub(crate) fn send_to_discovery(
         self: &Arc<Self>,
         addr: &SocketAddr,
         data: &[u8],
     ) -> io::Result<()> {
-        let addr = *addr;
-        let key = (addr, TcpFrameKind::Discovery);
-        if self.is_self_connection(&addr) || self.live_connection(&key).is_some() {
-            return self.send_to(addr, TcpFrameKind::Discovery, data);
-        }
-
-        validate_payload_size(data.len())?;
-        let mut frame = Vec::with_capacity(data.len() + 8);
-        encode_frame(data, &mut frame)?;
-        self.pending_dials.insert(key, frame);
-        let _ = self.dial_wakeup.send(key);
-        Ok(())
+        self.send_to(*addr, TcpFrameKind::Discovery, data)
     }
 
-    /// Open the slot a queued announcement is waiting on and deliver it.
-    ///
-    /// A failure here is ordinary — a configured peer that is not up yet — so it
-    /// only feeds the backoff. The announcement is dropped rather than held,
-    /// since the next one supersedes it anyway.
-    fn dial_pending(self: &Arc<Self>, key: ConnectionKey) {
-        let Some((_, frame)) = self.pending_dials.remove(&key) else {
-            return;
-        };
-        if self.live_connection(&key).is_some() {
-            return;
-        }
-        if let Ok(connection) = self.open_connection(key) {
-            let _ = connection.send(&frame);
-        }
-    }
-
+    /// Write one frame to a peer, or leave it waiting for the connection when
+    /// there is none yet. `Ok` means the frame is owed to the peer in order,
+    /// not that it has reached the socket.
     pub(crate) fn send_to(
         self: &Arc<Self>,
         addr: SocketAddr,
@@ -196,27 +175,56 @@ impl TcpSender {
         }
 
         let key = (addr, kind);
-        let connection = match self.live_connection(&key) {
-            Some(connection) => connection,
-            None => self.open_connection(key)?,
-        };
-
         let mut frame = Vec::with_capacity(data.len() + 8);
         encode_frame(data, &mut frame)?;
 
-        match self.write_frame(key, &connection, &frame) {
-            // The stream the frame was meant for is gone, and a new one starts
-            // from a frame boundary, so the whole frame goes out again, once.
-            Err(_) if connection.is_failed() => {
-                let reopened = self.open_connection(key)?;
-                let result = self.write_frame(key, &reopened, &frame);
-                if result.is_err() && reopened.is_failed() {
-                    self.stats.write_error.record("write error", addr, kind);
-                }
-                result
+        if let Some(connection) = self.live_connection(&key) {
+            match self.write_frame(key, &connection, &frame) {
+                // The stream the frame was meant for is gone, and a new one
+                // starts from a frame boundary, so the whole frame waits for it.
+                Err(_) if connection.is_failed() => {}
+                result => return result,
             }
-            result => result,
         }
+        self.queue_for_dial(key, frame)
+    }
+
+    /// Leave a frame in its slot until the dial loop has a connection for it.
+    fn queue_for_dial(&self, key: ConnectionKey, frame: Vec<u8>) -> io::Result<()> {
+        let Some(waker) = self.dial_waker.get() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!("no dial worker to open a connection to {}", key.0),
+            ));
+        };
+        let promoted = match self.slots.entry(key) {
+            Entry::Occupied(mut entry) => match entry.get_mut() {
+                Slot::Connecting { frames, bytes, .. } => {
+                    if *bytes + frame.len() > SEND_QUEUE_BYTE_BUDGET {
+                        return Err(self.no_room_for(key));
+                    }
+                    *bytes += frame.len();
+                    frames.push(frame);
+                    return Ok(());
+                }
+                Slot::Live(connection) if !connection.is_failed() => Arc::clone(connection),
+                Slot::Live(_) => {
+                    self.refuse_during_backoff(key)?;
+                    entry.insert(Slot::waiting_with(frame));
+                    let _ = waker.wake();
+                    return Ok(());
+                }
+            },
+            Entry::Vacant(entry) => {
+                self.refuse_during_backoff(key)?;
+                entry.insert(Slot::waiting_with(frame));
+                let _ = waker.wake();
+                return Ok(());
+            }
+        };
+        // Promoted since the caller looked; written outside the slot's lock,
+        // which a failed write takes again to evict the connection.
+        self.write_frame(key, &promoted, &frame)
     }
 
     fn write_frame(
@@ -228,13 +236,7 @@ impl TcpSender {
         let (addr, kind) = key;
         match connection.send(frame) {
             Ok(SendOutcome::Sent) => Ok(()),
-            Ok(SendOutcome::Stalled) => {
-                self.stats.peer_stalled.record("peer send queue full", addr, kind);
-                Err(transport_io_error(
-                    TransportErrorCode::TcpPeerSendQueueFull,
-                    format!("peer {addr} has no room for a {kind:?} frame"),
-                ))
-            }
+            Ok(SendOutcome::Stalled) => Err(self.no_room_for(key)),
             Err(error) => {
                 if connection.is_failed() {
                     self.evict_connection(key, connection);
@@ -245,52 +247,101 @@ impl TcpSender {
         }
     }
 
-    fn live_connection(&self, key: &ConnectionKey) -> Option<Arc<OutboundConnection>> {
-        let connection = self.connections.get(key)?;
-        if connection.is_failed() {
-            return None;
-        }
-        Some(Arc::clone(&connection))
+    fn no_room_for(&self, key: ConnectionKey) -> io::Error {
+        let (addr, kind) = key;
+        self.stats.peer_stalled.record("peer send queue full", addr, kind);
+        transport_io_error(
+            TransportErrorCode::TcpPeerSendQueueFull,
+            format!("peer {addr} has no room for a {kind:?} frame"),
+        )
     }
 
-    fn open_connection(&self, key: ConnectionKey) -> io::Result<Arc<OutboundConnection>> {
-        let (addr, kind) = key;
-        if let Some(remaining) = self.shared.backoff_remaining(key) {
-            self.stats.backoff.record("reconnect backoff", addr, kind);
-            return Err(transport_io_error(
-                TransportErrorCode::TcpReconnectBackoff,
-                format!("peer {addr} is in reconnect backoff for another {remaining:?}"),
-            ));
+    fn live_connection(&self, key: &ConnectionKey) -> Option<Arc<OutboundConnection>> {
+        match self.slots.get(key)?.value() {
+            Slot::Live(connection) if !connection.is_failed() => Some(Arc::clone(connection)),
+            _ => None,
         }
+    }
 
-        let connection = OutboundConnection::connect(
-            addr,
-            &self.shared.tuning,
-            self.tls_config.as_deref(),
-            self.connect_timeout,
-            self.tls_handshake_timeout,
-        )
-        .inspect_err(|error| {
-            self.stats.connect_failed.record("connect failed", addr, kind);
-            // A refusal costs the caller one round trip, and discovery never
-            // dials more often than its own periods, so holding it back only
-            // drops the reply a participant that just reappeared is waiting for.
-            let refused = error.kind() == io::ErrorKind::ConnectionRefused;
-            if !(refused && kind == TcpFrameKind::Discovery) {
-                self.shared.note_connect_failure(key, error);
+    fn refuse_during_backoff(&self, key: ConnectionKey) -> io::Result<()> {
+        let Some(remaining) = self.shared.backoff_remaining(key) else {
+            return Ok(());
+        };
+        let (addr, kind) = key;
+        self.stats.backoff.record("reconnect backoff", addr, kind);
+        Err(transport_io_error(
+            TransportErrorCode::TcpReconnectBackoff,
+            format!("peer {addr} is in reconnect backoff for another {remaining:?}"),
+        ))
+    }
+
+    /// Record how a dial ended: a failure feeds the backoff and drops the
+    /// frames that waited for it, and a success clears the backoff and takes
+    /// the slot.
+    fn record_dial_result(
+        &self,
+        key: ConnectionKey,
+        cancelled: &Arc<AtomicBool>,
+        result: io::Result<OutboundConnection>,
+    ) {
+        let Entry::Occupied(mut entry) = self.slots.entry(key) else {
+            return;
+        };
+        if !matches!(entry.get(), Slot::Connecting { cancelled: current, .. }
+            if Arc::ptr_eq(current, cancelled) && !current.load(Ordering::Acquire))
+        {
+            return;
+        }
+        let (addr, kind) = key;
+        let connection = match result {
+            Ok(connection) => connection,
+            Err(error) => {
+                self.stats.connect_failed.record("connect failed", addr, kind);
+                // A refusal costs the caller one round trip, and discovery never
+                // dials more often than its own periods, so holding it back only
+                // drops the reply a participant that just reappeared is waiting for.
+                let refused = error.kind() == io::ErrorKind::ConnectionRefused;
+                if !(refused && kind == TcpFrameKind::Discovery) {
+                    self.shared.note_connect_failure(key, &error);
+                }
+                entry.remove();
+                return;
             }
-        })?;
-
+        };
         self.shared.clear_backoff(key);
-        debug!("TcpSender: established {:?} connection to {}", kind, addr);
+        if let Err(error) = self.promote(key, entry.get_mut(), connection) {
+            entry.remove();
+            debug!("TcpSender: write {:?} to {} failed: {}", kind, addr, error);
+        }
+    }
 
+    /// The waiting frames go out and the slot turns live under one lock, so a
+    /// frame sent meanwhile can neither overtake them nor be left behind in a
+    /// queue nobody drains.
+    fn promote(
+        &self,
+        key: ConnectionKey,
+        slot: &mut Slot,
+        connection: OutboundConnection,
+    ) -> io::Result<()> {
+        let Slot::Connecting { frames, .. } = slot else {
+            return Ok(());
+        };
+        let frames = std::mem::take(frames);
         let connection = Arc::new(connection);
-        self.connections.insert(key, Arc::clone(&connection));
-        Ok(connection)
+        for frame in &frames {
+            connection.send(frame)?;
+        }
+        *slot = Slot::Live(connection);
+        debug!("TcpSender: established {:?} connection to {}", key.1, key.0);
+        Ok(())
     }
 
     fn evict_connection(&self, key: ConnectionKey, connection: &Arc<OutboundConnection>) {
-        self.connections.remove_if(&key, |_, current| Arc::ptr_eq(current, connection));
+        self.slots.remove_if(
+            &key,
+            |_, slot| matches!(slot, Slot::Live(current) if Arc::ptr_eq(current, connection)),
+        );
     }
 
     /// Discard what a peer's earlier failures left behind.
@@ -305,14 +356,24 @@ impl TcpSender {
     }
 
     pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
-        self.connections.retain(|(peer, _), _| *peer != addr);
+        self.slots.retain(|(peer, _), slot| {
+            if *peer != addr {
+                return true;
+            }
+            if let Slot::Connecting { cancelled, .. } = slot {
+                cancelled.store(true, Ordering::Release);
+            }
+            false
+        });
         self.shared.clear_peer_backoff(addr);
+        if let Some(waker) = self.dial_waker.get() {
+            let _ = waker.wake();
+        }
     }
 
     pub(crate) fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
-        self.connections.clear();
-        self.pending_dials.clear();
+        self.slots.clear();
     }
 
     pub(crate) fn is_self_connection(&self, addr: &SocketAddr) -> bool {
@@ -330,7 +391,7 @@ impl TcpSender {
 
     #[cfg(test)]
     pub(crate) fn connection_count(&self) -> usize {
-        self.connections.len()
+        self.slots.iter().filter(|slot| matches!(slot.value(), Slot::Live(_))).count()
     }
 
     #[cfg(test)]
@@ -375,6 +436,18 @@ mod tests {
         )
     }
 
+    /// Dials finish on the dial loop, so a test waits for their outcome.
+    fn eventually(wait: Duration, done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + wait;
+        while !done() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
     /// A peer that cannot be reached must not leave a slot behind, and the
     /// second attempt must be refused by the backoff instead of waiting again.
     /// The other frame kind keeps its own slot and is still free to dial.
@@ -386,17 +459,24 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
         let message = test_message(0x02, b"payload");
 
-        let first = sender.send_to(peer, TcpFrameKind::UserData, &message).unwrap_err();
-        assert_ne!(first.kind(), io::ErrorKind::WouldBlock);
+        sender.send_to(peer, TcpFrameKind::UserData, &message).expect("queued for the dial");
+        assert!(
+            eventually(Duration::from_secs(2), || sender.stats.connect_failed.count() == 1
+                && !sender.slots.contains_key(&(peer, TcpFrameKind::UserData))),
+            "the failed dial left its slot behind"
+        );
         assert_eq!(sender.connection_count(), 0);
 
         let second = sender.send_to(peer, TcpFrameKind::UserData, &message).unwrap_err();
         assert_eq!(second.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(sender.stats.backoff.count(), 1);
 
-        let other_kind = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
-        assert_ne!(other_kind.kind(), io::ErrorKind::WouldBlock);
+        sender
+            .send_to(peer, TcpFrameKind::Discovery, &message)
+            .expect("the other kind is not held back by this backoff");
         assert_eq!(sender.stats.backoff.count(), 1);
+
+        sender.shutdown();
     }
 
     /// Each frame kind opens its own slot to the same peer, and no more.
@@ -414,6 +494,8 @@ mod tests {
             sender.send_to(peer, TcpFrameKind::UserData, &message).expect("user send");
         }
 
+        assert!(eventually(Duration::from_secs(2), || sender.connection_count() == 2));
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(sender.connection_count(), 2);
         sender.shutdown();
     }
@@ -533,8 +615,13 @@ mod tests {
         drop(old);
         drop(listener);
         std::thread::sleep(Duration::from_millis(100));
-        let refused = sender.send_to(peer, TcpFrameKind::Discovery, &while_down).unwrap_err();
-        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+        sender.send_to(peer, TcpFrameKind::Discovery, &while_down).expect("queued for the dial");
+        assert!(
+            eventually(Duration::from_secs(2), || sender.stats.connect_failed.count() == 1
+                && !sender.slots.contains_key(&(peer, TcpFrameKind::Discovery))),
+            "the dial to the stopped peer was never refused"
+        );
+        assert!(sender.shared.backoff_remaining((peer, TcpFrameKind::Discovery)).is_none());
 
         let restarted = std::net::TcpListener::bind(peer).expect("same port again");
         let result = sender.send_to(peer, TcpFrameKind::Discovery, &after);
@@ -562,8 +649,9 @@ mod tests {
         let mut old = accept_within(&listener, Duration::from_secs(2)).expect("first connection");
         assert_eq!(read_frame(&mut old, &first), test_framed(&first));
 
-        let connection =
-            sender.live_connection(&(peer, TcpFrameKind::UserData)).expect("an open slot");
+        let key = (peer, TcpFrameKind::UserData);
+        assert!(eventually(Duration::from_secs(2), || sender.live_connection(&key).is_some()));
+        let connection = sender.live_connection(&key).expect("an open slot");
         connection.shutdown_write();
 
         let result = sender.send_to(peer, TcpFrameKind::UserData, &retried);
@@ -583,30 +671,66 @@ mod tests {
         sender.shutdown();
     }
 
-    /// A peer that answers nothing must still put discovery into backoff: a
-    /// dial that times out holds the calling thread, so the next frame must not
-    /// wait for it again.
+    /// An address that drops every SYN without a reply, for as long as it lives.
+    struct SilentPeer {
+        addr: SocketAddr,
+        _holds: Option<(socket2::Socket, Vec<TcpStream>)>,
+    }
+
     // Only these kernels drop new SYNs without a reply once the accept queue is
     // full, which is what stands in for a host that is down.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    #[test]
-    fn a_discovery_dial_that_times_out_enters_backoff() {
+    fn silent_peer() -> Option<SilentPeer> {
         let listener = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
             .expect("socket");
         listener.bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into()).expect("bind");
         listener.listen(0).expect("listen");
-        let peer = listener.local_addr().expect("addr").as_socket().expect("inet addr");
-        let _queued: Vec<TcpStream> = (0..2)
-            .filter_map(|_| TcpStream::connect_timeout(&peer, Duration::from_millis(100)).ok())
+        let addr = listener.local_addr().expect("addr").as_socket().expect("inet addr");
+        let queued = (0..2)
+            .filter_map(|_| TcpStream::connect_timeout(&addr, Duration::from_millis(100)).ok())
             .collect();
+        Some(SilentPeer { addr, _holds: Some((listener, queued)) })
+    }
+
+    /// Elsewhere a full accept queue answers with a reset, so a documentation
+    /// address stands in, but only where this host routes it into silence;
+    /// `None` lets the caller skip instead of passing for the wrong reason.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn silent_peer() -> Option<SilentPeer> {
+        // Clear of the 192.0.2.1:7400 that the test sender takes as its own address.
+        static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20000);
+        let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
+        let addr = SocketAddr::from(([192, 0, 2, 1], port));
+        let probe =
+            crate::rtps::transport::tcp::dial::start_dial(addr, Duration::from_secs(1)).ok()?;
+        std::thread::sleep(Duration::from_millis(150));
+        let unanswered = matches!(probe.take_error(), Ok(None))
+            && matches!(probe.peer_addr(), Err(error) if error.kind() == io::ErrorKind::NotConnected);
+        unanswered.then_some(SilentPeer { addr, _holds: None })
+    }
+
+    /// A peer that answers nothing must still put discovery into backoff, so
+    /// the next frame is refused at once instead of waiting through another
+    /// dial that is bound to time out.
+    #[test]
+    fn a_discovery_dial_that_times_out_enters_backoff() {
+        let Some(silent) = silent_peer() else {
+            eprintln!("skipped: no address on this host drops SYNs without a reply");
+            return;
+        };
+        let peer = silent.addr;
 
         let bound = Duration::from_millis(200);
         let config = TcpConfig { connect_timeout: bound, ..TcpConfig::default() };
         let sender = make_sender(config);
         let message = test_message(0xC2, b"discovery");
 
-        let first = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
-        assert_eq!(first.kind(), io::ErrorKind::TimedOut);
+        sender.send_to(peer, TcpFrameKind::Discovery, &message).expect("queued for the dial");
+        assert!(
+            eventually(bound * 5, || sender.stats.connect_failed.count() == 1),
+            "the dial to a peer that answers nothing never timed out"
+        );
+        assert!(sender.shared.backoff_remaining((peer, TcpFrameKind::Discovery)).is_some());
 
         let call = Instant::now();
         let second = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
@@ -614,5 +738,313 @@ mod tests {
         assert!(call.elapsed() < bound / 2, "the second send waited {:?}", call.elapsed());
 
         sender.shutdown();
+    }
+
+    /// A candidate that never answers its SYN must not hold back the
+    /// announcement to a peer that is listening: the live peer is reached in
+    /// its own round trip, not after every timeout queued ahead of it.
+    #[test]
+    fn an_unanswered_candidate_does_not_hold_back_a_live_peer() {
+        let Some(silent) = (0..3).map(|_| silent_peer()).collect::<Option<Vec<_>>>() else {
+            eprintln!("skipped: no address on this host drops SYNs without a reply");
+            return;
+        };
+        let live = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let peer = live.local_addr().expect("addr");
+
+        let bound = Duration::from_millis(300);
+        let config = TcpConfig { connect_timeout: bound, ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let message = test_message(0xC2, b"discovery");
+
+        let start = Instant::now();
+        for candidate in &silent {
+            sender
+                .send_to_discovery(&candidate.addr, &message)
+                .expect("handoff to the dial worker");
+        }
+        sender.send_to_discovery(&peer, &message).expect("handoff to the dial worker");
+
+        let mut stream =
+            accept_within(&live, Duration::from_secs(3)).expect("the live peer was never dialed");
+        let waited = start.elapsed();
+        assert_eq!(read_frame(&mut stream, &message), test_framed(&message));
+        assert!(waited < bound, "the live peer waited {waited:?} behind unanswered candidates");
+
+        sender.shutdown();
+    }
+
+    /// A send to a peer with no connection yet must never hold the calling
+    /// thread for the dial: the frame waits for the connection instead, so a
+    /// peer that answers nothing costs the caller nothing.
+    #[test]
+    fn a_send_to_an_unanswered_peer_does_not_hold_the_caller() {
+        let Some(silent) = silent_peer() else {
+            eprintln!("skipped: no address on this host drops SYNs without a reply");
+            return;
+        };
+        let bound = Duration::from_millis(300);
+        let config = TcpConfig { connect_timeout: bound, ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let message = test_message(0x02, b"user data");
+
+        let call = Instant::now();
+        let result = sender.send_to(silent.addr, TcpFrameKind::UserData, &message);
+        let held = call.elapsed();
+
+        assert!(held < bound / 2, "the caller was held {held:?} by a dial nobody answers");
+        result.expect("a frame for a peer still being dialed is queued");
+
+        sender.shutdown();
+    }
+
+    #[test]
+    fn a_failed_queued_write_removes_the_connection_before_the_next_send() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = listener.local_addr().unwrap();
+        let socket = TcpStream::connect(peer).unwrap();
+        let old = listener.accept().unwrap().0;
+        let tuning = TcpSocketTuning::default();
+        let sender = Arc::new(TcpSender {
+            working_ips: vec![],
+            listener_port: 0,
+            connect_timeout: Duration::from_secs(1),
+            tls_handshake_timeout: Duration::from_secs(1),
+            stats: Arc::new(SendStats::default()),
+            tls_config: None,
+            shared: Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning)),
+            slots: DashMap::new(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            dial_waker: OnceLock::new(),
+        });
+        let key = (peer, TcpFrameKind::UserData);
+        let message = test_message(0x02, b"discarded after the failed write");
+        let slot = Slot::waiting_with(test_framed(&message));
+        let Slot::Connecting { cancelled, .. } = &slot else { unreachable!() };
+        let cancelled = Arc::clone(cancelled);
+        sender.slots.insert(key, slot);
+        let connection = OutboundConnection::plain(socket, &tuning).unwrap();
+        connection.shutdown_write();
+
+        sender.record_dial_result(key, &cancelled, Ok(connection));
+        let retained = sender.slots.contains_key(&key);
+        TcpSender::spawn_dial_worker(&sender).unwrap();
+        let message = test_message(0x02, b"sent on a new connection");
+        sender.send_to(peer, key.1, &message).unwrap();
+        let mut new = accept_within(&listener, Duration::from_secs(1)).unwrap();
+        let received = read_frame(&mut new, &message);
+        sender.shutdown();
+        drop(old);
+        drop(new);
+        drop(listener);
+
+        assert!(!retained, "the failed queued write left a connection in the slot");
+        assert_eq!(received, test_framed(&message));
+    }
+
+    #[test]
+    fn results_from_a_disconnected_attempt_leave_the_new_queue_untouched() {
+        for succeeded in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let peer = listener.local_addr().unwrap();
+            let socket = TcpStream::connect(peer).unwrap();
+            let accepted = listener.accept().unwrap().0;
+            let tuning = TcpSocketTuning::default();
+            let sender = TcpSender {
+                working_ips: vec![],
+                listener_port: 0,
+                connect_timeout: Duration::from_secs(1),
+                tls_handshake_timeout: Duration::from_secs(1),
+                stats: Arc::new(SendStats::default()),
+                tls_config: None,
+                shared: Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning)),
+                slots: DashMap::new(),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                dial_waker: OnceLock::new(),
+            };
+            let key = (peer, TcpFrameKind::UserData);
+            let old = Slot::waiting_with(vec![1]);
+            let Slot::Connecting { cancelled, .. } = &old else { unreachable!() };
+            let cancelled = Arc::clone(cancelled);
+            sender.slots.insert(key, old);
+            sender.disconnect_peer(peer);
+            sender.slots.insert(key, Slot::waiting_with(vec![2]));
+
+            let result = if succeeded {
+                Ok(OutboundConnection::plain(socket, &tuning).unwrap())
+            } else {
+                drop(socket);
+                Err(io::Error::from(io::ErrorKind::TimedOut))
+            };
+            sender.record_dial_result(key, &cancelled, result);
+            let waiting = sender.slots.get(&key).is_some_and(|slot| {
+                matches!(slot.value(), Slot::Connecting { frames, cancelled, .. }
+                    if frames == &vec![vec![2]] && !cancelled.load(Ordering::Acquire))
+            });
+            let failures = sender.stats.connect_failed.count();
+            let backoff = sender.shared.backoff_remaining(key);
+            sender.shutdown();
+            drop(accepted);
+            drop(listener);
+
+            assert!(cancelled.load(Ordering::Acquire));
+            assert!(waiting, "an old result changed the new queue (success: {succeeded})");
+            assert_eq!(failures, 0);
+            assert!(backoff.is_none());
+        }
+    }
+
+    #[test]
+    fn disconnecting_a_peer_cancels_its_handshake_before_redial() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("cert.pem");
+        let key_file = dir.path().join("key.pem");
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_file, generated.cert.pem()).unwrap();
+        std::fs::write(&key_file, generated.key_pair.serialize_pem()).unwrap();
+        let tls = TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file,
+            key_file,
+            server_name: "localhost".to_string(),
+            verify_peer: false,
+        };
+        let server_config = tls.build_server_config().unwrap();
+        let config = TcpConfig {
+            connect_timeout: Duration::from_secs(3),
+            tls_handshake_timeout: Duration::from_secs(3),
+            ..TcpConfig::default()
+        };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()));
+        let sender = TcpSender::new(
+            0,
+            0,
+            vec![],
+            0,
+            [0; 12],
+            Some(Arc::new(tls)),
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = listener.local_addr().unwrap();
+        let message = test_message(0x02, b"before disconnect");
+        sender.send_to(peer, TcpFrameKind::UserData, &message).unwrap();
+        let mut old = accept_within(&listener, Duration::from_secs(1)).unwrap();
+        let mut hello = [0u8; 4096];
+        assert!(old.read(&mut hello).unwrap() > 0);
+
+        sender.disconnect_peer(peer);
+        let message = test_message(0x02, b"after disconnect");
+        sender.send_to(peer, TcpFrameKind::UserData, &message).unwrap();
+        old.set_nonblocking(true).unwrap();
+        let closed = eventually(Duration::from_millis(500), || {
+            let mut sink = [0u8; 4096];
+            match (&old).read(&mut sink) {
+                Ok(0) => true,
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => true,
+                _ => false,
+            }
+        });
+        let received = accept_within(&listener, Duration::from_millis(500)).map(|socket| {
+            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut received = vec![0u8; test_framed(&message).len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let failures = sender.stats.connect_failed.count();
+        let backoff = sender.shared.backoff_remaining((peer, TcpFrameKind::UserData));
+        sender.shutdown();
+        drop(old);
+        drop(listener);
+
+        assert!(closed, "disconnect left the old handshake socket open until its deadline");
+        assert_eq!(
+            received,
+            Some(test_framed(&message)),
+            "the old attempt held back the new frame"
+        );
+        assert_eq!(failures, 0, "cancellation must not count as a connection failure");
+        assert!(backoff.is_none(), "cancellation must not delay the new attempt");
+    }
+
+    /// A TLS peer that takes the connection and then never answers the
+    /// handshake must cost only its own handshake deadline, never the dials
+    /// queued behind it.
+    #[test]
+    fn a_stalled_tls_handshake_does_not_hold_back_other_dials() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("cert.pem");
+        let key_file = dir.path().join("key.pem");
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_file, generated.cert.pem()).unwrap();
+        std::fs::write(&key_file, generated.key_pair.serialize_pem()).unwrap();
+        let tls = TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file,
+            key_file,
+            server_name: "localhost".to_string(),
+            verify_peer: false,
+        };
+        let server_config = tls.build_server_config().unwrap();
+
+        // The kernel completes the TCP connection from the accept queue, but
+        // nothing ever answers the ClientHello.
+        let stalled = std::net::TcpListener::bind("127.0.0.1:0").expect("stalled listener");
+        let live = std::net::TcpListener::bind("127.0.0.1:0").expect("live listener");
+        let live_peer = live.local_addr().expect("addr");
+
+        let handshake_bound = Duration::from_secs(1);
+        let config = TcpConfig {
+            connect_timeout: Duration::from_secs(1),
+            tls_handshake_timeout: handshake_bound,
+            ..TcpConfig::default()
+        };
+        let tuning = TcpSocketTuning {
+            nodelay: config.nodelay,
+            so_rcvbuf: config.so_rcvbuf,
+            so_sndbuf: config.so_sndbuf,
+            unacked_timeout: config.unacked_timeout,
+            keepalive: None,
+        };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning));
+        let sender = TcpSender::new(
+            0,
+            0,
+            vec!["192.0.2.1".into()],
+            7400,
+            [0; 12],
+            Some(Arc::new(tls)),
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let message = test_message(0x02, b"over tls");
+
+        let stalled_peer = stalled.local_addr().expect("addr");
+        sender.send_to(stalled_peer, TcpFrameKind::UserData, &message).expect("queued");
+        // Lets the stalled dial reach its handshake before the live one is queued.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let start = Instant::now();
+        sender.send_to(live_peer, TcpFrameKind::UserData, &message).expect("queued");
+        let socket =
+            accept_within(&live, Duration::from_secs(3)).expect("the live peer was never dialed");
+        let connection = rustls::ServerConnection::new(server_config).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut received = vec![0u8; test_framed(&message).len()];
+        stream.read_exact(&mut received).expect("a whole frame over tls");
+        let waited = start.elapsed();
+
+        assert_eq!(received, test_framed(&message));
+        assert!(
+            waited < handshake_bound / 2,
+            "the live peer waited {waited:?} behind a stalled handshake"
+        );
+
+        sender.shutdown();
+        drop(stalled);
     }
 }
