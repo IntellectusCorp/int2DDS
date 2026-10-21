@@ -417,7 +417,7 @@ class DataReader(Generic[T]):
         self._qos_handle: CData | None = None
         self._listener_ctx_id: int | None = None
         self._buffer_size = self.DEFAULT_BUFFER_SIZE
-        self._buffer = ffi.new(f"uint8_t[{self._buffer_size}]")
+        self._buffer = ffi.new("uint8_t[]", self._buffer_size)
 
         # Create QoS if provided
         qos_ptr = ffi.NULL
@@ -477,7 +477,7 @@ class DataReader(Generic[T]):
 
     def _grow_buffer(self, required: int) -> None:
         self._buffer_size = required
-        self._buffer = ffi.new(f"uint8_t[{required}]")
+        self._buffer = ffi.new("uint8_t[]", required)
 
     def _take_or_read_one(self, native_fn) -> Sample[T] | None:
         actual_size = ffi.new("size_t *")
@@ -852,7 +852,7 @@ class DataReader(Generic[T]):
         handle_ptr = ffi.from_buffer(handle)
         capacity = 64
         while True:
-            key_buf = ffi.new(f"uint8_t[{capacity}]")
+            key_buf = ffi.new("uint8_t[]", capacity)
             size_out = ffi.new("size_t *")
             ret = lib.int2dds_datareader_get_key_value(
                 self._handle, handle_ptr, key_buf, capacity, size_out
