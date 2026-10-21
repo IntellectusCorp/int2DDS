@@ -4,27 +4,55 @@ use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-#[cfg(not(windows))]
-pub(crate) fn dial(addr: SocketAddr, wait: Duration) -> io::Result<TcpStream> {
-    TcpStream::connect_timeout(&addr, wait)
-}
-
-/// The kernel there answers a refused SYN by sending it again and reports the
-/// refusal only once its retries run out, which outlasts the connect timeout
-/// and turns a cheap refusal into a timeout that earns a backoff.
-#[cfg(windows)]
-pub(crate) fn dial(addr: SocketAddr, wait: Duration) -> io::Result<TcpStream> {
+/// Send the SYN and return at once with a non-blocking stream that is still
+/// connecting. It turns writable once the peer answers either way, and only
+/// its pending error then tells an accepted connection from a refused one.
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub(crate) fn start_dial(addr: SocketAddr, wait: Duration) -> io::Result<TcpStream> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(addr),
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
-    let rtt_ms = wait.as_millis().clamp(MIN_INITIAL_RTO_MS as u128, MAX_INITIAL_RTO_MS as u128);
-    if let Err(error) = refuse_without_syn_retransmission(&socket, rtt_ms as u16) {
-        log::debug!("TCP connect to {addr} keeps retransmitting its SYN: {error}");
+    // Windows answers a refused SYN by sending it again and reports the refusal
+    // only once its retries run out, which turns a cheap refusal into a timeout
+    // that earns a backoff.
+    #[cfg(windows)]
+    {
+        let rtt_ms = wait.as_millis().clamp(MIN_INITIAL_RTO_MS as u128, MAX_INITIAL_RTO_MS as u128);
+        if let Err(error) = refuse_without_syn_retransmission(&socket, rtt_ms as u16) {
+            log::debug!("TCP connect to {addr} keeps retransmitting its SYN: {error}");
+        }
     }
-    socket.connect_timeout(&addr.into(), wait)?;
+    socket.set_nonblocking(true)?;
+    match socket.connect(&addr.into()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        Err(error) => return Err(error),
+    }
     Ok(socket.into())
+}
+
+/// Wait on the calling thread for a dial started by `start_dial` to settle.
+#[cfg(test)]
+pub(crate) fn wait_for_dial(stream: &TcpStream, wait: Duration) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Some(error) = stream.take_error()? {
+            return Err(error);
+        }
+        match stream.peer_addr() {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotConnected => {}
+            Err(error) => return Err(error),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// With its one SYN never resent, a dial to a silent host ends after a single
@@ -117,7 +145,10 @@ mod tests {
         drop(listener);
 
         let call = Instant::now();
-        let error = dial(closed, Duration::from_secs(5)).expect_err("nothing listens there");
+        let wait = Duration::from_secs(5);
+        let error = start_dial(closed, wait)
+            .and_then(|stream| wait_for_dial(&stream, wait))
+            .expect_err("nothing listens there");
 
         assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
         assert!(

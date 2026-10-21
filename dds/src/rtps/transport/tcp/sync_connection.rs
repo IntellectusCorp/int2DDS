@@ -7,7 +7,9 @@
 //! budget, which bounds memory rather than answering congestion.
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+#[cfg(test)]
+use std::net::SocketAddr;
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -16,13 +18,12 @@ use rustls::pki_types::ServerName;
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
-use crate::rtps::transport::tcp::dial::dial;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// How much a peer may owe the stream before frames are refused instead of
 /// queued. This is a bound on memory, not a congestion threshold, so it sits
 /// far above any backlog a peer that is merely behind can build up.
-const SEND_QUEUE_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+pub(crate) const SEND_QUEUE_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
 /// How long a peer may take no bytes at all while it still owes the stream.
 /// Progress of any size resets it, so only a peer that has stopped entirely
@@ -125,8 +126,9 @@ struct ConnectionState {
 }
 
 impl OutboundConnection {
-    /// Connect, tune, and complete the TLS handshake if one is configured.
-    /// Each of the two steps has its own bound; neither outlives this call.
+    /// Connect and complete the TLS handshake on the calling thread, for tests
+    /// that need a connection to a peer rather than the dial loop.
+    #[cfg(test)]
     pub(crate) fn connect(
         addr: SocketAddr,
         tuning: &TcpSocketTuning,
@@ -134,24 +136,36 @@ impl OutboundConnection {
         connect_timeout: Duration,
         tls_handshake_timeout: Duration,
     ) -> io::Result<Self> {
-        let socket = dial(addr, connect_timeout).map_err(|error| {
-            let code = match error.kind() {
-                io::ErrorKind::ConnectionRefused => TransportErrorCode::TcpConnectionRefused,
-                _ => TransportErrorCode::TcpConnectionTimeout,
-            };
-            transport_io_error(code, format!("TCP connect to {addr} failed: {error}"))
-        })?;
-        apply_socket_tuning(&socket, tuning);
-
-        let wire = match tls_config {
-            Some(config) => Wire::Tls(Box::new(handshake(socket, config, tls_handshake_timeout)?)),
-            None => {
-                socket.set_nonblocking(true)?;
-                Wire::Plain(socket)
+        let socket = TcpStream::connect_timeout(&addr, connect_timeout)?;
+        match tls_config {
+            None => Self::plain(socket, tuning),
+            Some(config) => {
+                let tls = handshake(&socket, config, tls_handshake_timeout)?;
+                Self::over_tls(socket, tls, tuning)
             }
-        };
+        }
+    }
 
-        Ok(Self {
+    /// A connected socket that carries frames as they are.
+    pub(crate) fn plain(socket: TcpStream, tuning: &TcpSocketTuning) -> io::Result<Self> {
+        apply_socket_tuning(&socket, tuning);
+        socket.set_nonblocking(true)?;
+        Ok(Self::over(Wire::Plain(socket)))
+    }
+
+    /// A connected socket whose TLS handshake has already completed.
+    pub(crate) fn over_tls(
+        socket: TcpStream,
+        tls: rustls::ClientConnection,
+        tuning: &TcpSocketTuning,
+    ) -> io::Result<Self> {
+        apply_socket_tuning(&socket, tuning);
+        socket.set_nonblocking(true)?;
+        Ok(Self::over(Wire::Tls(Box::new(rustls::StreamOwned::new(tls, socket)))))
+    }
+
+    fn over(wire: Wire) -> Self {
+        Self {
             state: Mutex::new(ConnectionState {
                 wire,
                 pending: Vec::new(),
@@ -159,7 +173,7 @@ impl OutboundConnection {
                 last_progress: Instant::now(),
             }),
             failed: AtomicBool::new(false),
-        })
+        }
     }
 
     pub(crate) fn is_failed(&self) -> bool {
@@ -302,43 +316,48 @@ fn retryable(error: &io::Error) -> bool {
     matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
-fn handshake(
-    socket: TcpStream,
-    config: &TlsConfig,
-    wait: Duration,
-) -> io::Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
+/// The client side of a TLS session that has not started its handshake yet.
+pub(crate) fn tls_client(config: &TlsConfig) -> io::Result<rustls::ClientConnection> {
     let client_config = config.build_client_config().map_err(|error| {
         transport_io_error(TransportErrorCode::TlsConfigError, error.to_string())
     })?;
     let server_name = ServerName::try_from(config.server_name().to_string()).map_err(|error| {
         transport_io_error(TransportErrorCode::TlsConfigError, error.to_string())
     })?;
-    let connection =
-        rustls::ClientConnection::new(client_config, server_name).map_err(|error| {
-            transport_io_error(TransportErrorCode::TlsHandshakeFailed, error.to_string())
-        })?;
+    rustls::ClientConnection::new(client_config, server_name).map_err(|error| {
+        transport_io_error(TransportErrorCode::TlsHandshakeFailed, error.to_string())
+    })
+}
 
+#[cfg(test)]
+fn handshake(
+    socket: &TcpStream,
+    config: &TlsConfig,
+    wait: Duration,
+) -> io::Result<rustls::ClientConnection> {
+    let mut tls = tls_client(config)?;
     socket.set_read_timeout(Some(wait))?;
     socket.set_write_timeout(Some(wait))?;
-    let mut stream = rustls::StreamOwned::new(connection, socket);
-    while stream.conn.is_handshaking() {
-        stream.conn.complete_io(&mut stream.sock).map_err(|error| {
+    let mut io = socket;
+    while tls.is_handshaking() {
+        tls.complete_io(&mut io).map_err(|error| {
             transport_io_error(
                 TransportErrorCode::TlsHandshakeFailed,
                 format!("TLS handshake failed: {error}"),
             )
         })?;
     }
-    stream.sock.set_read_timeout(None)?;
-    stream.sock.set_write_timeout(None)?;
-    stream.sock.set_nonblocking(true)?;
-    Ok(stream)
+    socket.set_read_timeout(None)?;
+    socket.set_write_timeout(None)?;
+    Ok(tls)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::tcp::dial::{start_dial, wait_for_dial};
     use std::io::Read;
+    use std::net::SocketAddr;
     use std::time::Instant;
 
     /// A peer that stops reading must cost latency, not data: its frames queue
@@ -516,15 +535,10 @@ mod tests {
         let closed = listener.local_addr().unwrap();
         drop(listener);
 
-        let error = OutboundConnection::connect(
-            closed,
-            &TcpSocketTuning::default(),
-            None,
-            crate::rtps::transport::TcpConfig::default().connect_timeout,
-            Duration::from_secs(1),
-        )
-        .err()
-        .expect("nothing listens on a closed port");
+        let wait = crate::rtps::transport::TcpConfig::default().connect_timeout;
+        let error = start_dial(closed, wait)
+            .and_then(|stream| wait_for_dial(&stream, wait))
+            .expect_err("nothing listens on a closed port");
 
         assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     }
