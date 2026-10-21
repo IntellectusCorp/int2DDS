@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ pub(super) const DIAL_WAKE_TOKEN: Token = Token(0);
 
 struct Dialing {
     key: ConnectionKey,
+    cancelled: Arc<AtomicBool>,
     stream: mio::net::TcpStream,
     deadline: Instant,
     /// Present once the TCP connection is up and its TLS handshake is under way.
@@ -69,6 +70,15 @@ impl DialLoop {
             if sender.shutdown.load(Ordering::Acquire) {
                 return;
             }
+            let cancelled: Vec<Token> = self
+                .dialing
+                .iter()
+                .filter(|(_, dialing)| dialing.cancelled.load(Ordering::Acquire))
+                .map(|(token, _)| *token)
+                .collect();
+            for token in cancelled {
+                self.remove_dial(token);
+            }
             for event in events.iter() {
                 if event.token() != DIAL_WAKE_TOKEN {
                     self.complete_answered_dial(&sender, event.token());
@@ -82,18 +92,24 @@ impl DialLoop {
     }
 
     fn dial_peers_with_queued_frames(&mut self, sender: &Arc<TcpSender>) {
-        let waiting: Vec<ConnectionKey> = sender
+        let waiting: Vec<(ConnectionKey, Arc<AtomicBool>)> = sender
             .slots
             .iter()
-            .filter(|slot| matches!(slot.value(), Slot::Connecting { .. }))
-            .map(|slot| *slot.key())
-            .filter(|key| !self.by_key.contains_key(key))
+            .filter_map(|slot| match slot.value() {
+                Slot::Connecting { cancelled, .. } if !self.by_key.contains_key(slot.key()) => {
+                    Some((*slot.key(), Arc::clone(cancelled)))
+                }
+                _ => None,
+            })
             .collect();
-        for key in waiting {
+        for (key, cancelled) in waiting {
+            if cancelled.load(Ordering::Acquire) {
+                continue;
+            }
             let mut stream = match start_dial(key.0, sender.connect_timeout) {
                 Ok(stream) => mio::net::TcpStream::from_std(stream),
                 Err(error) => {
-                    sender.record_dial_result(key, Err(error));
+                    sender.record_dial_result(key, &cancelled, Err(error));
                     continue;
                 }
             };
@@ -102,12 +118,12 @@ impl DialLoop {
             if let Err(error) =
                 self.poll.registry().register(&mut stream, token, Interest::WRITABLE)
             {
-                sender.record_dial_result(key, Err(error));
+                sender.record_dial_result(key, &cancelled, Err(error));
                 continue;
             }
             self.by_key.insert(key, token);
             let deadline = Instant::now() + sender.connect_timeout;
-            self.dialing.insert(token, Dialing { key, stream, deadline, tls: None });
+            self.dialing.insert(token, Dialing { key, cancelled, stream, deadline, tls: None });
         }
     }
 
@@ -140,15 +156,15 @@ impl DialLoop {
                 self.drive_tls_handshake(sender, token);
             }
             Ok(None) => {
-                let Some(Dialing { key, stream, .. }) = self.remove_dial(token) else {
+                let Some(Dialing { key, cancelled, stream, .. }) = self.remove_dial(token) else {
                     return;
                 };
                 let result = OutboundConnection::plain(stream.into(), &sender.shared.tuning);
-                sender.record_dial_result(key, result);
+                sender.record_dial_result(key, &cancelled, result);
             }
             Err(error) => {
-                if let Some(Dialing { key, .. }) = self.remove_dial(token) {
-                    sender.record_dial_result(key, Err(error));
+                if let Some(Dialing { key, cancelled, .. }) = self.remove_dial(token) {
+                    sender.record_dial_result(key, &cancelled, Err(error));
                 }
             }
         }
@@ -178,28 +194,29 @@ impl DialLoop {
                 if let Err(error) =
                     self.poll.registry().reregister(&mut dialing.stream, token, interest)
                 {
-                    if let Some(Dialing { key, .. }) = self.remove_dial(token) {
-                        sender.record_dial_result(key, Err(error));
+                    if let Some(Dialing { key, cancelled, .. }) = self.remove_dial(token) {
+                        sender.record_dial_result(key, &cancelled, Err(error));
                     }
                 }
             }
             Some(error) => {
-                if let Some(Dialing { key, .. }) = self.remove_dial(token) {
+                if let Some(Dialing { key, cancelled, .. }) = self.remove_dial(token) {
                     let error = transport_io_error(
                         TransportErrorCode::TlsHandshakeFailed,
                         format!("TLS handshake with {} failed: {error}", key.0),
                     );
-                    sender.record_dial_result(key, Err(error));
+                    sender.record_dial_result(key, &cancelled, Err(error));
                 }
             }
             None => {
-                let Some(Dialing { key, stream, tls: Some(tls), .. }) = self.remove_dial(token)
+                let Some(Dialing { key, cancelled, stream, tls: Some(tls), .. }) =
+                    self.remove_dial(token)
                 else {
                     return;
                 };
                 let result =
                     OutboundConnection::over_tls(stream.into(), tls, &sender.shared.tuning);
-                sender.record_dial_result(key, result);
+                sender.record_dial_result(key, &cancelled, result);
             }
         }
     }
@@ -213,7 +230,7 @@ impl DialLoop {
             .map(|(token, _)| *token)
             .collect();
         for token in overdue {
-            let Some(Dialing { key, tls, .. }) = self.remove_dial(token) else {
+            let Some(Dialing { key, cancelled, tls, .. }) = self.remove_dial(token) else {
                 continue;
             };
             let error = match tls {
@@ -226,7 +243,7 @@ impl DialLoop {
                     format!("TCP connect to {} got no answer", key.0),
                 ),
             };
-            sender.record_dial_result(key, Err(error));
+            sender.record_dial_result(key, &cancelled, Err(error));
         }
     }
 
