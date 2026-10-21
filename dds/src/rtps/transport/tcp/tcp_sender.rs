@@ -644,17 +644,15 @@ mod tests {
     }
 
     /// An address that drops every SYN without a reply, for as long as it lives.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     struct SilentPeer {
         addr: SocketAddr,
-        _listener: socket2::Socket,
-        _queued: Vec<TcpStream>,
+        _holds: Option<(socket2::Socket, Vec<TcpStream>)>,
     }
 
     // Only these kernels drop new SYNs without a reply once the accept queue is
     // full, which is what stands in for a host that is down.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn silent_peer() -> SilentPeer {
+    fn silent_peer() -> Option<SilentPeer> {
         let listener = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
             .expect("socket");
         listener.bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into()).expect("bind");
@@ -663,16 +661,35 @@ mod tests {
         let queued = (0..2)
             .filter_map(|_| TcpStream::connect_timeout(&addr, Duration::from_millis(100)).ok())
             .collect();
-        SilentPeer { addr, _listener: listener, _queued: queued }
+        Some(SilentPeer { addr, _holds: Some((listener, queued)) })
+    }
+
+    /// Elsewhere a full accept queue answers with a reset, so a documentation
+    /// address stands in, but only where this host routes it into silence;
+    /// `None` lets the caller skip instead of passing for the wrong reason.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn silent_peer() -> Option<SilentPeer> {
+        // Clear of the 192.0.2.1:7400 that the test sender takes as its own address.
+        static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20000);
+        let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
+        let addr = SocketAddr::from(([192, 0, 2, 1], port));
+        let probe =
+            crate::rtps::transport::tcp::dial::start_dial(addr, Duration::from_secs(1)).ok()?;
+        std::thread::sleep(Duration::from_millis(150));
+        let unanswered = matches!(probe.take_error(), Ok(None))
+            && matches!(probe.peer_addr(), Err(error) if error.kind() == io::ErrorKind::NotConnected);
+        unanswered.then_some(SilentPeer { addr, _holds: None })
     }
 
     /// A peer that answers nothing must still put discovery into backoff, so
     /// the next frame is refused at once instead of waiting through another
     /// dial that is bound to time out.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn a_discovery_dial_that_times_out_enters_backoff() {
-        let silent = silent_peer();
+        let Some(silent) = silent_peer() else {
+            eprintln!("skipped: no address on this host drops SYNs without a reply");
+            return;
+        };
         let peer = silent.addr;
 
         let bound = Duration::from_millis(200);
@@ -698,10 +715,12 @@ mod tests {
     /// A candidate that never answers its SYN must not hold back the
     /// announcement to a peer that is listening: the live peer is reached in
     /// its own round trip, not after every timeout queued ahead of it.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn an_unanswered_candidate_does_not_hold_back_a_live_peer() {
-        let silent: Vec<SilentPeer> = (0..3).map(|_| silent_peer()).collect();
+        let Some(silent) = (0..3).map(|_| silent_peer()).collect::<Option<Vec<_>>>() else {
+            eprintln!("skipped: no address on this host drops SYNs without a reply");
+            return;
+        };
         let live = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let peer = live.local_addr().expect("addr");
 
@@ -730,10 +749,12 @@ mod tests {
     /// A send to a peer with no connection yet must never hold the calling
     /// thread for the dial: the frame waits for the connection instead, so a
     /// peer that answers nothing costs the caller nothing.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn a_send_to_an_unanswered_peer_does_not_hold_the_caller() {
-        let silent = silent_peer();
+        let Some(silent) = silent_peer() else {
+            eprintln!("skipped: no address on this host drops SYNs without a reply");
+            return;
+        };
         let bound = Duration::from_millis(300);
         let config = TcpConfig { connect_timeout: bound, ..TcpConfig::default() };
         let sender = make_sender(config);
