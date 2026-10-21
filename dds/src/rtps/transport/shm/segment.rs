@@ -146,7 +146,16 @@ impl OwnedSegment {
         let pool_offset = ring_offset + Ring::size_for(ring_capacity);
         let total = pool_offset + pool_layout.total_size();
 
-        let shm = SharedMemory::new(&segment_name(domain, slot), total as usize, true)?;
+        // A leftover smaller than `total` fails the size check; it is still a leftover.
+        let shm = SharedMemory::new(&segment_name(domain, slot), total as usize, true).map_err(
+            |e| {
+                if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::InvalidData) {
+                    io::Error::new(io::ErrorKind::AlreadyExists, "segment already exists")
+                } else {
+                    e
+                }
+            },
+        )?;
         // A leftover segment may have live peers and its own size; never adopt
         // it. The caller unlinks and retries.
         if !shm.is_creator() {
@@ -449,5 +458,30 @@ mod tests {
 
         drop(owned);
         unlink_segment(DOMAIN, 6);
+    }
+
+    /// The probe must not map past a short object's end, which raises SIGBUS.
+    #[cfg(unix)]
+    #[test]
+    fn attaching_to_a_zero_sized_segment_fails_instead_of_faulting() {
+        const D: u32 = 239;
+        unlink_segment(D, 0);
+        let name = std::ffi::CString::new(format!("/{}", segment_name(D, 0))).unwrap();
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666) };
+        assert!(fd >= 0);
+        unsafe { libc::close(fd) };
+
+        let err = PeerSegment::attach(D, 0, 1, 1).err().expect("nothing to attach to");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        // The owner's retry matches on AlreadyExists, whatever the leftover's size.
+        let err = OwnedSegment::create(D, 0, 1, TEST_POOL_SIZE, 4).err().expect("leftover");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        // Sized but smaller, like one left by a run with a smaller pool.
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR, 0o666) };
+        assert_eq!(unsafe { libc::ftruncate(fd, 4096) }, 0);
+        unsafe { libc::close(fd) };
+        let err = OwnedSegment::create(D, 0, 1, TEST_POOL_SIZE, 4).err().expect("leftover");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        unlink_segment(D, 0);
     }
 }

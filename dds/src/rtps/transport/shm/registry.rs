@@ -313,7 +313,27 @@ impl RegistrySegment {
     pub(crate) fn open(domain: u32) -> io::Result<RegistrySegment> {
         let name = registry_name(domain);
         let size = Registry::size() as usize;
-        let mut shm = SharedMemory::new(&name, size, true)?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut shm = loop {
+            match SharedMemory::new(&name, size, true) {
+                Ok(shm) => break shm,
+                // 0 bytes: a creator mid-ftruncate, or one that died there.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        // Nothing can be mapped from a 0-byte object; replace it.
+                        warn!("[shm] replacing an unsized registry for domain {domain}");
+                        unlink_registry(domain);
+                        break SharedMemory::new(&name, size, true)?;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // Another build's registry may be live; leave it alone.
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    return Err(io::Error::other("registry layout mismatch"))
+                }
+                Err(e) => return Err(e),
+            }
+        };
 
         if shm.is_creator() {
             let registry = unsafe { Registry::init(shm.as_ptr()) };
@@ -410,6 +430,10 @@ impl ParticipantSlot {
 
     pub(crate) fn slot(&self) -> u32 {
         self.slot
+    }
+
+    pub(crate) fn domain(&self) -> u32 {
+        self.domain
     }
 
     pub(crate) fn epoch(&self) -> u64 {
@@ -520,6 +544,43 @@ mod tests {
         assert_eq!(reg.find_active(&[8; 12]), None);
         reg.release(slot, epoch);
         assert_eq!(reg.find_active(&[7; 12]), None);
+    }
+
+    /// A creator that died between shm_open and ftruncate leaves a 0-byte object;
+    /// mapping it used to SIGBUS every later participant on the domain.
+    #[cfg(unix)]
+    #[test]
+    fn a_zero_sized_registry_left_by_a_dead_creator_is_replaced() {
+        const D: u32 = 242;
+        unlink_registry(D);
+        let name = std::ffi::CString::new(format!("/{}", registry_name(D))).unwrap();
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666) };
+        assert!(fd >= 0);
+        unsafe { libc::close(fd) };
+
+        let seg = RegistrySegment::open(D).expect("an unsized registry must be replaced");
+        assert!(seg.registry().claim(std::process::id(), [6; 12], 1).is_some());
+        drop(seg);
+        unlink_registry(D);
+    }
+
+    /// A sized but smaller registry may belong to a live build with another
+    /// layout: refuse it without unlinking.
+    #[cfg(unix)]
+    #[test]
+    fn a_smaller_registry_from_another_build_is_refused_not_replaced() {
+        const D: u32 = 240;
+        unlink_registry(D);
+        let name = std::ffi::CString::new(format!("/{}", registry_name(D))).unwrap();
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666) };
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, 64) }, 0);
+        unsafe { libc::close(fd) };
+
+        assert!(RegistrySegment::open(D).is_err());
+        let path = format!("/dev/shm/{}", registry_name(D));
+        assert_eq!(std::fs::metadata(&path).map(|m| m.len()).ok(), Some(64), "{path} was replaced");
+        unlink_registry(D);
     }
 
     #[test]

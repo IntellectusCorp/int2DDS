@@ -259,6 +259,9 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn close(&self) {
         self.udp_sender.force_close();
+        if let Some(rt) = &self.runtime {
+            rt.unlink_own();
+        }
 
         for guard_arc in [
             &self.discovery_multicast_listener,
@@ -329,6 +332,26 @@ mod tests {
         assert!(!plugin.can_handle(&shm));
         assert!(plugin.advertised_default_unicast_locators().iter().all(|l| !l.is_shm()));
         plugin.close();
+    }
+
+    /// Threads may keep the runtime alive past exit, so its Drop never unlinks;
+    /// on Unix the pool then stays in /dev/shm unless close removes the name.
+    #[cfg(unix)]
+    #[test]
+    fn close_removes_the_own_segment_name() {
+        use crate::rtps::transport::shm::segment::segment_name;
+        const D: u32 = 227;
+        unlink_registry(D);
+        let plugin = plugin(D, [78; 12]);
+        let rt = plugin.shm_runtime().expect("the zero-copy runtime must be up");
+        let path = format!("/dev/shm/{}", segment_name(D, rt.slot()));
+        assert!(std::path::Path::new(&path).exists());
+
+        plugin.close();
+        assert!(!std::path::Path::new(&path).exists(), "{path} outlived close");
+        drop(rt);
+        drop(plugin);
+        unlink_registry(D);
     }
 
     #[test]

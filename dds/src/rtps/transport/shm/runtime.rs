@@ -416,6 +416,12 @@ impl ShmRuntime {
         Arc::clone(&self.own)
     }
 
+    /// Drop our segment's name at shutdown; threads still holding this runtime
+    /// may outlive the process. Existing mappings stay valid.
+    pub(crate) fn unlink_own(&self) {
+        unlink_segment(self.slot.domain(), self.slot.slot());
+    }
+
     /// Publish a lease as a slot the writer holds. `None` only if the slot
     /// fails validation, which a fresh commit never does; the slot is freed.
     pub(crate) fn commit(&self, lease: SlotLease, len: u32) -> Option<ShmSlotHandle> {
