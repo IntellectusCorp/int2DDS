@@ -30,12 +30,18 @@ namespace Int2Dds.Cdr
         private const uint MaxShortMemberId = 0x3F00; // member ids above this need the long form
         private const int MaxShortLength = 0xFFFF;    // content lengths above this need the long form
         private const ushort MuFlag = 0x4000;         // must-understand bit in a PL_CDR pid
+        private const int MaxSpareCapacity = 16 * 1024 * 1024;
+
+        // Released by ToBytes and reused by the next writer on the same thread.
+        [ThreadStatic] private static byte[]? s_spare;
 
         private byte[] _buffer;
         private int _pos;
         private int _headerSize;
         private readonly bool _littleEndian;
         private readonly bool _xcdr2;
+        // False once ToBytes has handed _buffer out: the next write copies it first.
+        private bool _ownsBuffer = true;
 
         /// <summary>
         /// Creates a new CDR writer that automatically writes the 4-byte encapsulation header.
@@ -47,7 +53,7 @@ namespace Int2Dds.Cdr
         {
             _littleEndian = littleEndian;
             _xcdr2 = xcdr2;
-            _buffer = new byte[DefaultCapacity];
+            _buffer = TakeSpare();
             _pos = 0;
             _headerSize = 0;
 
@@ -61,7 +67,7 @@ namespace Int2Dds.Cdr
         {
             _littleEndian = littleEndian;
             _xcdr2 = xcdr2;
-            _buffer = new byte[DefaultCapacity];
+            _buffer = TakeSpare();
             _pos = 0;
             _headerSize = headerSize;
         }
@@ -136,18 +142,48 @@ namespace Int2Dds.Cdr
 
         // ---- Buffer Management ----------------------------------------------
 
+        private static byte[] TakeSpare()
+        {
+            var spare = s_spare;
+            if (spare == null) return new byte[DefaultCapacity];
+            s_spare = null;
+            return spare;
+        }
+
+        private static void ReturnSpare(byte[] buffer)
+        {
+            if (buffer.Length > MaxSpareCapacity) return;
+            var spare = s_spare;
+            if (spare == null || spare.Length < buffer.Length)
+                s_spare = buffer;
+        }
+
+        /// <summary>
+        /// A new array whose contents are not zeroed where the runtime allows it; every byte must be
+        /// overwritten before it is read.
+        /// </summary>
+        internal static byte[] AllocateUninitialized(int length)
+        {
+#if NET5_0_OR_GREATER
+            return GC.AllocateUninitializedArray<byte>(length);
+#else
+            return new byte[length];
+#endif
+        }
+
         private void EnsureCapacity(int additionalBytes)
         {
             int required = _pos + additionalBytes;
-            if (required <= _buffer.Length) return;
+            if (_ownsBuffer && required <= _buffer.Length) return;
 
-            int newCapacity = _buffer.Length;
+            int newCapacity = Math.Max(_buffer.Length, DefaultCapacity);
             while (newCapacity < required)
                 newCapacity *= 2;
 
-            var newBuffer = new byte[newCapacity];
+            var newBuffer = AllocateUninitialized(newCapacity);
             Buffer.BlockCopy(_buffer, 0, newBuffer, 0, _pos);
             _buffer = newBuffer;
+            _ownsBuffer = true;
         }
 
         // ---- Primitive Writes -----------------------------------------------
@@ -359,6 +395,7 @@ namespace Int2Dds.Cdr
         public void DheaderFinalize(int token)
         {
             if (!_xcdr2) return; // XCDR1: no DHEADER
+            EnsureCapacity(0);
             uint objectSize = (uint)(_pos - token - 4);
             if (_littleEndian)
                 BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), objectSize);
@@ -405,6 +442,7 @@ namespace Int2Dds.Cdr
         /// <param name="token">The token returned by <see cref="EmheaderBegin"/>.</param>
         public void EmheaderFinalize(int token)
         {
+            EnsureCapacity(0);
             uint dataLength = (uint)(_pos - token - 4);
             if (_littleEndian)
                 BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), dataLength);
@@ -443,6 +481,7 @@ namespace Int2Dds.Cdr
         /// <summary>Backpatch a PL_CDR v1 member header, promoting to long form if needed.</summary>
         public void MemberV1Finalize(int headerPos, uint memberId, bool mustUnderstand)
         {
+            EnsureCapacity(0);
             ushort flags = mustUnderstand ? MuFlag : (ushort)0;
             bool shortReserved = memberId <= MaxShortMemberId;
             int contentStart = headerPos + (shortReserved ? 4 : 12);
@@ -499,8 +538,14 @@ namespace Int2Dds.Cdr
         /// </summary>
         public byte[] ToBytes()
         {
-            var result = new byte[_pos];
+            var result = AllocateUninitialized(_pos);
             Buffer.BlockCopy(_buffer, 0, result, 0, _pos);
+            if (_ownsBuffer)
+            {
+                ReturnSpare(_buffer);
+                _buffer = result;
+                _ownsBuffer = false;
+            }
             return result;
         }
     }
