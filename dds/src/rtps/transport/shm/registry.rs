@@ -157,6 +157,23 @@ impl Registry {
             .is_ok()
     }
 
+    /// Holds a free slot as CLAIMING under `pid` without publishing it, so no
+    /// claimer can take it until `unhold`.
+    pub(crate) fn hold_free(&self, slot: u32, pid: u32, tick: u64) -> bool {
+        self.reserve(slot, tick) && self.begin_claim(slot, pid, tick).is_some()
+    }
+
+    pub(crate) fn unhold(&self, slot: u32) {
+        if let Some(state) = self.state_of(slot) {
+            let _ = state.compare_exchange(
+                STATE_CLAIMING,
+                STATE_EMPTY,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
     pub(crate) fn claim(&self, pid: u32, guid_prefix: [u8; 12], tick: u64) -> Option<(u32, u64)> {
         for slot in 0..MAX_PARTICIPANTS as u32 {
             let state = self.state_of(slot)?;
@@ -388,6 +405,18 @@ pub(crate) fn unlink_registry(domain: u32) {
     }
 }
 
+/// Unlinks a freed slot's segment while holding the slot. Checking `is_free`
+/// first was not enough: a claimer could create its segment before the unlink.
+/// `false` when someone already claimed the slot; that claimer unlinks it.
+fn unlink_dead_segment(registry: &Registry, domain: u32, slot: u32) -> bool {
+    if !registry.hold_free(slot, std::process::id(), now_tick()) {
+        return false;
+    }
+    unlink_segment(domain, slot);
+    registry.unhold(slot);
+    true
+}
+
 /// A participant's registry entry: claimed at startup, kept alive by a
 /// heartbeat thread, released on drop.
 pub(crate) struct ParticipantSlot {
@@ -404,11 +433,8 @@ impl ParticipantSlot {
         let segment = Arc::new(RegistrySegment::open(domain)?);
 
         for dead in segment.registry().sweep_dead(now_tick(), STALE_AFTER_TICKS) {
-            // Someone may have claimed it since; unlinking then would leave the
-            // new owner's segment nameless.
-            if segment.registry().is_free(dead) {
+            if unlink_dead_segment(segment.registry(), domain, dead) {
                 debug!("[shm] reclaimed registry slot {dead} from a dead participant");
-                unlink_segment(domain, dead);
             }
         }
 
@@ -457,9 +483,7 @@ impl ParticipantSlot {
     pub(crate) fn sweep(&self) -> Vec<u32> {
         let dead = self.registry().sweep_dead(now_tick(), STALE_AFTER_TICKS);
         for slot in &dead {
-            if self.registry().is_free(*slot) {
-                unlink_segment(self.domain, *slot);
-            }
+            unlink_dead_segment(self.registry(), self.domain, *slot);
         }
         dead
     }
@@ -554,6 +578,24 @@ mod tests {
 
         assert!(reg.reserve(slot, 100));
         assert!(!reg.sweep_dead(110, 20).contains(&slot));
+    }
+
+    /// A sweeper unlinks a dead slot's segment while holding the slot; a claimer
+    /// that took it in between would have its new segment unlinked.
+    #[test]
+    fn a_held_slot_is_neither_claimed_nor_swept_until_unheld() {
+        let (_region, reg) = registry();
+        let (slot, epoch) = reg.claim(DEAD_PID, [2; 12], 0).unwrap();
+        reg.release(slot, epoch);
+
+        assert!(reg.hold_free(slot, std::process::id(), 100));
+        let (other, _) = reg.claim(std::process::id(), [3; 12], 100).unwrap();
+        assert_ne!(other, slot, "a held slot was handed to a claimer");
+        assert!(!reg.sweep_dead(100_000, 20).contains(&slot), "a live holder was swept");
+
+        reg.unhold(slot);
+        assert!(reg.is_free(slot));
+        assert!(!reg.hold_free(other, std::process::id(), 100), "a claimed slot was held");
     }
 
     #[test]
