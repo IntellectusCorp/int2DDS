@@ -87,7 +87,7 @@ jobs:
           ref: feature/xml-driver-enhanced
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11.4"
+          python-version: "3.11"
       - name: Downloads assets
         uses: robinraju/release-downloader@v1.10
         with:
@@ -272,7 +272,7 @@ jobs:
           path: .
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11.4"
+          python-version: "3.11"
       - name: Setting up environment
         run: |
           python3 -m venv .venv
