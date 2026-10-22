@@ -30,7 +30,8 @@ namespace Int2Dds.Cdr
         private const uint MaxShortMemberId = 0x3F00; // member ids above this need the long form
         private const int MaxShortLength = 0xFFFF;    // content lengths above this need the long form
         private const ushort MuFlag = 0x4000;         // must-understand bit in a PL_CDR pid
-        private const int MaxSpareCapacity = 16 * 1024 * 1024;
+        // Below the 85,000-byte LOH threshold: a retained LOH spare caused latency spikes.
+        private const int MaxSpareCapacity = 64 * 1024;
 
         // Released by ToBytes and reused by the next writer on the same thread.
         [ThreadStatic] private static byte[]? s_spare;
