@@ -149,20 +149,6 @@ jobs:
           path: target/${{ matrix.triple }}/release/libint2dds_java.so
           if-no-files-found: error
 
-      # Built here, not in verify-glibc-floor, so the loader inherits this
-      # image's glibc 2.28 floor and runs in every target container without a
-      # compiler or python — ubi8 and the ubuntu base images ship neither.
-      - name: Build the glibc floor smoke-test loader
-        if: matrix.triple == 'x86_64-unknown-linux-gnu'
-        run: gcc -O2 -o glibc-floor-check .github/scripts/ci/glibc-floor-check.c -ldl
-
-      - uses: actions/upload-artifact@v4
-        if: matrix.triple == 'x86_64-unknown-linux-gnu'
-        with:
-          name: glibc-floor-check
-          path: glibc-floor-check
-          if-no-files-found: error
-
   # Proves the "build low, run high" claim instead of trusting it: the glibc
   # 2.28 artifact is loaded on every OS the RMW layer targets. dlopen(RTLD_NOW)
   # forces full relocation, so a missing symbol version fails here rather than
@@ -180,15 +166,24 @@ jobs:
           - { image: "ubuntu:22.04", glibc: "2.35" }   # ROS 2 Humble
           - { image: "ubuntu:24.04", glibc: "2.39" }   # ROS 2 Jazzy / Kilted / Rolling
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts/ci/glibc-floor-check.c
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v4
         with:
           name: native-linux-x86_64
           path: art
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: glibc-floor-check
-          path: checker
+      # Built in the same glibc 2.28 manylinux image as the library, so the
+      # loader runs in every target container without a compiler or python —
+      # ubi8 and the ubuntu base images ship neither.
+      - name: Build the glibc floor smoke-test loader
+        run: |
+          mkdir -p checker
+          docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux_2_28_x86_64 \
+            gcc -O2 -o checker/glibc-floor-check .github/scripts/ci/glibc-floor-check.c -ldl
 
       - name: Unpack the archive
         env:
@@ -197,7 +192,6 @@ jobs:
           set -euo pipefail
           mkdir -p unpacked
           tar -xzf "art/int2dds-$VERSION-linux-x86_64.tar.gz" -C unpacked
-          chmod +x checker/glibc-floor-check
 
       - name: Load the library on ${{ matrix.image }}
         env:
@@ -238,7 +232,7 @@ jobs:
         include:
           - { triple: x86_64-unknown-linux-musl,  dist: linux-x86_64-musl,  runner: ubuntu-latest,    image: "alpine:3.20" }
           - { triple: aarch64-unknown-linux-musl, dist: linux-aarch64-musl, runner: ubuntu-24.04-arm, image: "alpine:3.20" }
-          - { triple: armv7-unknown-linux-musleabihf, dist: linux-armhf-musl, runner: ubuntu-latest, image: "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:main" }
+          - { triple: armv7-unknown-linux-musleabihf, dist: linux-armhf-musl, runner: ubuntu-latest, image: "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf@sha256:c7208b0198e43fa55f1653bf35e4496e20524e42d5ae3acf700fd8337140c13c" }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -870,9 +864,53 @@ jobs:
           python -m pip install --quiet pytest
           python -m pytest python/tests/test_libpath.py -q
 
-  release:
-    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, java, verify-examples, verify-glibc-floor]
+  sbom:
+    needs: prepare
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx@0.5.9
+
+      - uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: v1.42.3
+
+      - name: Generate SBOM
+        run: bash .github/scripts/ci/generate-sbom.sh "${{ needs.prepare.outputs.version }}" dist/sbom
+
+      - name: Scan SBOM for vulnerabilities
+        id: scan
+        uses: anchore/scan-action@v7
+        with:
+          sbom: dist/sbom/int2dds-${{ needs.prepare.outputs.version }}.spdx.json
+          severity-cutoff: high
+          output-format: table
+          output-file: grype.txt
+
+      - name: Vulnerability summary
+        if: always() && steps.scan.outcome != 'skipped'
+        run: |
+          {
+            echo "### Vulnerability scan (fails on high or above)"
+            echo '```'
+            cat grype.txt 2>/dev/null || echo "no report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: dist/sbom/*.json
+
+  release:
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, java, verify-examples, verify-glibc-floor, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -883,6 +921,25 @@ jobs:
       - name: Collect assets and generate checksums
         run: ./.github/scripts/ci/collect-assets.sh "${{ needs.prepare.outputs.version }}" artifacts dist/release
 
+      - name: Attest build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/release/*
+
+      - name: Attest SBOM
+        if: github.event_name == 'push'
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/release/*.tar.gz
+            dist/release/*.zip
+            dist/release/*.nupkg
+            dist/release/*.snupkg
+            dist/release/*.whl
+            dist/release/*.jar
+          sbom-path: dist/release/int2dds-${{ needs.prepare.outputs.version }}.spdx.json
+
       - name: Create draft release
         if: github.event_name == 'push'
         env:
@@ -890,7 +947,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ github.ref_name }}"
-          # Rerun handling: if any of the 26 asset uploads fails the job fails, but
+          # Rerun handling: if any of the 28 asset uploads fails the job fails, but
           # the draft release itself already exists. On a rerun in that state
           # `gh release create` dies with "release already exists", so upload
           # (clobbering) instead of creating when the release is already there.

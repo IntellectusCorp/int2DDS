@@ -1268,13 +1268,11 @@ mod tests {
     #[test]
     fn send_reaches_listener_with_mismatched_participant_id() {
         let domain = next_test_domain();
-        let recv_port: u16 = 17601;
-        let send_port: u16 = 17602;
 
         // Receiver at participant_id 1.
         let recv_cfg = TcpConfig {
-            bind_port: Some(recv_port),
-            initial_peers: vec![format!("127.0.0.1:{recv_port}").parse().unwrap()],
+            bind_port: Some(0),
+            initial_peers: vec!["127.0.0.1:1".parse().unwrap()],
             ..TcpConfig::default()
         };
         let receiver = TcpTransportPlugin::new(
@@ -1286,10 +1284,11 @@ mod tests {
             recv_cfg,
         )
         .expect("receiver");
+        let recv_port = receiver.listener_port;
 
         // Sender at participant_id 0, allowed to dial the receiver.
         let send_cfg = TcpConfig {
-            bind_port: Some(send_port),
+            bind_port: Some(0),
             initial_peers: vec![format!("127.0.0.1:{recv_port}").parse().unwrap()],
             ..TcpConfig::default()
         };
