@@ -164,6 +164,10 @@ impl OwnedSegment {
                 "segment already exists; unlink it before creating",
             ));
         }
+        // Clones can outlive our registry slot, and the name may belong to the
+        // slot's next owner by then. `ShmRuntime` unlinks while it holds the slot.
+        let mut shm = shm;
+        shm.disown_creation();
         let base = shm.as_ptr();
         // Safety: `shm` is freshly created, zeroed and exclusively ours, with
         // room for `total` bytes; both sub-regions lie inside it, and each sets
@@ -458,6 +462,23 @@ mod tests {
 
         drop(owned);
         unlink_segment(DOMAIN, 6);
+    }
+
+    /// A segment dropped after its slot was re-issued must leave the new
+    /// owner's name alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_late_drop_keeps_the_next_owners_segment_name() {
+        const D: u32 = 244;
+        unlink_segment(D, 0);
+        let old = OwnedSegment::create(D, 0, 1, TEST_POOL_SIZE, 4).unwrap();
+        unlink_segment(D, 0);
+        let new = OwnedSegment::create(D, 0, 2, TEST_POOL_SIZE, 4).unwrap();
+
+        drop(old);
+        assert!(PeerSegment::attach(D, 0, 1, 1).is_ok(), "the new owner lost its name");
+        drop(new);
+        unlink_segment(D, 0);
     }
 
     /// The probe must not map past a short object's end, which raises SIGBUS.

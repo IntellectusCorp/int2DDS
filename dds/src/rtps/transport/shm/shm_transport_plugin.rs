@@ -334,7 +334,7 @@ mod tests {
         plugin.close();
     }
 
-    /// Threads may keep the runtime alive past exit, so its Drop never unlinks;
+    /// Threads may keep the runtime alive past exit, so its Drop may never run;
     /// on Unix the pool then stays in /dev/shm unless close removes the name.
     #[cfg(unix)]
     #[test]

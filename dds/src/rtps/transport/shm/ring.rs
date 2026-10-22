@@ -273,6 +273,9 @@ impl Ring {
         {
             return;
         }
+        // The claimer may have died before counting its claim.
+        let _ =
+            header.enqueue_pos.compare_exchange(pos, pos + 1, Ordering::AcqRel, Ordering::Relaxed);
         header.dequeue_pos.store(pos + 1, Ordering::Release);
     }
 
@@ -567,6 +570,21 @@ mod tests {
         r.push(b"after", SPILL_NONE, T).unwrap();
         let (len, _) = r.pop(&mut out, not_dead).unwrap();
         assert_eq!(&out[..len as usize], b"after");
+    }
+
+    /// Dying before counting its claim leaves `enqueue_pos` on the freed cell,
+    /// where every later push would spin.
+    #[test]
+    fn a_cell_freed_before_its_claim_was_counted_does_not_stall_producers() {
+        let (_region, mut r) = ring(4);
+        r.claim_of(0).store(claim_word(0, DEAD), Ordering::Release);
+
+        let mut out = [0u8; RING_INLINE];
+        assert!(r.pop(&mut out, not_dead).is_none());
+        assert_eq!(r.header().enqueue_pos.load(Ordering::Acquire), 1);
+        r.push(b"next", SPILL_NONE, T).unwrap();
+        let (len, _) = r.pop(&mut out, not_dead).unwrap();
+        assert_eq!(&out[..len as usize], b"next");
     }
 
     #[test]

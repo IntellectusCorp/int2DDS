@@ -326,10 +326,8 @@ where
 }
 
 pub(crate) struct ShmRuntime {
-    // Declared before `slot`: dropping our segment before releasing our
-    // registry entry keeps the entry ACTIVE while the segment name disappears,
-    // so a racing peer sees a benign attach failure, never a claim on our slot.
-    // `Arc` because a writer-side `ShmSlotHandle` holds a clone.
+    // `Arc` because a writer-side `ShmSlotHandle` holds a clone. Its name is
+    // unlinked by `Drop` below, never by the segment, which may outlive `slot`.
     own: Arc<OwnedSegment>,
     slot: ParticipantSlot,
     peers: PeerMap,
@@ -480,6 +478,13 @@ impl ShmRuntime {
             self.peers.forget_slot(&self.own, self.registry(), slot);
         }
         self.peers.forget_departed(&self.own, self.registry());
+    }
+}
+
+impl Drop for ShmRuntime {
+    // Runs before `slot` is released, so the name is still ours.
+    fn drop(&mut self) {
+        self.unlink_own();
     }
 }
 

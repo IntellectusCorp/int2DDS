@@ -142,13 +142,25 @@ impl Registry {
         Some(())
     }
 
+    /// EMPTY to CLAIMING. The heartbeat goes in first: until `begin_claim`, the
+    /// entry still holds the previous occupant's stale heartbeat and dead pid.
+    fn reserve(&self, slot: u32, tick: u64) -> bool {
+        let (Some(state), Some(hb)) = (self.state_of(slot), self.heartbeat_of(slot)) else {
+            return false;
+        };
+        if state.load(Ordering::Acquire) != STATE_EMPTY {
+            return false;
+        }
+        hb.store(tick, Ordering::Release);
+        state
+            .compare_exchange(STATE_EMPTY, STATE_CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
+
     pub(crate) fn claim(&self, pid: u32, guid_prefix: [u8; 12], tick: u64) -> Option<(u32, u64)> {
         for slot in 0..MAX_PARTICIPANTS as u32 {
             let state = self.state_of(slot)?;
-            if state
-                .compare_exchange(STATE_EMPTY, STATE_CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err()
-            {
+            if !self.reserve(slot, tick) {
                 continue;
             }
             self.begin_claim(slot, pid, tick)?;
@@ -285,11 +297,7 @@ impl Registry {
     #[cfg(test)]
     pub(crate) fn claim_without_publishing_for_test(&self, pid: u32, tick: u64) -> Option<u32> {
         for slot in 0..MAX_PARTICIPANTS as u32 {
-            let state = self.state_of(slot)?;
-            if state
-                .compare_exchange(STATE_EMPTY, STATE_CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err()
-            {
+            if !self.reserve(slot, tick) {
                 continue;
             }
             self.begin_claim(slot, pid, tick)?;
@@ -534,6 +542,18 @@ mod tests {
 
         let (again, _) = reg.claim(123, [3; 12], 0).unwrap();
         assert_eq!(again, dead);
+    }
+
+    /// A claimer stalled right after its CAS must not be judged by the
+    /// previous occupant's heartbeat and pid.
+    #[test]
+    fn a_slot_just_reserved_is_not_swept_on_its_predecessors_record() {
+        let (_region, reg) = registry();
+        let (slot, epoch) = reg.claim(DEAD_PID, [2; 12], 0).unwrap();
+        reg.release(slot, epoch);
+
+        assert!(reg.reserve(slot, 100));
+        assert!(!reg.sweep_dead(110, 20).contains(&slot));
     }
 
     #[test]
