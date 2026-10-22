@@ -247,6 +247,9 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn close(&self) {
         self.udp_sender.force_close();
+        if let Some(rt) = &self.runtime {
+            rt.unlink_own();
+        }
 
         for guard_arc in [
             &self.discovery_multicast_listener,
@@ -328,6 +331,26 @@ mod tests {
         plugin.close();
     }
 
+    /// Threads may keep the runtime alive past exit, so its Drop may never run;
+    /// on Unix the pool then stays in /dev/shm unless close removes the name.
+    #[cfg(unix)]
+    #[test]
+    fn close_removes_the_own_segment_name() {
+        use crate::rtps::transport::shm::segment::segment_name;
+        const D: u32 = 227;
+        unlink_registry(D);
+        let plugin = plugin(D, [78; 12]);
+        let rt = plugin.shm_runtime().expect("the zero-copy runtime must be up");
+        let path = format!("/dev/shm/{}", segment_name(D, rt.slot()));
+        assert!(std::path::Path::new(&path).exists());
+
+        plugin.close();
+        assert!(!std::path::Path::new(&path).exists(), "{path} outlived close");
+        drop(rt);
+        drop(plugin);
+        unlink_registry(D);
+    }
+
     #[test]
     fn send_to_peer_lands_in_the_peers_ring_and_refuses_a_foreign_locator() {
         const OWN_PREFIX: GuidPrefix = [76; 12];
@@ -354,7 +377,8 @@ mod tests {
         let locator = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7410);
         plugin.send_to_peer(b"descriptor", &locator, PEER_PREFIX).unwrap();
         let mut out = [0u8; RING_INLINE];
-        let (len, _) = peer.ring_mut().pop(&mut out).expect("the peer's ring must carry it");
+        let (len, _) =
+            peer.ring_mut().pop(&mut out, |_| true).expect("the peer's ring must carry it");
         assert_eq!(&out[..len as usize], b"descriptor");
 
         // Another host's SHM locator, and a UDP one, are not zero-copy targets.

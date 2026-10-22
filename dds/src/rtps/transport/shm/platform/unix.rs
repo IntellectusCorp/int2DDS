@@ -37,6 +37,15 @@ impl UnixSharedMemory {
             (Self::open_shm(&name_cstr)?, false)
         };
 
+        if !is_creator {
+            // Touching past the object's end raises SIGBUS; a creator still before
+            // its ftruncate, or one that died there, leaves it short.
+            if let Err(e) = Self::ensure_size(fd, size) {
+                unsafe { close(fd) };
+                return Err(e);
+            }
+        }
+
         let ptr = Self::map_memory(fd, size)?;
 
         Ok(Self { fd, ptr, size, name: shm_name, is_creator })
@@ -80,6 +89,27 @@ impl UnixSharedMemory {
         Ok(fd)
     }
 
+    /// `WouldBlock` while the object is still 0 bytes (not yet ftruncated);
+    /// `InvalidData` when it has another, smaller size.
+    #[cfg(unix)]
+    fn ensure_size(fd: i32, size: usize) -> io::Result<()> {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let actual = st.st_size as u64;
+        if actual == 0 && size > 0 {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "shared memory object not sized"));
+        }
+        if actual < size as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shared memory object is smaller than the mapping",
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     fn map_memory(fd: i32, size: usize) -> io::Result<*mut u8> {
         let ptr =
@@ -99,6 +129,11 @@ impl UnixSharedMemory {
 
     #[cfg(not(unix))]
     fn open_shm(_name: &CString) -> io::Result<i32> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "Unix only"))
+    }
+
+    #[cfg(not(unix))]
+    fn ensure_size(_fd: i32, _size: usize) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "Unix only"))
     }
 

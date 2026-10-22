@@ -142,13 +142,42 @@ impl Registry {
         Some(())
     }
 
+    /// EMPTY to CLAIMING. The heartbeat goes in first: until `begin_claim`, the
+    /// entry still holds the previous occupant's stale heartbeat and dead pid.
+    fn reserve(&self, slot: u32, tick: u64) -> bool {
+        let (Some(state), Some(hb)) = (self.state_of(slot), self.heartbeat_of(slot)) else {
+            return false;
+        };
+        if state.load(Ordering::Acquire) != STATE_EMPTY {
+            return false;
+        }
+        hb.store(tick, Ordering::Release);
+        state
+            .compare_exchange(STATE_EMPTY, STATE_CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Holds a free slot as CLAIMING under `pid` without publishing it, so no
+    /// claimer can take it until `unhold`.
+    pub(crate) fn hold_free(&self, slot: u32, pid: u32, tick: u64) -> bool {
+        self.reserve(slot, tick) && self.begin_claim(slot, pid, tick).is_some()
+    }
+
+    pub(crate) fn unhold(&self, slot: u32) {
+        if let Some(state) = self.state_of(slot) {
+            let _ = state.compare_exchange(
+                STATE_CLAIMING,
+                STATE_EMPTY,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
     pub(crate) fn claim(&self, pid: u32, guid_prefix: [u8; 12], tick: u64) -> Option<(u32, u64)> {
         for slot in 0..MAX_PARTICIPANTS as u32 {
             let state = self.state_of(slot)?;
-            if state
-                .compare_exchange(STATE_EMPTY, STATE_CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err()
-            {
+            if !self.reserve(slot, tick) {
                 continue;
             }
             self.begin_claim(slot, pid, tick)?;
@@ -285,11 +314,7 @@ impl Registry {
     #[cfg(test)]
     pub(crate) fn claim_without_publishing_for_test(&self, pid: u32, tick: u64) -> Option<u32> {
         for slot in 0..MAX_PARTICIPANTS as u32 {
-            let state = self.state_of(slot)?;
-            if state
-                .compare_exchange(STATE_EMPTY, STATE_CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err()
-            {
+            if !self.reserve(slot, tick) {
                 continue;
             }
             self.begin_claim(slot, pid, tick)?;
@@ -313,7 +338,27 @@ impl RegistrySegment {
     pub(crate) fn open(domain: u32) -> io::Result<RegistrySegment> {
         let name = registry_name(domain);
         let size = Registry::size() as usize;
-        let mut shm = SharedMemory::new(&name, size, true)?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut shm = loop {
+            match SharedMemory::new(&name, size, true) {
+                Ok(shm) => break shm,
+                // 0 bytes: a creator mid-ftruncate, or one that died there.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        // Nothing can be mapped from a 0-byte object; replace it.
+                        warn!("[shm] replacing an unsized registry for domain {domain}");
+                        unlink_registry(domain);
+                        break SharedMemory::new(&name, size, true)?;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // Another build's registry may be live; leave it alone.
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    return Err(io::Error::other("registry layout mismatch"))
+                }
+                Err(e) => return Err(e),
+            }
+        };
 
         if shm.is_creator() {
             let registry = unsafe { Registry::init(shm.as_ptr()) };
@@ -360,6 +405,18 @@ pub(crate) fn unlink_registry(domain: u32) {
     }
 }
 
+/// Unlinks a freed slot's segment while holding the slot. Checking `is_free`
+/// first was not enough: a claimer could create its segment before the unlink.
+/// `false` when someone already claimed the slot; that claimer unlinks it.
+fn unlink_dead_segment(registry: &Registry, domain: u32, slot: u32) -> bool {
+    if !registry.hold_free(slot, std::process::id(), now_tick()) {
+        return false;
+    }
+    unlink_segment(domain, slot);
+    registry.unhold(slot);
+    true
+}
+
 /// A participant's registry entry: claimed at startup, kept alive by a
 /// heartbeat thread, released on drop.
 pub(crate) struct ParticipantSlot {
@@ -376,11 +433,8 @@ impl ParticipantSlot {
         let segment = Arc::new(RegistrySegment::open(domain)?);
 
         for dead in segment.registry().sweep_dead(now_tick(), STALE_AFTER_TICKS) {
-            // Someone may have claimed it since; unlinking then would leave the
-            // new owner's segment nameless.
-            if segment.registry().is_free(dead) {
+            if unlink_dead_segment(segment.registry(), domain, dead) {
                 debug!("[shm] reclaimed registry slot {dead} from a dead participant");
-                unlink_segment(domain, dead);
             }
         }
 
@@ -412,6 +466,10 @@ impl ParticipantSlot {
         self.slot
     }
 
+    pub(crate) fn domain(&self) -> u32 {
+        self.domain
+    }
+
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -425,9 +483,7 @@ impl ParticipantSlot {
     pub(crate) fn sweep(&self) -> Vec<u32> {
         let dead = self.registry().sweep_dead(now_tick(), STALE_AFTER_TICKS);
         for slot in &dead {
-            if self.registry().is_free(*slot) {
-                unlink_segment(self.domain, *slot);
-            }
+            unlink_dead_segment(self.registry(), self.domain, *slot);
         }
         dead
     }
@@ -512,6 +568,36 @@ mod tests {
         assert_eq!(again, dead);
     }
 
+    /// A claimer stalled right after its CAS must not be judged by the
+    /// previous occupant's heartbeat and pid.
+    #[test]
+    fn a_slot_just_reserved_is_not_swept_on_its_predecessors_record() {
+        let (_region, reg) = registry();
+        let (slot, epoch) = reg.claim(DEAD_PID, [2; 12], 0).unwrap();
+        reg.release(slot, epoch);
+
+        assert!(reg.reserve(slot, 100));
+        assert!(!reg.sweep_dead(110, 20).contains(&slot));
+    }
+
+    /// A sweeper unlinks a dead slot's segment while holding the slot; a claimer
+    /// that took it in between would have its new segment unlinked.
+    #[test]
+    fn a_held_slot_is_neither_claimed_nor_swept_until_unheld() {
+        let (_region, reg) = registry();
+        let (slot, epoch) = reg.claim(DEAD_PID, [2; 12], 0).unwrap();
+        reg.release(slot, epoch);
+
+        assert!(reg.hold_free(slot, std::process::id(), 100));
+        let (other, _) = reg.claim(std::process::id(), [3; 12], 100).unwrap();
+        assert_ne!(other, slot, "a held slot was handed to a claimer");
+        assert!(!reg.sweep_dead(100_000, 20).contains(&slot), "a live holder was swept");
+
+        reg.unhold(slot);
+        assert!(reg.is_free(slot));
+        assert!(!reg.hold_free(other, std::process::id(), 100), "a claimed slot was held");
+    }
+
     #[test]
     fn find_active_locates_a_participant_by_prefix_and_ignores_released_ones() {
         let (_region, reg) = registry();
@@ -520,6 +606,43 @@ mod tests {
         assert_eq!(reg.find_active(&[8; 12]), None);
         reg.release(slot, epoch);
         assert_eq!(reg.find_active(&[7; 12]), None);
+    }
+
+    /// A creator that died between shm_open and ftruncate leaves a 0-byte object;
+    /// mapping it used to SIGBUS every later participant on the domain.
+    #[cfg(unix)]
+    #[test]
+    fn a_zero_sized_registry_left_by_a_dead_creator_is_replaced() {
+        const D: u32 = 242;
+        unlink_registry(D);
+        let name = std::ffi::CString::new(format!("/{}", registry_name(D))).unwrap();
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666) };
+        assert!(fd >= 0);
+        unsafe { libc::close(fd) };
+
+        let seg = RegistrySegment::open(D).expect("an unsized registry must be replaced");
+        assert!(seg.registry().claim(std::process::id(), [6; 12], 1).is_some());
+        drop(seg);
+        unlink_registry(D);
+    }
+
+    /// A sized but smaller registry may belong to a live build with another
+    /// layout: refuse it without unlinking.
+    #[cfg(unix)]
+    #[test]
+    fn a_smaller_registry_from_another_build_is_refused_not_replaced() {
+        const D: u32 = 240;
+        unlink_registry(D);
+        let name = std::ffi::CString::new(format!("/{}", registry_name(D))).unwrap();
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666) };
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, 64) }, 0);
+        unsafe { libc::close(fd) };
+
+        assert!(RegistrySegment::open(D).is_err());
+        let path = format!("/dev/shm/{}", registry_name(D));
+        assert_eq!(std::fs::metadata(&path).map(|m| m.len()).ok(), Some(64), "{path} was replaced");
+        unlink_registry(D);
     }
 
     #[test]

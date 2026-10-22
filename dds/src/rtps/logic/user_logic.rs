@@ -159,21 +159,10 @@ impl NackFragRequest {
             let outstanding =
                 proxy.first_incomplete_fragmented_sn(SequenceNumber::ZERO, self.last_sn).is_some();
 
-            // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with
-            // can_handle guarding the local-side reachability.
-            let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
-            let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
-                let v: Vec<&Locator> = locs
-                    .iter()
-                    .copied()
-                    .filter(|l| is_kind(l) && self.transport.can_handle(l))
-                    .collect();
-                (!v.is_empty()).then_some(v)
-            };
-            let chosen: Vec<Locator> = try_kind(Locator::is_shm)
-                .or_else(|| try_kind(Locator::is_tcp))
-                .or_else(|| try_kind(Locator::is_udp))
-                .unwrap_or(locs)
+            // Same pick as send_rtps_message_to_locators: `send` cannot reach an SHM locator.
+            let plain: Vec<&Locator> =
+                proxy.unicast_locator_list().iter().filter(|l| !l.is_shm()).collect();
+            let chosen: Vec<Locator> = pick_locators(plain, |l| self.transport.can_handle(l))
                 .into_iter()
                 .cloned()
                 .collect();
@@ -750,7 +739,8 @@ impl UserLogic {
                         LOCATOR_KIND_SHM,
                     )
             };
-            Some((runtime.own_arc(), sink))
+            let own = runtime.own_arc();
+            Some((own, move |tag| runtime.producer_alive(tag), sink))
         });
     }
 }
@@ -889,7 +879,6 @@ impl UserLogic {
         let mut windows =
             SendWindows::new(self.transport.as_ref(), self.shared_send_credit(stateful_writer));
         let dst_prefix = remote_reader_guid.prefix();
-        let selected = self.locators_to_send_to(locators.iter());
 
         for change_type in requested_change_types {
             let a_change = match change_type {
@@ -900,20 +889,12 @@ impl UserLogic {
                 RequestedChangeType::Data(a_change) => a_change,
             };
 
-            let copy_to = match self.try_zero_copy(
-                &a_change,
-                remote_reader_guid,
-                group_id,
-                writer.endpoint_id(),
-                None,
-                None,
-                &selected,
-                locators.iter(),
-                &mut send_buffer,
-            ) {
-                ZeroCopy::Delivered | ZeroCopy::Nowhere => continue,
-                ZeroCopy::CopyTo(copy_to) => copy_to,
-            };
+            // Always a copy: the reader may be NACKing a descriptor it could not resolve.
+            let copy_to =
+                match self.non_shm_targets_or_nowhere(&a_change, dst_prefix, locators.iter()) {
+                    ZeroCopy::Delivered | ZeroCopy::Nowhere => continue,
+                    ZeroCopy::CopyTo(copy_to) => copy_to,
+                };
 
             if a_change.is_fragmented() {
                 let requested_change_sn = a_change.sequence_number();
@@ -938,7 +919,7 @@ impl UserLogic {
                     plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    selected.len(),
+                    copy_to.len(),
                     piggyback,
                 );
 
@@ -1115,7 +1096,8 @@ impl UserLogic {
         let reliable = reader_proxy.is_reliable();
         let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
         // Same for every change below, and one datagram is written once per locator.
-        let locator_count = self.locators_to_send_to(reader_proxy.unicast_locator_list()).len();
+        let locator_count =
+            self.non_shm_locators_to_send_to(reader_proxy.unicast_locator_list()).len();
         let dst_prefix = remote_reader_guid.prefix();
 
         let timestamp = Utc::now();
@@ -1466,7 +1448,7 @@ impl UserLogic {
                     plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    selected.len(),
+                    copy_to.len(),
                     is_piggyback_wanted,
                 );
 
@@ -1674,7 +1656,7 @@ impl UserLogic {
                                 plan,
                                 a_change.fragment_size() as usize,
                                 a_change.data_value().len(),
-                                selected.len(),
+                                copy_to.len(),
                                 reliable && piggyback,
                             );
 
@@ -3134,15 +3116,14 @@ impl UserLogic {
         pick_locators(locators, |l| self.transport.can_handle(l))
     }
 
-    /// Send `buffer` via the highest-priority transport reachable on both
-    /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
-    /// a single copy. Associated fn so `&self`-less closures (e.g. the
-    /// NACK_FRAG timer) can route through the same path.
+    /// Send `buffer` via the highest-priority non-SHM transport reachable on
+    /// both sides (TCP > UDP); a peer advertising multiple transports gets a
+    /// single copy. SHM is skipped: `send` refuses it, only `send_to_peer` reaches it.
     fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
     where
         T: IntoIterator<Item = &'a Locator>,
     {
-        self.send_rtps_message_to_selected(&self.locators_to_send_to(locators), buffer)
+        self.send_rtps_message_to_selected(&self.non_shm_locators_to_send_to(locators), buffer)
     }
 
     /// True when every picked locator is SHM and the destination is another
@@ -3229,6 +3210,19 @@ impl UserLogic {
                 return ZeroCopy::Delivered;
             }
         }
+        self.non_shm_targets_or_nowhere(change, dst_prefix, fallback)
+    }
+
+    /// The bytes to `fallback`'s non-SHM locators, or `Nowhere` when it has none.
+    fn non_shm_targets_or_nowhere<'a, T>(
+        &self,
+        change: &CacheChange,
+        dst_prefix: GuidPrefix,
+        fallback: T,
+    ) -> ZeroCopy<'a>
+    where
+        T: IntoIterator<Item = &'a Locator>,
+    {
         let copy_to = self.copy_targets(fallback);
         if copy_to.is_empty() {
             warn!(
@@ -3597,7 +3591,15 @@ impl UnicastMessageProcessor for UserLogic {
         let detached_payload =
             shm_ref.is_none().then(|| bytes::Bytes::copy_from_slice(&serialized_data));
 
-        let peer_segment = shm_ref.and_then(|_| self.resolve_shm_peer(remote_writer_guid));
+        // Unlike a rejected claim, the writer may still hold this sample: leave it
+        // missing so the reader NACKs it, and the repair comes back as a copy.
+        let peer_segment = match shm_ref {
+            Some(_) => match self.resolve_shm_peer(remote_writer_guid) {
+                Some(segment) => Some(segment),
+                None => return Ok(()),
+            },
+            None => None,
+        };
 
         for reader in matched_readers {
             let mut change = match reader.reader_cache().lock() {
@@ -4967,6 +4969,9 @@ mod tests {
     #[derive(Default)]
     struct DatagramRecorder {
         sent: Mutex<Vec<SentDatagram>>,
+        /// When set, `send_to_peer` succeeds and counts instead of refusing.
+        accept_peer_sends: std::sync::atomic::AtomicBool,
+        peer_sends: std::sync::atomic::AtomicUsize,
     }
 
     impl DatagramRecorder {
@@ -5022,6 +5027,19 @@ mod tests {
             if let SendTarget::UserData(locator) = target {
                 self.record(data, (*locator).clone());
             }
+            Ok(())
+        }
+        fn send_to_peer(
+            &self,
+            _data: &[u8],
+            _locator: &Locator,
+            _dst_prefix: GuidPrefix,
+        ) -> std::io::Result<()> {
+            use std::sync::atomic::Ordering;
+            if !self.accept_peer_sends.load(Ordering::Relaxed) {
+                return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "refused"));
+            }
+            self.peer_sends.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
         fn can_handle(&self, _locator: &Locator) -> bool {
@@ -5316,6 +5334,95 @@ mod tests {
         unlink_segment(DOMAIN, SLOT);
     }
 
+    /// A NACK may be for a descriptor the reader could not resolve; resending the
+    /// descriptor would have it NACK the same sample forever.
+    #[test]
+    fn a_nacked_slot_backed_change_is_repaired_as_a_copy() {
+        const DOMAIN: u32 = 233;
+        const SLOT: u32 = 0;
+        const SAMPLE: usize = 1024 * 1024;
+
+        unlink_segment(DOMAIN, SLOT);
+        let segment = Arc::new(
+            OwnedSegment::create(DOMAIN, SLOT, 1, DEFAULT_POOL_SIZE, DEFAULT_RING_ENTRIES).unwrap(),
+        );
+        let lease = segment.owner_mut().acquire(SAMPLE).unwrap();
+        let slot_ref = segment.owner_mut().commit(lease, SAMPLE as u32);
+        let handle = ShmSlotHandle::own(Arc::clone(&segment), slot_ref).unwrap();
+
+        let locators = vec![
+            Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411),
+            Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411),
+        ];
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer_with_locators(1, locators, Some(WINDOW_TEST_ADVERTISED));
+        recorder.accept_peer_sends.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let sn = SequenceNumber::new(0, 1);
+        let mut change = CacheChange::create_fragmented(
+            ChangeKind::Alive,
+            writer.guid(),
+            InstanceHandle::NIL,
+            sn,
+            &vec![0xA5; SAMPLE],
+            None,
+            WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+            WINDOW_TEST_FRAG_SIZE,
+        );
+        change.set_shm_slot_payload(handle);
+        writer
+            .writer_cache()
+            .lock()
+            .unwrap()
+            .add_change(Arc::new(change), writer.as_ref())
+            .unwrap();
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        assert!(round.is_empty(), "the first transmission must go as a descriptor");
+        assert_eq!(recorder.peer_sends.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let reader_guid = {
+            let proxies = writer.reader_proxies();
+            let mut guard = proxies.lock().unwrap();
+            guard[0].requested_changes_set(vec![sn]);
+            guard[0].remote_reader_guid()
+        };
+        user_logic.send_requested_changes(writer.guid().entity_id(), reader_guid).unwrap();
+
+        let repair = recorder.take();
+        assert!(!repair.is_empty(), "the NACKed sample was not resent");
+        assert!(repair.iter().all(|d| !d.locator.is_shm()), "a copy reached an SHM locator");
+        assert_eq!(
+            recorder.peer_sends.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the repair went back into the ring"
+        );
+
+        drop(segment);
+        unlink_segment(DOMAIN, SLOT);
+    }
+
+    /// HEARTBEAT, ACKNACK and GAP go through `send`, which refuses an SHM locator;
+    /// picking SHM for them dropped every one toward a peer that advertises it.
+    #[test]
+    fn a_message_without_a_descriptor_goes_to_the_non_shm_locator() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let recorder = Arc::new(DatagramRecorder::default());
+        let user_logic = UserLogic::new(participant, recorder.clone());
+
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        user_logic.send_rtps_message_to_locators([&shm, &udp], &[0u8; 20]).unwrap();
+
+        let sent: Vec<Locator> = recorder.take().into_iter().map(|d| d.locator).collect();
+        assert_eq!(sent, vec![udp]);
+        assert!(
+            user_logic.send_rtps_message_to_locators([&shm], &[0u8; 20]).is_err(),
+            "an SHM-only destination has nothing `send` can reach"
+        );
+        assert!(recorder.take().is_empty());
+    }
+
     #[test]
     fn a_first_transmission_is_bounded_by_the_peers_advertised_buffer() {
         let (_participant, user_logic, recorder, writer, _) =
@@ -5332,6 +5439,29 @@ mod tests {
             "the whole {total}-fragment sample went out in one go, so nothing bounded it"
         );
         assert_datagrams_tile(&round, "first transmission");
+    }
+
+    /// The copy goes to the non-SHM locators only, so SHM locators it skips must not
+    /// charge the window: with more SHM than UDP locators the burst used to shrink.
+    #[test]
+    fn shm_locators_the_copy_skips_do_not_charge_the_window() {
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let sent_fragments = |locators: Vec<Locator>| -> u32 {
+            let (_participant, user_logic, recorder, writer, _) =
+                windowed_writer_with_locators(1, locators, Some(WINDOW_TEST_ADVERTISED));
+            stage_fragmented_sample(&writer, 1024 * 1024);
+            let round = first_transmission(&user_logic, &writer, &recorder);
+            assert!(round.iter().all(|d| !d.locator.is_shm()), "a copy reached an SHM locator");
+            round.iter().map(|d| d.fragment_count as u32).sum()
+        };
+
+        let udp_only = sent_fragments(vec![udp.clone()]);
+        let with_shm = sent_fragments(vec![
+            Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411),
+            Locator::from_shm(&Ipv4Addr::new(192, 168, 0, 10), 7411),
+            udp,
+        ]);
+        assert_eq!(with_shm, udp_only);
     }
 
     #[test]
@@ -6311,6 +6441,44 @@ mod tests {
              re-request bytes it has, and the writer resend them into a buffer that already \
              counted them"
         );
+    }
+
+    /// Advancing past it made the reader ACK a sample the writer still held, so it was
+    /// never repaired. `NullTransport` has no runtime, so the peer cannot be resolved.
+    #[test]
+    fn a_descriptor_whose_peer_cannot_be_resolved_stays_missing() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let slot_ref = crate::rtps::transport::shm::slot::SlotRef {
+            owner_slot: 1,
+            owner_epoch_low: 1,
+            order: 0,
+            index: 0,
+            generation: 1,
+            len: 16,
+        };
+        let mut data = Data::new(reader_a.guid().entity_id(), writer_guid.entity_id(), sn);
+        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::copy_from_slice(
+            &slot_ref.to_payload(),
+        )));
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let mut message_receiver = MessageReceiver::new(participant.guid().prefix(), &from_addr);
+        let ts_header = SubmessageHeader::new(SubmessageId::INFO_TS, 0, 0);
+        message_receiver.from_timestamp(&ts_header, &InfoTimestamp::new(Utc::now()));
+
+        user_logic
+            .handle_data_message(
+                &Header::new(writer_guid.prefix()),
+                &SubmessageHeader::new(SubmessageId::DATA, 0, 0),
+                &data,
+                &message_receiver,
+            )
+            .unwrap();
+
+        let proxies = reader_a.writer_proxies();
+        let guard = proxies.lock().unwrap();
+        let proxy = guard.iter().find(|p| p.remote_writer_guid() == writer_guid).unwrap();
+        assert_eq!(proxy.expected_sn(), sn, "the reader must still be waiting for the sample");
     }
 
     // --- Fragment reassembly: a bail between completion and delivery must not leave the ---

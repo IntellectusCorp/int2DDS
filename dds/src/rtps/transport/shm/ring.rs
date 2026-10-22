@@ -2,9 +2,9 @@
 //!
 //! `Ring` is a bounded MPSC queue of fixed-size cells; each cell carries its
 //! own sequence marker, so a consumer only observes a cell after its writer
-//! published it. `Notifier` wakes the consumer: a named auto-reset event on
-//! Windows, a futex on a word inside the ring header on Linux, and polling
-//! elsewhere.
+//! published it, and the tag of the producer that claimed it. `Notifier` wakes
+//! the consumer: a named auto-reset event on Windows, a futex on a word inside
+//! the ring header on Linux, and polling elsewhere.
 
 use std::io;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -19,13 +19,15 @@ const RING_MAGIC: u64 = 0x494E_5432_5A43_524E; // "INT2ZCRN"
 #[repr(C, align(64))]
 pub(crate) struct RingEntry {
     pub seq: AtomicU64,
+    /// The low 32 bits of the claimed position above the claimer's tag.
+    pub claim: AtomicU64,
     pub len: u32,
     pub spill: u32,
     pub inline: [u8; RING_INLINE],
 }
 
 // Cells are addressed by index across processes, so the stride is wire format.
-const _: () = assert!(std::mem::size_of::<RingEntry>() == 256);
+const _: () = assert!(std::mem::size_of::<RingEntry>() == 320);
 
 #[repr(C, align(64))]
 pub(crate) struct RingHeader {
@@ -41,9 +43,31 @@ pub(crate) struct RingHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RingError {
     Full,
-    /// The cell was reclaimed by `recover_if_wedged` while this producer was
-    /// preempted; the payload was not published.
+    /// The cell was reclaimed by `recover_if_wedged` because the registry
+    /// declared this producer dead; the payload was not published.
     Preempted,
+}
+
+/// Names a producer in the cells it claims: its registry slot and the low
+/// bits of its epoch, so a re-issued slot does not pass for the dead owner.
+pub(crate) fn producer_tag(slot: u32, epoch: u64) -> u32 {
+    (slot << 16) | (epoch as u32 & 0xFFFF)
+}
+
+pub(crate) fn tag_slot(tag: u32) -> u32 {
+    tag >> 16
+}
+
+pub(crate) fn tag_epoch_matches(tag: u32, epoch: u64) -> bool {
+    tag & 0xFFFF == epoch as u32 & 0xFFFF
+}
+
+fn claim_word(pos: u64, tag: u32) -> u64 {
+    (pos as u32 as u64) << 32 | tag as u64
+}
+
+fn claims(word: u64, pos: u64) -> bool {
+    word >> 32 == pos as u32 as u64
 }
 
 pub(crate) struct Ring {
@@ -52,7 +76,7 @@ pub(crate) struct Ring {
     mask: u64,
 }
 
-// Safety: a producer only touches a cell it claimed via CAS on `enqueue_pos`,
+// Safety: a producer only touches a cell it claimed via CAS on its `claim`,
 // and a consumer only reads a cell after `seq` proves the write is published.
 unsafe impl Send for Ring {}
 unsafe impl Sync for Ring {}
@@ -79,6 +103,9 @@ impl Ring {
         let ring = Ring { base, capacity: capacity as u64, mask: capacity as u64 - 1 };
         for i in 0..capacity as u64 {
             ring.seq_of(i).store(i, Ordering::Relaxed);
+            // A zeroed word would read as a claim on position 0.
+            let previous_lap = i.wrapping_sub(capacity as u64);
+            ring.claim_of(i).store(claim_word(previous_lap, 0), Ordering::Relaxed);
         }
         (*header).magic.store(RING_MAGIC, Ordering::Release);
         Ok(ring)
@@ -126,21 +153,44 @@ impl Ring {
         unsafe { &*std::ptr::addr_of!((*self.entry_ptr(pos)).seq) }
     }
 
-    pub(crate) fn push(&self, payload: &[u8], spill: u32) -> Result<(), RingError> {
+    fn claim_of(&self, pos: u64) -> &AtomicU64 {
+        unsafe { &*std::ptr::addr_of!((*self.entry_ptr(pos)).claim) }
+    }
+
+    /// `tag` is the calling participant's `producer_tag`.
+    pub(crate) fn push(&self, payload: &[u8], spill: u32, tag: u32) -> Result<(), RingError> {
         if payload.len() > RING_INLINE {
             return Err(RingError::Full);
         }
         let header = self.header();
         let pos = loop {
-            let pos = header.enqueue_pos.load(Ordering::Relaxed);
+            let pos = header.enqueue_pos.load(Ordering::Acquire);
+            // Read before `seq`: a CAS from this value then fails if anyone
+            // claimed the cell since, in this lap or a later one.
+            let claim = self.claim_of(pos).load(Ordering::Acquire);
             let seq = self.seq_of(pos).load(Ordering::Acquire);
             let dif = seq as i64 - pos as i64;
             if dif == 0 {
-                if header
-                    .enqueue_pos
-                    .compare_exchange_weak(pos, pos + 1, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
+                let ours = !claims(claim, pos)
+                    && self
+                        .claim_of(pos)
+                        .compare_exchange(
+                            claim,
+                            claim_word(pos, tag),
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok();
+                // Whoever claimed `pos`, anyone may count the claim.
+                if ours || claims(claim, pos) {
+                    let _ = header.enqueue_pos.compare_exchange(
+                        pos,
+                        pos + 1,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    );
+                }
+                if ours {
                     break pos;
                 }
             } else if dif < 0 {
@@ -162,8 +212,8 @@ impl Ring {
             );
         }
         // A CAS, not a store: `recover_if_wedged` may have freed this cell
-        // while we were preempted, and overwriting its marker would close the
-        // cell for good.
+        // once the registry declared us dead, and overwriting its marker
+        // would close the cell for good.
         if self
             .seq_of(pos)
             .compare_exchange(pos, pos + 1, Ordering::Release, Ordering::Relaxed)
@@ -174,11 +224,16 @@ impl Ring {
         Ok(())
     }
 
-    pub(crate) fn pop(&mut self, out: &mut [u8; RING_INLINE]) -> Option<(u32, u32)> {
+    /// `alive` says whether the producer a `producer_tag` names still runs.
+    pub(crate) fn pop(
+        &mut self,
+        out: &mut [u8; RING_INLINE],
+        alive: impl Fn(u32) -> bool,
+    ) -> Option<(u32, u32)> {
         let header = self.header();
         let pos = header.dequeue_pos.load(Ordering::Relaxed);
         if self.seq_of(pos).load(Ordering::Acquire) != pos + 1 {
-            self.recover_if_wedged(pos);
+            self.recover_if_wedged(pos, alive);
             return None;
         }
         // Safety: the marker synchronizes with the producer's publishing store,
@@ -200,16 +255,15 @@ impl Ring {
         Some((len, spill))
     }
 
-    /// A producer that claimed this cell and died before publishing leaves
-    /// `seq == pos` for good, and every cell behind it unreachable. Free it
-    /// only once a full lap has been claimed since; the CAS leaves it alone
-    /// if the producer publishes after all.
-    fn recover_if_wedged(&mut self, pos: u64) {
+    /// Frees a cell whose claimer died before publishing, which would wedge the ring.
+    /// A live claimer, however long preempted, still writes the body, so its cell stays.
+    fn recover_if_wedged(&mut self, pos: u64, alive: impl Fn(u32) -> bool) {
         let header = self.header();
         if self.seq_of(pos).load(Ordering::Acquire) != pos {
             return;
         }
-        if header.enqueue_pos.load(Ordering::Acquire).wrapping_sub(pos) < self.capacity {
+        let claim = self.claim_of(pos).load(Ordering::Acquire);
+        if !claims(claim, pos) || alive(claim as u32) {
             return;
         }
         if self
@@ -219,6 +273,9 @@ impl Ring {
         {
             return;
         }
+        // The claimer may have died before counting its claim.
+        let _ =
+            header.enqueue_pos.compare_exchange(pos, pos + 1, Ordering::AcqRel, Ordering::Relaxed);
         header.dequeue_pos.store(pos + 1, Ordering::Release);
     }
 
@@ -382,6 +439,12 @@ mod tests {
     use super::*;
     use crate::rtps::transport::shm::test_region::AlignedRegion;
 
+    const T: u32 = 0x0001_0001;
+
+    fn live(_: u32) -> bool {
+        true
+    }
+
     fn ring(capacity: u32) -> (AlignedRegion, Ring) {
         let region = AlignedRegion::new(Ring::size_for(capacity) as usize);
         let r = unsafe { Ring::init(region.ptr(), capacity) }.unwrap();
@@ -392,25 +455,25 @@ mod tests {
     fn push_then_pop_round_trips_and_an_empty_ring_pops_none() {
         let (_g, mut r) = ring(4);
         let mut out = [0u8; RING_INLINE];
-        assert!(r.pop(&mut out).is_none());
-        r.push(b"hello", 7).unwrap();
-        let (len, spill) = r.pop(&mut out).unwrap();
+        assert!(r.pop(&mut out, live).is_none());
+        r.push(b"hello", 7, T).unwrap();
+        let (len, spill) = r.pop(&mut out, live).unwrap();
         assert_eq!(&out[..len as usize], b"hello");
         assert_eq!(spill, 7);
-        assert!(r.pop(&mut out).is_none());
+        assert!(r.pop(&mut out, live).is_none());
     }
 
     #[test]
     fn a_full_ring_reports_full_and_never_overwrites() {
         let (_g, mut r) = ring(2);
-        r.push(b"a", SPILL_NONE).unwrap();
-        r.push(b"b", SPILL_NONE).unwrap();
-        assert_eq!(r.push(b"c", SPILL_NONE), Err(RingError::Full));
-        assert_eq!(r.push(&[0u8; RING_INLINE + 1], SPILL_NONE), Err(RingError::Full));
+        r.push(b"a", SPILL_NONE, T).unwrap();
+        r.push(b"b", SPILL_NONE, T).unwrap();
+        assert_eq!(r.push(b"c", SPILL_NONE, T), Err(RingError::Full));
+        assert_eq!(r.push(&[0u8; RING_INLINE + 1], SPILL_NONE, T), Err(RingError::Full));
         let mut out = [0u8; RING_INLINE];
-        let (len, _) = r.pop(&mut out).unwrap();
+        let (len, _) = r.pop(&mut out, live).unwrap();
         assert_eq!(&out[..len as usize], b"a");
-        let (len, _) = r.pop(&mut out).unwrap();
+        let (len, _) = r.pop(&mut out, live).unwrap();
         assert_eq!(&out[..len as usize], b"b");
     }
 
@@ -423,9 +486,9 @@ mod tests {
         }
         unsafe { Ring::init(region.ptr(), 4) }.unwrap();
         let mut r = unsafe { Ring::attach(region.ptr(), Ring::size_for(4)) }.unwrap();
-        r.push(b"z", SPILL_NONE).unwrap();
+        r.push(b"z", SPILL_NONE, T).unwrap();
         let mut out = [0u8; RING_INLINE];
-        let (len, _) = r.pop(&mut out).unwrap();
+        let (len, _) = r.pop(&mut out, live).unwrap();
         assert_eq!(&out[..len as usize], b"z");
 
         // A corrupt capacity whose entry array runs past the mapping.
@@ -454,7 +517,7 @@ mod tests {
                 s.spawn(move || {
                     for n in 0..PER_PRODUCER {
                         let msg = [p as u8, (n & 0xFF) as u8, (n >> 8) as u8];
-                        while produce.push(&msg, SPILL_NONE).is_err() {
+                        while produce.push(&msg, SPILL_NONE, T).is_err() {
                             std::hint::spin_loop();
                         }
                     }
@@ -464,7 +527,7 @@ mod tests {
             let mut got = 0;
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while got < total {
-                if let Some((len, _)) = consume.pop(&mut out) {
+                if let Some((len, _)) = consume.pop(&mut out, live) {
                     assert_eq!(len, 3);
                     seen[out[0] as usize] += 1;
                     got += 1;
@@ -477,47 +540,104 @@ mod tests {
         assert_eq!(seen, vec![PER_PRODUCER; PRODUCERS]);
     }
 
-    #[test]
-    fn a_cell_claimed_and_never_published_is_freed_after_a_full_lap() {
-        let (_region, mut r) = ring(4);
-        // A producer claimed cell 0 and died before publishing.
+    const DEAD: u32 = 0x0005_0009;
+
+    fn not_dead(tag: u32) -> bool {
+        tag != DEAD
+    }
+
+    /// What a producer leaves behind when it stops between claim and publish.
+    fn claim_and_stall(r: &Ring, tag: u32) {
+        r.claim_of(0).store(claim_word(0, tag), Ordering::Release);
         r.header().enqueue_pos.store(1, Ordering::Release);
+    }
+
+    #[test]
+    fn a_cell_claimed_by_a_dead_producer_is_freed() {
+        let (_region, mut r) = ring(4);
+        claim_and_stall(&r, DEAD);
         for i in 0..3u8 {
-            r.push(&[i], SPILL_NONE).unwrap();
+            r.push(&[i], SPILL_NONE, T).unwrap();
         }
 
         let mut out = [0u8; RING_INLINE];
-        assert!(r.pop(&mut out).is_none(), "the wedged cell yields nothing");
-        let (len, _) = r.pop(&mut out).expect("the cell behind it becomes reachable");
+        assert!(r.pop(&mut out, live).is_none(), "a live claimer is waited for");
+        assert!(r.pop(&mut out, not_dead).is_none(), "the wedged cell yields nothing");
+        let (len, _) = r.pop(&mut out, not_dead).expect("the cell behind it becomes reachable");
         assert_eq!(&out[..len as usize], &[0u8]);
 
-        while r.pop(&mut out).is_some() {}
-        r.push(b"after", SPILL_NONE).unwrap();
-        let (len, _) = r.pop(&mut out).unwrap();
+        while r.pop(&mut out, not_dead).is_some() {}
+        r.push(b"after", SPILL_NONE, T).unwrap();
+        let (len, _) = r.pop(&mut out, not_dead).unwrap();
         assert_eq!(&out[..len as usize], b"after");
+    }
+
+    /// Dying before counting its claim leaves `enqueue_pos` on the freed cell,
+    /// where every later push would spin.
+    #[test]
+    fn a_cell_freed_before_its_claim_was_counted_does_not_stall_producers() {
+        let (_region, mut r) = ring(4);
+        r.claim_of(0).store(claim_word(0, DEAD), Ordering::Release);
+
+        let mut out = [0u8; RING_INLINE];
+        assert!(r.pop(&mut out, not_dead).is_none());
+        assert_eq!(r.header().enqueue_pos.load(Ordering::Acquire), 1);
+        r.push(b"next", SPILL_NONE, T).unwrap();
+        let (len, _) = r.pop(&mut out, not_dead).unwrap();
+        assert_eq!(&out[..len as usize], b"next");
+    }
+
+    #[test]
+    fn a_live_producers_cell_is_never_handed_to_another() {
+        let (_region, mut r) = ring(4);
+        claim_and_stall(&r, T);
+        for i in 0..3u8 {
+            r.push(&[i], SPILL_NONE, T).unwrap();
+        }
+
+        let mut out = [0u8; RING_INLINE];
+        for _ in 0..3 {
+            assert!(r.pop(&mut out, live).is_none());
+        }
+        assert_eq!(r.push(b"other", SPILL_NONE, T), Err(RingError::Full));
+
+        // The stalled producer resumes and publishes into the cell it kept.
+        unsafe {
+            let e = r.entry_ptr(0);
+            std::ptr::addr_of_mut!((*e).len).write(4);
+            let inline = std::ptr::addr_of_mut!((*e).inline) as *mut u8;
+            std::ptr::copy_nonoverlapping(b"late".as_ptr(), inline, 4);
+        }
+        r.seq_of(0).compare_exchange(0, 1, Ordering::Release, Ordering::Relaxed).unwrap();
+        let (len, _) = r.pop(&mut out, live).unwrap();
+        assert_eq!(&out[..len as usize], b"late");
+        for i in 0..3u8 {
+            let (len, _) = r.pop(&mut out, live).unwrap();
+            assert_eq!(&out[..len as usize], &[i]);
+        }
     }
 
     #[test]
     fn a_late_publish_after_recovery_loses_only_its_own_sample() {
         let (_region, mut r) = ring(4);
-        r.header().enqueue_pos.store(1, Ordering::Release);
+        claim_and_stall(&r, DEAD);
         for i in 0..3u8 {
-            r.push(&[i], SPILL_NONE).unwrap();
+            r.push(&[i], SPILL_NONE, T).unwrap();
         }
 
         let mut out = [0u8; RING_INLINE];
-        assert!(r.pop(&mut out).is_none());
+        assert!(r.pop(&mut out, not_dead).is_none());
         assert_eq!(
             r.seq_of(0).compare_exchange(0, 1, Ordering::Release, Ordering::Relaxed),
             Err(4),
             "the freed cell must refuse the late publish"
         );
         for i in 0..3u8 {
-            let (len, _) = r.pop(&mut out).unwrap();
+            let (len, _) = r.pop(&mut out, not_dead).unwrap();
             assert_eq!(&out[..len as usize], &[i]);
         }
-        r.push(b"after", SPILL_NONE).unwrap();
-        let (len, _) = r.pop(&mut out).unwrap();
+        r.push(b"after", SPILL_NONE, T).unwrap();
+        let (len, _) = r.pop(&mut out, not_dead).unwrap();
         assert_eq!(&out[..len as usize], b"after");
     }
 

@@ -69,7 +69,7 @@ impl Drop for KillOnDrop {
 fn attach_retry(domain: u32, slot: u32, my_slot: u32) -> PeerSegment {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match PeerSegment::attach(domain, slot, my_slot) {
+        match PeerSegment::attach(domain, slot, my_slot, 1) {
             Ok(p) => return p,
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
             Err(e) => panic!("attach d{domain} p{slot} failed: {e}"),
@@ -100,7 +100,7 @@ fn child_claim_and_die() {
     let mut out = [0u8; RING_INLINE];
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if let Some((len, _)) = mine.ring_mut().pop(&mut out) {
+        if let Some((len, _)) = mine.ring_mut().pop(&mut out, |_| true) {
             let r = SlotRef::decode(&out[..len as usize]).expect("descriptor");
             let claimed = parent.reader.claim(&r).expect("claim");
             assert_eq!(parent.reader.bytes(&claimed), b"frame");
@@ -141,7 +141,7 @@ fn payload_survives_the_process_boundary() {
     let slot_ref = owned.owner_mut().commit(lease, 5);
 
     let child_seg = attach_retry(DOMAIN, CHILD_SLOT, PARENT_SLOT);
-    child_seg.ring.push(&slot_ref.encode(), SPILL_NONE).unwrap();
+    child_seg.ring.push(&slot_ref.encode(), SPILL_NONE, child_seg.tag).unwrap();
 
     let status = child.wait().unwrap();
     assert!(status.success(), "child failed to claim the slot");
@@ -208,7 +208,7 @@ fn a_peer_process_wakes_a_blocked_owner() {
     let mut out = [0u8; RING_INLINE];
     let len = loop {
         // The guard from `pop` dies with this `if let`, before the wait re-locks.
-        if let Some((len, _)) = owned.ring_mut().pop(&mut out) {
+        if let Some((len, _)) = owned.ring_mut().pop(&mut out, |_| true) {
             break len;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -667,7 +667,8 @@ fn dds_subscriber_check() -> Result<String, String> {
         .registry()
         .find_active(&peer_prefix)
         .ok_or_else(|| "the publisher is not in the registry".to_string())?;
-    let peer = PeerSegment::attach(domain as u32, peer_slot, my_slot).map_err(|e| e.to_string())?;
+    let peer =
+        PeerSegment::attach(domain as u32, peer_slot, my_slot, 1).map_err(|e| e.to_string())?;
     let bit = 1u64 << my_slot;
     if !wait_until(Duration::from_secs(10), || slots_referenced_by(&peer, bit) > 0) {
         return Err(format!(
