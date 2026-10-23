@@ -2463,6 +2463,12 @@ impl DomainParticipant {
         self.lifecycle.begin_operation()
     }
 
+    // The listener slot itself, for the reader's DATA_AVAILABLE dispatch, which checks with
+    // try_read whether any listener is installed without admitting the participant.
+    pub(crate) fn listener_slot(&self) -> &RwLock<Option<Arc<dyn DomainParticipantListener>>> {
+        &self.listener
+    }
+
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn DomainParticipantListener>>> {
         let _operation = self.lifecycle.begin_operation()?;
 

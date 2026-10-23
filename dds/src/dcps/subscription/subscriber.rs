@@ -1268,6 +1268,12 @@ impl Subscriber {
         self.lifecycle.begin_operation()
     }
 
+    // The listener slot itself, for the reader's DATA_AVAILABLE dispatch, which checks with
+    // try_read whether any listener is installed without admitting the subscriber.
+    pub(crate) fn listener_slot(&self) -> &RwLock<Option<Arc<dyn SubscriberListener>>> {
+        &self.listener
+    }
+
     pub(crate) fn guid(&self) -> Guid {
         self.guid
     }

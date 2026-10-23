@@ -1484,6 +1484,46 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         let subscriber = self.subscriber_arc()?;
         let participant = subscriber.participant_arc()?;
 
+        // Every listener lookup below admits its entity, and with no listener installed at any
+        // level all of them come back empty. Skip them when one look at the slots finds no
+        // listener this dispatch could run: none on the subscriber or the participant, and none
+        // on the reader or DATA_AVAILABLE not enabled there. The slots are held together, so the
+        // answer describes a single instant instead of combining reads taken at different times
+        // while a listener moves between levels. Each slot is taken with try_read and never waits;
+        // a slot being set (or poisoned) gives up the shortcut and the lookups below run as before.
+        // The guards are released at the end of the block, before any lookup or callback.
+        let no_listener_to_run = 'check: {
+            let Ok(reader_mask) = self.mask.try_read() else {
+                break 'check false;
+            };
+            let reader_listener = if reader_mask.contains(StatusKind::DATA_AVAILABLE) {
+                match self.listener.try_read() {
+                    Ok(guard) => Some(guard),
+                    Err(_) => break 'check false,
+                }
+            } else {
+                None
+            };
+            if reader_listener.as_ref().is_some_and(|listener| listener.is_some()) {
+                break 'check false;
+            }
+            #[cfg(test)]
+            tests::run_listener_check_hook();
+            let Ok(subscriber_listener) = subscriber.listener_slot().try_read() else {
+                break 'check false;
+            };
+            if subscriber_listener.is_some() {
+                break 'check false;
+            }
+            let Ok(participant_listener) = participant.listener_slot().try_read() else {
+                break 'check false;
+            };
+            participant_listener.is_none()
+        };
+        if no_listener_to_run {
+            return Ok(());
+        }
+
         // on_data_on_readers is tried on the Subscriber and on_data_available runs only when it
         // was not called. Within on_data_available the most specific enabled listener wins.
         if subscriber.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
@@ -8127,5 +8167,444 @@ pub(crate) mod tests {
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
+    }
+
+    // ---- DATA_AVAILABLE dispatch when no listener is installed ----
+    //
+    // The dispatch may skip its listener lookups when one consistent look finds no listener it
+    // could run. These tests fix the points where that look can go wrong: listeners moving
+    // between levels during the look, listener/mask changes during it, parent deletion during
+    // it, and a callback that changes listeners (no guard may be held while it runs).
+
+    thread_local! {
+        static LISTENER_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    // Called by the dispatch after the reader's slots are read and before the subscriber's.
+    #[allow(dead_code)]
+    pub(super) fn run_listener_check_hook() {
+        LISTENER_CHECK_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow().as_ref() {
+                hook();
+            }
+        });
+    }
+
+    fn set_listener_check_hook(hook: Option<Box<dyn Fn()>>) {
+        LISTENER_CHECK_HOOK.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    // Runs the body on its own thread and fails the test if it does not finish in time (a
+    // dispatch that keeps a guard across a callback would block forever).
+    fn finish_within(seconds: u64, body: impl FnOnce() + Send + 'static) {
+        let (done_sender, done_receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            body();
+            let _ = done_sender.send(());
+        });
+        done_receiver
+            .recv_timeout(std::time::Duration::from_secs(seconds))
+            .expect("the test body blocked or panicked");
+    }
+
+    struct DispatchTree {
+        participant: crate::domain::domain_participant::DomainParticipant,
+        subscriber: Subscriber,
+        reader: DataReader<TestData>,
+    }
+
+    fn dispatch_tree(topic_name: &str, reader_mask: StatusMask) -> DispatchTree {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                topic_name,
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<TestData>(&topic, DataReaderQos::default(), None, reader_mask)
+            .unwrap();
+        DispatchTree { participant, subscriber, reader }
+    }
+
+    fn drop_tree(tree: DispatchTree) {
+        let DispatchTree { participant, .. } = tree;
+        let _ = participant.delete_contained_entities();
+        let _ = DomainParticipantFactory::get_instance().delete_participant(participant);
+    }
+
+    struct CountReader {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl DataReaderListener for CountReader {
+        type Foo = TestData;
+
+        fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+            self.count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    struct CountSubscriber {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl SubscriberListener for CountSubscriber {
+        fn on_data_on_readers(&self, _subscriber: &Subscriber) {
+            self.count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    // A reader listener that removes itself from inside the callback.
+    struct ClearReaderFromCallback {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl DataReaderListener for ClearReaderFromCallback {
+        type Foo = TestData;
+
+        fn on_data_available(&self, reader: &DataReader<Self::Foo>) {
+            self.count.fetch_add(1, Ordering::AcqRel);
+            reader.set_listener(None, StatusMask::NONE).unwrap();
+        }
+    }
+
+    // A subscriber listener that removes itself from inside the callback.
+    struct ClearSubscriberFromCallback {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl SubscriberListener for ClearSubscriberFromCallback {
+        fn on_data_on_readers(&self, subscriber: &Subscriber) {
+            self.count.fetch_add(1, Ordering::AcqRel);
+            subscriber.set_listener(None, StatusMask::default()).unwrap();
+        }
+    }
+
+    /// No listener anywhere (the rmw configuration: reader mask 0, subscriber and participant
+    /// without listeners): the three status levels are still raised and a WaitSet still wakes.
+    #[test]
+    fn data_available_without_listeners_raises_every_status_and_wakes_waitset() {
+        finish_within(30, || {
+            let tree = dispatch_tree("LfpNoListenerTopic", StatusMask::NONE);
+            let condition = tree.reader.get_statuscondition().unwrap();
+            condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
+            let wait_set = WaitSet::new();
+            wait_set.attach_condition(condition.clone()).unwrap();
+
+            tree.reader.handle_data_available_status().unwrap();
+
+            assert!(tree.reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE));
+            assert!(tree
+                .subscriber
+                .get_status_changes()
+                .unwrap()
+                .contains(StatusMask::DATA_ON_READERS));
+            assert!(tree
+                .participant
+                .get_status_changes()
+                .unwrap()
+                .contains(StatusMask::DATA_ON_READERS));
+            let active = wait_set.wait(Duration::from_seconds(5)).unwrap();
+            assert!(!active.is_empty(), "WaitSet did not wake");
+            wait_set.detach_condition(condition).unwrap();
+            drop_tree(tree);
+        });
+    }
+
+    /// A listener installed after a sample that found none runs on the next sample.
+    #[test]
+    fn listener_installed_after_a_sample_runs_on_the_next_one() {
+        finish_within(30, || {
+            let tree = dispatch_tree("LfpLateListenerTopic", StatusMask::NONE);
+            let count = Arc::new(AtomicUsize::new(0));
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(count.load(Ordering::Acquire), 0);
+
+            tree.reader
+                .set_listener(
+                    Some(Arc::new(CountReader { count: Arc::clone(&count) })),
+                    StatusMask::DATA_AVAILABLE,
+                )
+                .unwrap();
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(count.load(Ordering::Acquire), 1);
+
+            let subscriber_count = Arc::new(AtomicUsize::new(0));
+            tree.reader.set_listener(None, StatusMask::NONE).unwrap();
+            tree.subscriber
+                .set_listener(
+                    Some(Arc::new(CountSubscriber { count: Arc::clone(&subscriber_count) })),
+                    StatusMask::default(),
+                )
+                .unwrap();
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(subscriber_count.load(Ordering::Acquire), 1);
+            drop_tree(tree);
+        });
+    }
+
+    /// The listener moves from the subscriber to the reader while the dispatch is between the
+    /// reader's slots and the subscriber's: at no instant is there no listener, so one of them
+    /// must run. A look that combines per-slot reads taken at different times misses both.
+    #[test]
+    fn listener_moved_from_subscriber_to_reader_during_the_check_still_runs() {
+        finish_within(60, || {
+            for round in 0..5 {
+                let tree = dispatch_tree(&format!("LfpMoveTopic{round}"), StatusMask::default());
+                let subscriber_count = Arc::new(AtomicUsize::new(0));
+                let reader_count = Arc::new(AtomicUsize::new(0));
+                tree.subscriber
+                    .set_listener(
+                        Some(Arc::new(CountSubscriber { count: Arc::clone(&subscriber_count) })),
+                        StatusMask::default(),
+                    )
+                    .unwrap();
+
+                let mover: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> =
+                    Arc::default();
+                let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                {
+                    let mover = Arc::clone(&mover);
+                    let fired = Arc::clone(&fired);
+                    let reader = tree.reader.clone();
+                    let subscriber = tree.subscriber.clone();
+                    let reader_count = Arc::clone(&reader_count);
+                    set_listener_check_hook(Some(Box::new(move || {
+                        if fired.swap(true, Ordering::AcqRel) {
+                            return;
+                        }
+                        let reader = reader.clone();
+                        let subscriber = subscriber.clone();
+                        let reader_count = Arc::clone(&reader_count);
+                        *mover.lock().unwrap() = Some(std::thread::spawn(move || {
+                            reader
+                                .set_listener(
+                                    Some(Arc::new(CountReader { count: reader_count })),
+                                    StatusMask::default(),
+                                )
+                                .unwrap();
+                            subscriber.set_listener(None, StatusMask::default()).unwrap();
+                        }));
+                        // Time for the move to complete if nothing holds it back.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    })));
+                }
+
+                tree.reader.handle_data_available_status().unwrap();
+                set_listener_check_hook(None);
+                if let Some(handle) = mover.lock().unwrap().take() {
+                    handle.join().unwrap();
+                }
+                let ran =
+                    subscriber_count.load(Ordering::Acquire) + reader_count.load(Ordering::Acquire);
+                assert!(
+                    ran >= 1,
+                    "round {round}: no listener ran although one was installed throughout"
+                );
+                drop_tree(tree);
+            }
+        });
+    }
+
+    /// A reader listener and its mask are set while the dispatch is inside its look (the setter
+    /// writes the listener and the mask under separate locks): the dispatch neither blocks nor
+    /// loses the listener for the next sample; and a setter flipping both in a loop next to the
+    /// dispatch does not block either.
+    #[test]
+    fn listener_and_mask_changes_during_the_check_do_not_block_or_lose_the_next_sample() {
+        finish_within(60, || {
+            let tree = dispatch_tree("LfpMaskTopic", StatusMask::NONE);
+            let count = Arc::new(AtomicUsize::new(0));
+            let setter: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+            let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let setter = Arc::clone(&setter);
+                let fired = Arc::clone(&fired);
+                let reader = tree.reader.clone();
+                let count = Arc::clone(&count);
+                set_listener_check_hook(Some(Box::new(move || {
+                    if fired.swap(true, Ordering::AcqRel) {
+                        return;
+                    }
+                    let reader = reader.clone();
+                    let count = Arc::clone(&count);
+                    *setter.lock().unwrap() = Some(std::thread::spawn(move || {
+                        reader
+                            .set_listener(
+                                Some(Arc::new(CountReader { count })),
+                                StatusMask::DATA_AVAILABLE,
+                            )
+                            .unwrap();
+                    }));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                })));
+            }
+            tree.reader.handle_data_available_status().unwrap();
+            set_listener_check_hook(None);
+            let pending = setter.lock().unwrap().take();
+            match pending {
+                Some(handle) => handle.join().unwrap(),
+                // No check to stop in (tree without the shortcut): set it after the dispatch.
+                None => tree
+                    .reader
+                    .set_listener(
+                        Some(Arc::new(CountReader { count: Arc::clone(&count) })),
+                        StatusMask::DATA_AVAILABLE,
+                    )
+                    .unwrap(),
+            }
+            let before = count.load(Ordering::Acquire);
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(
+                count.load(Ordering::Acquire),
+                before + 1,
+                "listener set during the check did not run next"
+            );
+
+            // Flip listener and mask next to the dispatch.
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flipper = {
+                let reader = tree.reader.clone();
+                let stop = Arc::clone(&stop);
+                let count = Arc::clone(&count);
+                std::thread::spawn(move || {
+                    let mut on = false;
+                    while !stop.load(Ordering::Acquire) {
+                        on = !on;
+                        if on {
+                            reader
+                                .set_listener(
+                                    Some(Arc::new(CountReader { count: Arc::clone(&count) })),
+                                    StatusMask::DATA_AVAILABLE,
+                                )
+                                .unwrap();
+                        } else {
+                            reader.set_listener(None, StatusMask::NONE).unwrap();
+                        }
+                    }
+                })
+            };
+            for _ in 0..20_000 {
+                tree.reader.handle_data_available_status().unwrap();
+            }
+            stop.store(true, Ordering::Release);
+            flipper.join().unwrap();
+
+            tree.reader
+                .set_listener(
+                    Some(Arc::new(CountReader { count: Arc::clone(&count) })),
+                    StatusMask::DATA_AVAILABLE,
+                )
+                .unwrap();
+            let before = count.load(Ordering::Acquire);
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(count.load(Ordering::Acquire), before + 1);
+            drop_tree(tree);
+        });
+    }
+
+    /// The reader and its subscriber are deleted while the dispatch is inside its look: the
+    /// dispatch returns (Ok, or AlreadyDeleted from a lookup), the deletes complete, and a
+    /// dispatch after the deletion fails with AlreadyDeleted before any status is touched.
+    #[test]
+    fn parent_deletion_during_the_check_completes_and_later_samples_fail_with_already_deleted() {
+        finish_within(60, || {
+            let tree = dispatch_tree("LfpDeleteTopic", StatusMask::NONE);
+            let deleter: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<DdsResult<()>>>>> =
+                Arc::default();
+            let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let deleter = Arc::clone(&deleter);
+                let fired = Arc::clone(&fired);
+                let reader = tree.reader.clone();
+                let subscriber = tree.subscriber.clone();
+                let participant = tree.participant.clone();
+                set_listener_check_hook(Some(Box::new(move || {
+                    if fired.swap(true, Ordering::AcqRel) {
+                        return;
+                    }
+                    let reader = reader.clone();
+                    let subscriber = subscriber.clone();
+                    let participant = participant.clone();
+                    *deleter.lock().unwrap() = Some(std::thread::spawn(move || {
+                        subscriber.delete_datareader(reader)?;
+                        participant.delete_subscriber(subscriber)
+                    }));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                })));
+            }
+            let outcome = tree.reader.handle_data_available_status();
+            set_listener_check_hook(None);
+            assert!(
+                matches!(outcome, Ok(()) | Err(DdsError::AlreadyDeleted)),
+                "dispatch during deletion: {outcome:?}"
+            );
+            let pending = deleter.lock().unwrap().take();
+            match pending {
+                Some(handle) => handle.join().unwrap().unwrap(),
+                // No check to stop in (tree without the shortcut): delete after the dispatch.
+                None => {
+                    tree.subscriber.delete_datareader(tree.reader.clone()).unwrap();
+                    tree.participant.delete_subscriber(tree.subscriber.clone()).unwrap();
+                }
+            }
+            let later = tree.reader.handle_data_available_status();
+            assert!(
+                matches!(later, Err(DdsError::AlreadyDeleted)),
+                "dispatch after deletion: {later:?}"
+            );
+            drop_tree(tree);
+        });
+    }
+
+    /// Listener callbacks that change listeners from inside the callback (a set_listener write
+    /// while the dispatch held any read guard on the same slot would never return).
+    #[test]
+    fn callbacks_that_change_listeners_do_not_block() {
+        finish_within(30, || {
+            let tree = dispatch_tree("LfpCallbackTopic", StatusMask::DATA_AVAILABLE);
+            let count = Arc::new(AtomicUsize::new(0));
+            tree.reader
+                .set_listener(
+                    Some(Arc::new(ClearReaderFromCallback { count: Arc::clone(&count) })),
+                    StatusMask::DATA_AVAILABLE,
+                )
+                .unwrap();
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(count.load(Ordering::Acquire), 1);
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(count.load(Ordering::Acquire), 1, "cleared listener ran again");
+
+            let subscriber_count = Arc::new(AtomicUsize::new(0));
+            tree.subscriber
+                .set_listener(
+                    Some(Arc::new(ClearSubscriberFromCallback {
+                        count: Arc::clone(&subscriber_count),
+                    })),
+                    StatusMask::default(),
+                )
+                .unwrap();
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(subscriber_count.load(Ordering::Acquire), 1);
+            tree.reader.handle_data_available_status().unwrap();
+            assert_eq!(subscriber_count.load(Ordering::Acquire), 1);
+            drop_tree(tree);
+        });
     }
 }
