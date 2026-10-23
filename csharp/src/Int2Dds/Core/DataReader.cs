@@ -24,7 +24,10 @@ namespace Int2Dds.Core
     {
         private const int DefaultBufferSize = 65536;
 
+        private delegate T SpanDeserializer(ReadOnlySpan<byte> data);
+
         private static readonly Func<byte[], T> s_deserializer = CreateDeserializer();
+        private static readonly SpanDeserializer? s_spanDeserializer = CreateSpanDeserializer();
 
         private static Func<byte[], T> CreateDeserializer()
         {
@@ -33,7 +36,18 @@ namespace Int2Dds.Core
             if (method == null)
                 throw new InvalidOperationException(
                     $"{typeof(T).Name} must have a public static DeserializeCdr(byte[]) method.");
+            if (Delegate.CreateDelegate(typeof(Func<byte[], T>), method, false) is Func<byte[], T> direct)
+                return direct;
             return (byte[] data) => (T)method.Invoke(null, new object[] { data });
+        }
+
+        private static SpanDeserializer? CreateSpanDeserializer()
+        {
+            var method = typeof(T).GetMethod("DeserializeCdr", BindingFlags.Public | BindingFlags.Static,
+                null, new[] { typeof(ReadOnlySpan<byte>) }, null);
+            return method == null
+                ? null
+                : Delegate.CreateDelegate(typeof(SpanDeserializer), method, false) as SpanDeserializer;
         }
 
         private readonly IntPtr _handle;
@@ -1034,11 +1048,14 @@ namespace Int2Dds.Core
 
         // -- Private helpers --------------------------------------------------
 
-        private byte[] CopyBuffer(int length)
+        private T DeserializeBuffer(int length)
         {
+            if (s_spanDeserializer != null)
+                return s_spanDeserializer(new ReadOnlySpan<byte>(_buffer, 0, length));
+
             var result = new byte[length];
             Buffer.BlockCopy(_buffer, 0, result, 0, length);
-            return result;
+            return s_deserializer(result);
         }
 
         private void GrowBuffer(int required)
@@ -1070,7 +1087,7 @@ namespace Int2Dds.Core
 
                         if (validData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return new Sample<T>(data, true);
                         }
                         return new Sample<T>(default, false);
@@ -1101,7 +1118,7 @@ namespace Int2Dds.Core
 
                         if (validData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return new Sample<T>(data, true);
                         }
                         return new Sample<T>(default, false);
@@ -1134,7 +1151,7 @@ namespace Int2Dds.Core
                         var info = ConvertSampleInfo(ref nativeInfo);
                         if (nativeInfo.ValidData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return (new Sample<T>(data, true), info);
                         }
                         return (new Sample<T>(default, false), info);
@@ -1167,7 +1184,7 @@ namespace Int2Dds.Core
                         var info = ConvertSampleInfo(ref nativeInfo);
                         if (nativeInfo.ValidData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return (new Sample<T>(data, true), info);
                         }
                         return (new Sample<T>(default, false), info);
@@ -1194,7 +1211,7 @@ namespace Int2Dds.Core
 
                     if (nativeInfo.ValidData)
                     {
-                        var data = s_deserializer(CopySequenceData(seqHandle, i));
+                        var data = DeserializeBuffer(LoadSequenceData(seqHandle, i));
                         results.Add((new Sample<T>(data, true), info));
                     }
                     else
@@ -1208,10 +1225,10 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
-        /// Copies the serialized data of one sample in a sequence, growing the
-        /// buffer when the sample is larger than it.
+        /// Loads the serialized data of one sample in a sequence into the buffer, growing
+        /// it when the sample is larger than it. Returns the data length.
         /// </summary>
-        private byte[] CopySequenceData(IntPtr seqHandle, UIntPtr index)
+        private int LoadSequenceData(IntPtr seqHandle, UIntPtr index)
         {
             unsafe
             {
@@ -1229,7 +1246,7 @@ namespace Int2Dds.Core
                         }
                         ReturnCodeHelper.CheckReturn(ret);
 
-                        return CopyBuffer((int)actualSize);
+                        return (int)actualSize;
                     }
                 }
             }
