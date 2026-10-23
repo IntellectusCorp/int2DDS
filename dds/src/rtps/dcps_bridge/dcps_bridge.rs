@@ -90,8 +90,7 @@ impl DcpsBridge {
             .unwrap_or_else(crate::rtps::transport::get_transport_type);
 
         // Build optional TLS config from the PropertyQosPolicy.
-        let tls_config = match crate::rtps::transport::tcp::tls::TlsConfig::from_property(property)
-        {
+        let tls_config = match crate::rtps::transport::tls::TlsConfig::from_property(property) {
             Ok(cfg) => cfg.map(std::sync::Arc::new),
             Err(e) => panic!("Invalid TLS configuration in DomainParticipantQos: {e}"),
         };

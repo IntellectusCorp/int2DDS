@@ -29,7 +29,7 @@ use crate::rtps::transport::tcp::framing::{encode_frame, validate_payload_size, 
 use crate::rtps::transport::tcp::sync_connection::{
     OutboundConnection, SendOutcome, SEND_QUEUE_BYTE_BUDGET,
 };
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tls::TlsConfig;
 use crate::rtps::transport::TcpConfig;
 
 #[derive(Default)]

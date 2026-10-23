@@ -18,7 +18,7 @@ use rustls::pki_types::ServerName;
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tls::TlsConfig;
 
 /// How much a peer may owe the stream before frames are refused instead of
 /// queued. This is a bound on memory, not a congestion threshold, so it sits

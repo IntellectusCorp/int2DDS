@@ -27,7 +27,7 @@ use crate::rtps::transport::tcp::framing::TcpFrameKind;
 use crate::rtps::transport::tcp::peer_candidates::{AnnounceTargets, PEER_PRUNE_DELAY};
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tls::TlsConfig;
 use crate::rtps::transport::{TcpConfig, TransportType};
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────

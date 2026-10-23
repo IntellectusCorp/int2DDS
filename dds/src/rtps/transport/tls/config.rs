@@ -1,4 +1,4 @@
-//! High-level TLS configuration for the TCP transport.
+//! High-level TLS configuration for connection-oriented transports.
 //!
 //! `TlsConfig` describes the certificates and verification policy used
 //! to wrap a TCP socket with TLS. It is built from
@@ -79,7 +79,7 @@ impl TlsConfig {
         Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer }))
     }
 
-    fn load_root_store(&self) -> io::Result<RootCertStore> {
+    pub(crate) fn load_root_store(&self) -> io::Result<RootCertStore> {
         let mut reader = BufReader::new(open_pem(&self.ca_file)?);
         let mut store = RootCertStore::empty();
         for cert in rustls_pemfile::certs(&mut reader) {
@@ -89,7 +89,7 @@ impl TlsConfig {
         Ok(store)
     }
 
-    fn load_cert_chain(&self) -> io::Result<Vec<CertificateDer<'static>>> {
+    pub(crate) fn load_cert_chain(&self) -> io::Result<Vec<CertificateDer<'static>>> {
         let mut reader = BufReader::new(open_pem(&self.cert_file)?);
         let mut chain = Vec::new();
         for cert in rustls_pemfile::certs(&mut reader) {
@@ -104,7 +104,7 @@ impl TlsConfig {
         Ok(chain)
     }
 
-    fn load_private_key(&self) -> io::Result<PrivateKeyDer<'static>> {
+    pub(crate) fn load_private_key(&self) -> io::Result<PrivateKeyDer<'static>> {
         let mut reader = BufReader::new(open_pem(&self.key_file)?);
         match rustls_pemfile::private_key(&mut reader).map_err(|e| pem_error(&self.key_file, e))? {
             Some(key) => Ok(key),

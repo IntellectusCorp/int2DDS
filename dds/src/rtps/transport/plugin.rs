@@ -189,7 +189,7 @@ impl TransportPluginFactory {
         multicast_if_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
-        tls_config: Option<std::sync::Arc<crate::rtps::transport::tcp::tls::TlsConfig>>,
+        tls_config: Option<std::sync::Arc<crate::rtps::transport::tls::TlsConfig>>,
         property: &PropertyQosPolicy,
     ) -> io::Result<Box<dyn TransportPlugin>> {
         match transport_type {

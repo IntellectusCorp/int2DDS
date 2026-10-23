@@ -11,7 +11,7 @@ use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
 use crate::rtps::transport::tcp::framing::{
     TcpBufferPool, TcpFrame, TcpFrameKind, TcpFrameReadState, TcpReadOutcome,
 };
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tls::TlsConfig;
 use crate::rtps::transport::tokens::ListenerToken;
 
 const FIRST_CONNECTION_TOKEN: usize = 100_000;
