@@ -42,7 +42,7 @@ use std::{
 use super::{
     data_reader_listener::DataReaderListener,
     loaned_samples::{decode_once, LoanToken, LoanedSample, LoanedSamples},
-    qos::DataReaderQos,
+    qos::{DataReaderQos, SubscriberQos},
     query_condition::QueryCondition,
     read_condition::ReadCondition,
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
@@ -60,12 +60,13 @@ use crate::{
         error::{DdsError, DdsResult},
         time::{Duration, Time},
     },
+    domain::qos::DomainParticipantQos,
     infrastructure::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, OperationGuard, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
         qos_policy::Qos,
@@ -102,6 +103,17 @@ use crate::{
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
+
+// The three status conditions the per-sample DATA_AVAILABLE / DATA_ON_READERS update writes to.
+// Each entity assigns its condition once, while it is being created and before it is reachable,
+// so a clone taken afterwards shares the live condition state for the entity's whole life. Each
+// level is filled on its own, at the point of the update that used to take it.
+#[derive(Default)]
+struct SampleStatusConditions {
+    reader: OnceLock<StatusCondition<DataReaderQos>>,
+    subscriber: OnceLock<StatusCondition<SubscriberQos>>,
+    participant: OnceLock<StatusCondition<DomainParticipantQos>>,
+}
 
 pub enum BoundedSerialized {
     Fit(Bytes, SampleInfo),
@@ -226,6 +238,7 @@ pub struct DataReader<Foo> {
     status_callback:
         Arc<OnceLock<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>,
     _phantom: PhantomData<fn() -> Foo>, // Temporary
+    sample_status_conditions: Arc<SampleStatusConditions>,
     datareader_cache: Arc<Mutex<DataReaderHistoryCache<Foo>>>,
     outstanding_loans: Arc<AtomicUsize>,
 }
@@ -301,6 +314,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             deadline_monitor: self.deadline_monitor.clone(),
             change_callback: self.change_callback.clone(),
             status_callback: self.status_callback.clone(),
+            sample_status_conditions: self.sample_status_conditions.clone(),
             _phantom: self._phantom,
             datareader_cache: self.datareader_cache.clone(),
             outstanding_loans: self.outstanding_loans.clone(),
@@ -1636,37 +1650,94 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     fn set_read_communication_status(&self, trigger_value: bool) -> DdsResult<()> {
-        // 1. DataReader StatusCondition
-        self.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+        // The reader is admitted only while its condition is taken, as `get_statuscondition`
+        // admitted it, not across the updates below.
+        let reader_condition = {
+            let _operation = self.lifecycle.begin_operation()?;
+            self.reader_sample_status_condition()?
+        };
+        self.update_read_communication_status(reader_condition, trigger_value)
+    }
 
-        // 2. Subscriber and 3. DomainParticipant StatusConditions.
-        //
-        // `Entity::set_communication_status` reaches the condition through `get_statuscondition`,
-        // which takes a mutex and clones a 4-`Arc` `StatusCondition` just to run one atomic bit
-        // update. The subscriber and the participant each take two status kinds, so calling it
-        // once per kind pays that lock-and-clone twice for the very same condition. Hoisting one
-        // clone per entity turns five lock+clone pairs per sample into three -- and every reader
-        // under the participant does this on every sample it delivers.
-        //
-        // The two kinds stay two separate calls on purpose. `add_communication_status` fires the
-        // WaitSet callback only when `enabled_statuses` contains *every* bit of its argument
-        // (`StatusMask::contains` is all-of), so folding the kinds into one mask would silently
-        // stop waking a condition that enabled only one of them.
+    // The same update for a caller that already holds an operation on this reader, so the sample
+    // does not enter the reader's lifecycle a second time.
+    fn set_read_communication_status_admitted(
+        &self,
+        _admitted: &OperationGuard<'_>,
+        trigger_value: bool,
+    ) -> DdsResult<()> {
+        let reader_condition = self.reader_sample_status_condition()?;
+        self.update_read_communication_status(reader_condition, trigger_value)
+    }
+
+    // The reader, subscriber and participant conditions are kept (see `SampleStatusConditions`)
+    // instead of locked and cloned on every sample. Both the receive thread and the take thread
+    // run this per sample, and cloning a condition is four reference-count writes on cache lines
+    // the other thread writes too. Each parent is still reached and admitted on every sample at
+    // the point `get_statuscondition` admitted it, on the first sample and on every later one: an
+    // expired parent fails with the same error and a deleted one with AlreadyDeleted, after the
+    // same bits were written. As before, the parent's operation covers only that admission, not
+    // the bit updates.
+    //
+    // The two kinds stay two separate calls on purpose. `add_communication_status` fires the
+    // WaitSet callback only when `enabled_statuses` contains *every* bit of its argument
+    // (`StatusMask::contains` is all-of), so folding the kinds into one mask would silently stop
+    // waking a condition that enabled only one of them.
+    fn update_read_communication_status(
+        &self,
+        reader_condition: &StatusCondition<DataReaderQos>,
+        trigger_value: bool,
+    ) -> DdsResult<()> {
+        let conditions = &self.sample_status_conditions;
+
+        // 1. DataReader StatusCondition
+        reader_condition.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+
+        // 2. Subscriber StatusCondition
         let subscriber = self.subscriber_arc()?;
-        let subscriber_condition = subscriber.get_statuscondition()?;
+        let subscriber_condition = match conditions.subscriber.get() {
+            Some(condition) => {
+                drop(subscriber.admit_operation()?);
+                condition
+            }
+            None => {
+                let condition = subscriber.get_statuscondition()?;
+                conditions.subscriber.get_or_init(|| condition)
+            }
+        };
         subscriber_condition
             .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
         subscriber_condition
             .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
+        // 3. DomainParticipant StatusCondition
         let participant = subscriber.participant_arc()?;
-        let participant_condition = participant.get_statuscondition()?;
+        let participant_condition = match conditions.participant.get() {
+            Some(condition) => {
+                drop(participant.admit_operation()?);
+                condition
+            }
+            None => {
+                let condition = participant.get_statuscondition()?;
+                conditions.participant.get_or_init(|| condition)
+            }
+        };
         participant_condition
             .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
         participant_condition
             .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         Ok(())
+    }
+
+    // The reader's own condition, taken on first use. The caller has admitted the reader.
+    fn reader_sample_status_condition(&self) -> DdsResult<&StatusCondition<DataReaderQos>> {
+        if let Some(condition) = self.sample_status_conditions.reader.get() {
+            return Ok(condition);
+        }
+        let condition =
+            self.status_condition.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone();
+        Ok(self.sample_status_conditions.reader.get_or_init(|| condition))
     }
 
     pub(crate) fn get_datareader_cache(
@@ -2230,6 +2301,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             deadline_monitor: Arc::new(Mutex::new(None)),
             change_callback: Arc::new(OnceLock::new()),
             status_callback: Arc::new(OnceLock::new()),
+            sample_status_conditions: Arc::default(),
             _phantom: PhantomData,
             datareader_cache: Arc::new(Mutex::new(DataReaderHistoryCache::<Foo>::new(
                 Weak::new(),
@@ -3118,7 +3190,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             }
         }
 
-        self.set_read_communication_status(false)?;
+        self.set_read_communication_status_admitted(&_operation, false)?;
         let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
 
         // Group ordered access hands out one sample per call, so that the application can move to
@@ -3331,7 +3403,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             return Err(DdsError::BadParameter);
         }
 
-        self.set_read_communication_status(false)?;
+        self.set_read_communication_status_admitted(&_operation, false)?;
         let mut result_samples: Vec<R> = Vec::new();
 
         // Group ordered access hands out one sample per call, so that the application can move to
@@ -4361,6 +4433,65 @@ pub(crate) mod tests {
     pub struct TestData {
         #[dds(key)]
         id: u32,
+    }
+
+    /// The per-sample update keeps the conditions it took on the first sample. They must be the
+    /// live conditions every `get_statuscondition` caller sees (same shared state), or a WaitSet
+    /// attached after the first sample would never wake.
+    #[test]
+    fn read_communication_status_keeps_the_live_conditions() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "ReadCommLiveConditionsTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<TestData>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        reader.set_read_communication_status(true).unwrap();
+        reader.set_read_communication_status(false).unwrap();
+
+        let conditions = &reader.sample_status_conditions;
+        assert!(
+            conditions.reader.get() == Some(&reader.get_statuscondition().unwrap()),
+            "reader condition is not the live one"
+        );
+        assert!(
+            conditions.subscriber.get() == Some(&subscriber.get_statuscondition().unwrap()),
+            "subscriber condition is not the live one"
+        );
+        assert!(
+            conditions.participant.get() == Some(&participant.get_statuscondition().unwrap()),
+            "participant condition is not the live one"
+        );
+
+        // Later samples still reach every level through the kept conditions.
+        reader.set_read_communication_status(true).unwrap();
+        assert!(reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE));
+        assert!(subscriber.get_status_changes().unwrap().contains(StatusMask::DATA_ON_READERS));
+        assert!(participant.get_status_changes().unwrap().contains(StatusMask::DATA_ON_READERS));
     }
 
     /// `set_read_communication_status` fans one arrival out to three entity levels with two

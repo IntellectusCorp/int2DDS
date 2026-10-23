@@ -87,7 +87,7 @@ use crate::{
     infrastructure::{
         entity::{
             impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            EntityLifecycle, UpdateStatus,
+            EntityLifecycle, OperationGuard, UpdateStatus,
         },
         qos_policy::{
             DeadlineQosPolicy, DestinationOrderQosPolicy, DestinationOrderQosPolicyKind,
@@ -2457,6 +2457,12 @@ impl DomainParticipant {
     }
 
     // For Entity
+    // Admits one operation on this participant, for an internal caller that must observe its
+    // deletion exactly as a public call would (AlreadyDeleted) without the call itself.
+    pub(crate) fn admit_operation(&self) -> DdsResult<OperationGuard<'_>> {
+        self.lifecycle.begin_operation()
+    }
+
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn DomainParticipantListener>>> {
         let _operation = self.lifecycle.begin_operation()?;
 

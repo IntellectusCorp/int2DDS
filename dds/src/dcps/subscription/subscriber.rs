@@ -42,7 +42,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, OperationGuard, UpdateStatus,
         },
         qos_kind::QosKind,
         qos_policy::{PresentationQosAccessScopeKind, Qos},
@@ -1260,6 +1260,12 @@ impl Subscriber {
             .ok_or_else(|| {
                 DdsError::Error("Participant reference is invalid or expired".to_string())
             })
+    }
+
+    // Admits one operation on this subscriber, for an internal caller that must observe its
+    // deletion exactly as a public call would (AlreadyDeleted) without the call itself.
+    pub(crate) fn admit_operation(&self) -> DdsResult<OperationGuard<'_>> {
+        self.lifecycle.begin_operation()
     }
 
     pub(crate) fn guid(&self) -> Guid {
