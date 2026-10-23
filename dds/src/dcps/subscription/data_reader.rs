@@ -1717,7 +1717,9 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     // the point `get_statuscondition` admitted it, on the first sample and on every later one: an
     // expired parent fails with the same error and a deleted one with AlreadyDeleted, after the
     // same bits were written. As before, the parent's operation covers only that admission, not
-    // the bit updates.
+    // the bit updates; on a cached condition the admission was taken and dropped at once with no
+    // work between, so it is answered by `check_operation_allowed` (the same rule as
+    // `begin_operation`, without registering a holder).
     //
     // The two kinds stay two separate calls on purpose. `add_communication_status` fires the
     // WaitSet callback only when `enabled_statuses` contains *every* bit of its argument
@@ -1737,7 +1739,11 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         let subscriber = self.subscriber_arc()?;
         let subscriber_condition = match conditions.subscriber.get() {
             Some(condition) => {
-                drop(subscriber.admit_operation()?);
+                #[cfg(test)]
+                tests::run_parent_check_hook(0);
+                subscriber.check_operation_allowed()?;
+                #[cfg(test)]
+                tests::run_parent_check_hook(1);
                 condition
             }
             None => {
@@ -1754,7 +1760,11 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         let participant = subscriber.participant_arc()?;
         let participant_condition = match conditions.participant.get() {
             Some(condition) => {
-                drop(participant.admit_operation()?);
+                #[cfg(test)]
+                tests::run_parent_check_hook(2);
+                participant.check_operation_allowed()?;
+                #[cfg(test)]
+                tests::run_parent_check_hook(3);
                 condition
             }
             None => {
@@ -8604,6 +8614,184 @@ pub(crate) mod tests {
             assert_eq!(subscriber_count.load(Ordering::Acquire), 1);
             tree.reader.handle_data_available_status().unwrap();
             assert_eq!(subscriber_count.load(Ordering::Acquire), 1);
+            drop_tree(tree);
+        });
+    }
+
+    // ---- parent deletion around the cached parent admission (hooks at the admission) ----
+
+    thread_local! {
+        static PARENT_CHECK_HOOK: std::cell::RefCell<Option<(u8, Box<dyn FnOnce()>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    // Points: 0/1 before/after the subscriber's admission, 2/3 before/after the participant's,
+    // on the cached-condition path. Runs the armed hook once when its point is reached.
+    #[allow(dead_code)]
+    pub(super) fn run_parent_check_hook(point: u8) {
+        let hook = PARENT_CHECK_HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(at, _)| *at == point) {
+                slot.take().map(|(_, hook)| hook)
+            } else {
+                None
+            }
+        });
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    fn arm_parent_check_hook(point: u8, hook: Box<dyn FnOnce()>) {
+        PARENT_CHECK_HOOK.with(|slot| *slot.borrow_mut() = Some((point, hook)));
+    }
+
+    // Starts deleting the reader and then its subscriber on other threads (the caller holds an
+    // operation on the reader, so the reader's delete waits) and returns once the subscriber is
+    // marked deleted.
+    fn mark_reader_and_subscriber_deleted(
+        tree: &DispatchTree,
+    ) -> (std::thread::JoinHandle<DdsResult<()>>, std::thread::JoinHandle<DdsResult<()>>) {
+        let (subscriber, reader) = (tree.subscriber.clone(), tree.reader.clone());
+        let reader_delete = std::thread::spawn(move || subscriber.delete_datareader(reader));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !tree.reader.lifecycle.is_deleted() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(tree.reader.lifecycle.is_deleted(), "reader deletion did not start");
+        let (participant, subscriber) = (tree.participant.clone(), tree.subscriber.clone());
+        let subscriber_delete =
+            std::thread::spawn(move || participant.delete_subscriber(subscriber));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(tree.subscriber.get_qos(), Err(DdsError::AlreadyDeleted))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert!(
+            matches!(tree.subscriber.get_qos(), Err(DdsError::AlreadyDeleted)),
+            "subscriber deletion did not start"
+        );
+        (reader_delete, subscriber_delete)
+    }
+
+    fn cached_subscriber_bits(tree: &DispatchTree) -> StatusMask {
+        tree.reader
+            .sample_status_conditions
+            .subscriber
+            .get()
+            .expect("subscriber condition not cached")
+            .get_status_changes()
+            .unwrap()
+    }
+
+    /// The subscriber is deleted just before the cached admission: the update fails with
+    /// AlreadyDeleted after the reader bit and before any subscriber bit.
+    #[test]
+    fn parent_deleted_just_before_cached_admission_fails_after_reader_bit_only() {
+        finish_within(60, || {
+            let tree = dispatch_tree("PcBeforeTopic", StatusMask::NONE);
+            tree.reader.set_read_communication_status(true).unwrap();
+            tree.reader.set_read_communication_status(false).unwrap();
+            assert!(!cached_subscriber_bits(&tree).contains(StatusMask::DATA_ON_READERS));
+            let held = tree.reader.lifecycle.begin_operation().unwrap();
+            let deletes: Arc<
+                std::sync::Mutex<
+                    Option<(
+                        std::thread::JoinHandle<DdsResult<()>>,
+                        std::thread::JoinHandle<DdsResult<()>>,
+                    )>,
+                >,
+            > = Arc::default();
+            {
+                let deletes = Arc::clone(&deletes);
+                let tree_ref = DispatchTree {
+                    participant: tree.participant.clone(),
+                    subscriber: tree.subscriber.clone(),
+                    reader: tree.reader.clone(),
+                };
+                arm_parent_check_hook(
+                    0,
+                    Box::new(move || {
+                        *deletes.lock().unwrap() =
+                            Some(mark_reader_and_subscriber_deleted(&tree_ref));
+                    }),
+                );
+            }
+            let outcome = tree.reader.set_read_communication_status(true);
+            let fired = deletes.lock().unwrap().take();
+            assert!(fired.is_some(), "hook did not fire on the cached admission");
+            assert!(matches!(outcome, Err(DdsError::AlreadyDeleted)), "outcome {outcome:?}");
+            assert!(tree.reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE));
+            assert!(!cached_subscriber_bits(&tree).contains(StatusMask::DATA_ON_READERS));
+            drop(held);
+            let (reader_delete, subscriber_delete) = fired.unwrap();
+            reader_delete.join().unwrap().unwrap();
+            subscriber_delete.join().unwrap().unwrap();
+            drop_tree(tree);
+        });
+    }
+
+    /// The subscriber is deleted just after the cached admission passed: the update still writes
+    /// the subscriber's bits (the admission covers only itself) and returns Ok.
+    #[test]
+    fn parent_deleted_just_after_cached_admission_still_writes_its_bits() {
+        finish_within(60, || {
+            let tree = dispatch_tree("PcAfterTopic", StatusMask::NONE);
+            tree.reader.set_read_communication_status(true).unwrap();
+            tree.reader.set_read_communication_status(false).unwrap();
+            let held = tree.reader.lifecycle.begin_operation().unwrap();
+            let deletes: Arc<
+                std::sync::Mutex<
+                    Option<(
+                        std::thread::JoinHandle<DdsResult<()>>,
+                        std::thread::JoinHandle<DdsResult<()>>,
+                    )>,
+                >,
+            > = Arc::default();
+            {
+                let deletes = Arc::clone(&deletes);
+                let tree_ref = DispatchTree {
+                    participant: tree.participant.clone(),
+                    subscriber: tree.subscriber.clone(),
+                    reader: tree.reader.clone(),
+                };
+                arm_parent_check_hook(
+                    1,
+                    Box::new(move || {
+                        *deletes.lock().unwrap() =
+                            Some(mark_reader_and_subscriber_deleted(&tree_ref));
+                    }),
+                );
+            }
+            let outcome = tree.reader.set_read_communication_status(true);
+            let fired = deletes.lock().unwrap().take();
+            assert!(fired.is_some(), "hook did not fire after the cached admission");
+            assert!(outcome.is_ok(), "outcome {outcome:?}");
+            assert!(cached_subscriber_bits(&tree).contains(StatusMask::DATA_ON_READERS));
+            drop(held);
+            let (reader_delete, subscriber_delete) = fired.unwrap();
+            reader_delete.join().unwrap().unwrap();
+            subscriber_delete.join().unwrap().unwrap();
+            drop_tree(tree);
+        });
+    }
+
+    /// A take on a reader whose subscriber is being deleted (cached conditions, the take holds
+    /// the reader operation) fails with AlreadyDeleted at the parent admission.
+    #[test]
+    fn take_during_parent_deletion_fails_with_already_deleted() {
+        finish_within(60, || {
+            let tree = dispatch_tree("PcTakeTopic", StatusMask::NONE);
+            tree.reader.set_read_communication_status(true).unwrap();
+            tree.reader.set_read_communication_status(false).unwrap();
+            let held = tree.reader.lifecycle.begin_operation().unwrap();
+            let (reader_delete, subscriber_delete) = mark_reader_and_subscriber_deleted(&tree);
+            let outcome = tree.reader.set_read_communication_status_admitted(&held, false);
+            assert!(matches!(outcome, Err(DdsError::AlreadyDeleted)), "outcome {outcome:?}");
+            drop(held);
+            reader_delete.join().unwrap().unwrap();
+            subscriber_delete.join().unwrap().unwrap();
             drop_tree(tree);
         });
     }

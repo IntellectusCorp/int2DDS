@@ -42,7 +42,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, EntityLifecycle, OperationGuard, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         qos_kind::QosKind,
         qos_policy::{PresentationQosAccessScopeKind, Qos},
@@ -1262,10 +1262,11 @@ impl Subscriber {
             })
     }
 
-    // Admits one operation on this subscriber, for an internal caller that must observe its
-    // deletion exactly as a public call would (AlreadyDeleted) without the call itself.
-    pub(crate) fn admit_operation(&self) -> DdsResult<OperationGuard<'_>> {
-        self.lifecycle.begin_operation()
+    // The admission rule of `EntityLifecycle::begin_operation` without registering an
+    // operation, for a caller whose admission would cover no work (see
+    // `EntityLifecycle::check_operation_allowed`).
+    pub(crate) fn check_operation_allowed(&self) -> DdsResult<()> {
+        self.lifecycle.check_operation_allowed()
     }
 
     // The listener slot itself, for the reader's DATA_AVAILABLE dispatch, which checks with

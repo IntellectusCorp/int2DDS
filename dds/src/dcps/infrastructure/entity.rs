@@ -69,6 +69,22 @@ impl EntityLifecycle {
         Ok(OperationGuard { lifecycle: self, thread: current_thread, _not_send: PhantomData })
     }
 
+    // Answers whether an operation would be admitted right now, by the same rule as
+    // `begin_operation`, without registering one: before deletion every thread is admitted, after
+    // it only a thread that already holds an operation on this entity. Only for callers whose
+    // admission covers no work (taken and dropped at once); anything that must keep the entity
+    // from being torn down while it runs needs `begin_operation`.
+    pub(crate) fn check_operation_allowed(&self) -> DdsResult<()> {
+        let state = self.lock_state();
+        if state.is_deleted && !state.holder_threads.contains(&std::thread::current().id()) {
+            debug!(
+                "EntityLifecycle::check_operation_allowed() - operation refused, entity already deleted"
+            );
+            return Err(DdsError::AlreadyDeleted);
+        }
+        Ok(())
+    }
+
     // Marks the entity deleted, then blocks until admitted operations finish. A listener
     // callback caller skips the wait, since it holds a lease only it could release.
     pub(crate) fn mark_deleted_and_await_operation_completion(&self) {
@@ -463,5 +479,93 @@ mod tests {
         );
 
         worker.join().expect("worker thread panicked");
+    }
+
+    // ---- check_operation_allowed: the admission rule without registering a holder ----
+
+    #[test]
+    fn check_on_a_live_entity_is_allowed_and_registers_nothing() {
+        let lifecycle = EntityLifecycle::default();
+        assert!(lifecycle.check_operation_allowed().is_ok());
+        assert_eq!(lifecycle.get_active_operation_count(), 0);
+        let held = lifecycle.begin_operation().unwrap();
+        assert!(lifecycle.check_operation_allowed().is_ok());
+        assert_eq!(lifecycle.get_active_operation_count(), 1);
+        drop(held);
+        assert_eq!(lifecycle.get_active_operation_count(), 0);
+    }
+
+    #[test]
+    fn check_after_completed_deletion_is_refused() {
+        let lifecycle = EntityLifecycle::default();
+        lifecycle.mark_deleted_and_await_operation_completion();
+        assert!(matches!(lifecycle.check_operation_allowed(), Err(DdsError::AlreadyDeleted)));
+        assert!(matches!(lifecycle.begin_operation(), Err(DdsError::AlreadyDeleted)));
+        assert_eq!(lifecycle.get_active_operation_count(), 0);
+    }
+
+    // Deletion has started and waits for this thread's operation: this thread's check is still
+    // allowed (nested entry), another thread's is refused, the check does not end the wait, and
+    // dropping the real operation does.
+    #[test]
+    fn check_during_deletion_follows_the_begin_operation_rule() {
+        let lifecycle = Arc::new(EntityLifecycle::default());
+        let held = lifecycle.begin_operation().unwrap();
+        let deleter = {
+            let lifecycle = Arc::clone(&lifecycle);
+            std::thread::spawn(move || lifecycle.mark_deleted_and_await_operation_completion())
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lifecycle.is_deleted() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(lifecycle.is_deleted(), "deletion did not start");
+
+        assert!(lifecycle.check_operation_allowed().is_ok(), "holder thread refused");
+        let other = {
+            let lifecycle = Arc::clone(&lifecycle);
+            std::thread::spawn(move || lifecycle.check_operation_allowed())
+        };
+        assert!(matches!(other.join().unwrap(), Err(DdsError::AlreadyDeleted)));
+
+        for _ in 0..1000 {
+            lifecycle.check_operation_allowed().unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!deleter.is_finished(), "deletion stopped waiting while the operation was held");
+        assert_eq!(lifecycle.get_active_operation_count(), 1);
+
+        drop(held);
+        deleter.join().unwrap();
+        assert_eq!(lifecycle.get_active_operation_count(), 0);
+        assert!(matches!(lifecycle.check_operation_allowed(), Err(DdsError::AlreadyDeleted)));
+    }
+
+    // Checks running in a loop on another thread never hold the entity: deletion with no real
+    // operation completes while they run, and they turn into AlreadyDeleted once it is marked.
+    #[test]
+    fn checks_do_not_delay_deletion() {
+        let lifecycle = Arc::new(EntityLifecycle::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let checker = {
+            let lifecycle = Arc::clone(&lifecycle);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut refused = 0usize;
+                while !stop.load(Ordering::Acquire) {
+                    if lifecycle.check_operation_allowed().is_err() {
+                        refused += 1;
+                    }
+                }
+                refused
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let started = std::time::Instant::now();
+        lifecycle.mark_deleted_and_await_operation_completion();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "deletion waited on checks");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        stop.store(true, Ordering::Release);
+        assert!(checker.join().unwrap() > 0, "checks after deletion were not refused");
     }
 }
