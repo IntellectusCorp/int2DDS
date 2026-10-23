@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using Int2Dds.Cdr;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 using Int2Dds.Types;
@@ -49,6 +50,16 @@ namespace Int2Dds.Core
                 _state.ThrowIfReturned();
                 return _data == IntPtr.Zero ? ReadOnlySpan<byte>.Empty : new ReadOnlySpan<byte>((void*)_data, _size);
             }
+        }
+
+        /// <summary>
+        /// A reader over <see cref="SerializedData"/> in place, for a generated
+        /// <c>DeserializeCdr(CdrReader)</c>. Its reads throw once the loan is returned.
+        /// </summary>
+        public unsafe CdrReader CreateReader()
+        {
+            _state.ThrowIfReturned();
+            return new CdrReader((byte*)_data, _size, _state);
         }
     }
 

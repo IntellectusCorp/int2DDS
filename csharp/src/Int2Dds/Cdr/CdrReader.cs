@@ -3,7 +3,10 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Text;
+using Int2Dds.Core;
 
 namespace Int2Dds.Cdr
 {
@@ -26,7 +29,12 @@ namespace Int2Dds.Cdr
         private const uint MemberIdSentinel = 0x3F02;
         private const uint PidExtended = 0x3F01; // PL_CDR v1 long-form member header marker
 
-        private readonly byte[] _data;
+        // Exactly one of _array / _native backs the reader.
+        private readonly byte[]? _array;
+        private readonly unsafe byte* _native;
+        private readonly int _length;
+        // Set for loaned native memory: reads throw once the loan is returned.
+        private readonly LoanState? _loan;
         private int _pos;
         private readonly int _headerSize;
         private readonly bool _littleEndian;
@@ -37,12 +45,39 @@ namespace Int2Dds.Cdr
         /// </summary>
         /// <remarks>Reads <paramref name="data"/> in place; do not modify it while reading.</remarks>
         public CdrReader(byte[] data)
+            : this(data ?? throw new ArgumentNullException(nameof(data)), data.Length)
         {
-            if (data == null) throw new ArgumentNullException(nameof(data));
-            _data = data;
-            (_littleEndian, _xcdr2) = ParseEncapsulationHeader(data);
+        }
+
+        /// <summary>Reads the first <paramref name="length"/> bytes of <paramref name="data"/> in place.</summary>
+        internal CdrReader(byte[] data, int length)
+        {
+            _array = data;
+            _length = length;
+            (_littleEndian, _xcdr2) = ParseEncapsulationHeader(new ReadOnlySpan<byte>(data, 0, length));
             _headerSize = 4;
             _pos = 4; // skip encapsulation header
+        }
+
+        /// <summary>Reads loaned native memory in place until <paramref name="loan"/> is returned.</summary>
+        internal unsafe CdrReader(byte* data, int length, LoanState loan)
+        {
+            _native = data;
+            _length = length;
+            _loan = loan;
+            (_littleEndian, _xcdr2) = ParseEncapsulationHeader(new ReadOnlySpan<byte>(data, length));
+            _headerSize = 4;
+            _pos = 4; // skip encapsulation header
+        }
+
+        private unsafe ReadOnlySpan<byte> Data
+        {
+            get
+            {
+                if (_array != null) return new ReadOnlySpan<byte>(_array, 0, _length);
+                _loan?.ThrowIfReturned();
+                return new ReadOnlySpan<byte>(_native, _length);
+            }
         }
 
         /// <summary>
@@ -60,7 +95,7 @@ namespace Int2Dds.Cdr
             return copy;
         }
 
-        private static (bool LittleEndian, bool Xcdr2) ParseEncapsulationHeader(byte[] data)
+        private static (bool LittleEndian, bool Xcdr2) ParseEncapsulationHeader(ReadOnlySpan<byte> data)
         {
             if (data.Length < 4)
                 throw new CdrUnderflowException("Data too short for encapsulation header.");
@@ -95,7 +130,8 @@ namespace Int2Dds.Cdr
         /// </summary>
         private CdrReader(byte[] data, bool littleEndian, bool xcdr2)
         {
-            _data = data;
+            _array = data;
+            _length = data.Length;
             _littleEndian = littleEndian;
             _xcdr2 = xcdr2;
             _headerSize = 0;
@@ -111,7 +147,7 @@ namespace Int2Dds.Cdr
         }
 
         /// <summary>Number of bytes remaining to be read.</summary>
-        public int Remaining => Math.Max(0, _data.Length - _pos);
+        public int Remaining => Math.Max(0, _length - _pos);
 
         /// <summary>Current read position in the buffer.</summary>
         public int Position => _pos;
@@ -130,14 +166,14 @@ namespace Int2Dds.Cdr
             int aligned = (streamPos + actual - 1) & ~(actual - 1);
             int newPos = aligned + _headerSize;
 
-            if (newPos > _data.Length)
+            if (newPos > _length)
                 throw new CdrUnderflowException("Alignment would exceed buffer.");
             _pos = newPos;
         }
 
         private void EnsureRemaining(int count)
         {
-            if (_pos + count > _data.Length)
+            if (_pos + count > _length)
                 throw new CdrUnderflowException(
                     $"Need {count} bytes but only {Remaining} remaining.");
         }
@@ -148,21 +184,21 @@ namespace Int2Dds.Cdr
         public bool ReadBool()
         {
             EnsureRemaining(1);
-            return _data[_pos++] != 0;
+            return Data[_pos++] != 0;
         }
 
         /// <summary>Read a signed 8-bit integer.</summary>
         public sbyte ReadI8()
         {
             EnsureRemaining(1);
-            return (sbyte)_data[_pos++];
+            return (sbyte)Data[_pos++];
         }
 
         /// <summary>Read an unsigned 8-bit integer.</summary>
         public byte ReadU8()
         {
             EnsureRemaining(1);
-            return _data[_pos++];
+            return Data[_pos++];
         }
 
         /// <summary>Read a signed 16-bit integer with 2-byte alignment.</summary>
@@ -171,8 +207,8 @@ namespace Int2Dds.Cdr
             Align(2);
             EnsureRemaining(2);
             short value = _littleEndian
-                ? BinaryPrimitives.ReadInt16LittleEndian(_data.AsSpan(_pos))
-                : BinaryPrimitives.ReadInt16BigEndian(_data.AsSpan(_pos));
+                ? BinaryPrimitives.ReadInt16LittleEndian(Data.Slice(_pos))
+                : BinaryPrimitives.ReadInt16BigEndian(Data.Slice(_pos));
             _pos += 2;
             return value;
         }
@@ -183,8 +219,8 @@ namespace Int2Dds.Cdr
             Align(2);
             EnsureRemaining(2);
             ushort value = _littleEndian
-                ? BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_pos))
-                : BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos));
+                ? BinaryPrimitives.ReadUInt16LittleEndian(Data.Slice(_pos))
+                : BinaryPrimitives.ReadUInt16BigEndian(Data.Slice(_pos));
             _pos += 2;
             return value;
         }
@@ -195,8 +231,8 @@ namespace Int2Dds.Cdr
             Align(4);
             EnsureRemaining(4);
             int value = _littleEndian
-                ? BinaryPrimitives.ReadInt32LittleEndian(_data.AsSpan(_pos))
-                : BinaryPrimitives.ReadInt32BigEndian(_data.AsSpan(_pos));
+                ? BinaryPrimitives.ReadInt32LittleEndian(Data.Slice(_pos))
+                : BinaryPrimitives.ReadInt32BigEndian(Data.Slice(_pos));
             _pos += 4;
             return value;
         }
@@ -207,8 +243,8 @@ namespace Int2Dds.Cdr
             Align(4);
             EnsureRemaining(4);
             uint value = _littleEndian
-                ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
-                : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
+                ? BinaryPrimitives.ReadUInt32LittleEndian(Data.Slice(_pos))
+                : BinaryPrimitives.ReadUInt32BigEndian(Data.Slice(_pos));
             _pos += 4;
             return value;
         }
@@ -219,8 +255,8 @@ namespace Int2Dds.Cdr
             Align(8);
             EnsureRemaining(8);
             long value = _littleEndian
-                ? BinaryPrimitives.ReadInt64LittleEndian(_data.AsSpan(_pos))
-                : BinaryPrimitives.ReadInt64BigEndian(_data.AsSpan(_pos));
+                ? BinaryPrimitives.ReadInt64LittleEndian(Data.Slice(_pos))
+                : BinaryPrimitives.ReadInt64BigEndian(Data.Slice(_pos));
             _pos += 8;
             return value;
         }
@@ -231,8 +267,8 @@ namespace Int2Dds.Cdr
             Align(8);
             EnsureRemaining(8);
             ulong value = _littleEndian
-                ? BinaryPrimitives.ReadUInt64LittleEndian(_data.AsSpan(_pos))
-                : BinaryPrimitives.ReadUInt64BigEndian(_data.AsSpan(_pos));
+                ? BinaryPrimitives.ReadUInt64LittleEndian(Data.Slice(_pos))
+                : BinaryPrimitives.ReadUInt64BigEndian(Data.Slice(_pos));
             _pos += 8;
             return value;
         }
@@ -252,7 +288,7 @@ namespace Int2Dds.Cdr
         {
             Align(8);
             EnsureRemaining(16);
-            var span = _data.AsSpan(_pos);
+            var span = Data.Slice(_pos);
             Float128 value = _littleEndian
                 ? new Float128(BinaryPrimitives.ReadUInt64LittleEndian(span), BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(8)))
                 : new Float128(BinaryPrimitives.ReadUInt64BigEndian(span.Slice(8)), BinaryPrimitives.ReadUInt64BigEndian(span));
@@ -285,11 +321,21 @@ namespace Int2Dds.Cdr
             EnsureRemaining((int)cdrLen);
             // cdrLen includes the null terminator; string length is cdrLen - 1
             int strLen = (int)(cdrLen - 1);
-            string result = strLen > 0
-                ? Encoding.UTF8.GetString(_data, _pos, strLen)
-                : string.Empty;
+            string result = strLen == 0 ? string.Empty
+                : _array != null ? Encoding.UTF8.GetString(_array, _pos, strLen)
+                : DecodeNativeUtf8(strLen);
             _pos += (int)cdrLen;
             return result;
+        }
+
+        private unsafe string DecodeNativeUtf8(int length)
+        {
+            _loan?.ThrowIfReturned();
+#if NET45
+            return Encoding.UTF8.GetString(Data.Slice(_pos, length).ToArray());
+#else
+            return Encoding.UTF8.GetString(_native + _pos, length);
+#endif
         }
 
         /// <summary>
@@ -328,9 +374,24 @@ namespace Int2Dds.Cdr
         {
             EnsureRemaining(length);
             var result = CdrWriter.AllocateUninitialized(length);
-            Buffer.BlockCopy(_data, _pos, result, 0, length);
+            Data.Slice(_pos, length).CopyTo(result);
             _pos += length;
             return result;
+        }
+
+        /// <summary>Read raw bytes into a new list (no alignment).</summary>
+        public List<byte> ReadByteList(int length)
+        {
+#if NET8_0_OR_GREATER
+            EnsureRemaining(length);
+            var list = new List<byte>(length);
+            CollectionsMarshal.SetCount(list, length);
+            Data.Slice(_pos, length).CopyTo(CollectionsMarshal.AsSpan(list));
+            _pos += length;
+            return list;
+#else
+            return new List<byte>(ReadBytes(length));
+#endif
         }
 
         /// <summary>Read an enum discriminant as a signed 32-bit integer.</summary>
@@ -359,7 +420,7 @@ namespace Int2Dds.Cdr
         {
             if (!_xcdr2) return; // XCDR1: no DHEADER
             int expectedEnd = startPos + (int)objectSize;
-            if (expectedEnd > _data.Length)
+            if (expectedEnd > _length)
                 throw new CdrUnderflowException("DHEADER end exceeds buffer.");
             _pos = expectedEnd;
         }
@@ -398,11 +459,11 @@ namespace Int2Dds.Cdr
                 case 6:
                 case 7:
                 {
-                    if (_pos + 4 > _data.Length)
+                    if (_pos + 4 > _length)
                         throw new CdrUnderflowException("NEXTINT extends beyond buffer.");
                     uint nextInt = _littleEndian
-                        ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
-                        : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
+                        ? BinaryPrimitives.ReadUInt32LittleEndian(Data.Slice(_pos))
+                        : BinaryPrimitives.ReadUInt32BigEndian(Data.Slice(_pos));
                     dataLength = lc switch
                     {
                         5 => nextInt,
@@ -426,10 +487,10 @@ namespace Int2Dds.Cdr
         {
             get
             {
-                if (_pos + 4 > _data.Length) return false;
+                if (_pos + 4 > _length) return false;
                 uint header = _littleEndian
-                    ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
-                    : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(Data.Slice(_pos))
+                    : BinaryPrimitives.ReadUInt32BigEndian(Data.Slice(_pos));
                 uint memberId = header & 0x0FFFFFFFu;
                 return memberId == MemberIdSentinel;
             }
@@ -451,14 +512,14 @@ namespace Int2Dds.Cdr
         public (uint MemberId, uint Length, bool MustUnderstand, bool Sentinel) ReadParameterHeader()
         {
             Align(4);
-            if (_pos + 4 > _data.Length)
+            if (_pos + 4 > _length)
                 throw new CdrUnderflowException("PL_CDR member header extends beyond buffer.");
             ushort pid = _littleEndian
-                ? BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_pos))
-                : BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos));
+                ? BinaryPrimitives.ReadUInt16LittleEndian(Data.Slice(_pos))
+                : BinaryPrimitives.ReadUInt16BigEndian(Data.Slice(_pos));
             ushort length = _littleEndian
-                ? BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_pos + 2))
-                : BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos + 2));
+                ? BinaryPrimitives.ReadUInt16LittleEndian(Data.Slice(_pos + 2))
+                : BinaryPrimitives.ReadUInt16BigEndian(Data.Slice(_pos + 2));
             uint rawPid = (uint)(pid & 0x3FFF);
 
             if (rawPid == (MemberIdSentinel & 0x3FFF))
@@ -472,14 +533,14 @@ namespace Int2Dds.Cdr
             if (rawPid == (PidExtended & 0x3FFF))
             {
                 _pos += 4;
-                if (_pos + 8 > _data.Length)
+                if (_pos + 8 > _length)
                     throw new CdrUnderflowException("PL_CDR long member header extends beyond buffer.");
                 uint memberId = _littleEndian
-                    ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
-                    : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(Data.Slice(_pos))
+                    : BinaryPrimitives.ReadUInt32BigEndian(Data.Slice(_pos));
                 uint memberLength = _littleEndian
-                    ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos + 4))
-                    : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos + 4));
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(Data.Slice(_pos + 4))
+                    : BinaryPrimitives.ReadUInt32BigEndian(Data.Slice(_pos + 4));
                 _pos += 8;
                 return (memberId, memberLength, mustUnderstand, false);
             }

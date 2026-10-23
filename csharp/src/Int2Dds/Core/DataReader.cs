@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Int2Dds.Cdr;
 using Int2Dds.Conditions;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
@@ -28,6 +29,7 @@ namespace Int2Dds.Core
 
         private static readonly Func<byte[], T> s_deserializer = CreateDeserializer();
         private static readonly SpanDeserializer? s_spanDeserializer = CreateSpanDeserializer();
+        private static readonly Func<CdrReader, T>? s_readerDeserializer = CreateReaderDeserializer();
 
         private static Func<byte[], T> CreateDeserializer()
         {
@@ -48,6 +50,15 @@ namespace Int2Dds.Core
             return method == null
                 ? null
                 : Delegate.CreateDelegate(typeof(SpanDeserializer), method, false) as SpanDeserializer;
+        }
+
+        private static Func<CdrReader, T>? CreateReaderDeserializer()
+        {
+            var method = typeof(T).GetMethod("DeserializeCdr", BindingFlags.Public | BindingFlags.Static,
+                null, new[] { typeof(CdrReader) }, null);
+            return method == null
+                ? null
+                : Delegate.CreateDelegate(typeof(Func<CdrReader, T>), method, false) as Func<CdrReader, T>;
         }
 
         private readonly IntPtr _handle;
@@ -1050,6 +1061,8 @@ namespace Int2Dds.Core
 
         private T DeserializeBuffer(int length)
         {
+            if (s_readerDeserializer != null)
+                return s_readerDeserializer(new CdrReader(_buffer, length));
             if (s_spanDeserializer != null)
                 return s_spanDeserializer(new ReadOnlySpan<byte>(_buffer, 0, length));
 

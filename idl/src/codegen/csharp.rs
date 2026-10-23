@@ -260,7 +260,12 @@ impl<'a> CsGen<'a> {
         self.line("");
 
         self.line(&format!(
-            "public static {} DeserializeCdr(byte[] data) => DeserializeCdr(data.AsSpan());",
+            "public static {} DeserializeCdr(byte[] data) => DeserializeCdrInline(new CdrReader(data));",
+            class_name
+        ));
+        self.line("");
+        self.line(&format!(
+            "public static {} DeserializeCdr(CdrReader r) => DeserializeCdrInline(r);",
             class_name
         ));
         self.line("");
@@ -1183,7 +1188,7 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Sequence { element, .. } if Self::is_octet_element(element) => {
                 self.line(&format!("w.WriteSeqHeader((uint){}.Count);", accessor));
-                self.line(&format!("w.WriteBytes({}.ToArray());", accessor));
+                self.line(&format!("w.WriteBytes({});", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
                 let non_prim = Self::is_non_primitive_element(element);
@@ -1373,7 +1378,14 @@ impl<'a> CsGen<'a> {
 
         // byte[] overload for P/Invoke compatibility (DataReader uses reflection to find this signature)
         self.line(&format!(
-            "public static {} DeserializeCdr(byte[] data) => DeserializeCdr(data.AsSpan());",
+            "public static {} DeserializeCdr(byte[] data) => DeserializeCdrInline(new CdrReader(data));",
+            class_name
+        ));
+        self.line("");
+
+        // Reader overload: DataReader and LoanedSample.CreateReader read their buffers in place
+        self.line(&format!(
+            "public static {} DeserializeCdr(CdrReader r) => DeserializeCdrInline(r);",
             class_name
         ));
     }
@@ -1546,10 +1558,7 @@ impl<'a> CsGen<'a> {
             ResolvedType::Sequence { element, .. } if Self::is_octet_element(element) => {
                 let count_var = format!("_{name}Count");
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
-                self.line(&format!(
-                    "{}.{} = new List<byte>(r.ReadBytes((int){}));",
-                    obj, name, count_var
-                ));
+                self.line(&format!("{}.{} = r.ReadByteList((int){});", obj, name, count_var));
             }
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("_{name}Count");
@@ -1695,10 +1704,7 @@ impl<'a> CsGen<'a> {
             ResolvedType::Sequence { element, .. } if Self::is_octet_element(element) => {
                 let count_var = format!("{var_name}Count");
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
-                self.line(&format!(
-                    "var {} = new List<byte>(r.ReadBytes((int){}));",
-                    var_name, count_var
-                ));
+                self.line(&format!("var {} = r.ReadByteList((int){});", var_name, count_var));
             }
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("{var_name}Count");
@@ -1979,14 +1985,10 @@ mod tests {
         let model = resolve(defs).unwrap();
         let code = generate(&model, "Blob.idl", &CSharpOptions::default());
         assert!(code.contains("public List<byte> Data"), "{}", code);
-        assert!(code.contains("w.WriteBytes(Data.ToArray());"), "{}", code);
-        assert!(code.contains("new List<byte>(r.ReadBytes((int)_DataCount));"), "{}", code);
-        assert!(code.contains("w.WriteBytes(_item.ToArray());"), "{}", code);
-        assert!(
-            code.contains("var _item = new List<byte>(r.ReadBytes((int)_itemCount));"),
-            "{}",
-            code
-        );
+        assert!(code.contains("w.WriteBytes(Data);"), "{}", code);
+        assert!(code.contains("r.ReadByteList((int)_DataCount);"), "{}", code);
+        assert!(code.contains("w.WriteBytes(_item);"), "{}", code);
+        assert!(code.contains("var _item = r.ReadByteList((int)_itemCount);"), "{}", code);
         assert!(code.contains("w.WriteI32(_item);"), "{}", code);
         assert!(!code.contains("w.WriteU8(_item);"), "{}", code);
     }

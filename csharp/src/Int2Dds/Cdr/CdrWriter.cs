@@ -3,6 +3,7 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -369,6 +370,16 @@ namespace Int2Dds.Cdr
             EnsureCapacity(data.Length);
             data.CopyTo(_buffer.AsSpan(_pos));
             _pos += data.Length;
+        }
+
+        /// <summary>Write the bytes of a list (no alignment, no length prefix).</summary>
+        public void WriteBytes(List<byte> data)
+        {
+#if NET5_0_OR_GREATER
+            WriteBytes(CollectionsMarshal.AsSpan(data));
+#else
+            WriteBytes(data.ToArray());
+#endif
         }
 
         /// <summary>Write an enum discriminant as a signed 32-bit integer.</summary>
