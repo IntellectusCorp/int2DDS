@@ -31,7 +31,8 @@ namespace Int2Dds.Cdr
         private const int MaxShortLength = 0xFFFF;    // content lengths above this need the long form
         private const ushort MuFlag = 0x4000;         // must-understand bit in a PL_CDR pid
         // Below the 85,000-byte LOH threshold: a retained LOH spare caused latency spikes.
-        private const int MaxSpareCapacity = 64 * 1024;
+        private const int MaxSpareCapacity = 80 * 1024;
+        private const int GrowthSlack = 1024;
 
         // Released by ToBytes and reused by the next writer on the same thread.
         [ThreadStatic] private static byte[]? s_spare;
@@ -178,8 +179,10 @@ namespace Int2Dds.Cdr
             if (_ownsBuffer && required <= _buffer.Length) return;
 
             int newCapacity = Math.Max(_buffer.Length, DefaultCapacity);
-            while (newCapacity < required)
-                newCapacity *= 2;
+            // Fit a bulk write with small slack instead of doubling past it; the slack keeps trailing
+            // fields and padding from forcing a second full-size grow.
+            if (newCapacity < required)
+                newCapacity = Math.Max(newCapacity * 2, required + GrowthSlack);
 
             var newBuffer = AllocateUninitialized(newCapacity);
             Buffer.BlockCopy(_buffer, 0, newBuffer, 0, _pos);
@@ -548,6 +551,17 @@ namespace Int2Dds.Cdr
                 _ownsBuffer = false;
             }
             return result;
+        }
+
+        /// <summary>The bytes written so far, without copying.</summary>
+        internal ReadOnlySpan<byte> WrittenSpan => new ReadOnlySpan<byte>(_buffer, 0, _pos);
+
+        /// <summary>Hands the buffer back for reuse; do not read <see cref="WrittenSpan"/> afterwards.</summary>
+        internal void Release()
+        {
+            if (!_ownsBuffer) return;
+            ReturnSpare(_buffer);
+            _ownsBuffer = false;
         }
     }
 }
