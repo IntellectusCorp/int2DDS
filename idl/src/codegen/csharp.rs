@@ -207,7 +207,9 @@ impl<'a> CsGen<'a> {
         // SerializeCdr
         self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
-        self.line("public byte[] SerializeCdr(bool xcdr2)");
+        self.line("public byte[] SerializeCdr(bool xcdr2) => SerializeCdrWriter(xcdr2).ToBytes();");
+        self.line("");
+        self.line("public CdrWriter SerializeCdrWriter(bool xcdr2)");
         self.line("{");
         self.indent += 1;
         self.line("var w = new CdrWriter(Extensibility.Final, xcdr2: xcdr2);");
@@ -223,7 +225,7 @@ impl<'a> CsGen<'a> {
             bit_offset += f.bit_width;
         }
         self.line(&format!("w.{}(packed);", write_method));
-        self.line("return w.ToBytes();");
+        self.line("return w;");
         self.indent -= 1;
         self.line("}");
         self.line("");
@@ -431,7 +433,9 @@ impl<'a> CsGen<'a> {
         // SerializeCdr
         self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
-        self.line("public byte[] SerializeCdr(bool xcdr2)");
+        self.line("public byte[] SerializeCdr(bool xcdr2) => SerializeCdrWriter(xcdr2).ToBytes();");
+        self.line("");
+        self.line("public CdrWriter SerializeCdrWriter(bool xcdr2)");
         self.line("{");
         self.indent += 1;
         let union_ext = match u.extensibility {
@@ -472,7 +476,7 @@ impl<'a> CsGen<'a> {
         if needs_union_dh {
             self.line("w.DheaderFinalize(_udt);");
         }
-        self.line("return w.ToBytes();");
+        self.line("return w;");
         self.indent -= 1;
         self.line("}");
         self.line("");
@@ -1092,8 +1096,11 @@ impl<'a> CsGen<'a> {
         self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
 
-        // SerializeCdr(bool xcdr2) - actual implementation
-        self.line("public byte[] SerializeCdr(bool xcdr2)");
+        self.line("public byte[] SerializeCdr(bool xcdr2) => SerializeCdrWriter(xcdr2).ToBytes();");
+        self.line("");
+
+        // SerializeCdrWriter - actual implementation; DataWriter reads its buffer without ToBytes
+        self.line("public CdrWriter SerializeCdrWriter(bool xcdr2)");
         self.line("{");
         self.indent += 1;
         self.line("var w = new CdrWriter(TypeExtensibility, xcdr2: xcdr2);");
@@ -1130,7 +1137,7 @@ impl<'a> CsGen<'a> {
             }
         }
 
-        self.line("return w.ToBytes();");
+        self.line("return w;");
         self.indent -= 1;
         self.line("}");
     }
