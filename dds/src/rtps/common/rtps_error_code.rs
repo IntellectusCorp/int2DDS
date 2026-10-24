@@ -48,6 +48,7 @@ pub enum RtpsErrorCode {
     SerializationError = 107,
     DeserializationError = 108,
     InvalidDestinationGuid = 109,
+    UnauthenticatedSource = 110,
 
     // Validation/Type
     InvalidEntityKind = 200,
@@ -103,6 +104,7 @@ impl RtpsErrorCode {
             107 => Some(RtpsErrorCode::SerializationError),
             108 => Some(RtpsErrorCode::DeserializationError),
             109 => Some(RtpsErrorCode::InvalidDestinationGuid),
+            110 => Some(RtpsErrorCode::UnauthenticatedSource),
 
             // Validation/Type/State
             200 => Some(RtpsErrorCode::InvalidEntityKind),
@@ -154,6 +156,7 @@ impl RtpsErrorCode {
             RtpsErrorCode::SerializationError => "Serialization Error",
             RtpsErrorCode::DeserializationError => "Deserialization Error",
             RtpsErrorCode::InvalidDestinationGuid => "Invalid Destination Guid",
+            RtpsErrorCode::UnauthenticatedSource => "Unauthenticated Source",
             RtpsErrorCode::InvalidEntityKind => "Invalid entity kind",
             RtpsErrorCode::LockError => "Failed to acquire lock",
             RtpsErrorCode::ThreadJoinError => "Failed to join thread",

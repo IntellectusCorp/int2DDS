@@ -5,5 +5,6 @@
 //! that TCP and QUIC each hand to their own handshake.
 
 pub mod config;
+pub(crate) mod identity;
 
 pub(crate) use config::TlsConfig;

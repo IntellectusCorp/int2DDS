@@ -11,6 +11,7 @@ use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
 use crate::rtps::transport::tcp::framing::{
     TcpBufferPool, TcpFrame, TcpFrameKind, TcpFrameReadState, TcpReadOutcome,
 };
+use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
 use crate::rtps::transport::tls::TlsConfig;
 use crate::rtps::transport::tokens::ListenerToken;
 
@@ -20,6 +21,7 @@ pub(crate) struct IncomingTcpMessage {
     pub(crate) data: bytes::Bytes,
     pub(crate) source: SocketAddr,
     pub(crate) kind: TcpFrameKind,
+    pub(crate) peer_identity: Option<[u8; IDENTITY_LEN]>,
 }
 
 struct TcpReadConnection {
@@ -29,6 +31,7 @@ struct TcpReadConnection {
     tls: Option<rustls::ServerConnection>,
     tls_handshake_deadline: Option<Instant>,
     first_frame_deadline: Option<Instant>,
+    peer_identity: Option<[u8; IDENTITY_LEN]>,
 }
 
 pub(crate) struct TcpListener {
@@ -212,6 +215,7 @@ impl TcpListener {
                     tls,
                     tls_handshake_deadline,
                     first_frame_deadline,
+                    peer_identity: None,
                 },
             );
             accepted_count += 1;
@@ -254,6 +258,10 @@ impl TcpListener {
                             )
                         };
                         if was_handshaking && !tls.is_handshaking() {
+                            connection.peer_identity = tls
+                                .peer_certificates()
+                                .and_then(|chain| chain.first())
+                                .map(identity_from_cert);
                             connection.tls_handshake_deadline = None;
                             connection.first_frame_deadline = Some(now + first_frame_timeout);
                             let interest = if tls.wants_write() {
@@ -286,6 +294,7 @@ impl TcpListener {
                 data: frame.payload,
                 source,
                 kind: frame.kind,
+                peer_identity: connection.peer_identity,
             });
         }
         if terminal {
@@ -631,6 +640,73 @@ mod tests {
 
         let connection = client.join().unwrap();
         assert!(!connection.is_failed());
+        listener.deregister_all(poll.registry()).unwrap();
+        drop(connection);
+        drop(listener);
+        drop(poll);
+    }
+
+    #[test]
+    fn a_tls_frame_carries_the_identity_of_the_client_certificate() {
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let pem_dir = tempfile::tempdir().unwrap();
+        let mut config = self_signed_tls_config(pem_dir.path());
+        config.verify_peer = true;
+        let tls_config = Arc::new(config);
+
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::clone(&tls_config)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-identity"));
+        let client_config = Arc::clone(&tls_config);
+        let client = std::thread::spawn(move || {
+            let connection = OutboundConnection::connect(
+                address,
+                &TcpSocketTuning::default(),
+                Some(client_config.as_ref()),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+            connection
+        });
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let received = loop {
+            assert!(Instant::now() < deadline, "timed out waiting for the TLS frame");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            let mut message = None;
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else if let Some(ready) =
+                    listener.get_message(event.token(), poll.registry()).unwrap()
+                {
+                    message = Some(ready);
+                }
+            }
+            if let Some(message) = message {
+                break message;
+            }
+        };
+
+        let leaf = tls_config.load_cert_chain().unwrap().remove(0);
+        assert_eq!(received.peer_identity, Some(identity_from_cert(&leaf)));
+
+        let connection = client.join().unwrap();
         listener.deregister_all(poll.registry()).unwrap();
         drop(connection);
         drop(listener);

@@ -116,6 +116,15 @@ pub(crate) trait TransportPlugin: Send + Sync {
         None
     }
 
+    /// Bytes derived from the transport's own cryptographic identity, to be
+    /// embedded in the participant's GUID prefix. A peer that can recover the
+    /// same identity from an authenticated connection can then reject messages
+    /// whose self-written prefix does not match the sender. `None` when the
+    /// transport authenticates nothing, which leaves the prefix random.
+    fn identity_bytes(&self) -> Option<[u8; 6]> {
+        None
+    }
+
     /// Whether the periodic SPDP announcement already goes, one by one, to every participant
     /// discovered so far. A transport that broadcasts instead cannot tell who heard it, so the
     /// discovery layer repeats the announcement to each known peer on top.

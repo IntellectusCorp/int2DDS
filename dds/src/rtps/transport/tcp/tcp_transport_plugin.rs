@@ -27,6 +27,7 @@ use crate::rtps::transport::tcp::framing::TcpFrameKind;
 use crate::rtps::transport::tcp::peer_candidates::{AnnounceTargets, PEER_PRUNE_DELAY};
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
+use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
 use crate::rtps::transport::tls::TlsConfig;
 use crate::rtps::transport::{TcpConfig, TransportType};
 
@@ -78,6 +79,10 @@ pub(crate) struct TcpTransportPlugin {
     /// Connection bookkeeping and the self-delivery queue, shared with the
     /// sender and with the stream listening task.
     shared: Arc<ConnectionRegistry>,
+
+    /// Derived from this participant's own certificate, so a peer can check the
+    /// GUID prefix against the TLS connection it arrives on.
+    identity: Option<[u8; IDENTITY_LEN]>,
 }
 
 /// What TCP reports as the traffic it can absorb: the largest an SPDP
@@ -166,6 +171,13 @@ impl TcpTransportPlugin {
             }),
         };
 
+        // Without verify_peer a client never presents a certificate, so a peer
+        // could not check the prefix and binding it would only refuse traffic.
+        let identity = match tls_config.as_ref() {
+            Some(tls) if tls.verify_peer => tls.load_cert_chain()?.first().map(identity_from_cert),
+            _ => None,
+        };
+
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let (listener, participant_id) = Self::bind_listener(
@@ -220,6 +232,7 @@ impl TcpTransportPlugin {
             sender,
             listener: Mutex::new(Some(listener)),
             shared,
+            identity,
         })
     }
 
@@ -562,6 +575,10 @@ impl TcpTransportPlugin {
 }
 
 impl TransportPlugin for TcpTransportPlugin {
+    fn identity_bytes(&self) -> Option<[u8; IDENTITY_LEN]> {
+        self.identity
+    }
+
     /// A frame the socket will not take is queued rather than dropped, so no
     /// amount of traffic has to be held back to keep the peer from losing it.
     /// Reporting the largest value the announcement can carry is how that is
@@ -1488,5 +1505,64 @@ mod tests {
 
         sender.close();
         receiver.close();
+    }
+
+    fn make_tls_plugin(domain: u32, tls: Option<Arc<TlsConfig>>) -> TcpTransportPlugin {
+        let cfg = TcpConfig {
+            initial_peers: vec!["127.0.0.1:7400".parse().unwrap()],
+            bind_port: Some(0),
+            ..TcpConfig::default()
+        };
+        TcpTransportPlugin::new_with_tls(
+            domain,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            tls,
+            cfg,
+        )
+        .expect("plugin creation")
+    }
+
+    fn self_signed_tls(dir: &std::path::Path) -> Arc<TlsConfig> {
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_file = dir.join("cert.pem");
+        let key_file = dir.join("key.pem");
+        std::fs::write(&cert_file, generated.cert.pem()).unwrap();
+        std::fs::write(&key_file, generated.key_pair.serialize_pem()).unwrap();
+        Arc::new(TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file,
+            key_file,
+            server_name: "localhost".to_string(),
+            verify_peer: true,
+        })
+    }
+
+    #[test]
+    fn identity_bytes_come_from_the_configured_leaf_certificate() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first_tls = self_signed_tls(first_dir.path());
+
+        let first = make_tls_plugin(next_test_domain(), Some(Arc::clone(&first_tls)));
+        let second = make_tls_plugin(next_test_domain(), Some(self_signed_tls(second_dir.path())));
+        let plain = make_tls_plugin(next_test_domain(), None);
+        let unverified_dir = tempfile::tempdir().unwrap();
+        let mut unverified_tls = (*self_signed_tls(unverified_dir.path())).clone();
+        unverified_tls.verify_peer = false;
+        let unverified = make_tls_plugin(next_test_domain(), Some(Arc::new(unverified_tls)));
+
+        let leaf = first_tls.load_cert_chain().unwrap().remove(0);
+        assert_eq!(first.identity_bytes(), Some(identity_from_cert(&leaf)));
+        assert_ne!(first.identity_bytes(), second.identity_bytes());
+        assert_eq!(plain.identity_bytes(), None);
+        assert_eq!(unverified.identity_bytes(), None);
+
+        first.close();
+        second.close();
+        plain.close();
+        unverified.close();
     }
 }

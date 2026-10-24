@@ -14,6 +14,7 @@ use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
+use crate::rtps::transport::tls::identity::IDENTITY_LEN;
 use crate::rtps::transport::tokens::ListenerToken;
 use crate::serialize::pl_cdr::InlineQosParameters;
 use log::{debug, error, info, warn};
@@ -29,12 +30,14 @@ pub(crate) struct DiscoveryUnicastListeningTask {
     spdp_logic: Arc<Option<SpdpLogic>>,
     sedp_logic: Arc<Option<SedpLogic>>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
+    identity_required: bool,
 }
 
 impl DiscoveryUnicastListeningTask {
     pub(crate) fn new(participant: Arc<Participant>) -> Self {
         let (spdp_logic, sedp_logic, _) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
+        let identity_required = participant.identity().is_some();
         let domain_id = participant.domain_id();
         Self {
             guid_prefix,
@@ -43,6 +46,7 @@ impl DiscoveryUnicastListeningTask {
             spdp_logic,
             sedp_logic,
             shutdown_waker: Arc::new(OnceLock::new()),
+            identity_required,
         }
     }
 
@@ -114,6 +118,7 @@ impl DiscoveryUnicastListeningTask {
                             buffer,
                             from_addr,
                             udp_locator_kind(&from_addr.ip()),
+                            None,
                         );
                     }
                 }
@@ -126,9 +131,11 @@ impl DiscoveryUnicastListeningTask {
         bytes: Bytes,
         from_addr: SocketAddr,
         locator_kind: i32,
+        peer_identity: Option<[u8; IDENTITY_LEN]>,
     ) -> RtpsResult<()> {
         let mut message_receiver =
             MessageReceiver::new_with_locator_kind(self.guid_prefix, &from_addr, locator_kind);
+        message_receiver.authenticate(self.identity_required, peer_identity);
         let rtps_message = message_receiver.init(&bytes)?;
 
         // Ignore messages sent by myself
@@ -161,13 +168,21 @@ impl DiscoveryUnicastListeningTask {
                     .and_then(|qos| qos.get_status_info())
                     .is_some_and(|status| status.disposed() || status.unregistered());
 
-                if is_termination {
-                    let terminated_participant_guid = inline_qos_params
+                let named_guid = if is_termination {
+                    inline_qos_params
                         .as_ref()
                         .and_then(|qos| qos.get_key_hash())
-                        .unwrap_or_else(|| {
-                            InstanceHandle::from_guid(&participant_proxy_data.participant_guid())
-                        });
+                        .map(|key_hash| key_hash.to_guid())
+                        .unwrap_or_else(|| participant_proxy_data.participant_guid())
+                } else {
+                    participant_proxy_data.participant_guid()
+                };
+                if !message_receiver.sender_owns(named_guid) {
+                    return Err(message_receiver.unauthenticated(named_guid.prefix()));
+                }
+
+                if is_termination {
+                    let terminated_participant_guid = InstanceHandle::from_guid(&named_guid);
 
                     if let Err(e) = spdp_logic.handle_participant_termination_message(
                         &terminated_participant_guid.to_guid(),

@@ -1069,6 +1069,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "regex",
+ "ring",
  "roxmltree",
  "rustls",
  "rustls-pemfile",

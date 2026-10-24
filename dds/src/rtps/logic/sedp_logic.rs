@@ -2698,7 +2698,15 @@ impl UnicastMessageProcessor for SedpLogic {
                 }
             };
 
-            let outcome = if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
+            let foreign_key = inline_qos_params
+                .as_ref()
+                .and_then(|qos| qos.get_key_hash())
+                .map(|key_hash| InstanceHandle::to_guid(&key_hash))
+                .filter(|guid| !message_receiver.sender_owns(*guid));
+
+            let outcome = if let Some(foreign_key) = foreign_key {
+                Err(message_receiver.unauthenticated(foreign_key.prefix()))
+            } else if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
                 let is_termination = inline_qos_params
                     .as_ref()
                     .and_then(|qos| qos.get_status_info())
@@ -2747,6 +2755,9 @@ impl UnicastMessageProcessor for SedpLogic {
                             &writer_data.publication_builtin_topic_data.topic_name(),
                             "DiscoveredWriterData",
                         )?;
+                        if !message_receiver.sender_owns(endpoint_guid) {
+                            return Err(message_receiver.unauthenticated(endpoint_guid.prefix()));
+                        }
 
                         if participant.is_publication_ignored(endpoint_guid) {
                             debug!("SEDP Logic: discarding ignored publication {}", endpoint_guid);
@@ -2816,6 +2827,9 @@ impl UnicastMessageProcessor for SedpLogic {
                             &reader_data.subscription_builtin_topic_data.topic_name(),
                             "DiscoveredReaderData",
                         )?;
+                        if !message_receiver.sender_owns(endpoint_guid) {
+                            return Err(message_receiver.unauthenticated(endpoint_guid.prefix()));
+                        }
 
                         if participant.is_subscription_ignored(endpoint_guid) {
                             debug!("SEDP Logic: discarding ignored subscription {}", endpoint_guid);
@@ -2846,7 +2860,10 @@ impl UnicastMessageProcessor for SedpLogic {
             // The bytes arrived, so the sample is received (RTPS 8.4.12); re-requesting them
             // cannot make an endpoint of them. Returning would drop the submessages behind it.
             if let Err(e) = outcome {
-                if e.code == RtpsErrorCode::DeserializationError {
+                if matches!(
+                    e.code,
+                    RtpsErrorCode::DeserializationError | RtpsErrorCode::UnauthenticatedSource
+                ) {
                     warn!("[SEDP] discarding an unusable announcement from {}: {}", writer_guid, e);
                 } else {
                     return Err(e);
@@ -2875,14 +2892,21 @@ impl UnicastMessageProcessor for SedpLogic {
                 .and_then(|qos| qos.get_status_info())
                 .is_some_and(|status| status.disposed() || status.unregistered());
 
-            if is_termination {
-                let terminated_participant_guid =
-                    inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash()).unwrap_or_else(
-                        || InstanceHandle::from_guid(&participant_proxy_data.participant_guid()),
-                    );
+            let named_guid = if is_termination {
+                inline_qos_params
+                    .as_ref()
+                    .and_then(|qos| qos.get_key_hash())
+                    .map(|key_hash| key_hash.to_guid())
+                    .unwrap_or_else(|| participant_proxy_data.participant_guid())
+            } else {
+                participant_proxy_data.participant_guid()
+            };
+            if !message_receiver.sender_owns(named_guid) {
+                return Err(message_receiver.unauthenticated(named_guid.prefix()));
+            }
 
-                let _ = participant
-                    .unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
+            if is_termination {
+                let _ = participant.unmatch_with_remote_participant(&named_guid);
             } else {
                 return self.handle_discovered_participant_data(
                     participant_proxy_data.clone(),

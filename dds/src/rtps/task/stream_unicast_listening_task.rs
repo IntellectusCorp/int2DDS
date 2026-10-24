@@ -86,6 +86,7 @@ impl StreamUnicastListeningTask {
                     message.data,
                     message.source,
                     tcp_locator_kind(&message.source.ip()),
+                    participant.identity(),
                 );
             }
             for event in &events {
@@ -117,6 +118,7 @@ impl StreamUnicastListeningTask {
                                         message.data,
                                         message.source,
                                         locator_kind,
+                                        message.peer_identity,
                                     );
                                 }
                                 TcpFrameKind::UserData => {
@@ -124,6 +126,7 @@ impl StreamUnicastListeningTask {
                                         message.data,
                                         message.source,
                                         locator_kind,
+                                        message.peer_identity,
                                     );
                                 }
                             }

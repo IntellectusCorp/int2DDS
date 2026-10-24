@@ -147,13 +147,27 @@ impl DcpsBridge {
         let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
-        let participant = Participant::new(
-            domain_id,
-            participant_id,
-            socket.working_ips(),
-            metatraffic_unicast_locators,
-            default_unicast_locators,
-        );
+        let identity = transport.identity_bytes();
+        let participant = match identity {
+            Some(identity) => Participant::with_guid_prefix(
+                domain_id,
+                participant_id,
+                socket.working_ips(),
+                metatraffic_unicast_locators,
+                default_unicast_locators,
+                Guid::guid_prefix_from_identity(identity),
+            ),
+            None => Participant::new(
+                domain_id,
+                participant_id,
+                socket.working_ips(),
+                metatraffic_unicast_locators,
+                default_unicast_locators,
+            ),
+        };
+        if let Some(identity) = identity {
+            participant.set_identity(identity);
+        }
         participant.set_local_receive_buffer_size(transport.advertised_receive_buffer_size());
         participant.set_local_user_data(qos.user_data.clone());
         if socket.is_working_ips_from_feature() {
@@ -2222,5 +2236,372 @@ mod tests {
                     .is_none());
             }
         }
+    }
+
+    /// One CA and the PEM files of the leaf certificates it signs, all valid for `localhost`
+    /// as both client and server.
+    struct TestPki {
+        dir: tempfile::TempDir,
+        ca: rcgen::Certificate,
+        ca_key: rcgen::KeyPair,
+    }
+
+    impl TestPki {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let ca_key = rcgen::KeyPair::generate().unwrap();
+            let ca = params.self_signed(&ca_key).unwrap();
+            std::fs::write(dir.path().join("ca.pem"), ca.pem()).unwrap();
+            Self { dir, ca, ca_key }
+        }
+
+        /// Issues a leaf certificate and returns its TLS config and DER encoding.
+        fn issue(&self, name: &str) -> (crate::rtps::transport::tls::TlsConfig, Vec<u8>) {
+            let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+            params.extended_key_usages = vec![
+                rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+                rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = params.signed_by(&key, &self.ca, &self.ca_key).unwrap();
+            let cert_file = self.dir.path().join(format!("{name}.pem"));
+            let key_file = self.dir.path().join(format!("{name}.key"));
+            std::fs::write(&cert_file, cert.pem()).unwrap();
+            std::fs::write(&key_file, key.serialize_pem()).unwrap();
+            let config = crate::rtps::transport::tls::TlsConfig {
+                ca_file: self.dir.path().join("ca.pem"),
+                cert_file,
+                key_file,
+                server_name: "localhost".to_string(),
+                verify_peer: true,
+            };
+            (config, cert.der().to_vec())
+        }
+    }
+
+    /// A prefix whose bytes 2..8 carry the leading SHA-256 bytes of `cert_der`.
+    fn prefix_owned_by(cert_der: &[u8]) -> GuidPrefix {
+        let hash = ring::digest::digest(&ring::digest::SHA256, cert_der);
+        let mut prefix = [0x01, 0x19, 0, 0, 0, 0, 0, 0, 0xA5, 0xA5, 0xA5, 0xA5];
+        prefix[2..8].copy_from_slice(&hash.as_ref()[..6]);
+        prefix
+    }
+
+    fn replace_prefix(message: &[u8], from: GuidPrefix, to: GuidPrefix) -> Vec<u8> {
+        let mut replaced = message.to_vec();
+        let mut at = 0;
+        while at + from.len() <= replaced.len() {
+            if replaced[at..at + from.len()] == from {
+                replaced[at..at + from.len()].copy_from_slice(&to);
+                at += from.len();
+            } else {
+                at += 1;
+            }
+        }
+        replaced
+    }
+
+    /// Whether a remote participant is recorded under `prefix`, by its header or by
+    /// the GUID its payload announced.
+    fn has_remote_participant(bridge: &DcpsBridge, prefix: GuidPrefix) -> bool {
+        bridge
+            .participant
+            .remote_participant_proxy_datas()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|data| data.guid_prefix() == prefix || data.participant_guid().prefix() == prefix)
+    }
+
+    fn discovered_within(bridge: &DcpsBridge, prefix: GuidPrefix, limit: StdDuration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < deadline {
+            if has_remote_participant(bridge, prefix) {
+                return true;
+            }
+            thread::sleep(StdDuration::from_millis(20));
+        }
+        false
+    }
+
+    /// A TCP participant that requires client certificates, and a copy of its
+    /// own SPDP announcement to forge others from.
+    struct TlsReceiver {
+        bridge: DcpsBridge,
+        port: u16,
+        prefix: GuidPrefix,
+        spdp: Vec<u8>,
+    }
+
+    impl TlsReceiver {
+        fn new(pki: &TestPki) -> Self {
+            let (tls, _) = pki.issue("receiver");
+            let mut qos = DomainParticipantQos::default();
+            let property = &mut qos.property;
+            property.add_property("int2dds.transport", "tcp", false);
+            property.add_property("int2dds.tls.ca_file", tls.ca_file.to_str().unwrap(), false);
+            property.add_property("int2dds.tls.cert_file", tls.cert_file.to_str().unwrap(), false);
+            property.add_property("int2dds.tls.key_file", tls.key_file.to_str().unwrap(), false);
+            property.add_property("int2dds.tls.verify_peer", "true", false);
+            // A port nobody listens on: the receiver only has to accept, never reach anyone.
+            property.add_property("int2dds.initial_peers", "127.0.0.1:1", false);
+            let mut bridge = DcpsBridge::new(unique_domain_id() as u32, &qos).unwrap();
+            bridge.init().unwrap();
+
+            let prefix = bridge.participant.guid().prefix();
+            let port = bridge
+                .participant
+                .local_participant_proxy_data()
+                .metatraffic_unicast_locator_list()[0]
+                .port() as u16;
+            let spdp = bridge
+                .spdp_logic
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .create_spdp_message()
+                .unwrap()
+                .unwrap();
+            Self { bridge, port, prefix, spdp: spdp.to_vec() }
+        }
+
+        /// The receiver's announcement rewritten to come from `prefix`.
+        fn spdp_from(&self, prefix: GuidPrefix) -> Vec<u8> {
+            replace_prefix(&self.spdp, self.prefix, prefix)
+        }
+
+        /// A SEDP publication announcement sent under `sender`, naming `endpoint`
+        /// as the announced writer.
+        fn publication_from(&self, sender: GuidPrefix, writer_sn: u32, endpoint: Guid) -> Vec<u8> {
+            let mut publication =
+                crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData::new(
+                    &DataWriterQos::default(),
+                    &PublisherQos::default(),
+                    &TopicQos::default(),
+                );
+            publication.set_endpoint_guid(endpoint);
+            publication.set_topic_name("sedp_forgery".to_string());
+            publication.set_type_name("Forged".to_string());
+            let payload = publication.to_serialized_data().to_vec();
+
+            let mut message = self.spdp[..8].to_vec();
+            message.extend_from_slice(&sender);
+            message.extend_from_slice(&[0x15, 0x05]);
+            message.extend_from_slice(&((20 + payload.len()) as u16).to_le_bytes());
+            message.extend_from_slice(&[0, 0, 16, 0]);
+            message.extend_from_slice(&EntityId::SEDP_BUILTIN_PUBLICATIONS_READER.to_bytes());
+            message.extend_from_slice(&EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER.to_bytes());
+            message.extend_from_slice(&0u32.to_le_bytes());
+            message.extend_from_slice(&writer_sn.to_le_bytes());
+            message.extend_from_slice(&payload);
+            message
+        }
+
+        fn connect_as(
+            &self,
+            tls: &crate::rtps::transport::tls::TlsConfig,
+        ) -> crate::rtps::transport::tcp::sync_connection::OutboundConnection {
+            crate::rtps::transport::tcp::sync_connection::OutboundConnection::connect(
+                std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, self.port)),
+                &crate::rtps::transport::tcp::connection_registry::TcpSocketTuning::default(),
+                Some(tls),
+                StdDuration::from_secs(5),
+                StdDuration::from_secs(5),
+            )
+            .unwrap()
+        }
+    }
+
+    fn send_over(
+        connection: &crate::rtps::transport::tcp::sync_connection::OutboundConnection,
+        message: &[u8],
+    ) {
+        let mut frame = Vec::new();
+        crate::rtps::transport::tcp::framing::encode_frame(message, &mut frame).unwrap();
+        connection.send(&frame).unwrap();
+    }
+
+    /// The first DATA of `message` turned into a payload-less dispose carrying
+    /// `parameters` as its inline QoS, in the little-endian layout this crate writes.
+    fn as_termination(message: &[u8], parameters: &[u8]) -> Vec<u8> {
+        const DATA_ID: u8 = 0x15;
+        const LITTLE_ENDIAN_AND_INLINE_QOS: u8 = 0x03;
+        const DATA_FIXED_PART: usize = 20;
+        let mut at = 20;
+        while at + 4 <= message.len() {
+            let octets = u16::from_le_bytes([message[at + 2], message[at + 3]]) as usize;
+            if message[at] == DATA_ID {
+                let mut termination = message[..at + 4 + DATA_FIXED_PART].to_vec();
+                termination[at + 1] = LITTLE_ENDIAN_AND_INLINE_QOS;
+                let octets = (DATA_FIXED_PART + parameters.len()) as u16;
+                termination[at + 2..at + 4].copy_from_slice(&octets.to_le_bytes());
+                termination.extend_from_slice(parameters);
+                return termination;
+            }
+            at += 4 + octets;
+        }
+        panic!("no DATA submessage to turn into a termination");
+    }
+
+    /// KEY_HASH naming the participant under `prefix`, marked disposed and unregistered.
+    fn termination_of(prefix: GuidPrefix) -> Vec<u8> {
+        let mut parameters = vec![0x70, 0x00, 16, 0];
+        parameters.extend_from_slice(&prefix);
+        parameters.extend_from_slice(&[0x00, 0x00, 0x01, 0xC1]);
+        parameters.extend_from_slice(&[0x71, 0x00, 4, 0, 0, 0, 0, 3]);
+        parameters.extend_from_slice(&[0x01, 0x00, 0, 0]);
+        parameters
+    }
+
+    fn stays_discovered(bridge: &DcpsBridge, prefix: GuidPrefix, period: StdDuration) -> bool {
+        let deadline = std::time::Instant::now() + period;
+        while std::time::Instant::now() < deadline {
+            if !has_remote_participant(bridge, prefix) {
+                return false;
+            }
+            thread::sleep(StdDuration::from_millis(20));
+        }
+        true
+    }
+
+    #[test]
+    fn a_tcp_peer_cannot_announce_a_prefix_its_certificate_does_not_own() {
+        let pki = TestPki::new();
+        let receiver = TlsReceiver::new(&pki);
+        let (impostor_tls, impostor_der) = pki.issue("impostor");
+        let (_, victim_der) = pki.issue("victim");
+        let connection = receiver.connect_as(&impostor_tls);
+
+        let own_prefix = prefix_owned_by(&impostor_der);
+        send_over(&connection, &receiver.spdp_from(own_prefix));
+        let own_discovered =
+            discovered_within(&receiver.bridge, own_prefix, StdDuration::from_secs(5));
+
+        let victim_prefix = prefix_owned_by(&victim_der);
+        send_over(&connection, &receiver.spdp_from(victim_prefix));
+        let victim_discovered =
+            discovered_within(&receiver.bridge, victim_prefix, StdDuration::from_secs(3));
+
+        drop(connection);
+        let mut bridge = receiver.bridge;
+        let _ = bridge.disable();
+
+        assert!(own_discovered, "the announcement under the sender's own prefix was not accepted");
+        assert!(
+            !victim_discovered,
+            "an announcement under another certificate's prefix was accepted as that participant"
+        );
+    }
+
+    #[test]
+    fn a_tcp_peer_cannot_announce_another_participant_in_its_spdp_payload() {
+        let pki = TestPki::new();
+        let receiver = TlsReceiver::new(&pki);
+        let (impostor_tls, impostor_der) = pki.issue("impostor");
+        let (_, victim_der) = pki.issue("victim");
+        let connection = receiver.connect_as(&impostor_tls);
+
+        let own_prefix = prefix_owned_by(&impostor_der);
+        send_over(&connection, &receiver.spdp_from(own_prefix));
+        let own_discovered =
+            discovered_within(&receiver.bridge, own_prefix, StdDuration::from_secs(5));
+
+        let victim_prefix = prefix_owned_by(&victim_der);
+        let mut forged = receiver.spdp_from(victim_prefix);
+        forged[8..20].copy_from_slice(&own_prefix);
+        send_over(&connection, &forged);
+        let victim_discovered =
+            discovered_within(&receiver.bridge, victim_prefix, StdDuration::from_secs(3));
+
+        drop(connection);
+        let mut bridge = receiver.bridge;
+        let _ = bridge.disable();
+
+        assert!(own_discovered, "the announcement under the sender's own prefix was not accepted");
+        assert!(
+            !victim_discovered,
+            "a payload naming another participant was accepted under the sender's own header"
+        );
+    }
+
+    #[test]
+    fn a_tcp_peer_cannot_terminate_another_participant() {
+        let pki = TestPki::new();
+        let receiver = TlsReceiver::new(&pki);
+        let (impostor_tls, impostor_der) = pki.issue("impostor");
+        let (victim_tls, victim_der) = pki.issue("victim");
+
+        let victim_prefix = prefix_owned_by(&victim_der);
+        let victim = receiver.connect_as(&victim_tls);
+        send_over(&victim, &receiver.spdp_from(victim_prefix));
+        let victim_discovered =
+            discovered_within(&receiver.bridge, victim_prefix, StdDuration::from_secs(5));
+
+        let impostor = receiver.connect_as(&impostor_tls);
+        let own_prefix = prefix_owned_by(&impostor_der);
+        let termination =
+            as_termination(&receiver.spdp_from(own_prefix), &termination_of(victim_prefix));
+        send_over(&impostor, &termination);
+        let victim_kept =
+            stays_discovered(&receiver.bridge, victim_prefix, StdDuration::from_secs(3));
+
+        drop(impostor);
+        drop(victim);
+        let mut bridge = receiver.bridge;
+        let _ = bridge.disable();
+
+        assert!(victim_discovered, "the victim's own announcement was not accepted");
+        assert!(victim_kept, "a termination naming another participant removed that participant");
+    }
+
+    fn publication_seen_within(bridge: &DcpsBridge, writer: Guid, limit: StdDuration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < deadline {
+            let publications = bridge.participant.remote_publications();
+            if publications.iter().any(|topic| topic.value().contains_key(&writer)) {
+                return true;
+            }
+            thread::sleep(StdDuration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn a_tcp_peer_cannot_announce_another_participants_endpoint() {
+        let pki = TestPki::new();
+        let receiver = TlsReceiver::new(&pki);
+        let (impostor_tls, impostor_der) = pki.issue("impostor");
+        let (_, victim_der) = pki.issue("victim");
+        let connection = receiver.connect_as(&impostor_tls);
+
+        let own_prefix = prefix_owned_by(&impostor_der);
+        send_over(&connection, &receiver.spdp_from(own_prefix));
+        let own_discovered =
+            discovered_within(&receiver.bridge, own_prefix, StdDuration::from_secs(5));
+
+        let writer_kind = EntityKind::USER_DEFINED_WRITER_WITH_KEY;
+        let own_writer = Guid::new(own_prefix, EntityId::new([0, 0, 1], writer_kind));
+        send_over(&connection, &receiver.publication_from(own_prefix, 1, own_writer));
+        let own_writer_seen =
+            publication_seen_within(&receiver.bridge, own_writer, StdDuration::from_secs(5));
+
+        let victim_writer =
+            Guid::new(prefix_owned_by(&victim_der), EntityId::new([0, 0, 2], writer_kind));
+        send_over(&connection, &receiver.publication_from(own_prefix, 2, victim_writer));
+        let victim_writer_seen =
+            publication_seen_within(&receiver.bridge, victim_writer, StdDuration::from_secs(3));
+
+        drop(connection);
+        let mut bridge = receiver.bridge;
+        let _ = bridge.disable();
+
+        assert!(own_discovered, "the announcement under the sender's own prefix was not accepted");
+        assert!(own_writer_seen, "the sender's announcement of its own writer was not accepted");
+        assert!(
+            !victim_writer_seen,
+            "an endpoint under another participant's prefix was accepted from the sender"
+        );
     }
 }
