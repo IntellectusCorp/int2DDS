@@ -21,11 +21,19 @@ pub struct WriterHistoryCache {
     owner_id: EntityId,
     changes: BTreeMap<SequenceNumber, Arc<CacheChange>>,
     highest_sn: SequenceNumber, // Highest sequence number ever added to this cache
+    // Whether a removal is handed to the sending task. Its handler only updates a StatefulWriter's
+    // reader proxies (UserLogic::on_writer_cache_change_removal), so a StatelessWriter's cache
+    // skips the queue push and the wake-up for every removed change.
+    notify_removal: bool,
 }
 
 impl HistoryCache for WriterHistoryCache {
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
         self.changes.remove(&a_change.sequence_number());
+
+        if !self.notify_removal {
+            return Ok(());
+        }
 
         if let Some(participant) = self.participant.upgrade() {
             if let Some(handler) =
@@ -77,7 +85,14 @@ impl WriterHistoryCache {
             owner_id,
             changes: BTreeMap::new(),
             highest_sn: SequenceNumber::new(0, 0),
+            notify_removal: true,
         }
+    }
+
+    /// The history of a StatelessWriter: removals are not handed to the sending task (see
+    /// `notify_removal`).
+    pub(crate) fn new_stateless(participant: Weak<Participant>, owner_id: EntityId) -> Self {
+        Self { notify_removal: false, ..Self::new(participant, owner_id) }
     }
 
     pub(crate) fn get_change(&self, seq_num: SequenceNumber) -> Option<Arc<CacheChange>> {

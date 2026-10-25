@@ -115,7 +115,10 @@ impl StatelessWriter {
             heartbeat_period,
             data_max_size_serialized,
             reader_locators: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(participant, endpoint_id))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new_stateless(
+                participant,
+                endpoint_id,
+            ))),
             callback: Arc::new(Mutex::new(callback)),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
