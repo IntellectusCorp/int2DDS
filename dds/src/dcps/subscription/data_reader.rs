@@ -1755,6 +1755,20 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(())
     }
 
+    /// Take-side removal: removes the change from both caches only if it is still in the DataReader cache and tells
+    /// whether it was, so a change that a concurrent take already removed is not handed out twice.
+    pub(crate) fn take_change(&self, a_change: Arc<CacheChange>) -> DdsResult<bool> {
+        let removed = self
+            .get_datareader_cache()?
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .remove_change_if_present(&a_change)?;
+        if removed {
+            self.remove_change_from_rtps_reader_cache(a_change)?;
+        }
+        Ok(removed)
+    }
+
     /// Removes all changes of the given instance from both DataReader and RTPS reader caches.
     /// This acquires both cache locks, so avoid calling from RTPS Reader contexts to prevent deadlock.
     pub(crate) fn remove_change_of_instance(
@@ -3207,7 +3221,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             };
 
             if take {
-                self.remove_change(change.clone())?;
+                if !self.take_change(change.clone())? {
+                    continue;
+                }
             } else {
                 self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
             }
@@ -3455,7 +3471,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                     // samples are never in the cache here.
                     // self.mark_instance_as_viewed(change.instance_handle());
                     if take {
-                        self.remove_change(change.clone())?;
+                        if !self.take_change(change.clone())? {
+                            continue;
+                        }
                     } else {
                         self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
                     }

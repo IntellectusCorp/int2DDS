@@ -603,6 +603,24 @@ impl<Foo: DdsType> DataReaderHistoryCache<Foo> {
 }
 
 impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
+    // Removes the given CacheChange from its instance bucket and tells whether it was still there, so that of two
+    // concurrent takes holding the same change only one hands it out.
+    pub(crate) fn remove_change_if_present(
+        &mut self,
+        a_change: &Arc<CacheChange>,
+    ) -> DdsResult<bool> {
+        let mut map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let Some(bucket) = map.get_mut(&a_change.instance_handle()) else {
+            return Ok(false);
+        };
+        let before = bucket.len();
+        bucket.retain(|c| {
+            !(c.sequence_number() == a_change.sequence_number()
+                && c.writer_guid() == a_change.writer_guid())
+        });
+        Ok(bucket.len() != before)
+    }
+
     pub(crate) fn new(
         data_reader: Weak<DataReader<Foo>>,
         reliability_qos: ReliabilityQosPolicy,
