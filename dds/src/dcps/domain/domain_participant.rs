@@ -838,6 +838,7 @@ impl DomainParticipant {
             }
         };
 
+        qos.check_values()?;
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
 
