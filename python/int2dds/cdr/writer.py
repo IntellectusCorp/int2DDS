@@ -7,7 +7,7 @@ from __future__ import annotations
 import struct
 from contextlib import contextmanager
 from enum import IntEnum
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Iterator, Sequence
 
 if TYPE_CHECKING:
     from int2dds.cdr.float128 import Float128
@@ -225,6 +225,31 @@ class CdrWriter:
     def write_seq_header(self, count: int) -> None:
         """Write a sequence header (element count as u32)."""
         self.write_u32(count)
+
+    def write_prim_seq(self, values: Sequence[float], fmt_char: str) -> None:
+        """
+        Write a sequence of numeric primitives in a single struct call.
+
+        Args:
+            values: Element values
+            fmt_char: struct format character of the element (? b B h H i I q Q f d)
+        """
+        self.write_seq_header(len(values))
+        self.write_prim_array(values, fmt_char, len(values))
+
+    def write_prim_array(self, values: Sequence[float], fmt_char: str, count: int) -> None:
+        """
+        Write ``count`` numeric primitives in a single struct call, without a length prefix.
+
+        Raises:
+            struct.error: If ``len(values)`` differs from ``count`` or a value is out of range
+        """
+        if count == 0:
+            return
+
+        self._align(struct.calcsize("<" + fmt_char))
+        order = "<" if self._le else ">"
+        self._buf += struct.pack(f"{order}{count}{fmt_char}", *values)
 
     def write_bytes(self, data: bytes | bytearray) -> None:
         """Write raw bytes without length prefix."""

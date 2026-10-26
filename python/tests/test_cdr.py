@@ -2,9 +2,12 @@
 Tests for CDR serialization/deserialization.
 """
 
+import struct
+
 import pytest
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
+from int2dds.cdr.reader import CdrUnderflowError
 
 
 class TestCdrWriter:
@@ -174,3 +177,157 @@ class TestCdrSequence:
 
         r = CdrReader(data)
         assert r.read_seq_header() == 0
+
+
+# struct format character -> sample values
+_PRIM_CASES = {
+    "?": [True, False, True],
+    "b": [-128, 0, 127],
+    "B": [0, 1, 255],
+    "h": [-32768, 0, 32767],
+    "H": [0, 1, 65535],
+    "i": [-(2**31), 0, 2**31 - 1],
+    "I": [0, 1, 2**32 - 1],
+    "q": [-(2**63), 0, 2**63 - 1],
+    "Q": [0, 1, 2**64 - 1],
+    "f": [-1.5, 0.0, 3.25],
+    "d": [-1.5, 0.0, 1e300],
+}
+
+_ENCODINGS = [
+    pytest.param(True, False, id="xcdr1-le"),
+    pytest.param(False, False, id="xcdr1-be"),
+    pytest.param(True, True, id="xcdr2-le"),
+    pytest.param(False, True, id="xcdr2-be"),
+]
+
+
+class TestCdrPrimitiveSequence:
+    """Test bulk primitive sequence/array serialization."""
+
+    @pytest.mark.parametrize(
+        "xcdr2, expected",
+        [
+            pytest.param(
+                False,
+                b"\x00\x00\x00\x01"  # u32 1
+                b"\x07\x00\x00\x00"  # u8 7 + padding
+                b"\x00\x00\x00\x01"  # count 1
+                b"\x00\x00\x00\x00"  # padding to 8
+                b"\x3f\xf0\x00\x00\x00\x00\x00\x00",  # 1.0
+                id="xcdr1",
+            ),
+            pytest.param(
+                True,
+                b"\x00\x00\x00\x01"  # u32 1
+                b"\x07\x00\x00\x00"  # u8 7 + padding
+                b"\x00\x00\x00\x01"  # count 1
+                b"\x3f\xf0\x00\x00\x00\x00\x00\x00",  # 1.0, alignment capped at 4
+                id="xcdr2",
+            ),
+        ],
+    )
+    def test_prim_seq_double_wire_big_endian(self, xcdr2, expected):
+        w = CdrWriter(little_endian=False, xcdr2=xcdr2)
+        w.write_u32(1)
+        w.write_u8(7)
+        w.write_prim_seq([1.0], "d")
+
+        assert w.to_bytes()[4:] == expected
+
+    def test_prim_seq_short_wire_little_endian(self):
+        w = CdrWriter(little_endian=True)
+        w.write_prim_seq([1, -2], "h")
+
+        assert w.to_bytes()[4:] == b"\x02\x00\x00\x00\x01\x00\xfe\xff"
+
+    def test_prim_seq_bool_wire(self):
+        w = CdrWriter(little_endian=True)
+        w.write_prim_seq([True, False, 2], "?")
+
+        assert w.to_bytes()[4:] == b"\x03\x00\x00\x00\x01\x00\x01"
+
+        r = CdrReader.from_raw(b"\x03\x00\x00\x00\x01\x00\x07")
+        assert r.read_prim_seq("?") == [True, False, True]
+
+    @pytest.mark.parametrize(
+        "fmt_char, values, xcdr2, expected",
+        [
+            pytest.param("h", [1], False, b"\x07\x00\x01\x00", id="short"),
+            pytest.param("i", [1], False, b"\x07" + b"\x00" * 3 + b"\x01\x00\x00\x00", id="long"),
+            pytest.param(
+                "d",
+                [1.0],
+                False,
+                b"\x07" + b"\x00" * 7 + b"\x00" * 6 + b"\xf0\x3f",
+                id="double-xcdr1",
+            ),
+            pytest.param(
+                "d",
+                [1.0],
+                True,
+                b"\x07" + b"\x00" * 3 + b"\x00" * 6 + b"\xf0\x3f",
+                id="double-xcdr2",
+            ),
+        ],
+    )
+    def test_prim_array_wire_padding(self, fmt_char, values, xcdr2, expected):
+        w = CdrWriter(little_endian=True, xcdr2=xcdr2)
+        w.write_u8(7)
+        w.write_prim_array(values, fmt_char, len(values))
+
+        assert w.to_bytes()[4:] == expected
+
+    @pytest.mark.parametrize("little_endian, xcdr2", _ENCODINGS)
+    @pytest.mark.parametrize("fmt_char", list(_PRIM_CASES))
+    def test_prim_seq_roundtrip(self, fmt_char, little_endian, xcdr2):
+        values = _PRIM_CASES[fmt_char]
+
+        w = CdrWriter(little_endian=little_endian, xcdr2=xcdr2)
+        w.write_u32(1)
+        w.write_u8(7)
+        w.write_prim_seq(values, fmt_char)
+        w.write_u8(8)
+        w.write_prim_array(values, fmt_char, len(values))
+        w.write_u8(9)
+
+        r = CdrReader(w.to_bytes())
+        assert r.read_u32() == 1
+        assert r.read_u8() == 7
+        assert r.read_prim_seq(fmt_char) == values
+        assert r.read_u8() == 8
+        assert r.read_prim_array(fmt_char, len(values)) == values
+        assert r.read_u8() == 9
+        assert r.remaining == 0
+
+    def test_empty_prim_seq_writes_no_padding(self):
+        w = CdrWriter(little_endian=True, xcdr2=False)
+        w.write_prim_seq([], "d")
+        w.write_u8(7)
+
+        assert w.to_bytes()[4:] == b"\x00\x00\x00\x00\x07"
+
+        r = CdrReader(w.to_bytes())
+        assert r.read_prim_seq("d") == []
+        assert r.read_u8() == 7
+
+    def test_prim_array_size_mismatch_raises(self):
+        w = CdrWriter()
+
+        with pytest.raises(struct.error):
+            w.write_prim_array([1.0, 2.0], "f", 3)
+
+    def test_prim_u8_out_of_range_raises(self):
+        w = CdrWriter()
+
+        with pytest.raises(struct.error):
+            w.write_prim_seq([256], "B")
+
+    def test_prim_seq_underflow_raises(self):
+        w = CdrWriter()
+        w.write_seq_header(4)
+        w.write_f64(1.0)
+
+        r = CdrReader(w.to_bytes())
+        with pytest.raises(CdrUnderflowError):
+            r.read_prim_seq("d")

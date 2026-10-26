@@ -321,6 +321,30 @@ class CdrReader:
             )
         return count
 
+    def read_prim_seq(self, fmt_char: str) -> list[float]:
+        """
+        Read a sequence of numeric primitives in a single struct call.
+
+        Args:
+            fmt_char: struct format character of the element (? b B h H i I q Q f d)
+        """
+        count = self.read_seq_header()
+        return self.read_prim_array(fmt_char, count)
+
+    def read_prim_array(self, fmt_char: str, count: int) -> list[float]:
+        """Read ``count`` numeric primitives in a single struct call."""
+        if count == 0:
+            return []
+
+        size = struct.calcsize("<" + fmt_char)
+        self._align(size)
+        self._ensure(count * size)
+
+        order = "<" if self._le else ">"
+        values = list(struct.unpack_from(f"{order}{count}{fmt_char}", self._buf, self._pos))
+        self._pos += count * size
+        return values
+
     def read_bytes(self, length: int) -> bytes:
         """Read raw bytes."""
         self._ensure(length)
