@@ -2,7 +2,9 @@
 Tests for CDR serialization/deserialization.
 """
 
+import array
 import struct
+import sys
 
 import pytest
 
@@ -299,6 +301,44 @@ class TestCdrPrimitiveSequence:
         assert r.read_prim_array(fmt_char, len(values)) == values
         assert r.read_u8() == 9
         assert r.remaining == 0
+
+    @pytest.mark.parametrize(
+        "values, fmt_char, is_copied",
+        [
+            pytest.param(array.array("f", [1.0, -2.5]), "f", True, id="array-f"),
+            pytest.param(array.array("q", [1, -2]), "q", True, id="array-q"),
+            pytest.param(b"\x01\xff", "B", True, id="bytes"),
+            pytest.param(bytearray(b"\x01\xff"), "B", True, id="bytearray"),
+            pytest.param(array.array("d", [1.0, -2.5]), "f", False, id="size-mismatch"),
+            pytest.param(array.array("i", [1, 2]), "I", False, id="kind-mismatch"),
+            pytest.param(
+                memoryview(array.array("d", [1.0, 2.0, 3.0]))[::2], "d", False, id="strided"
+            ),
+            pytest.param(b"\x00\x02", "?", False, id="bytes-as-bool"),
+        ],
+    )
+    @pytest.mark.parametrize("little_endian", [True, False], ids=["le", "be"])
+    def test_prim_seq_buffer_matches_list(self, values, fmt_char, is_copied, little_endian):
+        expected = CdrWriter(little_endian=little_endian)
+        expected.write_u8(7)
+        expected.write_prim_seq(list(values), fmt_char)
+
+        w = CdrWriter(little_endian=little_endian)
+        w.write_u8(7)
+        w.write_prim_seq(values, fmt_char)
+
+        assert w.to_bytes() == expected.to_bytes()
+
+        is_host_order = little_endian == (sys.byteorder == "little")
+        size = struct.calcsize("<" + fmt_char)
+        view = w._wire_layout_view(values, fmt_char, size)
+        assert (view is not None) == (is_copied and (is_host_order or size == 1))
+
+    def test_prim_array_buffer_size_mismatch_raises(self):
+        w = CdrWriter()
+
+        with pytest.raises(struct.error):
+            w.write_prim_array(array.array("f", [1.0, 2.0]), "f", 3)
 
     def test_empty_prim_seq_writes_no_padding(self):
         w = CdrWriter(little_endian=True, xcdr2=False)

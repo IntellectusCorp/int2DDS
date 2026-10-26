@@ -5,6 +5,7 @@ CDR/XCDR2 Writer for serializing DDS data types.
 from __future__ import annotations
 
 import struct
+import sys
 from contextlib import contextmanager
 from enum import IntEnum
 from typing import TYPE_CHECKING, Iterator, Sequence
@@ -39,6 +40,16 @@ PID_EXTENDED = 0x3F01  # PL_CDR v1 long-form member header marker
 MAX_SHORT_MEMBER_ID = 0x3F00  # member ids above this need the long form
 MAX_SHORT_LENGTH = 0xFFFF  # content lengths above this need the long form
 _MU_FLAG = 0x4000  # must-understand bit in a PL_CDR pid
+
+_HOST_IS_LE = sys.byteorder == "little"
+
+# struct format character -> element kind. Buffer bytes are reused only within one kind.
+_PRIM_KINDS = {
+    **dict.fromkeys("?", "bool"),
+    **dict.fromkeys("bhilqn", "signed"),
+    **dict.fromkeys("BHILQN", "unsigned"),
+    **dict.fromkeys("fd", "float"),
+}
 
 
 class CdrWriter:
@@ -241,15 +252,51 @@ class CdrWriter:
         """
         Write ``count`` numeric primitives in a single struct call, without a length prefix.
 
+        A buffer object (bytes, array.array, numpy array) whose elements already have
+        the wire layout is copied as-is instead of being packed element by element.
+
         Raises:
             struct.error: If ``len(values)`` differs from ``count`` or a value is out of range
         """
         if count == 0:
             return
 
-        self._align(struct.calcsize("<" + fmt_char))
-        order = "<" if self._le else ">"
-        self._buf += struct.pack(f"{order}{count}{fmt_char}", *values)
+        size = struct.calcsize("<" + fmt_char)
+        self._align(size)
+
+        view = self._wire_layout_view(values, fmt_char, size)
+        if view is None:
+            order = "<" if self._le else ">"
+            self._buf += struct.pack(f"{order}{count}{fmt_char}", *values)
+            return
+
+        if len(view) != count:
+            raise struct.error(f"expected {count} elements, got {len(view)}")
+        self._buf += view
+
+    def _wire_layout_view(self, values: object, fmt_char: str, size: int) -> memoryview | None:
+        """Return ``values`` as a memoryview if its bytes equal the wire bytes, else None."""
+        try:
+            view = memoryview(values)  # type: ignore[arg-type]
+        except TypeError:
+            return None
+
+        buffer_format = view.format
+        is_buffer_le = _HOST_IS_LE
+        if buffer_format[:1] in "<>":
+            is_buffer_le = buffer_format[0] == "<"
+        buffer_char = buffer_format.lstrip("@=<>")
+
+        is_same_kind = _PRIM_KINDS.get(buffer_char) == _PRIM_KINDS[fmt_char]
+        if (
+            view.ndim == 1
+            and view.c_contiguous
+            and view.itemsize == size
+            and is_same_kind
+            and (is_buffer_le == self._le or size == 1)
+        ):
+            return view
+        return None
 
     def write_bytes(self, data: bytes | bytearray) -> None:
         """Write raw bytes without length prefix."""
