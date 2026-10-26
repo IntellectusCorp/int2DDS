@@ -50,11 +50,7 @@ use super::error::*;
 /// the previous plain div/mod overflowed i32 and produced a negative duration,
 /// which made local endpoints advertise a broken QoS and reject remote vendors.
 fn ns_to_duration(ns: i64) -> Duration {
-    let sec = ns.div_euclid(1_000_000_000);
-    if sec >= i32::MAX as i64 {
-        return Duration::infinite();
-    }
-    Duration { sec: sec.max(i32::MIN as i64) as i32, nanosec: ns.rem_euclid(1_000_000_000) as u32 }
+    crate::waitset::to_duration(ns, 1_000_000_000)
 }
 
 /// Convert a DDS Duration to nanoseconds, mapping infinite to i64::MAX.

@@ -25,7 +25,7 @@ use int2dds::{core::time::Duration, infrastructure::wait_set::WaitSet};
 use super::{error::*, types::*};
 
 // Exact conversion; seconds beyond the Duration range saturate to infinite
-fn to_duration(value: i64, units_per_sec: i64) -> Duration {
+pub(crate) fn to_duration(value: i64, units_per_sec: i64) -> Duration {
     let sec = value.div_euclid(units_per_sec);
     if sec >= i32::MAX as i64 {
         return Duration::infinite();

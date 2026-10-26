@@ -84,7 +84,9 @@ class Reliability:
 
     @property
     def _max_blocking_time_ns(self) -> int:
-        return int(self.max_blocking_time * 1_000_000_000)
+        # inf and a roundtripped native infinite both saturate to the INFINITE sentinel
+        ns = self.max_blocking_time * 1_000_000_000
+        return 0x7FFFFFFFFFFFFFFF if ns >= 0x7FFFFFFFFFFFFFFF else int(ns)
 
 
 @dataclass

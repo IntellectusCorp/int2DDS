@@ -5,11 +5,11 @@ namespace Int2Dds.Core
 {
     internal static class WaitTimeout
     {
-        // Timeout.InfiniteTimeSpan and spans beyond the native range wait forever;
-        // a negative span passes through and has already expired.
+        // Timeout.InfiniteTimeSpan waits forever; spans beyond the native range saturate
+        // to infinite in the FFI, and a negative span passes through and has already expired.
         internal static long ToMilliseconds(TimeSpan value)
         {
-            if (value == Timeout.InfiniteTimeSpan || value.Ticks >= long.MaxValue / TimeSpan.TicksPerMillisecond)
+            if (value == Timeout.InfiniteTimeSpan)
                 return long.MaxValue;
             return value.Ticks / TimeSpan.TicksPerMillisecond;
         }
