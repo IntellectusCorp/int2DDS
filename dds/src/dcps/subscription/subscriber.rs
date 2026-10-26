@@ -333,6 +333,7 @@ impl Subscriber {
     ) -> DdsResult<DataReader<Foo>> {
         let _ = self.cleanup_dead_readers();
 
+        qos.check_values()?;
         qos.is_consistent()?;
 
         let self_ref = self
@@ -1369,6 +1370,7 @@ impl Subscriber {
         match qos.into() {
             QosKind::Default => self.reset_default_datareader_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_datareader_qos.lock() {
                     Ok(mut default_qos) => {

@@ -165,8 +165,19 @@ impl Qos for DataWriterQos {
         Ok(())
     }
 
+    fn check_values(&self) -> DdsResult<()> {
+        self.deadline.check_values()?;
+        self.latency_budget.check_values()?;
+        self.liveliness.check_values()?;
+        self.reliability.check_values()?;
+        self.lifespan.check_values()?;
+        self.durability_service.check_values()?;
+        self.writer_reliability_extension.check_values()?;
+        self.history.check_values()?;
+        self.resource_limits.check_values()
+    }
+
     fn is_consistent(&self) -> DdsResult<()> {
-        self.history.is_consistent()?;
         self.resource_limits.is_consistent()?;
         if self.resource_limits.max_samples_per_instance != LENGTH_UNLIMITED
             && self.history.depth() > Some(self.resource_limits.max_samples_per_instance)

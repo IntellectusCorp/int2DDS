@@ -67,6 +67,25 @@ use crate::{
 pub trait QosPolicy {
     fn name(&self) -> &str;
 }
+
+// INFINITE, or non-negative with nanosec below one second
+fn check_duration(duration: Duration) -> DdsResult<()> {
+    if duration.is_infinite() || (duration.sec >= 0 && duration.nanosec < 1_000_000_000) {
+        Ok(())
+    } else {
+        Err(DdsError::BadParameter)
+    }
+}
+
+// Periods and expiry durations: zero would spin a timer or expire every sample at once
+fn check_positive_duration(duration: Duration) -> DdsResult<()> {
+    check_duration(duration)?;
+    if duration.is_zero() {
+        return Err(DdsError::BadParameter);
+    }
+    Ok(())
+}
+
 pub(crate) trait Qos: Default + ConstDefault {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
         Ok(())
@@ -76,6 +95,12 @@ pub(crate) trait Qos: Default + ConstDefault {
         Ok(())
     }
 
+    // Each policy value on its own is in range (BadParameter)
+    fn check_values(&self) -> DdsResult<()> {
+        Ok(())
+    }
+
+    // Policies agree with each other (InconsistentPolicy)
     fn is_consistent(&self) -> DdsResult<()> {
         Ok(())
     }
@@ -371,7 +396,7 @@ impl HistoryQosPolicy {
     }
 
     // KeepLast depth must be at least 1
-    pub(crate) fn is_consistent(&self) -> DdsResult<()> {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
         if matches!(self.kind, HistoryQosPolicyKind::KeepLast(depth) if depth < 1) {
             return Err(DdsError::BadParameter);
         }
@@ -429,6 +454,7 @@ impl HistoryQosPolicy {
 #[dds_type(crate_path = "crate", no_default)]
 pub struct LifespanQosPolicy {
     /// Maximum validity duration for samples.
+    /// Must be greater than zero; otherwise the QoS is rejected with `BadParameter`.
     #[serde(default)]
     pub duration: Duration,
 }
@@ -449,6 +475,12 @@ impl ConstDefault for LifespanQosPolicy {
 impl QosPolicy for LifespanQosPolicy {
     fn name(&self) -> &str {
         LIFESPAN_QOS_POLICY_NAME
+    }
+}
+
+impl LifespanQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_positive_duration(self.duration)
     }
 }
 
@@ -684,6 +716,13 @@ impl ConstDefault for ReaderDataLifecycleQosPolicy {
 impl QosPolicy for ReaderDataLifecycleQosPolicy {
     fn name(&self) -> &str {
         READERDATALIFECYCLE_QOS_POLICY_NAME
+    }
+}
+
+impl ReaderDataLifecycleQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_duration(self.autopurge_nowriter_samples_delay)?;
+        check_duration(self.autopurge_disposed_samples_delay)
     }
 }
 
@@ -1092,6 +1131,12 @@ impl QosPolicy for LatencyBudgetQosPolicy {
     }
 }
 
+impl LatencyBudgetQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_duration(self.duration)
+    }
+}
+
 /// Specifies the maximum expected time between data updates.
 ///
 /// If the deadline is missed, the corresponding listener callback
@@ -1162,6 +1207,7 @@ impl QosPolicy for LatencyBudgetQosPolicy {
 #[serde(default)]
 pub struct DeadlineQosPolicy {
     /// Maximum expected period between data updates.
+    /// Must be greater than zero; otherwise the QoS is rejected with `BadParameter`.
     pub period: Duration,
 }
 
@@ -1179,6 +1225,12 @@ impl ConstDefault for DeadlineQosPolicy {
 impl QosPolicy for DeadlineQosPolicy {
     fn name(&self) -> &str {
         DEADLINE_QOS_POLICY_NAME
+    }
+}
+
+impl DeadlineQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_positive_duration(self.period)
     }
 }
 
@@ -1202,6 +1254,12 @@ pub struct TimeBasedFilterQosPolicy {
 impl QosPolicy for TimeBasedFilterQosPolicy {
     fn name(&self) -> &str {
         TIMEBASEDFILTER_QOS_POLICY_NAME
+    }
+}
+
+impl TimeBasedFilterQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_duration(self.minimum_separation)
     }
 }
 
@@ -1453,6 +1511,12 @@ impl QosPolicy for ReliabilityQosPolicy {
     }
 }
 
+impl ReliabilityQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_duration(self.max_blocking_time)
+    }
+}
+
 /// Specifies how DataWriters assert they are still alive.
 ///
 /// - `Automatic`: Liveliness is asserted automatically by any DDS activity
@@ -1560,6 +1624,7 @@ pub struct LivelinessQosPolicy {
     /// The liveliness assertion mechanism.
     pub kind: LivelinessQosPolicyKind,
     /// Maximum time between liveliness assertions.
+    /// Must be greater than zero; otherwise the QoS is rejected with `BadParameter`.
     pub lease_duration: Duration,
 }
 
@@ -1585,6 +1650,12 @@ impl ConstDefault for LivelinessQosPolicy {
 impl QosPolicy for LivelinessQosPolicy {
     fn name(&self) -> &str {
         LIVELINESS_QOS_POLICY_NAME
+    }
+}
+
+impl LivelinessQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_positive_duration(self.lease_duration)
     }
 }
 
@@ -1825,14 +1896,17 @@ impl QosPolicy for DurabilityQosPolicy {
 pub struct ResourceLimitsQosPolicy {
     /// Maximum total number of samples that can be stored. Twice this value also bounds the
     /// coherent set buffer a DataReader's samples pass through before they are stored.
+    /// Must be positive or `LENGTH_UNLIMITED`; otherwise the QoS is rejected with `BadParameter`.
     #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
     #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_samples: i32,
     /// Maximum number of instances.
+    /// Must be positive or `LENGTH_UNLIMITED`; otherwise the QoS is rejected with `BadParameter`.
     #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
     #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_instances: i32,
     /// Maximum number of samples per instance.
+    /// Must be positive or `LENGTH_UNLIMITED`; otherwise the QoS is rejected with `BadParameter`.
     #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
     #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_samples_per_instance: i32,
@@ -1863,6 +1937,17 @@ impl QosPolicy for ResourceLimitsQosPolicy {
 }
 
 impl ResourceLimitsQosPolicy {
+    // Each limit is positive or LENGTH_UNLIMITED
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        if [self.max_samples, self.max_instances, self.max_samples_per_instance]
+            .iter()
+            .any(|&limit| limit < 1 && limit != LENGTH_UNLIMITED)
+        {
+            return Err(DdsError::BadParameter);
+        }
+        Ok(())
+    }
+
     // max_samples must be at least max_samples_per_instance; LENGTH_UNLIMITED means unbounded
     pub(crate) fn is_consistent(&self) -> DdsResult<()> {
         if self.max_samples != LENGTH_UNLIMITED
@@ -1926,6 +2011,12 @@ impl ConstDefault for DurabilityServiceQosPolicy {
 impl QosPolicy for DurabilityServiceQosPolicy {
     fn name(&self) -> &str {
         DURABILITYSERVICE_QOS_POLICY_NAME
+    }
+}
+
+impl DurabilityServiceQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_duration(self.service_cleanup_delay)
     }
 }
 
@@ -2375,6 +2466,7 @@ pub struct WriterReliabilityExtensionQosPolicy {
 
     /// Period for sending periodic heartbeat messages.
     /// Default: 2 seconds
+    /// Must be greater than zero; otherwise the QoS is rejected with `BadParameter`.
     pub heartbeat_period: Duration,
 
     /// Delay before sending initial heartbeat after reader discovery.
@@ -2429,6 +2521,15 @@ impl ConstDefault for WriterReliabilityExtensionQosPolicy {
 impl QosPolicy for WriterReliabilityExtensionQosPolicy {
     fn name(&self) -> &str {
         WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+impl WriterReliabilityExtensionQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_positive_duration(self.heartbeat_period)?;
+        check_duration(self.initial_heartbeat_delay)?;
+        check_duration(self.nack_suppression_duration)?;
+        check_duration(self.nack_response_delay)
     }
 }
 
@@ -2580,6 +2681,16 @@ impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
 impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
     fn name(&self) -> &str {
         READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+impl ReaderReliabilityExtensionQosPolicy {
+    pub(crate) fn check_values(&self) -> DdsResult<()> {
+        check_duration(self.heartbeat_response_delay)?;
+        check_duration(self.heartbeat_suppression_duration)?;
+        check_duration(self.preemptive_acknack_delay)?;
+        check_duration(self.nack_frag_response_delay)?;
+        check_duration(self.nack_frag_retry_delay)
     }
 }
 
@@ -2911,9 +3022,9 @@ mod history_depth_tests {
             let writer = DataWriterQos { history: h, ..Default::default() };
             let reader = DataReaderQos { history: h, ..Default::default() };
             let topic = TopicQos { history: h, ..Default::default() };
-            assert_eq!(writer.is_consistent(), Err(DdsError::BadParameter), "writer {depth}");
-            assert_eq!(reader.is_consistent(), Err(DdsError::BadParameter), "reader {depth}");
-            assert_eq!(topic.is_consistent(), Err(DdsError::BadParameter), "topic {depth}");
+            assert_eq!(writer.check_values(), Err(DdsError::BadParameter), "writer {depth}");
+            assert_eq!(reader.check_values(), Err(DdsError::BadParameter), "reader {depth}");
+            assert_eq!(topic.check_values(), Err(DdsError::BadParameter), "topic {depth}");
         }
     }
 
@@ -2925,7 +3036,309 @@ mod history_depth_tests {
             HistoryQosPolicyKind::KeepAll,
         ] {
             let qos = DataWriterQos { history: history(kind), ..Default::default() };
-            assert_eq!(qos.is_consistent(), Ok(()));
+            assert_eq!(qos.check_values(), Ok(()));
         }
+    }
+}
+
+#[cfg(test)]
+mod qos_value_tests {
+    use super::*;
+    use crate::{
+        domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+        infrastructure::status::StatusMask,
+        publication::qos::{DataWriterQos, PublisherQos},
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::qos::TopicQos,
+    };
+    use int2dds_derive::DdsType;
+
+    type Setter<Q> = (&'static str, fn(&mut Q, Duration));
+
+    const WRITER_DURATIONS: &[Setter<DataWriterQos>] = &[
+        ("deadline", |q, d| q.deadline.period = d),
+        ("latency_budget", |q, d| q.latency_budget.duration = d),
+        ("lease_duration", |q, d| q.liveliness.lease_duration = d),
+        ("max_blocking_time", |q, d| q.reliability.max_blocking_time = d),
+        ("lifespan", |q, d| q.lifespan.duration = d),
+        ("service_cleanup_delay", |q, d| q.durability_service.service_cleanup_delay = d),
+        ("heartbeat_period", |q, d| q.writer_reliability_extension.heartbeat_period = d),
+        ("initial_heartbeat_delay", |q, d| {
+            q.writer_reliability_extension.initial_heartbeat_delay = d
+        }),
+        ("nack_suppression_duration", |q, d| {
+            q.writer_reliability_extension.nack_suppression_duration = d
+        }),
+        ("nack_response_delay", |q, d| q.writer_reliability_extension.nack_response_delay = d),
+    ];
+
+    const READER_DURATIONS: &[Setter<DataReaderQos>] = &[
+        ("deadline", |q, d| q.deadline.period = d),
+        ("latency_budget", |q, d| q.latency_budget.duration = d),
+        ("lease_duration", |q, d| q.liveliness.lease_duration = d),
+        ("max_blocking_time", |q, d| q.reliability.max_blocking_time = d),
+        ("minimum_separation", |q, d| q.time_based_filter.minimum_separation = d),
+        ("autopurge_nowriter", |q, d| q.reader_data_lifecycle.autopurge_nowriter_samples_delay = d),
+        ("autopurge_disposed", |q, d| q.reader_data_lifecycle.autopurge_disposed_samples_delay = d),
+        ("heartbeat_response_delay", |q, d| {
+            q.reader_reliability_extension.heartbeat_response_delay = d
+        }),
+        ("heartbeat_suppression_duration", |q, d| {
+            q.reader_reliability_extension.heartbeat_suppression_duration = d
+        }),
+        ("preemptive_acknack_delay", |q, d| {
+            q.reader_reliability_extension.preemptive_acknack_delay = d
+        }),
+        ("nack_frag_response_delay", |q, d| {
+            q.reader_reliability_extension.nack_frag_response_delay = d
+        }),
+        ("nack_frag_retry_delay", |q, d| q.reader_reliability_extension.nack_frag_retry_delay = d),
+    ];
+
+    const TOPIC_DURATIONS: &[Setter<TopicQos>] = &[
+        ("deadline", |q, d| q.deadline.period = d),
+        ("latency_budget", |q, d| q.latency_budget.duration = d),
+        ("lease_duration", |q, d| q.liveliness.lease_duration = d),
+        ("max_blocking_time", |q, d| q.reliability.max_blocking_time = d),
+        ("lifespan", |q, d| q.lifespan.duration = d),
+        ("service_cleanup_delay", |q, d| q.durability_service.service_cleanup_delay = d),
+    ];
+
+    const MUST_BE_POSITIVE: &[&str] =
+        &["deadline", "lease_duration", "lifespan", "heartbeat_period"];
+
+    fn invalid_durations() -> [Duration; 5] {
+        [
+            Duration { sec: -1, nanosec: 0 },
+            Duration { sec: -1, nanosec: 500_000_000 },
+            Duration { sec: i32::MIN, nanosec: 0 },
+            Duration { sec: 0, nanosec: 1_000_000_000 },
+            Duration { sec: 1, nanosec: Duration::INFINITE_NSEC },
+        ]
+    }
+
+    fn check<Q: Qos>(
+        entity: &str,
+        setters: &[Setter<Q>],
+        expected: impl Fn(&str, Duration) -> DdsResult<()>,
+        values: &[Duration],
+    ) {
+        for (field, set) in setters {
+            for &d in values {
+                let mut qos = Q::default();
+                set(&mut qos, d);
+                assert_eq!(qos.check_values(), expected(field, d), "{entity}.{field} = {d:?}");
+            }
+        }
+    }
+
+    fn run(values: &[Duration], expected: impl Fn(&str, Duration) -> DdsResult<()> + Copy) {
+        check::<DataWriterQos>("writer", WRITER_DURATIONS, expected, values);
+        check::<DataReaderQos>("reader", READER_DURATIONS, expected, values);
+        check::<TopicQos>("topic", TOPIC_DURATIONS, expected, values);
+    }
+
+    #[test]
+    fn negative_or_unnormalized_durations_are_bad_parameter() {
+        run(&invalid_durations(), |_, _| Err(DdsError::BadParameter));
+    }
+
+    #[test]
+    fn zero_is_bad_parameter_only_for_periods_and_expiry() {
+        run(&[Duration::zero()], |field, _| {
+            if MUST_BE_POSITIVE.contains(&field) {
+                Err(DdsError::BadParameter)
+            } else {
+                Ok(())
+            }
+        });
+    }
+
+    #[test]
+    fn infinite_and_normalized_positive_durations_pass_value_check() {
+        run(
+            &[
+                Duration::infinite(),
+                Duration { sec: 0, nanosec: 1 },
+                Duration { sec: 0, nanosec: 999_999_999 },
+                Duration { sec: Duration::INFINITE_SEC, nanosec: 0 },
+            ],
+            |_, _| Ok(()),
+        );
+    }
+
+    fn limits(max_samples: i32, max_instances: i32, per_instance: i32) -> ResourceLimitsQosPolicy {
+        ResourceLimitsQosPolicy {
+            max_samples,
+            max_instances,
+            max_samples_per_instance: per_instance,
+        }
+    }
+
+    fn assert_limits(
+        rl: ResourceLimitsQosPolicy,
+        values: DdsResult<()>,
+        consistency: Option<DdsResult<()>>,
+    ) {
+        let history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+        let writer = DataWriterQos { resource_limits: rl, history, ..Default::default() };
+        let reader = DataReaderQos { resource_limits: rl, history, ..Default::default() };
+        let topic = TopicQos { resource_limits: rl, history, ..Default::default() };
+        assert_eq!(writer.check_values(), values, "writer {rl:?}");
+        assert_eq!(reader.check_values(), values, "reader {rl:?}");
+        assert_eq!(topic.check_values(), values, "topic {rl:?}");
+        if let Some(expected) = consistency {
+            assert_eq!(writer.is_consistent(), expected, "writer {rl:?}");
+            assert_eq!(reader.is_consistent(), expected, "reader {rl:?}");
+            assert_eq!(topic.is_consistent(), expected, "topic {rl:?}");
+        }
+    }
+
+    #[test]
+    fn resource_limits_zero_or_negative_other_than_unlimited_are_bad_parameter() {
+        for bad in [0, -5, i32::MIN] {
+            for rl in [
+                limits(bad, -1, -1),
+                limits(-1, bad, -1),
+                limits(-1, -1, bad),
+                limits(bad, bad, bad),
+            ] {
+                assert_limits(rl, Err(DdsError::BadParameter), None);
+            }
+        }
+    }
+
+    #[test]
+    fn resource_limits_positive_or_unlimited_pass_value_check() {
+        assert_limits(limits(-1, -1, -1), Ok(()), Some(Ok(())));
+        assert_limits(limits(10, 1, 10), Ok(()), Some(Ok(())));
+        assert_limits(limits(-1, 3, 5), Ok(()), Some(Ok(())));
+        assert_limits(limits(1, 1, 1), Ok(()), Some(Ok(())));
+        assert_limits(limits(5, -1, 10), Ok(()), Some(Err(DdsError::InconsistentPolicy)));
+    }
+
+    #[derive(DdsType)]
+    struct HelloWorld {
+        index: u32,
+    }
+
+    // Children stay disabled so create_* is the only check; enable() would otherwise re-run it.
+    const NO_AUTOENABLE: EntityFactoryQosPolicy =
+        EntityFactoryQosPolicy { autoenable_created_entities: false };
+
+    #[test]
+    fn invalid_qos_values_are_rejected_on_every_entry_point() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos { entity_factory: NO_AUTOENABLE, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let bad_topic_qos = TopicQos {
+            resource_limits: ResourceLimitsQosPolicy {
+                max_samples: -1,
+                max_instances: 0,
+                max_samples_per_instance: -1,
+            },
+            ..Default::default()
+        };
+        let bad_writer_qos = DataWriterQos {
+            lifespan: LifespanQosPolicy { duration: Duration::zero() },
+            ..Default::default()
+        };
+        let bad_reader_qos = DataReaderQos {
+            deadline: DeadlineQosPolicy { period: Duration { sec: -1, nanosec: 0 } },
+            ..Default::default()
+        };
+
+        let bad_topic = participant.create_topic::<HelloWorld>(
+            "invalid_qos_topic",
+            "HelloWorld",
+            bad_topic_qos.clone(),
+            None,
+            StatusMask::default(),
+        );
+        assert_eq!(bad_topic.err(), Some(DdsError::BadParameter), "create_topic");
+        assert_eq!(
+            participant.set_default_topic_qos(bad_topic_qos.clone()),
+            Err(DdsError::BadParameter),
+            "set_default_topic_qos"
+        );
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "valid_qos_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        assert_eq!(topic.set_qos(bad_topic_qos), Err(DdsError::BadParameter), "topic.set_qos");
+
+        let publisher = participant
+            .create_publisher(
+                PublisherQos { entity_factory: NO_AUTOENABLE, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let bad_writer = publisher.create_datawriter::<HelloWorld>(
+            &topic,
+            bad_writer_qos.clone(),
+            None,
+            StatusMask::default(),
+        );
+        assert_eq!(bad_writer.err(), Some(DdsError::BadParameter), "create_datawriter");
+        assert_eq!(
+            publisher.set_default_datawriter_qos(bad_writer_qos.clone()),
+            Err(DdsError::BadParameter),
+            "set_default_datawriter_qos"
+        );
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        assert_eq!(writer.set_qos(bad_writer_qos), Err(DdsError::BadParameter), "writer.set_qos");
+
+        let subscriber = participant
+            .create_subscriber(
+                SubscriberQos { entity_factory: NO_AUTOENABLE, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let bad_reader = subscriber.create_datareader::<HelloWorld>(
+            &topic,
+            bad_reader_qos.clone(),
+            None,
+            StatusMask::default(),
+        );
+        assert_eq!(bad_reader.err(), Some(DdsError::BadParameter), "create_datareader");
+        assert_eq!(
+            subscriber.set_default_datareader_qos(bad_reader_qos.clone()),
+            Err(DdsError::BadParameter),
+            "set_default_datareader_qos"
+        );
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        assert_eq!(reader.set_qos(bad_reader_qos), Err(DdsError::BadParameter), "reader.set_qos");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

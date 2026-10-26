@@ -343,6 +343,7 @@ impl Publisher {
         self.check_topic_participant(topic)?;
         let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
 
+        qos.check_values()?;
         qos.is_consistent()?;
 
         let self_ref = self
@@ -1183,6 +1184,7 @@ impl Publisher {
         match qos.into() {
             QosKind::Default => self.reset_default_datawriter_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_datawriter_qos.lock() {
                     Ok(mut default_qos) => {
