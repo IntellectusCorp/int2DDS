@@ -54,13 +54,6 @@ yarn-error.log
 # The Gradle wrapper jar is committed on purpose — it is what makes ./gradlew
 # work on a fresh clone without a preinstalled Gradle.
 !java/gradle/wrapper/gradle-wrapper.jar
-!java/android/gradle/wrapper/gradle-wrapper.jar
-java/android/local.properties
-*.apk
-*.aab
-*.jks
-*.keystore
-*.iml
 *.war
 *.ear
 *.nar
