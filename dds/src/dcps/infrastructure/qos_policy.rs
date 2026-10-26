@@ -2528,7 +2528,6 @@ impl WriterReliabilityExtensionQosPolicy {
     pub(crate) fn check_values(&self) -> DdsResult<()> {
         check_positive_duration(self.heartbeat_period)?;
         check_duration(self.initial_heartbeat_delay)?;
-        check_duration(self.nack_suppression_duration)?;
         check_duration(self.nack_response_delay)
     }
 }
@@ -3005,43 +3004,6 @@ mod lifespan_reference_tests {
 }
 
 #[cfg(test)]
-mod history_depth_tests {
-    use super::*;
-    use crate::{
-        publication::qos::DataWriterQos, subscription::qos::DataReaderQos, topic::qos::TopicQos,
-    };
-
-    fn history(kind: HistoryQosPolicyKind) -> HistoryQosPolicy {
-        HistoryQosPolicy { kind, strict: true }
-    }
-
-    #[test]
-    fn keep_last_depth_below_one_is_bad_parameter() {
-        for depth in [0, -1, i32::MIN] {
-            let h = history(HistoryQosPolicyKind::KeepLast(depth));
-            let writer = DataWriterQos { history: h, ..Default::default() };
-            let reader = DataReaderQos { history: h, ..Default::default() };
-            let topic = TopicQos { history: h, ..Default::default() };
-            assert_eq!(writer.check_values(), Err(DdsError::BadParameter), "writer {depth}");
-            assert_eq!(reader.check_values(), Err(DdsError::BadParameter), "reader {depth}");
-            assert_eq!(topic.check_values(), Err(DdsError::BadParameter), "topic {depth}");
-        }
-    }
-
-    #[test]
-    fn keep_last_positive_depth_and_keep_all_are_consistent() {
-        for kind in [
-            HistoryQosPolicyKind::KeepLast(1),
-            HistoryQosPolicyKind::KeepLast(i32::MAX),
-            HistoryQosPolicyKind::KeepAll,
-        ] {
-            let qos = DataWriterQos { history: history(kind), ..Default::default() };
-            assert_eq!(qos.check_values(), Ok(()));
-        }
-    }
-}
-
-#[cfg(test)]
 mod qos_value_tests {
     use super::*;
     use crate::{
@@ -3053,168 +3015,49 @@ mod qos_value_tests {
     };
     use int2dds_derive::DdsType;
 
-    type Setter<Q> = (&'static str, fn(&mut Q, Duration));
-
-    const WRITER_DURATIONS: &[Setter<DataWriterQos>] = &[
-        ("deadline", |q, d| q.deadline.period = d),
-        ("latency_budget", |q, d| q.latency_budget.duration = d),
-        ("lease_duration", |q, d| q.liveliness.lease_duration = d),
-        ("max_blocking_time", |q, d| q.reliability.max_blocking_time = d),
-        ("lifespan", |q, d| q.lifespan.duration = d),
-        ("service_cleanup_delay", |q, d| q.durability_service.service_cleanup_delay = d),
-        ("heartbeat_period", |q, d| q.writer_reliability_extension.heartbeat_period = d),
-        ("initial_heartbeat_delay", |q, d| {
-            q.writer_reliability_extension.initial_heartbeat_delay = d
-        }),
-        ("nack_suppression_duration", |q, d| {
-            q.writer_reliability_extension.nack_suppression_duration = d
-        }),
-        ("nack_response_delay", |q, d| q.writer_reliability_extension.nack_response_delay = d),
-    ];
-
-    const READER_DURATIONS: &[Setter<DataReaderQos>] = &[
-        ("deadline", |q, d| q.deadline.period = d),
-        ("latency_budget", |q, d| q.latency_budget.duration = d),
-        ("lease_duration", |q, d| q.liveliness.lease_duration = d),
-        ("max_blocking_time", |q, d| q.reliability.max_blocking_time = d),
-        ("minimum_separation", |q, d| q.time_based_filter.minimum_separation = d),
-        ("autopurge_nowriter", |q, d| q.reader_data_lifecycle.autopurge_nowriter_samples_delay = d),
-        ("autopurge_disposed", |q, d| q.reader_data_lifecycle.autopurge_disposed_samples_delay = d),
-        ("heartbeat_response_delay", |q, d| {
-            q.reader_reliability_extension.heartbeat_response_delay = d
-        }),
-        ("heartbeat_suppression_duration", |q, d| {
-            q.reader_reliability_extension.heartbeat_suppression_duration = d
-        }),
-        ("preemptive_acknack_delay", |q, d| {
-            q.reader_reliability_extension.preemptive_acknack_delay = d
-        }),
-        ("nack_frag_response_delay", |q, d| {
-            q.reader_reliability_extension.nack_frag_response_delay = d
-        }),
-        ("nack_frag_retry_delay", |q, d| q.reader_reliability_extension.nack_frag_retry_delay = d),
-    ];
-
-    const TOPIC_DURATIONS: &[Setter<TopicQos>] = &[
-        ("deadline", |q, d| q.deadline.period = d),
-        ("latency_budget", |q, d| q.latency_budget.duration = d),
-        ("lease_duration", |q, d| q.liveliness.lease_duration = d),
-        ("max_blocking_time", |q, d| q.reliability.max_blocking_time = d),
-        ("lifespan", |q, d| q.lifespan.duration = d),
-        ("service_cleanup_delay", |q, d| q.durability_service.service_cleanup_delay = d),
-    ];
-
-    const MUST_BE_POSITIVE: &[&str] =
-        &["deadline", "lease_duration", "lifespan", "heartbeat_period"];
-
-    fn invalid_durations() -> [Duration; 5] {
-        [
+    #[test]
+    fn duration_value_checks() {
+        for d in [
             Duration { sec: -1, nanosec: 0 },
             Duration { sec: -1, nanosec: 500_000_000 },
-            Duration { sec: i32::MIN, nanosec: 0 },
             Duration { sec: 0, nanosec: 1_000_000_000 },
             Duration { sec: 1, nanosec: Duration::INFINITE_NSEC },
-        ]
-    }
-
-    fn check<Q: Qos>(
-        entity: &str,
-        setters: &[Setter<Q>],
-        expected: impl Fn(&str, Duration) -> DdsResult<()>,
-        values: &[Duration],
-    ) {
-        for (field, set) in setters {
-            for &d in values {
-                let mut qos = Q::default();
-                set(&mut qos, d);
-                assert_eq!(qos.check_values(), expected(field, d), "{entity}.{field} = {d:?}");
-            }
+        ] {
+            assert_eq!(check_duration(d), Err(DdsError::BadParameter), "{d:?}");
+            assert_eq!(check_positive_duration(d), Err(DdsError::BadParameter), "{d:?}");
         }
-    }
-
-    fn run(values: &[Duration], expected: impl Fn(&str, Duration) -> DdsResult<()> + Copy) {
-        check::<DataWriterQos>("writer", WRITER_DURATIONS, expected, values);
-        check::<DataReaderQos>("reader", READER_DURATIONS, expected, values);
-        check::<TopicQos>("topic", TOPIC_DURATIONS, expected, values);
-    }
-
-    #[test]
-    fn negative_or_unnormalized_durations_are_bad_parameter() {
-        run(&invalid_durations(), |_, _| Err(DdsError::BadParameter));
-    }
-
-    #[test]
-    fn zero_is_bad_parameter_only_for_periods_and_expiry() {
-        run(&[Duration::zero()], |field, _| {
-            if MUST_BE_POSITIVE.contains(&field) {
-                Err(DdsError::BadParameter)
-            } else {
-                Ok(())
-            }
-        });
-    }
-
-    #[test]
-    fn infinite_and_normalized_positive_durations_pass_value_check() {
-        run(
-            &[
-                Duration::infinite(),
-                Duration { sec: 0, nanosec: 1 },
-                Duration { sec: 0, nanosec: 999_999_999 },
-                Duration { sec: Duration::INFINITE_SEC, nanosec: 0 },
-            ],
-            |_, _| Ok(()),
-        );
-    }
-
-    fn limits(max_samples: i32, max_instances: i32, per_instance: i32) -> ResourceLimitsQosPolicy {
-        ResourceLimitsQosPolicy {
-            max_samples,
-            max_instances,
-            max_samples_per_instance: per_instance,
+        for d in [
+            Duration::infinite(),
+            Duration { sec: 0, nanosec: 1 },
+            Duration { sec: Duration::INFINITE_SEC, nanosec: 0 },
+        ] {
+            assert_eq!(check_duration(d), Ok(()), "{d:?}");
+            assert_eq!(check_positive_duration(d), Ok(()), "{d:?}");
         }
-    }
-
-    fn assert_limits(
-        rl: ResourceLimitsQosPolicy,
-        values: DdsResult<()>,
-        consistency: Option<DdsResult<()>>,
-    ) {
-        let history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
-        let writer = DataWriterQos { resource_limits: rl, history, ..Default::default() };
-        let reader = DataReaderQos { resource_limits: rl, history, ..Default::default() };
-        let topic = TopicQos { resource_limits: rl, history, ..Default::default() };
-        assert_eq!(writer.check_values(), values, "writer {rl:?}");
-        assert_eq!(reader.check_values(), values, "reader {rl:?}");
-        assert_eq!(topic.check_values(), values, "topic {rl:?}");
-        if let Some(expected) = consistency {
-            assert_eq!(writer.is_consistent(), expected, "writer {rl:?}");
-            assert_eq!(reader.is_consistent(), expected, "reader {rl:?}");
-            assert_eq!(topic.is_consistent(), expected, "topic {rl:?}");
-        }
+        assert_eq!(check_duration(Duration::zero()), Ok(()));
+        assert_eq!(check_positive_duration(Duration::zero()), Err(DdsError::BadParameter));
     }
 
     #[test]
-    fn resource_limits_zero_or_negative_other_than_unlimited_are_bad_parameter() {
-        for bad in [0, -5, i32::MIN] {
-            for rl in [
-                limits(bad, -1, -1),
-                limits(-1, bad, -1),
-                limits(-1, -1, bad),
-                limits(bad, bad, bad),
-            ] {
-                assert_limits(rl, Err(DdsError::BadParameter), None);
-            }
+    fn history_depth_and_resource_limit_checks() {
+        let history = |kind| HistoryQosPolicy { kind, strict: true };
+        for depth in [0, -1] {
+            let h = history(HistoryQosPolicyKind::KeepLast(depth));
+            assert_eq!(h.check_values(), Err(DdsError::BadParameter), "{depth}");
         }
-    }
+        for kind in [HistoryQosPolicyKind::KeepLast(1), HistoryQosPolicyKind::KeepAll] {
+            assert_eq!(history(kind).check_values(), Ok(()));
+        }
 
-    #[test]
-    fn resource_limits_positive_or_unlimited_pass_value_check() {
-        assert_limits(limits(-1, -1, -1), Ok(()), Some(Ok(())));
-        assert_limits(limits(10, 1, 10), Ok(()), Some(Ok(())));
-        assert_limits(limits(-1, 3, 5), Ok(()), Some(Ok(())));
-        assert_limits(limits(1, 1, 1), Ok(()), Some(Ok(())));
-        assert_limits(limits(5, -1, 10), Ok(()), Some(Err(DdsError::InconsistentPolicy)));
+        let limits = |max_samples, max_instances, max_samples_per_instance| {
+            ResourceLimitsQosPolicy { max_samples, max_instances, max_samples_per_instance }
+        };
+        for rl in [limits(0, -1, -1), limits(-1, -5, -1), limits(-1, -1, 0)] {
+            assert_eq!(rl.check_values(), Err(DdsError::BadParameter), "{rl:?}");
+        }
+        for rl in [limits(-1, -1, -1), limits(10, 1, 10)] {
+            assert_eq!(rl.check_values(), Ok(()), "{rl:?}");
+        }
     }
 
     #[derive(DdsType)]

@@ -41,14 +41,7 @@ use int2dds::{
 
 use super::error::*;
 
-/// Convert a nanosecond count to a DDS Duration, treating any value whose
-/// seconds part would overflow i32 (>= 2^31 - 1 seconds, e.g. i64::MAX or a
-/// roundtripped infinite lease) as Duration::infinite(). A negative value stays
-/// negative so that creating or updating the entity fails with BadParameter, as
-/// it does through the Rust API.
-/// This keeps get->set roundtrips of INFINITE lossless across the ns-based C API;
-/// the previous plain div/mod overflowed i32 and produced a negative duration,
-/// which made local endpoints advertise a broken QoS and reject remote vendors.
+/// Convert nanoseconds to a Duration; values beyond the i32 seconds range become infinite.
 fn ns_to_duration(ns: i64) -> Duration {
     crate::waitset::to_duration(ns, 1_000_000_000)
 }
