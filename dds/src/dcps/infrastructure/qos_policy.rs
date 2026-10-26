@@ -223,6 +223,7 @@ impl QosPolicyId {
 #[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum HistoryQosPolicyKind {
     /// Keep only the last N samples per instance, where N is the depth value.
+    /// N must be at least 1; otherwise the QoS is rejected with `BadParameter`.
     KeepLast(i32),
     /// Keep all samples until resource limits are reached.
     KeepAll,
@@ -367,6 +368,14 @@ impl QosPolicy for HistoryQosPolicy {
 impl HistoryQosPolicy {
     pub fn depth(&self) -> Option<i32> {
         self.kind.depth()
+    }
+
+    // KeepLast depth must be at least 1
+    pub(crate) fn is_consistent(&self) -> DdsResult<()> {
+        if matches!(self.kind, HistoryQosPolicyKind::KeepLast(depth) if depth < 1) {
+            return Err(DdsError::BadParameter);
+        }
+        Ok(())
     }
 }
 
@@ -2881,5 +2890,42 @@ mod lifespan_reference_tests {
             LifespanReferenceQosPolicyKind::DEFAULT,
             LifespanReferenceQosPolicyKind::BySourceTimestamp
         );
+    }
+}
+
+#[cfg(test)]
+mod history_depth_tests {
+    use super::*;
+    use crate::{
+        publication::qos::DataWriterQos, subscription::qos::DataReaderQos, topic::qos::TopicQos,
+    };
+
+    fn history(kind: HistoryQosPolicyKind) -> HistoryQosPolicy {
+        HistoryQosPolicy { kind, strict: true }
+    }
+
+    #[test]
+    fn keep_last_depth_below_one_is_bad_parameter() {
+        for depth in [0, -1, i32::MIN] {
+            let h = history(HistoryQosPolicyKind::KeepLast(depth));
+            let writer = DataWriterQos { history: h, ..Default::default() };
+            let reader = DataReaderQos { history: h, ..Default::default() };
+            let topic = TopicQos { history: h, ..Default::default() };
+            assert_eq!(writer.is_consistent(), Err(DdsError::BadParameter), "writer {depth}");
+            assert_eq!(reader.is_consistent(), Err(DdsError::BadParameter), "reader {depth}");
+            assert_eq!(topic.is_consistent(), Err(DdsError::BadParameter), "topic {depth}");
+        }
+    }
+
+    #[test]
+    fn keep_last_positive_depth_and_keep_all_are_consistent() {
+        for kind in [
+            HistoryQosPolicyKind::KeepLast(1),
+            HistoryQosPolicyKind::KeepLast(i32::MAX),
+            HistoryQosPolicyKind::KeepAll,
+        ] {
+            let qos = DataWriterQos { history: history(kind), ..Default::default() };
+            assert_eq!(qos.is_consistent(), Ok(()));
+        }
     }
 }

@@ -166,6 +166,7 @@ impl Qos for DataWriterQos {
     }
 
     fn is_consistent(&self) -> DdsResult<()> {
+        self.history.is_consistent()?;
         self.resource_limits.is_consistent()?;
         if self.resource_limits.max_samples_per_instance != LENGTH_UNLIMITED
             && self.history.depth() > Some(self.resource_limits.max_samples_per_instance)
