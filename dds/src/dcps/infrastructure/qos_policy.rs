@@ -293,7 +293,7 @@ impl HistoryQosPolicyKind {
 ///
 /// ## KeepAll
 /// - Uses `ResourceLimitsQosPolicy.max_samples_per_instance` as the actual limit.
-/// - **Reliable mode**: Blocks waiting for ACKs up to `max_blocking_time`, returns `OutOfResources` on timeout.
+/// - **Reliable mode**: Blocks waiting for ACKs up to `max_blocking_time`, returns `Timeout` when it expires.
 /// - **Best-Effort mode**: Removes oldest sample when limit exceeded.
 /// - **`strict: false`**: A volatile writer removes samples acknowledged by all matched readers
 ///   from its history. Default is `true` (keep all samples).
