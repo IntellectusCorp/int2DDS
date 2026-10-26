@@ -19,7 +19,6 @@ use std::sync::{Arc, RwLock};
 use bytes::Bytes;
 use int2dds::{
     common::instance_handle::InstanceHandle,
-    core::time::Duration,
     infrastructure::status::StatusMask,
     subscription::{
         data_reader::BoundedSerialized,
@@ -28,7 +27,7 @@ use int2dds::{
     },
 };
 
-use crate::data::Int2DdsData;
+use crate::{data::Int2DdsData, waitset::max_wait_from_ms};
 
 pub struct Int2DdsSerializedLoan {
     data: Bytes,
@@ -1757,6 +1756,8 @@ pub unsafe extern "C" fn int2dds_datareader_read_serialized_batch_w_states(
 ///
 /// # Safety
 /// - `reader` must be a valid datareader
+/// - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+///   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_wait_for_historical_data(
     reader: *const Int2DdsDataReader,
@@ -1765,10 +1766,7 @@ pub unsafe extern "C" fn int2dds_datareader_wait_for_historical_data(
     check_null!(reader);
 
     let reader_ref = &*reader;
-    let max_wait = Duration {
-        sec: (timeout_ms / 1000) as i32,
-        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-    };
+    let max_wait = max_wait_from_ms(timeout_ms);
 
     match reader_ref.inner.wait_for_historical_data(max_wait) {
         Ok(()) => INT2DDS_RET_OK,

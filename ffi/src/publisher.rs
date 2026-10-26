@@ -18,12 +18,12 @@ use std::sync::{Arc, RwLock};
 
 use int2dds::{
     common::instance_handle::InstanceHandle,
-    core::time::{Duration, Time},
+    core::time::Time,
     infrastructure::status::StatusMask,
     publication::{data_writer::SerializedWriteLoan, data_writer_listener::DataWriterListener},
 };
 
-use crate::data::Int2DdsData;
+use crate::{data::Int2DdsData, waitset::max_wait_from_ms};
 
 pub struct Int2DdsSerializedWriteLoan {
     inner: Option<SerializedWriteLoan>,
@@ -962,6 +962,8 @@ pub unsafe extern "C" fn int2dds_datawriter_write_serialized_w_timestamp(
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
+/// - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+///   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_wait_for_acknowledgments(
     writer: *const Int2DdsDataWriter,
@@ -970,10 +972,7 @@ pub unsafe extern "C" fn int2dds_datawriter_wait_for_acknowledgments(
     check_null!(writer);
 
     let writer_ref = &*writer;
-    let max_wait = Duration {
-        sec: (timeout_ms / 1000) as i32,
-        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-    };
+    let max_wait = max_wait_from_ms(timeout_ms);
 
     match writer_ref.inner.wait_for_acknowledgments(max_wait) {
         Ok(()) => INT2DDS_RET_OK,
@@ -986,6 +985,8 @@ pub unsafe extern "C" fn int2dds_datawriter_wait_for_acknowledgments(
 ///
 /// # Safety
 /// - `publisher` must be a valid publisher
+/// - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+///   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publisher_wait_for_acknowledgments(
     publisher: *const Int2DdsPublisher,
@@ -994,10 +995,7 @@ pub unsafe extern "C" fn int2dds_publisher_wait_for_acknowledgments(
     check_null!(publisher);
 
     let publisher_ref = &*publisher;
-    let max_wait = Duration {
-        sec: (timeout_ms / 1000) as i32,
-        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-    };
+    let max_wait = max_wait_from_ms(timeout_ms);
 
     match publisher_ref.inner.wait_for_acknowledgments(max_wait) {
         Ok(()) => INT2DDS_RET_OK,

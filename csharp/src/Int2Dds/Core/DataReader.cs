@@ -339,7 +339,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_datareader_wait_for_historical_data(_handle, (long)timeout.TotalMilliseconds));
+                NativeMethods.int2dds_datareader_wait_for_historical_data(_handle, WaitTimeout.ToMilliseconds(timeout)));
         }
 
         /// <summary>
