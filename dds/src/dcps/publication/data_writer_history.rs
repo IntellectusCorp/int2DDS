@@ -230,7 +230,8 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
 
     // Ensures capacity before adding a new CacheChange to the history.
     // Returns Ok(None) if space is already available, or Ok(Some(CacheChange)) if space was secured after removing an existing CacheChange.
-    // Returns Err(DdsError::OutOfResources) if space cannot be secured, in which case the Sample is rejected.
+    // Returns Err(DdsError::OutOfResources) if space can never be secured, or Err(DdsError::Timeout) if
+    // max_blocking_time expires before an acknowledged change frees space; either way the Sample is rejected.
     fn ensure_capacity(
         &mut self,
         instance_handle: InstanceHandle,
@@ -456,7 +457,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             return Err(DdsError::OutOfResources);
         }
 
-        // For KEEP_ALL, block; if resources are not freed after blocking, return OUT_OF_RESOURCE
+        // For KEEP_ALL, block; if resources are not freed after blocking, return TIMEOUT
         if self.is_keep_all {
             self.remove_first_acked_change_or_block(&removable_changes)
         }
@@ -473,7 +474,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         &mut self,
         instance_handle: InstanceHandle,
     ) -> DdsResult<Arc<CacheChange>> {
-        // For KEEP_ALL, block; if resources are not freed after blocking, return OUT_OF_RESOURCE
+        // For KEEP_ALL, block; if resources are not freed after blocking, return TIMEOUT
         if self.is_keep_all {
             let changes = self.get_changes_of_instance(instance_handle)?;
             self.remove_first_acked_change_or_block(&changes)
@@ -491,7 +492,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
-    // Removes the first acknowledged change, or blocks for max_blocking_time if none exists.
+    // Removes the first acknowledged change, or blocks for max_blocking_time if none exists and then returns Timeout.
     fn remove_first_acked_change_or_block(
         &mut self,
         changes: &Vec<Arc<CacheChange>>,
@@ -523,7 +524,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
                         Duration::new(elapsed.as_secs() as i32, elapsed.subsec_nanos());
 
                     if elapsed_duration >= self.max_blocking_time {
-                        return Err(DdsError::OutOfResources);
+                        return Err(DdsError::Timeout);
                     }
 
                     // Avoid busy waiting if max_blocking_time is significant.
@@ -1184,7 +1185,7 @@ mod tests {
             .add_change_with_cleanup(create_change(3, InstanceHandle::new([1; 16])), false);
 
         assert!(result.is_err());
-        assert!(matches!(result, Err(DdsError::OutOfResources)));
+        assert!(matches!(result, Err(DdsError::Timeout)));
 
         drop(cache_guard);
         participant.delete_contained_entities().unwrap();
@@ -1228,7 +1229,7 @@ mod tests {
 
         let result = guard.add_change_with_cleanup(create_change(3, InstanceHandle::NIL), false);
 
-        assert!(matches!(result, Err(DdsError::OutOfResources)), "got {result:?}");
+        assert!(matches!(result, Err(DdsError::Timeout)), "got {result:?}");
         let kept: Vec<i64> = guard.changes.iter().map(|c| c.sequence_number().to_i64()).collect();
         assert_eq!(kept, vec![1, 2], "no unacked change may be dropped");
         drop(guard);
@@ -1439,7 +1440,7 @@ mod tests {
             cache_guard.add_change_with_cleanup(create_change(3, instance_handle_2), false);
 
         assert!(result.is_err());
-        assert!(matches!(result, Err(DdsError::OutOfResources)));
+        assert!(matches!(result, Err(DdsError::Timeout)));
 
         drop(cache_guard);
         participant.delete_contained_entities().unwrap();
@@ -1740,9 +1741,9 @@ mod tests {
 
         handle.join().unwrap();
 
-        // OutOfResources error should occur
+        // Timeout error should occur
         assert!(result.is_err());
-        assert!(matches!(result, Err(DdsError::OutOfResources)));
+        assert!(matches!(result, Err(DdsError::Timeout)));
 
         drop(cache_guard);
         participant.delete_contained_entities().unwrap();
