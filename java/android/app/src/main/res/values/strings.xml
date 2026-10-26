@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">int2DDS HelloWorld</string>
+    <string name="domain_hint">Domain ID</string>
+    <string name="peers_hint">Initial peers (optional), e.g. 192.168.0.10:7400</string>
+    <string name="reliable">RELIABLE</string>
+    <string name="publish">Publish</string>
+    <string name="subscribe">Subscribe</string>
+    <string name="stop">Stop</string>
+    <string name="clear">Clear</string>
+</resources>
