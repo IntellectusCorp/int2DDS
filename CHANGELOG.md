@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-27
+
+The first stable release. The network selection variables take effect in the
+core, and the hook registration symbols are gone.
+
 ### Added
 
 - `INT2DDS_NETWORK_IP` and `INT2DDS_NETWORK_INTERFACE` take effect in the core.
@@ -448,7 +453,8 @@ repository were migrated together.
 - Unused C code-generation output in `idl` and unused declarations in the
   `hello_world` FFI example header.
 
-[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.8...HEAD
+[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.8...v1.0.0
 [0.1.8]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.5...v0.1.6
