@@ -7,7 +7,7 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "IDL code generator for int2DDS - generates Rust and C type definitions from OMG IDL"
+description = "IDL code generator for int2DDS - generates Rust, C, Python, C#, Java and XML type definitions from OMG IDL"
 readme = "README.md"
 
 [[bin]]
