@@ -855,10 +855,13 @@ impl Parser {
             }
             Token::Long => {
                 self.advance();
-                // Check for "long long"
+                // Check for "long long" / "long double"
                 if matches!(self.peek(), Token::Long) {
                     self.advance();
                     Ok(TypeSpec::Int64)
+                } else if matches!(self.peek(), Token::Double) {
+                    self.advance();
+                    Ok(TypeSpec::Float128)
                 } else {
                     Ok(TypeSpec::Int32)
                 }

@@ -1,3 +1,4 @@
+use super::Float128;
 use speedy::Endianness;
 
 /// Common conversion from bool to Endianness
@@ -101,4 +102,21 @@ define_endian_wrappers! {
     i64 => to_bytes_i64, from_bytes_i64,
     f32 => to_bytes_f32, from_bytes_f32,
     f64 => to_bytes_f64, from_bytes_f64,
+}
+
+/// IEEE 754 binary128, the wire form of `float128`.
+#[inline]
+pub fn to_bytes_f128(value: Float128, endianness: Endianness) -> [u8; 16] {
+    match endianness {
+        Endianness::LittleEndian => value.to_bits().to_le_bytes(),
+        Endianness::BigEndian => value.to_bits().to_be_bytes(),
+    }
+}
+
+#[inline]
+pub fn from_bytes_f128(bytes: [u8; 16], endianness: Endianness) -> Float128 {
+    Float128::from_bits(match endianness {
+        Endianness::LittleEndian => u128::from_le_bytes(bytes),
+        Endianness::BigEndian => u128::from_be_bytes(bytes),
+    })
 }

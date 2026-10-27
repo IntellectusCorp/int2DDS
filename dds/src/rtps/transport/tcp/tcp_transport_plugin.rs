@@ -58,6 +58,8 @@ pub(crate) struct TcpTransportPlugin {
     /// Dial peers discovered at runtime that are not in `initial_peers`
     accept_undefined_peers: bool,
 
+    port_manager: PortManager,
+
     /// Addresses already named by `report_unreachable_peer`, so one
     /// misconfigured peer is reported once instead of every announcement.
     reported_unreachable: Mutex<HashSet<SocketAddr>>,
@@ -142,7 +144,12 @@ impl TcpTransportPlugin {
         let dial_allowed = Self::allowed_dial_addresses(&peers);
         let dial_allowed_hosts = Self::allowed_dial_hosts(&peers);
         let announce_targets = Mutex::new(AnnounceTargets::new(
-            Self::candidates(domain_id, &peers, tcp_config.peer_search_slots),
+            Self::candidates(
+                domain_id,
+                &peers,
+                tcp_config.peer_search_slots,
+                tcp_config.port_manager,
+            ),
             Some(PEER_PRUNE_DELAY),
             Instant::now(),
         ));
@@ -207,6 +214,7 @@ impl TcpTransportPlugin {
             announce_targets,
             public_address: tcp_config.public_address,
             accept_undefined_peers: tcp_config.accept_undefined_peers,
+            port_manager: tcp_config.port_manager,
             reported_unreachable: Mutex::new(HashSet::new()),
             shutdown,
             sender,
@@ -242,6 +250,13 @@ impl TcpTransportPlugin {
             )
         };
 
+        let port_manager = tcp_config.port_manager;
+        let max_participant_id = port_manager.max_tcp_participant_id();
+        let (first_participant_id, last_participant_id) = match tcp_config.participant_id {
+            Some(fixed_participant_id) => (fixed_participant_id, fixed_participant_id),
+            None => (first_participant_id, max_participant_id),
+        };
+
         if let Some(port) = tcp_config.bind_port {
             return open(port, tls_config)
                 .map(|listener| (listener, first_participant_id))
@@ -265,12 +280,26 @@ impl TcpTransportPlugin {
                 });
         }
 
+        if first_participant_id > max_participant_id {
+            return Err(transport_io_error(
+                TransportErrorCode::TcpBindFailed,
+                format!(
+                    "No TCP listening port left for domain {}: participant id {} is past the \
+                     domain's last slot {}",
+                    domain_id, first_participant_id, max_participant_id
+                ),
+            ));
+        }
+
         let mut last_error = None;
-        for participant_id in first_participant_id..=PortManager::MAX_TCP_PARTICIPANT_ID {
-            let port = PortManager::get_tcp_physical_port(domain_id, participant_id);
+        for participant_id in first_participant_id..=last_participant_id {
+            let port = port_manager.calculate_tcp_physical_port(domain_id, participant_id)?;
             match open(port, tls_config.clone()) {
                 Ok(listener) => return Ok((listener, participant_id)),
-                Err(e) => {
+                Err(e)
+                    if e.kind() == io::ErrorKind::AddrInUse
+                        && tcp_config.participant_id.is_none() =>
+                {
                     debug!(
                         "[TcpTransportPlugin] Port {} taken, trying participant id {}",
                         port,
@@ -278,12 +307,30 @@ impl TcpTransportPlugin {
                     );
                     last_error = Some(e);
                 }
+                Err(e) => {
+                    log::error!(
+                        "[TcpTransportPlugin] Failed to bind TCP listener on port {} for \
+                         participant id {} (domain={}): {}",
+                        port,
+                        participant_id,
+                        domain_id,
+                        e
+                    );
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpBindFailed,
+                        format!(
+                            "Failed to bind TCP listener on port {} for participant id {} \
+                             (domain={}): {}",
+                            port, participant_id, domain_id, e
+                        ),
+                    ));
+                }
             }
         }
 
-        let last_port =
-            PortManager::get_tcp_physical_port(domain_id, PortManager::MAX_TCP_PARTICIPANT_ID);
-        let first_port = PortManager::get_tcp_physical_port(domain_id, first_participant_id);
+        let last_port = port_manager.calculate_tcp_physical_port(domain_id, last_participant_id)?;
+        let first_port =
+            port_manager.calculate_tcp_physical_port(domain_id, first_participant_id)?;
         log::error!(
             "[TcpTransportPlugin] No free TCP listening port for domain {}: ports {}..={} are \
              all in use. A domain holds at most {} participants per host; the next port belongs \
@@ -291,24 +338,18 @@ impl TcpTransportPlugin {
             domain_id,
             first_port,
             last_port,
-            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            max_participant_id + 1,
             domain_id + 1
         );
         Err(transport_io_error(
             TransportErrorCode::TcpBindFailed,
-            match last_error {
-                Some(e) => format!(
-                    "No free TCP listening port for domain {} (tried {}..={}): {}",
-                    domain_id, first_port, last_port, e
-                ),
-                None => format!(
-                    "No TCP listening port left for domain {}: participant id {} is past the \
-                     domain's last slot {}",
-                    domain_id,
-                    first_participant_id,
-                    PortManager::MAX_TCP_PARTICIPANT_ID
-                ),
-            },
+            format!(
+                "No free TCP listening port for domain {} (tried {}..={}): {}",
+                domain_id,
+                first_port,
+                last_port,
+                last_error.map(|e| e.to_string()).unwrap_or_default()
+            ),
         ))
     }
 
@@ -420,8 +461,13 @@ impl TcpTransportPlugin {
     /// list keeps it whatever happens. A peer named by host alone becomes one
     /// address per participant slot the configuration says a host may hold,
     /// which is guesswork the list is free to narrow down.
-    fn candidates(domain_id: u32, peers: &[PeerSpec], slots: u32) -> Vec<(SocketAddr, bool)> {
-        let slot = |index: u32| PortManager::get_tcp_physical_port(domain_id, index);
+    fn candidates(
+        domain_id: u32,
+        peers: &[PeerSpec],
+        slots: u32,
+        port_manager: PortManager,
+    ) -> Vec<(SocketAddr, bool)> {
+        let slot = |index: u32| port_manager.calculate_tcp_physical_port(domain_id, index).ok();
         peers
             .iter()
             .flat_map(|peer| {
@@ -436,9 +482,16 @@ impl TcpTransportPlugin {
     /// The block ends where the next domain's begins, so a port inside it can
     /// only ever belong to a participant of this domain.
     fn is_in_domain_block(&self, port: u16) -> bool {
-        let first = PortManager::get_tcp_physical_port(self.domain_id, 0);
-        let last =
-            PortManager::get_tcp_physical_port(self.domain_id, PortManager::MAX_TCP_PARTICIPANT_ID);
+        let Ok(first) = self.port_manager.calculate_tcp_physical_port(self.domain_id, 0) else {
+            return false;
+        };
+
+        // Slots above 65535 have no port, so the block ends at u16::MAX
+        let last = self
+            .port_manager
+            .calculate_tcp_physical_port(self.domain_id, self.port_manager.max_tcp_participant_id())
+            .unwrap_or(u16::MAX);
+
         (first..=last).contains(&port)
     }
 
@@ -519,6 +572,12 @@ impl TransportPlugin for TcpTransportPlugin {
     /// a send window exists to avoid.
     fn advertised_receive_buffer_size(&self) -> Option<usize> {
         Some(STREAM_UNBOUNDED_RECEIVE_BYTES)
+    }
+
+    /// Every address a discovery or user-data send reaches is confirmed into the announcement
+    /// list, and a confirmed address is announced to on every round.
+    fn announces_to_each_known_peer(&self) -> bool {
+        true
     }
 
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
@@ -664,10 +723,10 @@ impl Drop for TcpTransportPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU32;
 
     use crate::rtps::transport::peer_spec::DEFAULT_PARTICIPANTS_PER_HOST;
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
+    use std::sync::atomic::AtomicU32;
 
     fn take_listener(plugin: &TcpTransportPlugin) -> TcpListener {
         match plugin.take_stream_source().expect("stream source") {
@@ -702,11 +761,36 @@ mod tests {
     const BUILTIN_WRITER: u8 = 0xC2;
     const USER_WRITER: u8 = 0x02;
 
-    /// Keep domain IDs unique across tests to avoid port collisions when
-    /// the test suite runs in parallel.
+    /// The last domain whose whole TCP port block stays below 32768, where the
+    /// ephemeral port range of every supported OS starts at the earliest.
+    const LAST_TEST_DOMAIN: u32 = 100;
+
+    /// Hands consecutive tests different domains, so parallel runs never share a
+    /// port block.
     fn next_test_domain() -> u32 {
-        static NEXT: AtomicU32 = AtomicU32::new(900);
-        NEXT.fetch_add(1, Ordering::SeqCst)
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        NEXT.fetch_add(1, Ordering::SeqCst) % (LAST_TEST_DOMAIN + 1)
+    }
+
+    /// A test port inside the ephemeral range can already be held by an outgoing
+    /// connection on the CI runner, which pushes a scanning participant to the next slot.
+    #[test]
+    fn a_test_domain_keeps_its_tcp_ports_below_the_ephemeral_range() {
+        const EPHEMERAL_RANGE_START: u32 = 32768;
+        let ports = PortManager::default();
+        let port = |domain, participant_id| {
+            u32::from(ports.calculate_tcp_physical_port(domain, participant_id).unwrap())
+        };
+        let base = port(0, 0);
+        let domain = next_test_domain();
+        let last_port = base
+            + (port(1, 0) - base) * domain
+            + (port(0, 1) - base) * ports.max_tcp_participant_id();
+
+        assert!(
+            last_port < EPHEMERAL_RANGE_START,
+            "domain {domain} reaches TCP port {last_port}, inside the ephemeral range"
+        );
     }
 
     fn make_plugin(domain: u32) -> TcpTransportPlugin {
@@ -769,7 +853,12 @@ mod tests {
 
         assert_eq!(peers, vec![declared]);
         assert_eq!(
-            TcpTransportPlugin::candidates(0, &peers, DEFAULT_PARTICIPANTS_PER_HOST),
+            TcpTransportPlugin::candidates(
+                0,
+                &peers,
+                DEFAULT_PARTICIPANTS_PER_HOST,
+                PortManager::default()
+            ),
             vec![("192.168.0.5:7400".parse().unwrap(), true)]
         );
     }
@@ -783,14 +872,119 @@ mod tests {
             0,
             &TcpTransportPlugin::resolve_peers(&[named]),
             DEFAULT_PARTICIPANTS_PER_HOST,
+            PortManager::default(),
         );
 
         assert_eq!(candidates.len(), DEFAULT_PARTICIPANTS_PER_HOST as usize);
         assert!(candidates.iter().all(|(_, declared)| !declared), "a guess is not declared");
         assert_eq!(
             candidates[0].0,
-            format!("192.168.0.5:{}", PortManager::get_tcp_physical_port(0, 0)).parse().unwrap()
+            format!(
+                "192.168.0.5:{}",
+                PortManager::default().calculate_tcp_physical_port(0, 0).unwrap()
+            )
+            .parse()
+            .unwrap()
         );
+    }
+
+    #[test]
+    fn the_wildcard_leaves_out_slots_whose_port_exceeds_65535() {
+        let named: PeerSpec = "192.168.0.5:0".parse().unwrap();
+
+        // Domain 232: slot 67 is 65534, slot 68 would be 65536
+        let candidates = TcpTransportPlugin::candidates(
+            232,
+            &TcpTransportPlugin::resolve_peers(&[named]),
+            PortManager::default().max_tcp_participant_id() + 1,
+            PortManager::default(),
+        );
+        let ports: Vec<u16> = candidates.iter().map(|(addr, _)| addr.port()).collect();
+
+        assert_eq!(ports.len(), 68);
+        assert_eq!(ports.first(), Some(&65400));
+        assert_eq!(ports.last(), Some(&65534));
+    }
+
+    #[test]
+    fn configured_search_width_preserves_valid_and_explicit_candidates() {
+        use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
+        use crate::rtps::transport::TransportConfig;
+
+        let wildcard: PeerSpec = "192.168.0.5:0".parse().unwrap();
+        let explicit: PeerSpec = "192.168.0.6:7400".parse().unwrap();
+        for (domain, base, requested, expected) in [
+            (0, 40000, u32::MAX, 8512),
+            (0, 40000, 2, 2),
+            (0, 65535, u32::MAX, 1),
+            (0, 65536, u32::MAX, 0),
+            (1, 40000, u32::MAX, 0),
+        ] {
+            let mut property = PropertyQosPolicy::default();
+            for (name, value) in [
+                ("int2dds.transport.port_base", base.to_string()),
+                ("int2dds.transport.domain_id_gain", u32::MAX.to_string()),
+                ("int2dds.transport.participant_id_gain", "3".to_string()),
+                ("int2dds.transport.TCPv4.peer_search_slots", requested.to_string()),
+            ] {
+                property.add_property(name, value, false);
+            }
+            let config = TcpConfig::from_property(&property, domain);
+            assert_eq!(config.peer_search_slots, expected);
+            let candidates = TcpTransportPlugin::candidates(
+                domain,
+                &[wildcard, explicit],
+                config.peer_search_slots,
+                config.port_manager,
+            );
+            assert_eq!(candidates.len(), expected as usize + 1);
+            for (id, (addr, declared)) in candidates[..expected as usize].iter().enumerate() {
+                assert_eq!(addr.port() as u32, base + 3 * id as u32);
+                assert!(!declared);
+            }
+            assert_eq!(candidates.last(), Some(&("192.168.0.6:7400".parse().unwrap(), true)));
+        }
+    }
+
+    #[test]
+    fn a_fixed_participant_id_is_not_searched_around() {
+        let domain_id = next_test_domain();
+        let searched = TcpConfig::default();
+        let fixed = TcpConfig { participant_id: Some(0), ..TcpConfig::default() };
+
+        let (first_listener, first_id) = TcpTransportPlugin::bind_listener(
+            domain_id,
+            0,
+            TcpSocketTuning::default(),
+            None,
+            &searched,
+        )
+        .expect("first listener");
+        assert_eq!(first_id, 0);
+
+        let error = match TcpTransportPlugin::bind_listener(
+            domain_id,
+            0,
+            TcpSocketTuning::default(),
+            None,
+            &fixed,
+        ) {
+            Ok(_) => panic!("a fixed participant id whose port is taken must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("participant id 0"), "{error}");
+
+        let (_, second_id) = TcpTransportPlugin::bind_listener(
+            domain_id,
+            0,
+            TcpSocketTuning::default(),
+            None,
+            &searched,
+        )
+        .expect("second listener");
+        assert_eq!(second_id, 1);
+
+        drop(first_listener);
     }
 
     /// Naming one host both ways is a contradiction, and the search wins.
@@ -843,7 +1037,7 @@ mod tests {
     #[test]
     fn a_configured_host_is_dialable_across_the_whole_domain_block() {
         const DOMAIN: u32 = 3;
-        let first_slot = PortManager::get_tcp_physical_port(DOMAIN, 0);
+        let first_slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 0).unwrap();
         let cfg = TcpConfig {
             bind_port: Some(0),
             initial_peers: vec![format!("127.0.0.1:{first_slot}").parse().unwrap()],
@@ -859,10 +1053,11 @@ mod tests {
         )
         .expect("plugin creation");
 
-        let other_slot = PortManager::get_tcp_physical_port(DOMAIN, 7);
+        let other_slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 7).unwrap();
         assert!(plugin.should_dial(&format!("127.0.0.1:{other_slot}").parse().unwrap()));
 
-        let next_domain_slot = PortManager::get_tcp_physical_port(DOMAIN + 1, 0);
+        let next_domain_slot =
+            PortManager::default().calculate_tcp_physical_port(DOMAIN + 1, 0).unwrap();
         assert!(
             !plugin.should_dial(&format!("127.0.0.1:{next_domain_slot}").parse().unwrap()),
             "a port of the next domain is not this domain's to dial"
@@ -896,7 +1091,7 @@ mod tests {
         )
         .expect("plugin creation");
 
-        let slot = PortManager::get_tcp_physical_port(DOMAIN, 5);
+        let slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 5).unwrap();
         assert!(plugin.should_dial(&format!("127.0.0.1:{slot}").parse().unwrap()));
         assert!(
             !plugin.should_dial(&format!("203.0.113.7:{slot}").parse().unwrap()),
@@ -928,7 +1123,7 @@ mod tests {
         )
         .expect("plugin creation");
 
-        let slot = PortManager::get_tcp_physical_port(DOMAIN, 5);
+        let slot = PortManager::default().calculate_tcp_physical_port(DOMAIN, 5).unwrap();
         assert!(plugin.should_dial(&SocketAddr::new(own_ip, slot)), "the declared form");
         assert!(
             plugin.should_dial(&format!("127.0.0.1:{slot}").parse().unwrap()),
@@ -1073,13 +1268,11 @@ mod tests {
     #[test]
     fn send_reaches_listener_with_mismatched_participant_id() {
         let domain = next_test_domain();
-        let recv_port: u16 = 17601;
-        let send_port: u16 = 17602;
 
         // Receiver at participant_id 1.
         let recv_cfg = TcpConfig {
-            bind_port: Some(recv_port),
-            initial_peers: vec![format!("127.0.0.1:{recv_port}").parse().unwrap()],
+            bind_port: Some(0),
+            initial_peers: vec!["127.0.0.1:1".parse().unwrap()],
             ..TcpConfig::default()
         };
         let receiver = TcpTransportPlugin::new(
@@ -1091,10 +1284,11 @@ mod tests {
             recv_cfg,
         )
         .expect("receiver");
+        let recv_port = receiver.listener_port;
 
         // Sender at participant_id 0, allowed to dial the receiver.
         let send_cfg = TcpConfig {
-            bind_port: Some(send_port),
+            bind_port: Some(0),
             initial_peers: vec![format!("127.0.0.1:{recv_port}").parse().unwrap()],
             ..TcpConfig::default()
         };
@@ -1233,6 +1427,64 @@ mod tests {
         assert_eq!(received.len(), 1, "the announcement must reach the peer that answers");
         assert_eq!(received[0].0, TcpFrameKind::Discovery);
         assert_eq!(received[0].1.as_ref(), test_framed(&announcement).as_slice());
+
+        sender.close();
+        receiver.close();
+    }
+
+    /// The announcement is all that keeps a discovered peer from expiring this participant, so a
+    /// guessed address must be announced to on every round once a discovery send has reached it.
+    #[test]
+    fn a_peer_reached_by_a_discovery_send_is_announced_to_every_round() {
+        let domain = next_test_domain();
+        let receiver = make_scanning_plugin(domain, None).expect("receiver");
+        // The receiver is the only slot guessed, so the first round reaches it at
+        // once on a host where an empty port takes a connect timeout to fail.
+        let send_cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec!["127.0.0.1:0".parse().unwrap()],
+            peer_search_slots: 1,
+            ..TcpConfig::default()
+        };
+        let sender = TcpTransportPlugin::new(
+            domain,
+            1,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0x55; 12],
+            send_cfg,
+        )
+        .unwrap();
+
+        let mut listener = take_listener(&receiver);
+        let locator = Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, receiver.listener_port as u32);
+        let announce = |payload: &[u8]| {
+            let announcement = test_message(BUILTIN_WRITER, payload);
+            sender.send(&announcement, &SendTarget::SPDPDiscovery { initial_peers: &[] }).unwrap();
+            announcement
+        };
+
+        let guessed_first = announce(b"guessed-1");
+        // A connection opened by the discovery send below would make the dial worker drop the
+        // queued first announcement.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sender.sender.connection_count() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let guessed_second = announce(b"guessed-2");
+        let discovery = test_message(BUILTIN_WRITER, b"sedp");
+        sender.send(&discovery, &SendTarget::SEDPDiscovery(&locator)).unwrap();
+        let reached_first = announce(b"reached-1");
+        let reached_second = announce(b"reached-2");
+
+        let received: Vec<Vec<u8>> =
+            pump(&mut listener, 4).into_iter().map(|(_, data)| data.to_vec()).collect();
+        let arrived = |message: &[u8]| received.contains(&test_framed(message));
+        assert!(arrived(&guessed_first), "the first round tries every guess");
+        assert!(!arrived(&guessed_second), "an unanswered guess is not asked again at once");
+        assert!(arrived(&discovery));
+        assert!(arrived(&reached_first), "a reached peer is announced to");
+        assert!(arrived(&reached_second), "and on every round, not on the aging schedule");
 
         sender.close();
         receiver.close();

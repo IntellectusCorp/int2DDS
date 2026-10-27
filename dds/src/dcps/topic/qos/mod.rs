@@ -109,8 +109,7 @@ impl ConstDefault for TopicQos {
 
 impl Qos for TopicQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.topic_data != TopicDataQosPolicy::default()
-            || self.durability_service != DurabilityServiceQosPolicy::default()
+        if self.durability_service != DurabilityServiceQosPolicy::default()
             || self.latency_budget != LatencyBudgetQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
         {
@@ -135,6 +134,17 @@ impl Qos for TopicQos {
         }
 
         Ok(())
+    }
+
+    fn check_values(&self) -> DdsResult<()> {
+        self.deadline.check_values()?;
+        self.latency_budget.check_values()?;
+        self.liveliness.check_values()?;
+        self.reliability.check_values()?;
+        self.lifespan.check_values()?;
+        self.durability_service.check_values()?;
+        self.history.check_values()?;
+        self.resource_limits.check_values()
     }
 
     fn is_consistent(&self) -> DdsResult<()> {

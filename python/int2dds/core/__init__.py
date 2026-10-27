@@ -21,8 +21,12 @@ from int2dds.core.qos import (
     DataReaderQos,
     DataWriterQos,
     Durability,
+    GroupData,
     History,
+    Presentation,
+    PresentationAccessScope,
     Reliability,
+    TopicData,
 )
 from int2dds.core.subscriber import DataReader, Sample, Subscriber
 from int2dds.core.topic import Topic
@@ -51,4 +55,8 @@ __all__ = [
     "Reliability",
     "Durability",
     "History",
+    "Presentation",
+    "PresentationAccessScope",
+    "TopicData",
+    "GroupData",
 ]

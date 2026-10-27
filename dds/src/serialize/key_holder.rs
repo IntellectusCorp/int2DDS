@@ -14,10 +14,14 @@ use crate::serialize::cdr::{
     Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult, XcdrSerialize,
 };
 use crate::serialize::core::SerializationError;
-use crate::serialize::WString;
+use crate::serialize::{Float128, WString};
 
 /// Projection of a value into its RTPS KeyHash key-holder form.
 pub trait KeyHolder {
+    /// XTypes primitive leaf: collections of it carry no DHEADER (see
+    /// [`XcdrSerialize::IS_PRIMITIVE`]).
+    const IS_PRIMITIVE: bool = false;
+
     /// Write this value's key projection into the (FINAL, big-endian, max-align-4,
     /// headerless) key-holder stream. Aggregated types with `@key` members write
     /// only those members in member-id order, recursing into nested aggregated
@@ -78,6 +82,7 @@ pub trait KeyHolderFallback<T> {
     fn kh_deserialize(&self, deserializer: &mut Xcdr2Deserializer) -> XcdrResult<T>;
     fn kh_max_size(&self) -> Option<usize>;
     fn kh_align(&self) -> usize;
+    fn kh_is_primitive(&self) -> bool;
 }
 
 impl<T: XcdrSerialize + XcdrDeserialize> KeyHolderFallback<T> for KeyHolderAccessor<T> {
@@ -96,6 +101,10 @@ impl<T: XcdrSerialize + XcdrDeserialize> KeyHolderFallback<T> for KeyHolderAcces
     #[inline]
     fn kh_align(&self) -> usize {
         4
+    }
+    #[inline]
+    fn kh_is_primitive(&self) -> bool {
+        <T as XcdrSerialize>::IS_PRIMITIVE
     }
 }
 
@@ -116,11 +125,16 @@ impl<T: KeyHolder> KeyHolderAccessor<T> {
     pub fn kh_align(&self) -> usize {
         T::key_holder_align()
     }
+    #[inline]
+    pub fn kh_is_primitive(&self) -> bool {
+        T::IS_PRIMITIVE
+    }
 }
 
 macro_rules! impl_leaf_key_holder {
     ($($ty:ty => $size:expr),+ $(,)?) => {$(
         impl KeyHolder for $ty {
+            const IS_PRIMITIVE: bool = true;
             #[inline]
             fn serialize_key_holder(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
                 XcdrSerialize::serialize_xcdr(self, serializer)
@@ -156,6 +170,7 @@ impl_leaf_key_holder!(
     i64 => 8,
     f32 => 4,
     f64 => 8,
+    Float128 => 16,
     char => 1,
 );
 
@@ -180,7 +195,7 @@ impl KeyHolder for String {
 }
 
 /// `WString` mirrors [`String`]: the bound is a field attribute, so a standalone
-/// wstring reports no finite maximum (the owning struct supplies `4 + 2*(bound+1)`
+/// wstring reports no finite maximum (the owning struct supplies `4 + 2*bound`
 /// for bounded wstring key fields).
 impl KeyHolder for WString {
     #[inline]
@@ -198,19 +213,31 @@ impl KeyHolder for WString {
 }
 
 /// A fixed-size array `[T; N]` projects element-wise: each element is written as
-/// its own key holder (FINAL, no framing), so a `[Point; 2]` of two `i32` fields
-/// is the 16 contiguous bytes and stays raw. Its maximum size is the packed
-/// (max-align-4) sum of `N` element key holders.
+/// its own key holder (nested aggregates as FINAL), so a `[Point; 2]` of two `i32`
+/// fields is the 16 contiguous bytes and stays raw. Non-primitive elements keep the
+/// collection DHEADER (DDS-XTypes 7.6.8 excludes only encapsulation, type and
+/// member headers from the key holder). Its maximum size is the packed
+/// (max-align-4) sum of `N` element key holders plus that DHEADER.
 impl<T: KeyHolder, const N: usize> KeyHolder for [T; N] {
     #[inline]
     fn serialize_key_holder(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
-        for element in self {
-            element.serialize_key_holder(serializer)?;
+        let write = |s: &mut Xcdr2Serializer| {
+            for element in self {
+                element.serialize_key_holder(s)?;
+            }
+            Ok(())
+        };
+        if T::IS_PRIMITIVE {
+            write(serializer)
+        } else {
+            serializer.serialize_delimited(write)
         }
-        Ok(())
     }
     #[inline]
     fn deserialize_key_holder(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
+        if !T::IS_PRIMITIVE {
+            deserializer.read_dheader()?;
+        }
         let mut values = Vec::with_capacity(N);
         for _ in 0..N {
             values.push(T::deserialize_key_holder(deserializer)?);
@@ -224,32 +251,48 @@ impl<T: KeyHolder, const N: usize> KeyHolder for [T; N] {
     #[inline]
     fn key_holder_max_size() -> Option<usize> {
         let element = T::key_holder_max_size()?;
+        let header = if T::IS_PRIMITIVE { 0 } else { 4 };
         if N == 0 {
-            return Some(0);
+            return Some(header);
         }
         let stride = align_up(element, T::key_holder_align());
-        stride.checked_mul(N - 1)?.checked_add(element)
+        stride.checked_mul(N - 1)?.checked_add(element)?.checked_add(header)
     }
     #[inline]
     fn key_holder_align() -> usize {
-        T::key_holder_align()
+        if T::IS_PRIMITIVE {
+            T::key_holder_align()
+        } else {
+            4
+        }
     }
 }
 
 /// A sequence `Vec<T>` writes its `u32` length then each element as its own key
-/// holder (FINAL, no framing), matching the dynamic path's key-holder sequence
+/// holder (nested aggregates as FINAL), behind the collection DHEADER when the
+/// element is non-primitive, matching the dynamic path's key-holder sequence
 /// form. It has no finite maximum size, so a sequence key always hashes (MD5).
 impl<T: KeyHolder> KeyHolder for Vec<T> {
     #[inline]
     fn serialize_key_holder(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
-        XcdrSerialize::serialize_xcdr(&(self.len() as u32), serializer)?;
-        for element in self {
-            element.serialize_key_holder(serializer)?;
+        let write = |s: &mut Xcdr2Serializer| {
+            XcdrSerialize::serialize_xcdr(&(self.len() as u32), s)?;
+            for element in self {
+                element.serialize_key_holder(s)?;
+            }
+            Ok(())
+        };
+        if T::IS_PRIMITIVE {
+            write(serializer)
+        } else {
+            serializer.serialize_delimited(write)
         }
-        Ok(())
     }
     #[inline]
     fn deserialize_key_holder(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
+        if !T::IS_PRIMITIVE {
+            deserializer.read_dheader()?;
+        }
         let len = <u32 as XcdrDeserialize>::deserialize_xcdr(deserializer)? as usize;
         let mut values = Vec::with_capacity(len);
         for _ in 0..len {

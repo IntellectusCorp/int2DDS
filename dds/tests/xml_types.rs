@@ -25,7 +25,7 @@ use int2dds::dcps::{
 };
 use int2dds::{
     topic::qos::TopicQos,
-    xtypes::{DynamicData, DynamicTypeKind, DynamicValue},
+    xtypes::{CompleteTypeObject, DynamicData, DynamicTypeKind, DynamicValue, TryConstructKind},
 };
 
 fn load(xml: &str) -> XmlTypeRegistry {
@@ -253,6 +253,87 @@ fn xml_union_pubsub_loopback() {
         }
         other => panic!("expected union, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
+}
+
+// Alternate spellings: enum extensibility, hex case labels, tryConstruct, <flag value>,
+// discriminator key.
+#[test]
+fn xml_alias_syntax_pubsub_loopback() {
+    let registry = load(
+        r#"<types>
+             <enum name="Mode" extensibility="appendable">
+               <enumerator name="Off"/>
+               <enumerator name="On"/>
+             </enum>
+             <bitmask name="Flags" bitBound="8">
+               <flag name="A" value="0"/>
+               <flag name="B" value="3"/>
+             </bitmask>
+             <union name="Payload">
+               <discriminator type="int32" key="true" tryConstruct="use_default"/>
+               <case><caseDiscriminator value="0x01"/><member name="small" type="int16"/></case>
+               <case><caseDiscriminator value="0x10"/><member name="big" type="int64"/></case>
+             </union>
+             <struct name="Frame">
+               <member name="id" type="int32" key="true"/>
+               <member name="mode" type="nonBasic" nonBasicTypeName="Mode"/>
+               <member name="flags" type="nonBasic" nonBasicTypeName="Flags"/>
+               <member name="payload" type="nonBasic" nonBasicTypeName="Payload"/>
+               <member name="tags" type="string" sequenceMaxLength="4" tryConstruct="trim"/>
+             </struct>
+           </types>"#,
+    );
+    assert_eq!(
+        registry.get("Mode").unwrap().dynamic_type().extensibility(),
+        int2dds::serialize::xcdr::ExtensibilityKind::Appendable
+    );
+    match &**registry.get("Payload").unwrap().dynamic_type().type_object() {
+        CompleteTypeObject::Union(u) => {
+            assert!(u.discriminator.member_flags.is_key());
+            assert_eq!(u.discriminator.member_flags.try_construct(), TryConstructKind::UseDefault);
+            assert_eq!(u.member_seq[1].common.label_seq, [0x10]);
+        }
+        other => panic!("expected union, got {other:?}"),
+    }
+    let support = Arc::new(registry.get("Frame").unwrap());
+
+    let (writer, reader, guard) = dynamic_loopback("FrameTopic", &support);
+
+    let mut data = support.create_data();
+    data.set("id", 1i32).unwrap();
+    data.set_value("mode", DynamicValue::Enum { name: String::new(), value: 1 }).unwrap();
+    data.set_value("flags", DynamicValue::Bitmask(0b1001)).unwrap();
+    data.set_value(
+        "payload",
+        DynamicValue::Union {
+            discriminator: Box::new(DynamicValue::Int32(0x10)),
+            value: Box::new(DynamicValue::Int64(-7)),
+        },
+    )
+    .unwrap();
+    data.set("tags", vec!["x".to_string()]).unwrap();
+    writer.write(&data, InstanceHandle::NIL).unwrap();
+
+    let received = take_one(&reader);
+    match received.get_value("mode").unwrap() {
+        DynamicValue::Enum { name, value } => assert_eq!((name.as_str(), *value), ("On", 1)),
+        other => panic!("expected enum, got {other:?}"),
+    }
+    match received.get_value("flags").unwrap() {
+        DynamicValue::Bitmask(bits) => assert_eq!(*bits, 0b1001),
+        other => panic!("expected bitmask, got {other:?}"),
+    }
+    match received.get_value("payload").unwrap() {
+        DynamicValue::Union { discriminator, value } => {
+            assert!(matches!(**discriminator, DynamicValue::Int32(0x10)));
+            assert!(matches!(**value, DynamicValue::Int64(-7)));
+        }
+        other => panic!("expected union, got {other:?}"),
+    }
+    assert_eq!(received.get::<Vec<String>>("tags").unwrap(), ["x"]);
 
     guard._participant.delete_contained_entities().unwrap();
     DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();

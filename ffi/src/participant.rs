@@ -171,6 +171,26 @@ pub unsafe extern "C" fn int2dds_participant_get_domain_id(
     }
 }
 
+/// Get the 16-byte instance handle of a participant.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_instance_handle(
+    participant: *const Int2DdsParticipant,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(handle_out);
+
+    let participant_ref = &*participant;
+    let handle = ffi_try!(participant_ref.inner.get_instance_handle());
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
 /// Set the QoS of a participant.
 ///
 /// # Safety

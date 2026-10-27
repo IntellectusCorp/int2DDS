@@ -3,6 +3,7 @@ package kr.co.intellectus.int2dds;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.DataInputStream;
 import java.io.File;
@@ -10,6 +11,7 @@ import java.io.InputStream;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 import kr.co.intellectus.int2dds.internal.ffi.Ffi;
+import kr.co.intellectus.int2dds.internal.ffi.FfiHandwritten;
 import org.junit.jupiter.api.Test;
 
 class JarLayoutTest {
@@ -17,6 +19,9 @@ class JarLayoutTest {
     @Test
     void generatedFfiClassIsCompiledAtJava8Bytecode() throws Exception {
         // A single JAR must load on JDK 8. Class file major version 52 == Java 8.
+        // On a JDK 22+ run the classpath resolves Ffi to the FFM class instead;
+        // the packaged-jar test below covers the base class there.
+        assumeTrue(FfiHandwritten.backend().equals("jni"), "JNI backend only");
         String path = Ffi.class.getName().replace('.', '/') + ".class";
         try (InputStream in = Ffi.class.getClassLoader().getResourceAsStream(path)) {
             assertNotNull(in, "Ffi.class must be on the classpath");
@@ -29,18 +34,25 @@ class JarLayoutTest {
 
     @Test
     void ffiDeclaresTheFullGeneratedSurface() {
-        // 460 generated natives + directBufferAddress.
+        // The FFM Ffi declares no natives at all; that is the point of it.
+        assumeTrue(FfiHandwritten.backend().equals("jni"), "JNI backend only");
+        // 514 generated natives + directBufferAddress.
         long natives =
                 java.util.Arrays.stream(Ffi.class.getDeclaredMethods())
                         .filter(m -> java.lang.reflect.Modifier.isNative(m.getModifiers()))
                         .count();
-        assertEquals(461, natives, "generated native method count");
+        assertEquals(515, natives, "generated native method count");
     }
 
     @Test
     void noFfiMethodExposesJavaLangString() {
-        // JNI modified UTF-8 would corrupt non-ASCII topic and type names.
+        // JNI modified UTF-8 would corrupt non-ASCII topic and type names. Checks the
+        // C ABI surface only: the FFM class also has private helpers, such as one
+        // that looks a symbol up by name, which never carry DDS text.
         for (java.lang.reflect.Method m : Ffi.class.getDeclaredMethods()) {
+            if (!m.getName().startsWith("int2dds_")) {
+                continue;
+            }
             assertTrue(m.getReturnType() != String.class, m.getName() + " must not return String");
             for (Class<?> p : m.getParameterTypes()) {
                 assertTrue(p != String.class, m.getName() + " must not take String");
@@ -117,6 +129,167 @@ class JarLayoutTest {
                     53,
                     majorVersionOf(jar, versionedPath),
                     "the versioned override must be compiled at Java 9 (major version 53)");
+        }
+    }
+
+    /**
+     * The JDK 22+ backend is a set of classes the Multi-Release JAR substitutes, all of which must
+     * ship together: a jar missing any one of them would mix FFM and JNI classes on a JDK 22+
+     * runtime. Each base class must stay at Java 8 and each override at Java 22.
+     */
+    @Test
+    void packagedJarCarriesTheJdk22FfmBackend() throws Exception {
+        String jarPath = System.getProperty("int2dds.built.jar");
+        assertNotNull(jarPath, "int2dds.built.jar system property must be set by the Gradle build");
+
+        try (JarFile jar = new JarFile(new File(jarPath))) {
+            Class<?>[] overridden = {
+                Ffi.class,
+                FfiHandwritten.class,
+                kr.co.intellectus.int2dds.internal.NativeLoader.class
+            };
+            for (Class<?> c : overridden) {
+                String basePath = c.getName().replace('.', '/') + ".class";
+                String versionedPath = "META-INF/versions/22/" + basePath;
+                assertNotNull(jar.getJarEntry(basePath), basePath + " must be present");
+                assertEquals(52, majorVersionOf(jar, basePath), basePath + " must stay at Java 8");
+                assertNotNull(
+                        jar.getJarEntry(versionedPath),
+                        versionedPath + " must be present -- the JDK 22+ FFM override");
+                assertEquals(
+                        66,
+                        majorVersionOf(jar, versionedPath),
+                        versionedPath + " must be compiled at Java 22 (major version 66)");
+            }
+
+            // Code compiled against a base class links against its override at run
+            // time, so every non-private member of the base must exist in the
+            // override with the same descriptor, or the call fails with
+            // NoSuchMethodError on JDK 22+ only.
+            for (Class<?> c : overridden) {
+                String basePath = c.getName().replace('.', '/') + ".class";
+                java.util.Set<String> base = nonPrivateMethods(jar, basePath);
+                java.util.Set<String> override =
+                        nonPrivateMethods(jar, "META-INF/versions/22/" + basePath);
+                base.removeAll(override);
+                assertTrue(
+                        base.isEmpty(),
+                        c.getSimpleName() + " override is missing base members: " + base);
+            }
+
+            // `jar --validate` (and tools that apply the same Multi-Release rule) rejects a
+            // versioned class whose public API differs from its base in either direction --
+            // an added public method, or a modifier such as `native` that only one side has.
+            for (Class<?> c : overridden) {
+                String basePath = c.getName().replace('.', '/') + ".class";
+                assertEquals(
+                        publicApi(jar, basePath),
+                        publicApi(jar, "META-INF/versions/22/" + basePath),
+                        c.getSimpleName() + " override must keep the base public API exactly");
+            }
+
+            // FFM-only helpers with no base counterpart: the listener upcalls and the
+            // hand-over of the library NativeLoader opened. Package-private, as a versioned
+            // directory may not add public classes either.
+            for (String helper : new String[] {"FfmListeners", "FfmLibrary"}) {
+                String path =
+                        "META-INF/versions/22/"
+                                + Ffi.class.getPackage().getName().replace('.', '/')
+                                + "/"
+                                + helper
+                                + ".class";
+                assertNotNull(jar.getJarEntry(path), path + " must be present");
+            }
+        }
+    }
+
+    /**
+     * {@code name + descriptor} of every non-private method in a jar's class entry, read straight
+     * from the class file: reflection cannot see a versioned entry the running JDK did not select.
+     */
+    private static java.util.Set<String> nonPrivateMethods(JarFile jar, String path)
+            throws Exception {
+        return methods(jar, path, false);
+    }
+
+    /** {@code access-flags name + descriptor} of every public or protected method. */
+    private static java.util.Set<String> publicApi(JarFile jar, String path) throws Exception {
+        return methods(jar, path, true);
+    }
+
+    private static java.util.Set<String> methods(JarFile jar, String path, boolean publicApi)
+            throws Exception {
+        try (DataInputStream d = new DataInputStream(jar.getInputStream(jar.getJarEntry(path)))) {
+            d.readInt(); // magic
+            d.readInt(); // minor, major
+            int count = d.readUnsignedShort();
+            String[] utf8 = new String[count];
+            for (int i = 1; i < count; i++) {
+                int tag = d.readUnsignedByte();
+                switch (tag) {
+                    case 1: // Utf8
+                        utf8[i] = d.readUTF();
+                        break;
+                    case 3: // Integer
+                    case 4: // Float
+                    case 9: // Fieldref
+                    case 10: // Methodref
+                    case 11: // InterfaceMethodref
+                    case 12: // NameAndType
+                    case 17: // Dynamic
+                    case 18: // InvokeDynamic
+                        d.skipBytes(4);
+                        break;
+                    case 5: // Long
+                    case 6: // Double
+                        d.skipBytes(8);
+                        i++; // takes two constant-pool slots
+                        break;
+                    case 7: // Class
+                    case 8: // String
+                    case 16: // MethodType
+                    case 19: // Module
+                    case 20: // Package
+                        d.skipBytes(2);
+                        break;
+                    case 15: // MethodHandle
+                        d.skipBytes(3);
+                        break;
+                    default:
+                        throw new IllegalStateException("constant pool tag " + tag + " in " + path);
+                }
+            }
+            d.skipBytes(6); // access_flags, this_class, super_class
+            d.skipBytes(2 * d.readUnsignedShort()); // interfaces
+            for (int f = d.readUnsignedShort(); f > 0; f--) {
+                d.skipBytes(6);
+                skipAttributes(d);
+            }
+            java.util.Set<String> out = new java.util.TreeSet<>();
+            for (int m = d.readUnsignedShort(); m > 0; m--) {
+                int access = d.readUnsignedShort();
+                String name = utf8[d.readUnsignedShort()];
+                String descriptor = utf8[d.readUnsignedShort()];
+                skipAttributes(d);
+                boolean isPrivate = (access & 0x0002) != 0;
+                boolean isSynthetic = (access & 0x1000) != 0;
+                boolean isPublicApi = (access & (0x0001 | 0x0004)) != 0; // public, protected
+                if (publicApi) {
+                    if (isPublicApi && !isSynthetic) {
+                        out.add(Integer.toHexString(access) + " " + name + descriptor);
+                    }
+                } else if (!isPrivate && !isSynthetic && !name.equals("<clinit>")) {
+                    out.add(name + descriptor);
+                }
+            }
+            return out;
+        }
+    }
+
+    private static void skipAttributes(DataInputStream d) throws Exception {
+        for (int a = d.readUnsignedShort(); a > 0; a--) {
+            d.skipBytes(2);
+            d.skipBytes(d.readInt());
         }
     }
 

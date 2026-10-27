@@ -85,6 +85,7 @@ ffi.cdef("""
     typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
     typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
     typedef struct Int2DdsSerializedLoan Int2DdsSerializedLoan;
+    typedef struct Int2DdsLoanedSamples Int2DdsLoanedSamples;
     typedef struct Int2DdsSerializedWriteLoan Int2DdsSerializedWriteLoan;
 
     typedef int32_t Int2DdsRet;
@@ -149,6 +150,22 @@ ffi.cdef("""
         const uint8_t (*handle)[16],
         bool *result_out
     );
+    Int2DdsRet int2dds_participant_get_instance_handle(
+        const Int2DdsParticipant *participant,
+        uint8_t (*handle_out)[16]
+    );
+    Int2DdsRet int2dds_participant_ignore_participant(
+        const Int2DdsParticipant *participant,
+        const uint8_t (*handle)[16]
+    );
+    Int2DdsRet int2dds_participant_ignore_publication(
+        const Int2DdsParticipant *participant,
+        const uint8_t (*handle)[16]
+    );
+    Int2DdsRet int2dds_participant_ignore_subscription(
+        const Int2DdsParticipant *participant,
+        const uint8_t (*handle)[16]
+    );
     Int2DdsRet int2dds_participant_find_topic(
         const Int2DdsParticipant *participant,
         const char *topic_name,
@@ -187,6 +204,8 @@ ffi.cdef("""
         const Int2DdsPublisher *publisher,
         Int2DdsPublisherQos **qos_out
     );
+    Int2DdsRet int2dds_publisher_begin_coherent_changes(const Int2DdsPublisher *publisher);
+    Int2DdsRet int2dds_publisher_end_coherent_changes(const Int2DdsPublisher *publisher);
 
     /* Subscriber */
     Int2DdsRet int2dds_create_subscriber(
@@ -316,6 +335,18 @@ ffi.cdef("""
         const Int2DdsSubscriber *subscriber,
         const Int2DdsSubscriberQos *qos
     );
+    Int2DdsRet int2dds_subscriber_begin_access(const Int2DdsSubscriber *subscriber);
+    Int2DdsRet int2dds_subscriber_end_access(const Int2DdsSubscriber *subscriber);
+    Int2DdsRet int2dds_subscriber_get_datareaders(
+        const Int2DdsSubscriber *subscriber,
+        uint32_t sample_state_mask,
+        uint32_t view_state_mask,
+        uint32_t instance_state_mask,
+        uint8_t (*handles_out)[16],
+        uintptr_t capacity,
+        uintptr_t *count_out
+    );
+    Int2DdsRet int2dds_subscriber_notify_datareaders(const Int2DdsSubscriber *subscriber);
     Int2DdsRet int2dds_topic_get_qos(
         const Int2DdsTopic *topic,
         Int2DdsTopicQos **qos_out
@@ -609,6 +640,14 @@ ffi.cdef("""
         const Int2DdsDataWriter *writer,
         uint8_t (*guid_out)[16]
     );
+    Int2DdsRet int2dds_datareader_get_instance_handle(
+        const Int2DdsDataReader *reader,
+        uint8_t (*handle_out)[16]
+    );
+    Int2DdsRet int2dds_datawriter_get_instance_handle(
+        const Int2DdsDataWriter *writer,
+        uint8_t (*handle_out)[16]
+    );
     Int2DdsRet int2dds_datareader_has_data(
         const Int2DdsDataReader *reader,
         bool *has_data_out
@@ -671,6 +710,12 @@ ffi.cdef("""
         const uint8_t *data,
         size_t data_len
     );
+    Int2DdsRet int2dds_datawriter_qos_get_user_data(
+        const Int2DdsDataWriterQos *qos,
+        uint8_t *buf,
+        uintptr_t capacity,
+        uintptr_t *size_out
+    );
     Int2DdsRet int2dds_datawriter_qos_set_writer_data_lifecycle(
         Int2DdsDataWriterQos *qos,
         bool autodispose_unregistered_instances
@@ -698,7 +743,8 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_datareader_qos_set_reliability(
         Int2DdsDataReaderQos *qos,
-        int32_t kind
+        int32_t kind,
+        int64_t max_blocking_time_ns
     );
     Int2DdsRet int2dds_datareader_qos_set_durability(
         Int2DdsDataReaderQos *qos,
@@ -739,6 +785,12 @@ ffi.cdef("""
         Int2DdsDataReaderQos *qos,
         const uint8_t *data,
         size_t data_len
+    );
+    Int2DdsRet int2dds_datareader_qos_get_user_data(
+        const Int2DdsDataReaderQos *qos,
+        uint8_t *buf,
+        uintptr_t capacity,
+        uintptr_t *size_out
     );
     Int2DdsRet int2dds_datareader_qos_set_reader_data_lifecycle(
         Int2DdsDataReaderQos *qos,
@@ -811,6 +863,17 @@ ffi.cdef("""
         Int2DdsTopicQos *qos,
         int32_t kind
     );
+    Int2DdsRet int2dds_topic_qos_set_topic_data(
+        Int2DdsTopicQos *qos,
+        const uint8_t *data,
+        uintptr_t data_len
+    );
+    Int2DdsRet int2dds_topic_qos_get_topic_data(
+        const Int2DdsTopicQos *qos,
+        uint8_t *buf,
+        uintptr_t capacity,
+        uintptr_t *size_out
+    );
     Int2DdsRet int2dds_topic_qos_destroy(Int2DdsTopicQos *qos);
 
     /* Publisher QoS */
@@ -819,6 +882,29 @@ ffi.cdef("""
         Int2DdsPublisherQos *qos,
         const char *const *partitions,
         size_t partition_count
+    );
+    Int2DdsRet int2dds_publisher_qos_set_presentation(
+        Int2DdsPublisherQos *qos,
+        int32_t access_scope,
+        bool coherent_access,
+        bool ordered_access
+    );
+    Int2DdsRet int2dds_publisher_qos_get_presentation(
+        const Int2DdsPublisherQos *qos,
+        int32_t *access_scope_out,
+        bool *coherent_access_out,
+        bool *ordered_access_out
+    );
+    Int2DdsRet int2dds_publisher_qos_set_group_data(
+        Int2DdsPublisherQos *qos,
+        const uint8_t *data,
+        uintptr_t data_len
+    );
+    Int2DdsRet int2dds_publisher_qos_get_group_data(
+        const Int2DdsPublisherQos *qos,
+        uint8_t *buf,
+        uintptr_t capacity,
+        uintptr_t *size_out
     );
     Int2DdsRet int2dds_publisher_qos_destroy(Int2DdsPublisherQos *qos);
 
@@ -829,6 +915,29 @@ ffi.cdef("""
         const char *const *partitions,
         size_t partition_count
     );
+    Int2DdsRet int2dds_subscriber_qos_set_presentation(
+        Int2DdsSubscriberQos *qos,
+        int32_t access_scope,
+        bool coherent_access,
+        bool ordered_access
+    );
+    Int2DdsRet int2dds_subscriber_qos_get_presentation(
+        const Int2DdsSubscriberQos *qos,
+        int32_t *access_scope_out,
+        bool *coherent_access_out,
+        bool *ordered_access_out
+    );
+    Int2DdsRet int2dds_subscriber_qos_set_group_data(
+        Int2DdsSubscriberQos *qos,
+        const uint8_t *data,
+        uintptr_t data_len
+    );
+    Int2DdsRet int2dds_subscriber_qos_get_group_data(
+        const Int2DdsSubscriberQos *qos,
+        uint8_t *buf,
+        uintptr_t capacity,
+        uintptr_t *size_out
+    );
     Int2DdsRet int2dds_subscriber_qos_destroy(Int2DdsSubscriberQos *qos);
 
     /* Participant QoS */
@@ -837,6 +946,12 @@ ffi.cdef("""
         Int2DdsParticipantQos *qos,
         const uint8_t *data,
         size_t data_len
+    );
+    Int2DdsRet int2dds_participant_qos_get_user_data(
+        const Int2DdsParticipantQos *qos,
+        uint8_t *buf,
+        uintptr_t capacity,
+        uintptr_t *size_out
     );
     Int2DdsRet int2dds_participant_qos_add_property(
         Int2DdsParticipantQos *qos,
@@ -1260,6 +1375,9 @@ ffi.cdef("""
     Int2DdsRet int2dds_publication_builtin_topic_data_get_deadline(const Int2DdsPublicationBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
     Int2DdsRet int2dds_publication_builtin_topic_data_get_lifespan(const Int2DdsPublicationBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
     Int2DdsRet int2dds_publication_builtin_topic_data_get_user_data(const Int2DdsPublicationBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_presentation(const Int2DdsPublicationBuiltinTopicData *data, int32_t *access_scope_out, bool *coherent_access_out, bool *ordered_access_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_topic_data(const Int2DdsPublicationBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_group_data(const Int2DdsPublicationBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
     Int2DdsRet int2dds_publication_builtin_topic_data_destroy(Int2DdsPublicationBuiltinTopicData *data);
 
     Int2DdsRet int2dds_subscription_builtin_topic_data_get_key(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t (*key_out)[12]);
@@ -1273,6 +1391,9 @@ ffi.cdef("""
     Int2DdsRet int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
     Int2DdsRet int2dds_subscription_builtin_topic_data_get_deadline(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
     Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_presentation(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *access_scope_out, bool *coherent_access_out, bool *ordered_access_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_topic_data(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_group_data(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
     Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(Int2DdsSubscriptionBuiltinTopicData *data);
 
     /* TypeObject introspection */
@@ -1325,6 +1446,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_sample_get_u64(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint64_t *out);
     Int2DdsRet int2dds_dynamic_sample_get_f32(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, float *out);
     Int2DdsRet int2dds_dynamic_sample_get_f64(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, double *out);
+    Int2DdsRet int2dds_dynamic_sample_get_f128(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint8_t *out);
     Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, char *out_buf, uintptr_t buf_cap, uintptr_t *out_len);
 
     /* DynamicData decoding (dotted/indexed field paths, e.g. "pos.x", "items[2]") */
@@ -1341,6 +1463,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_data_get_u64(const Int2DdsDynamicData *data, const char *field_path, uint64_t *out);
     Int2DdsRet int2dds_dynamic_data_get_f32(const Int2DdsDynamicData *data, const char *field_path, float *out);
     Int2DdsRet int2dds_dynamic_data_get_f64(const Int2DdsDynamicData *data, const char *field_path, double *out);
+    Int2DdsRet int2dds_dynamic_data_get_f128(const Int2DdsDynamicData *data, const char *field_path, uint8_t *out);
     Int2DdsRet int2dds_dynamic_data_get_char8(const Int2DdsDynamicData *data, const char *field_path, uint8_t *out);
     Int2DdsRet int2dds_dynamic_data_get_string(const Int2DdsDynamicData *data, const char *field_path, char *out_buf, uintptr_t buf_cap, uintptr_t *out_len);
     Int2DdsRet int2dds_dynamic_data_get_len(const Int2DdsDynamicData *data, const char *field_path, uintptr_t *out);
@@ -1401,6 +1524,43 @@ ffi.cdef("""
         size_t index,
         Int2DdsSampleInfo *info_out
     );
+    Int2DdsRet int2dds_datareader_read_loaned(const Int2DdsDataReader *reader, int32_t max_samples,
+        uint32_t sample_state_mask, uint32_t view_state_mask, uint32_t instance_state_mask,
+        Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_loaned(const Int2DdsDataReader *reader, int32_t max_samples,
+        uint32_t sample_state_mask, uint32_t view_state_mask, uint32_t instance_state_mask,
+        Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_w_condition_loaned(const Int2DdsDataReader *reader,
+        const Int2DdsReadCondition *condition, int32_t max_samples, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_w_condition_loaned(const Int2DdsDataReader *reader,
+        const Int2DdsReadCondition *condition, int32_t max_samples, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_next_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*previous_handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_next_instance_loaned(const Int2DdsDataReader *reader,
+        const uint8_t (*previous_handle)[16], int32_t max_samples, uint32_t sample_state_mask,
+        uint32_t view_state_mask, uint32_t instance_state_mask, Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_read_next_instance_w_condition_loaned(
+        const Int2DdsDataReader *reader, const uint8_t (*previous_handle)[16],
+        const Int2DdsReadCondition *condition, int32_t max_samples,
+        Int2DdsLoanedSamples **loan_out);
+    Int2DdsRet int2dds_datareader_take_next_instance_w_condition_loaned(
+        const Int2DdsDataReader *reader, const uint8_t (*previous_handle)[16],
+        const Int2DdsReadCondition *condition, int32_t max_samples,
+        Int2DdsLoanedSamples **loan_out);
+    size_t int2dds_loaned_samples_length(const Int2DdsLoanedSamples *loan);
+    Int2DdsRet int2dds_loaned_samples_get_info(const Int2DdsLoanedSamples *loan, size_t index,
+        Int2DdsSampleInfo *info_out);
+    Int2DdsRet int2dds_loaned_samples_get_data(const Int2DdsLoanedSamples *loan, size_t index,
+        const uint8_t **data_out, size_t *size_out);
+    Int2DdsRet int2dds_datareader_return_loan(const Int2DdsDataReader *reader,
+        Int2DdsLoanedSamples *loan);
     Int2DdsRet int2dds_sample_seq_delete(Int2DdsSampleSeq *seq);
 
     /* Serialized batch read/take (all instances) */
@@ -1471,6 +1631,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_data_set_u64(Int2DdsDynamicData *data, const char *field, uint64_t value);
     Int2DdsRet int2dds_dynamic_data_set_f32(Int2DdsDynamicData *data, const char *field, float value);
     Int2DdsRet int2dds_dynamic_data_set_f64(Int2DdsDynamicData *data, const char *field, double value);
+    Int2DdsRet int2dds_dynamic_data_set_f128(Int2DdsDynamicData *data, const char *field, const uint8_t *value);
     Int2DdsRet int2dds_dynamic_data_set_char8(Int2DdsDynamicData *data, const char *field, uint8_t value);
     Int2DdsRet int2dds_dynamic_data_set_string(Int2DdsDynamicData *data, const char *field, const char *value);
     Int2DdsRet int2dds_dynamic_data_set_value(Int2DdsDynamicData *data, const char *field, Int2DdsDynamicValue *value);
@@ -1488,6 +1649,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_value_u64(uint64_t value, Int2DdsDynamicValue **out);
     Int2DdsRet int2dds_dynamic_value_f32(float value, Int2DdsDynamicValue **out);
     Int2DdsRet int2dds_dynamic_value_f64(double value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_f128(const uint8_t *value, Int2DdsDynamicValue **out);
     Int2DdsRet int2dds_dynamic_value_byte(uint8_t value, Int2DdsDynamicValue **out);
     Int2DdsRet int2dds_dynamic_value_bitmask(uint64_t value, Int2DdsDynamicValue **out);
     Int2DdsRet int2dds_dynamic_value_bitset(uint64_t value, Int2DdsDynamicValue **out);
@@ -1517,6 +1679,10 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_value_as_u64(const Int2DdsDynamicValue *value, uint64_t *out);
     Int2DdsRet int2dds_dynamic_value_as_f32(const Int2DdsDynamicValue *value, float *out);
     Int2DdsRet int2dds_dynamic_value_as_f64(const Int2DdsDynamicValue *value, double *out);
+    Int2DdsRet int2dds_dynamic_value_as_f128(const Int2DdsDynamicValue *value, uint8_t *out);
+    Int2DdsRet int2dds_float128_parse(const char *text, uint8_t *out);
+    Int2DdsRet int2dds_float128_from_f64(double value, uint8_t *out);
+    Int2DdsRet int2dds_float128_to_f64(const uint8_t *value, double *out);
     Int2DdsRet int2dds_dynamic_value_as_char8(const Int2DdsDynamicValue *value, uint8_t *out);
     Int2DdsRet int2dds_dynamic_value_as_string(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len);
     Int2DdsRet int2dds_dynamic_value_to_string(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len);

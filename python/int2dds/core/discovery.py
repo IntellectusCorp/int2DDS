@@ -62,6 +62,19 @@ def _read_duration(getter, handle) -> tuple[int, int]:
     return sec_out[0], nsec_out[0]
 
 
+def _read_presentation(getter, handle) -> dict:
+    """Read a presentation getter into the ``presentation_*`` dict keys."""
+    access_scope_out = ffi.new("int32_t *")
+    coherent_access_out = ffi.new("bool *")
+    ordered_access_out = ffi.new("bool *")
+    check_ret(getter(handle, access_scope_out, coherent_access_out, ordered_access_out))
+    return {
+        "presentation_access_scope": access_scope_out[0],
+        "presentation_coherent_access": bool(coherent_access_out[0]),
+        "presentation_ordered_access": bool(ordered_access_out[0]),
+    }
+
+
 def _extract_publication(item) -> dict:
     return {
         "key": _read_fixed(lib.int2dds_publication_builtin_topic_data_get_key, item, 12),
@@ -87,6 +100,12 @@ def _extract_publication(item) -> dict:
             lib.int2dds_publication_builtin_topic_data_get_lifespan, item),
         "user_data": _read_bytes(
             lib.int2dds_publication_builtin_topic_data_get_user_data, item),
+        **_read_presentation(
+            lib.int2dds_publication_builtin_topic_data_get_presentation, item),
+        "topic_data": _read_bytes(
+            lib.int2dds_publication_builtin_topic_data_get_topic_data, item),
+        "group_data": _read_bytes(
+            lib.int2dds_publication_builtin_topic_data_get_group_data, item),
     }
 
 
@@ -113,6 +132,12 @@ def _extract_subscription(item) -> dict:
             lib.int2dds_subscription_builtin_topic_data_get_deadline, item),
         "user_data": _read_bytes(
             lib.int2dds_subscription_builtin_topic_data_get_user_data, item),
+        **_read_presentation(
+            lib.int2dds_subscription_builtin_topic_data_get_presentation, item),
+        "topic_data": _read_bytes(
+            lib.int2dds_subscription_builtin_topic_data_get_topic_data, item),
+        "group_data": _read_bytes(
+            lib.int2dds_subscription_builtin_topic_data_get_group_data, item),
     }
 
 

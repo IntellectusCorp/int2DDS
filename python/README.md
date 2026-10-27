@@ -161,6 +161,38 @@ struct HelloWorld {
 };
 ```
 
+## Sequence and Array Fields
+
+Sequence and array fields of boolean, integer and floating-point elements accept a
+`list` or any buffer-protocol object (`bytes`, `bytearray`, `array.array`, numpy array).
+
+```python
+import numpy as np
+
+# IDL: struct Sensor { sequence<float> values; };
+sample = Sensor(values=np.zeros(1_000_000, dtype=np.float32))
+writer.write(sample)
+```
+
+A buffer is copied into the CDR stream as-is when all of the following hold.
+Otherwise its elements are converted one by one, which gives the same bytes but is slower.
+
+- It is one-dimensional and C-contiguous.
+- Its element type matches the IDL type as in the table below.
+- Its byte order matches the writer's (little-endian for generated types).
+
+| IDL type | numpy dtype |
+|---|---|
+| `boolean` | `bool` |
+| `octet`, `uint8` | `uint8` (or `bytes`, `bytearray`) |
+| `int8` | `int8` |
+| `short` / `unsigned short` | `int16` / `uint16` |
+| `long` / `unsigned long` | `int32` / `uint32` |
+| `long long` / `unsigned long long` | `int64` / `uint64` |
+| `float` / `double` | `float32` / `float64` |
+
+Received samples always hold these fields as `list`.
+
 ## QoS Configuration
 
 ```python
@@ -260,12 +292,17 @@ See [docs/guide/env.md](../docs/guide/env.md) for the full env-var reference.
 - `create_publisher() -> Publisher` - Create a publisher
 - `create_subscriber() -> Subscriber` - Create a subscriber
 - `create_topic(name: str, type_class: type) -> Topic` - Create a topic
+- `get_instance_handle() -> bytes` - This participant's 16-byte instance handle
+- `ignore_participant(handle: bytes)` - Ignore a remote participant (cannot be reversed)
+- `ignore_publication(handle: bytes)` - Ignore a remote DataWriter (cannot be reversed)
+- `ignore_subscription(handle: bytes)` - Ignore a remote DataReader (cannot be reversed)
 
 ### Publisher / DataWriter
 
 - `Publisher.create_datawriter(topic, qos=None) -> DataWriter`
 - `DataWriter.write(sample)` - Write a sample
 - `DataWriter.matched_readers` - Number of matched readers
+- `DataWriter.get_instance_handle() -> bytes` - This writer's 16-byte instance handle
 
 ### Subscriber / DataReader
 
@@ -273,6 +310,7 @@ See [docs/guide/env.md](../docs/guide/env.md) for the full env-var reference.
 - `DataReader.take() -> list[Sample]` - Take all available samples
 - `DataReader.read() -> list[Sample]` - Read samples without removing
 - `DataReader.matched_writers` - Number of matched writers
+- `DataReader.get_instance_handle() -> bytes` - This reader's 16-byte instance handle
 
 ### WaitSet
 

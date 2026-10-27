@@ -126,7 +126,7 @@ impl DomainParticipantFactory {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<DomainParticipant> {
-        crate::common::enterprise_hooks::call_participant_gate()?;
+        crate::common::enterprise_loader::participant_gate()?;
         let domain_id = if domain_id != DEFAULT_DOMAIN_ID {
             domain_id
         } else {
@@ -138,6 +138,11 @@ impl DomainParticipantFactory {
                     0
                 })
         };
+
+        if domain_id < 0 {
+            log::error!("Rejecting participant creation for negative domain id {}", domain_id);
+            return Err(DdsError::BadParameter);
+        }
 
         // Resolution chain for QosKind::Default: registered default → configured
         // default profile → spec default. QosKind::Specific is used as-is.
@@ -378,6 +383,7 @@ impl DomainParticipantFactory {
     }
 
     pub fn set_qos(&self, qos: DomainParticipantFactoryQos) -> DdsResult<()> {
+        qos.check_values()?;
         qos.check_unsupported_policies()?;
         qos.is_consistent()?;
 
@@ -412,6 +418,7 @@ impl DomainParticipantFactory {
                 Err(e) => Err(DdsError::Error(e.to_string())),
             },
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_participant_qos.lock() {
                     Ok(mut default_qos) => {
@@ -803,18 +810,25 @@ mod factory_test {
 
     #[test]
     fn test_delete_participant() {
+        // A fixed id can be handed to a concurrently running test by unique_domain_id().
+        let domain_id = crate::test_utils::unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(10, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
-        let result = factory.lookup_participant(10).unwrap();
+        let result = factory.lookup_participant(domain_id).unwrap();
         assert!(result.is_some(), "is None");
 
         let result = factory.delete_participant(participant);
         println!("{:?}", result);
         assert_eq!(result, Ok(()));
-        let result = factory.lookup_participant(10).unwrap();
+        let result = factory.lookup_participant(domain_id).unwrap();
         assert!(result.is_none(), "is not None");
     }
 
@@ -1110,5 +1124,38 @@ mod factory_test {
             Some("32"),
             "property must be reachable on the resolved DomainParticipantQos"
         );
+    }
+
+    #[test]
+    fn negative_domain_id_is_rejected() {
+        let factory = DomainParticipantFactory::get_instance();
+
+        let result = factory.create_participant(
+            -2,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        );
+
+        assert!(matches!(result, Err(DdsError::BadParameter)));
+    }
+
+    #[test]
+    fn domain_id_whose_port_exceeds_65535_is_rejected() {
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Discovery multicast port of domain 233: 7400 + 250 * 233 = 65650
+        let result = factory.create_participant(
+            233,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        );
+
+        match result {
+            Err(DdsError::Error(message)) => assert!(message.contains("65650"), "{message}"),
+            Err(other) => panic!("unexpected error {other:?}"),
+            Ok(_) => panic!("domain 233 must be rejected"),
+        }
     }
 }

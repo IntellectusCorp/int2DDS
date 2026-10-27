@@ -152,6 +152,7 @@ CLAUDE.md
 
 *.log
 int2DDS-shapes-demo
+int2DDS-shapes-demo-xtypes
 
 # C# / .NET
 **/bin/

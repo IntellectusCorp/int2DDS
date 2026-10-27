@@ -1,8 +1,8 @@
 use super::CdrSerializerCommon;
 use crate::serialize::cdr::{CdrError, CdrSerializer, Xcdr2Serializer};
 use crate::serialize::{
-    to_bytes_f32, to_bytes_f64, to_bytes_i16, to_bytes_i32, to_bytes_i64, to_bytes_u16,
-    to_bytes_u32, to_bytes_u64,
+    to_bytes_f128, to_bytes_f32, to_bytes_f64, to_bytes_i16, to_bytes_i32, to_bytes_i64,
+    to_bytes_u16, to_bytes_u32, to_bytes_u64, Float128,
 };
 
 /// Trait for primitive type serialization
@@ -97,6 +97,15 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     fn serialize_f64(&mut self, value: f64) -> Result<(), CdrError> {
         self.align(8);
         let bytes = to_bytes_f64(value, self.endianness());
+        self.buffer_mut().extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    /// Serialize 128-bit floating point (IEEE binary128 on the wire)
+    #[inline]
+    fn serialize_f128(&mut self, value: Float128) -> Result<(), CdrError> {
+        self.align(8);
+        let bytes = to_bytes_f128(value, self.endianness());
         self.buffer_mut().extend_from_slice(&bytes);
         Ok(())
     }

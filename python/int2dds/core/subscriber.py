@@ -4,8 +4,9 @@ Subscriber and DataReader for receiving DDS data.
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from int2dds._ffi import CData, ffi, lib
 from int2dds.core.conditions import (
@@ -16,6 +17,7 @@ from int2dds.core.conditions import (
     ReadCondition,
     StatusCondition,
 )
+from int2dds.core.loan import LoanedSamples
 from int2dds.core.listeners import (
     DataReaderListener,
     _create_reader_listener_struct,
@@ -31,7 +33,7 @@ from int2dds.exceptions import (
 
 if TYPE_CHECKING:
     from int2dds.core.participant import DomainParticipant
-    from int2dds.core.qos import DataReaderQos
+    from int2dds.core.qos import DataReaderQos, SubscriberQos
     from int2dds.core.topic import ContentFilteredTopic, Topic
     from int2dds.types.base import DdsType
 
@@ -58,6 +60,17 @@ class Sample(Generic[T]):
     instance_state: int | None = None
 
 
+def _handle_ref(handle: bytes | None) -> CData:
+    """A 16-byte instance handle as ``const uint8_t (*)[16]``; None is NULL (NIL)."""
+    if handle is None:
+        return ffi.NULL
+    if len(handle) != 16:
+        raise ValueError("instance handle must be 16 bytes")
+    ref = ffi.new("uint8_t(*)[16]")
+    ffi.memmove(ref, handle, 16)
+    return ref
+
+
 def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     """Apply DataReaderQos policies onto a native reader QoS handle.
 
@@ -66,7 +79,8 @@ def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     value (the native default at creation, or the current QoS on set_qos merge).
     """
     if qos.reliability is not None:
-        check_ret(lib.int2dds_datareader_qos_set_reliability(handle, qos.reliability._kind_int))
+        check_ret(lib.int2dds_datareader_qos_set_reliability(
+            handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
     if qos.durability is not None:
         check_ret(lib.int2dds_datareader_qos_set_durability(handle, qos.durability._kind_int))
     if qos.history is not None:
@@ -92,8 +106,8 @@ def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     if qos.latency_budget is not None:
         check_ret(lib.int2dds_datareader_qos_set_latency_budget(
             handle, qos.latency_budget._duration_ns))
-    if qos.user_data is not None and qos.user_data.data:
-        data_ptr = ffi.from_buffer(qos.user_data.data)
+    if qos.user_data is not None:
+        data_ptr = ffi.from_buffer(qos.user_data.data) if qos.user_data.data else ffi.NULL
         check_ret(lib.int2dds_datareader_qos_set_user_data(
             handle, data_ptr, len(qos.user_data.data)))
     if qos.reader_data_lifecycle is not None:
@@ -111,6 +125,41 @@ def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
             handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
 
 
+def _apply_subscriber_qos(handle: CData, qos: "SubscriberQos") -> None:
+    """Apply SubscriberQos policies onto a native subscriber QoS handle.
+
+    Shared by subscriber creation and set_qos. Only the policies explicitly set on
+    `qos` are applied; an empty partition name list is left unapplied.
+    """
+    if qos.partition is not None and qos.partition.names:
+        c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
+        c_array = ffi.new("char*[]", c_strings)
+        check_ret(lib.int2dds_subscriber_qos_set_partition(
+            handle, c_array, len(qos.partition.names)))
+    if qos.presentation is not None:
+        check_ret(lib.int2dds_subscriber_qos_set_presentation(
+            handle,
+            qos.presentation._access_scope_int,
+            qos.presentation.coherent_access,
+            qos.presentation.ordered_access))
+    if qos.group_data is not None:
+        data_ptr = ffi.from_buffer(qos.group_data.data) if qos.group_data.data else ffi.NULL
+        check_ret(lib.int2dds_subscriber_qos_set_group_data(
+            handle, data_ptr, len(qos.group_data.data)))
+
+
+def _has_subscriber_policies(qos: "SubscriberQos") -> bool:
+    """True when `qos` sets a policy that differs from the creation default.
+
+    A QoS without one is created with a NULL handle so the configured default
+    profile still applies.
+    """
+    return bool(
+        (qos.partition is not None and qos.partition.names)
+        or qos.presentation is not None
+        or (qos.group_data is not None and qos.group_data.data))
+
+
 class Subscriber:
     """
     Subscriber - groups DataReaders for coherent subscription.
@@ -118,28 +167,30 @@ class Subscriber:
     Subscribers are created through DomainParticipant.create_subscriber().
     """
 
-    __slots__ = ("_handle", "_participant", "_closed")
+    __slots__ = ("_handle", "_participant", "_closed", "_readers")
 
     def __init__(self, participant: DomainParticipant, qos: "SubscriberQos | None" = None,
                  profile: str | None = None) -> None:
         self._participant = participant
         self._closed = False
+        # Typed DataReaders created by this subscriber, keyed by their 16-byte GUID.
+        self._readers: weakref.WeakValueDictionary[bytes, DataReader] = (
+            weakref.WeakValueDictionary())
 
         subscriber_ptr = ffi.new("Int2DdsSubscriber **")
         if profile is not None:
             check_ret(lib.int2dds_create_subscriber_with_profile(
                 participant._handle, profile.encode(), subscriber_ptr))
-        elif qos is not None and qos.partition is not None and qos.partition.names:
+        elif qos is not None and _has_subscriber_policies(qos):
             qos_handle_ptr = ffi.new("Int2DdsSubscriberQos **")
             check_ret(lib.int2dds_subscriber_qos_create_default(qos_handle_ptr))
             qos_handle = qos_handle_ptr[0]
-            c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
-            c_array = ffi.new("char*[]", c_strings)
-            check_ret(lib.int2dds_subscriber_qos_set_partition(
-                qos_handle, c_array, len(qos.partition.names)))
-            check_ret(lib.int2dds_create_subscriber(
-                participant._handle, qos_handle, subscriber_ptr))
-            lib.int2dds_subscriber_qos_destroy(qos_handle)
+            try:
+                _apply_subscriber_qos(qos_handle, qos)
+                check_ret(lib.int2dds_create_subscriber(
+                    participant._handle, qos_handle, subscriber_ptr))
+            finally:
+                lib.int2dds_subscriber_qos_destroy(qos_handle)
         else:
             check_ret(lib.int2dds_create_subscriber(
                 participant._handle, ffi.NULL, subscriber_ptr))
@@ -164,13 +215,17 @@ class Subscriber:
         Returns:
             A new DataReader instance
         """
-        return DataReader(self, topic, qos, listener, status_mask)
+        reader = DataReader(self, topic, qos, listener, status_mask)
+        self._readers[reader.get_guid()] = reader
+        return reader
 
     def create_datareader_with_profile(
         self, topic: Topic[T] | ContentFilteredTopic[T], profile: str
     ) -> DataReader[T]:
         """Create a DataReader whose QoS comes from the named XML profile."""
-        return DataReader(self, topic, profile=profile)
+        reader = DataReader(self, topic, profile=profile)
+        self._readers[reader.get_guid()] = reader
+        return reader
 
     def create_datareader_dynamic(self, topic, support):
         """Create a DataReader for a runtime XML/dynamic-typed topic."""
@@ -201,24 +256,112 @@ class Subscriber:
         check_ret(lib.int2dds_subscriber_get_status_changes(self._handle, mask_out))
         return mask_out[0]
 
+    def get_qos(self) -> "SubscriberQos":
+        """Return the effective QoS in force.
+
+        Reports the policies with a native getter (presentation, group_data).
+        ``partition`` has no native getter and is left unset.
+        """
+        from int2dds.core.discovery import _read_bytes
+        from int2dds.core.qos import (
+            GroupData, Presentation, PresentationAccessScope, SubscriberQos,
+        )
+
+        qos_ptr = ffi.new("Int2DdsSubscriberQos **")
+        check_ret(lib.int2dds_subscriber_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            access_scope = ffi.new("int32_t *")
+            coherent_access = ffi.new("bool *")
+            ordered_access = ffi.new("bool *")
+            check_ret(lib.int2dds_subscriber_qos_get_presentation(
+                handle, access_scope, coherent_access, ordered_access))
+            group_data = _read_bytes(lib.int2dds_subscriber_qos_get_group_data, handle)
+        finally:
+            lib.int2dds_subscriber_qos_destroy(handle)
+
+        return SubscriberQos(
+            presentation=Presentation(
+                access_scope=PresentationAccessScope(access_scope[0]).name,
+                coherent_access=bool(coherent_access[0]),
+                ordered_access=bool(ordered_access[0]),
+            ),
+            group_data=GroupData(data=group_data),
+        )
+
     def set_qos(self, qos: "SubscriberQos") -> None:
         """Set this subscriber's QoS.
 
-        The current QoS is used as the merge base, then the ``partition`` policy
-        from ``qos`` (the only mutable SubscriberQos policy) is applied on top.
+        The given policies are merged onto the subscriber's current QoS (fetched as
+        the base), then applied. Changing an immutable policy (presentation) to a
+        different value is rejected by the core.
         """
         qos_ptr = ffi.new("Int2DdsSubscriberQos **")
         check_ret(lib.int2dds_subscriber_get_qos(self._handle, qos_ptr))
         handle = qos_ptr[0]
         try:
-            if qos is not None and qos.partition is not None and qos.partition.names:
-                c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
-                c_array = ffi.new("char*[]", c_strings)
-                check_ret(lib.int2dds_subscriber_qos_set_partition(
-                    handle, c_array, len(qos.partition.names)))
+            _apply_subscriber_qos(handle, qos)
             check_ret(lib.int2dds_subscriber_set_qos(self._handle, handle))
         finally:
             lib.int2dds_subscriber_qos_destroy(handle)
+
+    def begin_access(self) -> None:
+        """Begin a sample access block.
+
+        Required before reading or calling get_datareaders() under GROUP access
+        scope. Has no effect under other access scopes. Calls may be nested.
+        """
+        check_ret(lib.int2dds_subscriber_begin_access(self._handle))
+
+    def end_access(self) -> None:
+        """End the sample access block started by begin_access().
+
+        Raises:
+            DdsPreconditionNotMet: Under GROUP access scope, if there is no matching
+                begin_access().
+        """
+        check_ret(lib.int2dds_subscriber_end_access(self._handle))
+
+    def get_datareaders(
+        self,
+        sample_states: int = ANY_SAMPLE_STATE,
+        view_states: int = ANY_VIEW_STATE,
+        instance_states: int = ANY_INSTANCE_STATE,
+    ) -> list[DataReader]:
+        """Return the DataReaders that hold samples matching the state masks.
+
+        The returned objects are the DataReader instances this subscriber created,
+        in the order the core reports them. Under GROUP access scope with ordered
+        access the list is in sample order and a reader may appear more than once.
+        Readers this binding cannot map back to an object are omitted: dynamic
+        readers (create_datareader_dynamic) and readers created outside this
+        Subscriber object (e.g. by an XML-configured participant).
+
+        Raises:
+            DdsPreconditionNotMet: Under GROUP access scope, if called outside a
+                begin_access()/end_access() block.
+        """
+        count_out = ffi.new("uintptr_t *")
+        check_ret(lib.int2dds_subscriber_get_datareaders(
+            self._handle, sample_states, view_states, instance_states,
+            ffi.NULL, 0, count_out))
+        while True:
+            capacity = count_out[0]
+            if capacity == 0:
+                return []
+            handles = ffi.new("uint8_t[][16]", capacity)
+            check_ret(lib.int2dds_subscriber_get_datareaders(
+                self._handle, sample_states, view_states, instance_states,
+                handles, capacity, count_out))
+            if count_out[0] <= capacity:
+                break
+
+        readers = (self._readers.get(bytes(handles[i])) for i in range(count_out[0]))
+        return [reader for reader in readers if reader is not None]
+
+    def notify_datareaders(self) -> None:
+        """Invoke the on_data_available listener of every DataReader of this subscriber."""
+        check_ret(lib.int2dds_subscriber_notify_datareaders(self._handle))
 
     def close(self) -> None:
         """Delete the subscriber."""
@@ -255,7 +398,7 @@ class DataReader(Generic[T]):
         ...         print(sample.data)
     """
 
-    __slots__ = ("_handle", "_subscriber", "_topic", "_qos_handle", "_buffer", "_buffer_size", "_closed","_listener_ctx_id")
+    __slots__ = ("_handle", "_subscriber", "_topic", "_qos_handle", "_buffer", "_buffer_size", "_closed","_listener_ctx_id", "__weakref__")
 
     # Default buffer size for reading samples
     DEFAULT_BUFFER_SIZE = 65536
@@ -275,7 +418,7 @@ class DataReader(Generic[T]):
         self._qos_handle: CData | None = None
         self._listener_ctx_id: int | None = None
         self._buffer_size = self.DEFAULT_BUFFER_SIZE
-        self._buffer = ffi.new(f"uint8_t[{self._buffer_size}]")
+        self._buffer = ffi.new("uint8_t[]", self._buffer_size)
 
         # Create QoS if provided
         qos_ptr = ffi.NULL
@@ -335,7 +478,7 @@ class DataReader(Generic[T]):
 
     def _grow_buffer(self, required: int) -> None:
         self._buffer_size = required
-        self._buffer = ffi.new(f"uint8_t[{required}]")
+        self._buffer = ffi.new("uint8_t[]", required)
 
     def _take_or_read_one(self, native_fn) -> Sample[T] | None:
         actual_size = ffi.new("size_t *")
@@ -710,7 +853,7 @@ class DataReader(Generic[T]):
         handle_ptr = ffi.from_buffer(handle)
         capacity = 64
         while True:
-            key_buf = ffi.new(f"uint8_t[{capacity}]")
+            key_buf = ffi.new("uint8_t[]", capacity)
             size_out = ffi.new("size_t *")
             ret = lib.int2dds_datareader_get_key_value(
                 self._handle, handle_ptr, key_buf, capacity, size_out
@@ -724,9 +867,10 @@ class DataReader(Generic[T]):
 
     def get_qos(self) -> "DataReaderQos":
         """Return the effective QoS (reliability, durability, history) in force."""
+        from int2dds.core.discovery import _read_bytes
         from int2dds.core.qos import (
             DataReaderQos, Reliability, Durability, History, LifespanReference, ResourceLimits,
-            ReliabilityKind, DurabilityKind, HistoryKind, LifespanReferenceKind,
+            ReliabilityKind, DurabilityKind, HistoryKind, LifespanReferenceKind, UserData,
         )
 
         qos_ptr = ffi.new("Int2DdsDataReaderQos **")
@@ -748,6 +892,7 @@ class DataReader(Generic[T]):
             max_per_instance = ffi.new("int32_t *")
             check_ret(lib.int2dds_datareader_qos_get_resource_limits(
                 handle, max_samples, max_instances, max_per_instance))
+            user_data = _read_bytes(lib.int2dds_datareader_qos_get_user_data, handle)
         finally:
             lib.int2dds_datareader_qos_destroy(handle)
 
@@ -765,6 +910,7 @@ class DataReader(Generic[T]):
                 max_instances=max_instances[0],
                 max_samples_per_instance=max_per_instance[0],
             ),
+            user_data=UserData(data=user_data),
         )
 
     def set_qos(self, qos: "DataReaderQos") -> None:
@@ -876,6 +1022,13 @@ class DataReader(Generic[T]):
         check_ret(lib.int2dds_datareader_get_guid(self._handle, ffi.cast("uint8_t(*)[16]", buf)))
         return bytes(ffi.buffer(buf, 16))
 
+    def get_instance_handle(self) -> bytes:
+        """Get this DataReader's 16-byte instance handle."""
+        buf = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_datareader_get_instance_handle(
+            self._handle, ffi.cast("uint8_t(*)[16]", buf)))
+        return bytes(ffi.buffer(buf, 16))
+
     def has_data(self) -> bool:
         """Return whether unread samples are available in the cache."""
         out = ffi.new("bool *")
@@ -904,6 +1057,100 @@ class DataReader(Generic[T]):
         finally:
             if loan_out[0] != ffi.NULL:
                 lib.int2dds_datareader_return_serialized_loan(loan_out[0])
+
+    def read_loaned(self, max_samples: int = -1, sample_states: int = ANY_SAMPLE_STATE,
+                    view_states: int = ANY_VIEW_STATE,
+                    instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """Loan matching samples without copying or removing them. Empty when nothing matches."""
+        return self._loan(lib.int2dds_datareader_read_loaned, max_samples, sample_states,
+                          view_states, instance_states)
+
+    def take_loaned(self, max_samples: int = -1, sample_states: int = ANY_SAMPLE_STATE,
+                    view_states: int = ANY_VIEW_STATE,
+                    instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_loaned, max_samples, sample_states,
+                          view_states, instance_states)
+
+    def read_w_condition_loaned(self, condition: ReadCondition,
+                                max_samples: int = -1) -> LoanedSamples:
+        """read_loaned() for samples matching a Read/QueryCondition of this reader."""
+        return self._loan(lib.int2dds_datareader_read_w_condition_loaned, condition._handle,
+                          max_samples)
+
+    def take_w_condition_loaned(self, condition: ReadCondition,
+                                max_samples: int = -1) -> LoanedSamples:
+        """read_w_condition_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_w_condition_loaned, condition._handle,
+                          max_samples)
+
+    def read_instance_loaned(self, handle: bytes, max_samples: int = -1,
+                             sample_states: int = ANY_SAMPLE_STATE,
+                             view_states: int = ANY_VIEW_STATE,
+                             instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_loaned() limited to the 16-byte instance ``handle``."""
+        return self._loan(lib.int2dds_datareader_read_instance_loaned, _handle_ref(handle),
+                          max_samples, sample_states, view_states, instance_states)
+
+    def take_instance_loaned(self, handle: bytes, max_samples: int = -1,
+                             sample_states: int = ANY_SAMPLE_STATE,
+                             view_states: int = ANY_VIEW_STATE,
+                             instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_instance_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_instance_loaned, _handle_ref(handle),
+                          max_samples, sample_states, view_states, instance_states)
+
+    def read_next_instance_loaned(self, previous_handle: bytes | None, max_samples: int = -1,
+                                  sample_states: int = ANY_SAMPLE_STATE,
+                                  view_states: int = ANY_VIEW_STATE,
+                                  instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_instance_loaned() for the next instance after ``previous_handle`` that has
+        matching samples; None starts from the first instance."""
+        return self._loan(lib.int2dds_datareader_read_next_instance_loaned,
+                          _handle_ref(previous_handle), max_samples, sample_states,
+                          view_states, instance_states)
+
+    def take_next_instance_loaned(self, previous_handle: bytes | None, max_samples: int = -1,
+                                  sample_states: int = ANY_SAMPLE_STATE,
+                                  view_states: int = ANY_VIEW_STATE,
+                                  instance_states: int = ANY_INSTANCE_STATE) -> LoanedSamples:
+        """read_next_instance_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_next_instance_loaned,
+                          _handle_ref(previous_handle), max_samples, sample_states,
+                          view_states, instance_states)
+
+    def read_next_instance_w_condition_loaned(self, previous_handle: bytes | None,
+                                              condition: ReadCondition,
+                                              max_samples: int = -1) -> LoanedSamples:
+        """read_next_instance_loaned() for samples matching a Read/QueryCondition."""
+        return self._loan(lib.int2dds_datareader_read_next_instance_w_condition_loaned,
+                          _handle_ref(previous_handle), condition._handle, max_samples)
+
+    def take_next_instance_w_condition_loaned(self, previous_handle: bytes | None,
+                                              condition: ReadCondition,
+                                              max_samples: int = -1) -> LoanedSamples:
+        """read_next_instance_w_condition_loaned() that removes the samples from the cache."""
+        return self._loan(lib.int2dds_datareader_take_next_instance_w_condition_loaned,
+                          _handle_ref(previous_handle), condition._handle, max_samples)
+
+    def return_loan(self, loan: LoanedSamples) -> None:
+        """Return a loan. A loan from another reader raises DdsPreconditionNotMet and stays
+        valid; a returned loan is ignored."""
+        if loan._returned:
+            return
+        if loan._handle == ffi.NULL:
+            loan._mark_returned()
+            return
+        check_ret(lib.int2dds_datareader_return_loan(self._handle, loan._handle))
+        loan._mark_returned()
+
+    def _loan(self, native_fn: Any, *args: Any) -> LoanedSamples:
+        loan_out = ffi.new("Int2DdsLoanedSamples **")
+        ret = native_fn(self._handle, *args, loan_out)
+        if ret == INT2DDS_RET_NO_DATA:
+            return LoanedSamples(self, ffi.NULL)
+        check_ret(ret)
+        return LoanedSamples(self, loan_out[0])
 
     def get_statuscondition(self) -> StatusCondition:
         """Get the StatusCondition associated with this DataReader."""

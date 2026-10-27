@@ -52,9 +52,22 @@ class DataRepresentationKind(IntEnum):
     XCDR2 = 2
 
 
+class PresentationAccessScope(IntEnum):
+    INSTANCE = 0
+    TOPIC = 1
+    GROUP = 2
+
+
 # ---------------------------------------------------------------------------
 # QoS Policy dataclasses
 # ---------------------------------------------------------------------------
+
+def _kind_value(policy: str, kind: str, mapping: dict[str, int]) -> int:
+    try:
+        return mapping[kind]
+    except KeyError:
+        raise ValueError(f"{policy} must be one of {list(mapping)}, got {kind!r}") from None
+
 
 @dataclass
 class Reliability:
@@ -63,11 +76,17 @@ class Reliability:
 
     @property
     def _kind_int(self) -> int:
-        return ReliabilityKind.RELIABLE if self.kind == "RELIABLE" else ReliabilityKind.BEST_EFFORT
+        return _kind_value(
+            "Reliability.kind",
+            self.kind,
+            {"BEST_EFFORT": ReliabilityKind.BEST_EFFORT, "RELIABLE": ReliabilityKind.RELIABLE},
+        )
 
     @property
     def _max_blocking_time_ns(self) -> int:
-        return int(self.max_blocking_time * 1_000_000_000)
+        # inf and a roundtripped native infinite both saturate to the INFINITE sentinel
+        ns = self.max_blocking_time * 1_000_000_000
+        return 0x7FFFFFFFFFFFFFFF if ns >= 0x7FFFFFFFFFFFFFFF else int(ns)
 
 
 @dataclass
@@ -92,7 +111,11 @@ class History:
 
     @property
     def _kind_int(self) -> int:
-        return HistoryKind.KEEP_ALL if self.kind == "KEEP_ALL" else HistoryKind.KEEP_LAST
+        return _kind_value(
+            "History.kind",
+            self.kind,
+            {"KEEP_LAST": HistoryKind.KEEP_LAST, "KEEP_ALL": HistoryKind.KEEP_ALL},
+        )
 
 
 @dataclass
@@ -101,7 +124,11 @@ class Ownership:
 
     @property
     def _kind_int(self) -> int:
-        return OwnershipKind.EXCLUSIVE if self.kind == "EXCLUSIVE" else OwnershipKind.SHARED
+        return _kind_value(
+            "Ownership.kind",
+            self.kind,
+            {"SHARED": OwnershipKind.SHARED, "EXCLUSIVE": OwnershipKind.EXCLUSIVE},
+        )
 
 
 @dataclass
@@ -140,7 +167,14 @@ class DestinationOrder:
 
     @property
     def _kind_int(self) -> int:
-        return DestinationOrderKind.BY_SOURCE if self.kind == "BY_SOURCE" else DestinationOrderKind.BY_RECEPTION
+        return _kind_value(
+            "DestinationOrder.kind",
+            self.kind,
+            {
+                "BY_RECEPTION": DestinationOrderKind.BY_RECEPTION,
+                "BY_SOURCE": DestinationOrderKind.BY_SOURCE,
+            },
+        )
 
 
 @dataclass
@@ -149,10 +183,13 @@ class LifespanReference:
 
     @property
     def _kind_int(self) -> int:
-        return (
-            LifespanReferenceKind.BY_RECEPTION
-            if self.kind == "BY_RECEPTION"
-            else LifespanReferenceKind.BY_SOURCE
+        return _kind_value(
+            "LifespanReference.kind",
+            self.kind,
+            {
+                "BY_SOURCE": LifespanReferenceKind.BY_SOURCE,
+                "BY_RECEPTION": LifespanReferenceKind.BY_RECEPTION,
+            },
         )
 
 
@@ -172,6 +209,16 @@ class TransportPriority:
 
 @dataclass
 class UserData:
+    data: bytes = b""
+
+
+@dataclass
+class TopicData:
+    data: bytes = b""
+
+
+@dataclass
+class GroupData:
     data: bytes = b""
 
 
@@ -204,7 +251,11 @@ class DataRepresentation:
 
     @property
     def _kind_int(self) -> int:
-        return DataRepresentationKind.XCDR2 if self.kind == "XCDR2" else DataRepresentationKind.XCDR1
+        return _kind_value(
+            "DataRepresentation.kind",
+            self.kind,
+            {"XCDR1": DataRepresentationKind.XCDR1, "XCDR2": DataRepresentationKind.XCDR2},
+        )
 
 
 @dataclass
@@ -251,6 +302,17 @@ class Liveliness:
 @dataclass
 class Partition:
     names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Presentation:
+    access_scope: Literal["INSTANCE", "TOPIC", "GROUP"] = "INSTANCE"
+    coherent_access: bool = False
+    ordered_access: bool = False
+
+    @property
+    def _access_scope_int(self) -> int:
+        return PresentationAccessScope[self.access_scope]
 
 
 @dataclass
@@ -335,16 +397,21 @@ class TopicQos:
     lifespan: Lifespan | None = None
     ownership: Ownership | None = None
     data_representation: DataRepresentation | None = None
+    topic_data: TopicData | None = None
 
 
 @dataclass
 class PublisherQos:
     partition: Partition | None = None
+    presentation: Presentation | None = None
+    group_data: GroupData | None = None
 
 
 @dataclass
 class SubscriberQos:
     partition: Partition | None = None
+    presentation: Presentation | None = None
+    group_data: GroupData | None = None
 
 
 @dataclass

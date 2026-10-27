@@ -14,6 +14,7 @@ import kr.co.intellectus.int2dds.qos.DestinationOrder;
 import kr.co.intellectus.int2dds.qos.DestinationOrderKind;
 import kr.co.intellectus.int2dds.qos.Durability;
 import kr.co.intellectus.int2dds.qos.DurabilityKind;
+import kr.co.intellectus.int2dds.qos.GroupData;
 import kr.co.intellectus.int2dds.qos.History;
 import kr.co.intellectus.int2dds.qos.HistoryKind;
 import kr.co.intellectus.int2dds.qos.LatencyBudget;
@@ -27,6 +28,8 @@ import kr.co.intellectus.int2dds.qos.OwnershipKind;
 import kr.co.intellectus.int2dds.qos.OwnershipStrength;
 import kr.co.intellectus.int2dds.qos.ParticipantQos;
 import kr.co.intellectus.int2dds.qos.Partition;
+import kr.co.intellectus.int2dds.qos.Presentation;
+import kr.co.intellectus.int2dds.qos.PresentationAccessScopeKind;
 import kr.co.intellectus.int2dds.qos.Property;
 import kr.co.intellectus.int2dds.qos.PropertyEntry;
 import kr.co.intellectus.int2dds.qos.PublisherQos;
@@ -36,6 +39,7 @@ import kr.co.intellectus.int2dds.qos.ReliabilityKind;
 import kr.co.intellectus.int2dds.qos.ResourceLimits;
 import kr.co.intellectus.int2dds.qos.SubscriberQos;
 import kr.co.intellectus.int2dds.qos.TimeBasedFilter;
+import kr.co.intellectus.int2dds.qos.TopicData;
 import kr.co.intellectus.int2dds.qos.TopicQos;
 import kr.co.intellectus.int2dds.qos.TransportPriority;
 import kr.co.intellectus.int2dds.qos.UserData;
@@ -68,9 +72,9 @@ import kr.co.intellectus.int2dds.qos.WriterDataLifecycle;
  *
  * <h2>Set-only, no getter — not round-trip verifiable</h2>
  *
- * <p>The FFI has 44 QoS setters and 28 getters (not the same shape: one getter, {@code
+ * <p>The FFI has 50 QoS setters and 37 getters (not the same shape: one getter, {@code
  * int2dds_participant_qos_get_properties_with_prefix}, has no corresponding setter, so the gap
- * below is 17 entries rather than the 44-28 arithmetic difference of 16). Output of:
+ * below is 14 entries rather than the 50-37 arithmetic difference of 13). Output of:
  *
  * <pre>{@code
  * comm -23 \
@@ -79,10 +83,7 @@ import kr.co.intellectus.int2dds.qos.WriterDataLifecycle;
  * }</pre>
  *
  * <pre>
- * int2dds_datareader_qos_user_data
- * int2dds_datawriter_qos_user_data
  * int2dds_participant_qos_multicast_ttl
- * int2dds_participant_qos_user_data
  * int2dds_publisher_qos_partition
  * int2dds_subscriber_qos_partition
  * int2dds_topic_qos_data_representation
@@ -98,7 +99,7 @@ import kr.co.intellectus.int2dds.qos.WriterDataLifecycle;
  * int2dds_topic_qos_transport_priority
  * </pre>
  *
- * <p>None of these seventeen policies can be round-trip verified; a test can only assert the setter
+ * <p>None of these fourteen policies can be round-trip verified; a test can only assert the setter
  * call returned OK. If the FFI ever grows a getter for one of them, this list — and {@link
  * #readWriterQos} / {@link #readReaderQos} — should be updated to match.
  */
@@ -110,8 +111,8 @@ public final class QosMarshal {
 
     public static void applyParticipantQos(long h, ParticipantQos q) {
         if (q.getUserData() != null) {
-            applyUserData(
-                    q.getUserData(),
+            applyOctets(
+                    q.getUserData().getData(),
                     (addr, len) -> FfiAccess.participantQosSetUserData(h, addr, len));
         }
         if (q.getProperty() != null) {
@@ -128,9 +129,9 @@ public final class QosMarshal {
     }
 
     /**
-     * Reads back a participant QoS handle's text properties. {@code UserData} has no getter and
-     * stays null; binary entries and {@code propagate} flags are not reported, so every entry reads
-     * back as text with {@code propagate == false}.
+     * Reads back a participant QoS handle's {@code UserData} and text properties. Binary entries
+     * and {@code propagate} flags are not reported, so every entry reads back as text with {@code
+     * propagate == false}.
      */
     public static ParticipantQos readParticipantQos(long h) {
         byte[][] flat = FfiAccess.participantQosPropertiesWithPrefix(h, new byte[0]);
@@ -139,27 +140,120 @@ public final class QosMarshal {
             property.add(new String(flat[i], UTF8), new String(flat[i + 1], UTF8), false);
         }
         ParticipantQos q = new ParticipantQos();
+        q.setUserData(
+                new UserData(
+                        readOctets(
+                                (buf, capacity, sizeOut) ->
+                                        FfiAccess.participantQosGetUserData(
+                                                h, buf, capacity, sizeOut))));
         q.setProperty(property);
         return q;
     }
 
     public static void applyPublisherQos(long h, PublisherQos q) {
+        if (q.getPresentation() != null) {
+            Presentation p = q.getPresentation();
+            ReturnCodes.check(
+                    FfiAccess.publisherQosSetPresentation(
+                            h,
+                            p.getAccessScope().value(),
+                            p.isCoherentAccess(),
+                            p.isOrderedAccess()));
+        }
         if (q.getPartition() != null) {
             applyPartition(
                     q.getPartition(),
                     (names, count) -> FfiAccess.publisherQosSetPartition(h, names, count));
         }
+        if (q.getGroupData() != null) {
+            applyOctets(
+                    q.getGroupData().getData(),
+                    (addr, len) -> FfiAccess.publisherQosSetGroupData(h, addr, len));
+        }
+    }
+
+    /**
+     * Reads back a publisher QoS handle's {@code Presentation} and {@code GroupData}. {@code
+     * Partition} has no getter and stays null.
+     */
+    public static PublisherQos readPublisherQos(long h) {
+        int[] accessScope = new int[1];
+        boolean[] coherentAccess = new boolean[1];
+        boolean[] orderedAccess = new boolean[1];
+        ReturnCodes.check(
+                FfiAccess.publisherQosGetPresentation(
+                        h, accessScope, coherentAccess, orderedAccess));
+
+        PublisherQos q = new PublisherQos();
+        q.setPresentation(
+                new Presentation(
+                        PresentationAccessScopeKind.fromValue(accessScope[0]),
+                        coherentAccess[0],
+                        orderedAccess[0]));
+        q.setGroupData(
+                new GroupData(
+                        readOctets(
+                                (buf, capacity, sizeOut) ->
+                                        FfiAccess.publisherQosGetGroupData(
+                                                h, buf, capacity, sizeOut))));
+        return q;
     }
 
     public static void applySubscriberQos(long h, SubscriberQos q) {
+        if (q.getPresentation() != null) {
+            Presentation p = q.getPresentation();
+            ReturnCodes.check(
+                    FfiAccess.subscriberQosSetPresentation(
+                            h,
+                            p.getAccessScope().value(),
+                            p.isCoherentAccess(),
+                            p.isOrderedAccess()));
+        }
         if (q.getPartition() != null) {
             applyPartition(
                     q.getPartition(),
                     (names, count) -> FfiAccess.subscriberQosSetPartition(h, names, count));
         }
+        if (q.getGroupData() != null) {
+            applyOctets(
+                    q.getGroupData().getData(),
+                    (addr, len) -> FfiAccess.subscriberQosSetGroupData(h, addr, len));
+        }
+    }
+
+    /**
+     * Reads back a subscriber QoS handle's {@code Presentation} and {@code GroupData}. {@code
+     * Partition} has no getter and stays null.
+     */
+    public static SubscriberQos readSubscriberQos(long h) {
+        int[] accessScope = new int[1];
+        boolean[] coherentAccess = new boolean[1];
+        boolean[] orderedAccess = new boolean[1];
+        ReturnCodes.check(
+                FfiAccess.subscriberQosGetPresentation(
+                        h, accessScope, coherentAccess, orderedAccess));
+
+        SubscriberQos q = new SubscriberQos();
+        q.setPresentation(
+                new Presentation(
+                        PresentationAccessScopeKind.fromValue(accessScope[0]),
+                        coherentAccess[0],
+                        orderedAccess[0]));
+        q.setGroupData(
+                new GroupData(
+                        readOctets(
+                                (buf, capacity, sizeOut) ->
+                                        FfiAccess.subscriberQosGetGroupData(
+                                                h, buf, capacity, sizeOut))));
+        return q;
     }
 
     public static void applyTopicQos(long h, TopicQos q) {
+        if (q.getTopicData() != null) {
+            applyOctets(
+                    q.getTopicData().getData(),
+                    (addr, len) -> FfiAccess.topicQosSetTopicData(h, addr, len));
+        }
         if (q.getReliability() != null) {
             ReturnCodes.check(
                     FfiAccess.topicQosSetReliability(
@@ -218,6 +312,21 @@ public final class QosMarshal {
         }
     }
 
+    /**
+     * Reads back a topic QoS handle's {@code TopicData}. Every other topic policy has no getter and
+     * stays null; see the set-only list in this class's javadoc.
+     */
+    public static TopicQos readTopicQos(long h) {
+        TopicQos q = new TopicQos();
+        q.setTopicData(
+                new TopicData(
+                        readOctets(
+                                (buf, capacity, sizeOut) ->
+                                        FfiAccess.topicQosGetTopicData(
+                                                h, buf, capacity, sizeOut))));
+        return q;
+    }
+
     public static void applyWriterQos(long h, DataWriterQos q) {
         if (q.getReliability() != null) {
             ReturnCodes.check(
@@ -271,8 +380,9 @@ public final class QosMarshal {
                             h, q.getTransportPriority().getValue()));
         }
         if (q.getUserData() != null) {
-            applyUserData(
-                    q.getUserData(), (addr, len) -> FfiAccess.writerQosSetUserData(h, addr, len));
+            applyOctets(
+                    q.getUserData().getData(),
+                    (addr, len) -> FfiAccess.writerQosSetUserData(h, addr, len));
         }
         if (q.getWriterDataLifecycle() != null) {
             ReturnCodes.check(
@@ -344,8 +454,9 @@ public final class QosMarshal {
                     FfiAccess.readerQosSetLatencyBudget(h, q.getLatencyBudget().durationNs()));
         }
         if (q.getUserData() != null) {
-            applyUserData(
-                    q.getUserData(), (addr, len) -> FfiAccess.readerQosSetUserData(h, addr, len));
+            applyOctets(
+                    q.getUserData().getData(),
+                    (addr, len) -> FfiAccess.readerQosSetUserData(h, addr, len));
         }
         if (q.getReaderDataLifecycle() != null) {
             ReturnCodes.check(
@@ -442,6 +553,13 @@ public final class QosMarshal {
         ReturnCodes.check(FfiAccess.writerQosGetDataFrag(h, addr));
         q.setDataFrag(slot.getInt(0));
 
+        q.setUserData(
+                new UserData(
+                        readOctets(
+                                (buf, capacity, sizeOut) ->
+                                        FfiAccess.writerQosGetUserData(
+                                                h, buf, capacity, sizeOut))));
+
         // One slot address feeds every getter above. The ordinary later
         // slot.getInt/getLong reads are what keep it reachable in practice,
         // but that is the same reasoning this class rejected as insufficient
@@ -514,6 +632,13 @@ public final class QosMarshal {
         q.setLifespanReference(
                 new LifespanReference(LifespanReferenceKind.fromValue(slot.getInt(0))));
 
+        q.setUserData(
+                new UserData(
+                        readOctets(
+                                (buf, capacity, sizeOut) ->
+                                        FfiAccess.readerQosGetUserData(
+                                                h, buf, capacity, sizeOut))));
+
         // One slot address feeds every getter above. The ordinary later
         // slot.getInt/getLong reads are what keep it reachable in practice,
         // but that is the same reasoning this class rejected as insufficient
@@ -534,18 +659,17 @@ public final class QosMarshal {
     }
 
     /**
-     * Copies {@code ud}'s bytes into a direct buffer and hands its address to {@code setter}.
-     * Nothing about the raw address itself keeps the buffer reachable for the setter call's
-     * duration -- see {@link NativeKeepAlive}'s own doc -- so this fences {@code buf} explicitly
-     * immediately afterward, the same fence every {@code FfiAccess} bridge that hands a direct
-     * buffer's address to native code uses.
+     * Copies {@code data} into a direct buffer and hands its address to {@code setter}. Nothing
+     * about the raw address itself keeps the buffer reachable for the setter call's duration -- see
+     * {@link NativeKeepAlive}'s own doc -- so this fences {@code buf} explicitly immediately
+     * afterward, the same fence every {@code FfiAccess} bridge that hands a direct buffer's address
+     * to native code uses.
      *
      * <p>The status code is held in a local and checked <em>after</em> the fence, not folded into
      * the call. Checking first would throw past the fence on failure, leaving the one path with no
      * later use of {@code buf} unfenced -- which is the path the fence exists for.
      */
-    private static void applyUserData(UserData ud, ByteBufferSetter setter) {
-        byte[] data = ud.getData();
+    private static void applyOctets(byte[] data, ByteBufferSetter setter) {
         ByteBuffer buf = ByteBuffer.allocateDirect(data.length).order(ByteOrder.nativeOrder());
         buf.put(data);
         long addr = FfiAccess.directBufferAddress(buf);
@@ -554,7 +678,14 @@ public final class QosMarshal {
         ReturnCodes.check(rc);
     }
 
-    /** Same direct-buffer hand-off as {@link #applyUserData}, for one binary property entry. */
+    /** Reads an octet-sequence policy through {@code getter}. */
+    private static byte[] readOctets(FfiAccess.GrowableBytesGetter getter) {
+        byte[][] bytesOut = new byte[1][];
+        ReturnCodes.check(FfiAccess.readGrowableBytes(getter, bytesOut));
+        return bytesOut[0];
+    }
+
+    /** Same direct-buffer hand-off as {@link #applyOctets}, for one binary property entry. */
     private static void applyBinaryProperty(long h, PropertyEntry e) {
         byte[] data = e.getBinaryValue();
         ByteBuffer buf =

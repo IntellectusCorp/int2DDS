@@ -450,7 +450,8 @@ fn generate_key_holder_field_max_size(
                     let __elem = __kh.kh_max_size()?;
                     let __stride = #crate_path::serialize::key_holder_align_up(__elem, __kh.kh_align());
                     pos = #crate_path::serialize::key_holder_align_up(pos, 4);
-                    pos = pos.checked_add(4usize)?;
+                    // DHEADER + length for non-primitive elements, length only otherwise.
+                    pos = pos.checked_add(if __kh.kh_is_primitive() { 4usize } else { 8usize })?;
                     if #bound > 0usize {
                         pos = pos.checked_add(__stride.checked_mul(#bound - 1)?)?.checked_add(__elem)?;
                     }
@@ -475,7 +476,7 @@ fn generate_key_holder_field_max_size(
             if let Some(bound) = cfg.bound {
                 quote! {
                     pos = #crate_path::serialize::key_holder_align_up(pos, 4);
-                    pos = pos.checked_add(4usize + 2usize * (#bound + 1))?;
+                    pos = pos.checked_add(4usize + 2usize * #bound)?;
                 }
             } else {
                 quote! { return None; }

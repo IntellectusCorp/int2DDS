@@ -4,6 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.util.Objects;
+import kr.co.intellectus.int2dds.cdr.Float128;
 import kr.co.intellectus.int2dds.exceptions.DdsException;
 import kr.co.intellectus.int2dds.internal.NativeKeepAlive;
 import kr.co.intellectus.int2dds.internal.ReturnCodes;
@@ -291,6 +292,29 @@ public final class DynamicSample {
         keepAlive(cdrBuf, out, type);
         ReturnCodes.check(rc);
         return out.getDouble(0);
+    }
+
+    /**
+     * Reads a {@code float128} field named {@code field}. Throws if the field is missing or not
+     * floating point.
+     */
+    public static Float128 getF128(byte[] cdr, TypeObject type, String field) {
+        Objects.requireNonNull(cdr, "cdr");
+        Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(field, "field");
+        ByteBuffer cdrBuf = directCopy(cdr);
+        byte[] out = new byte[16];
+        int rc =
+                FfiAccess.dynamicSampleGetF128(
+                        FfiAccess.directBufferAddress(cdrBuf),
+                        cdr.length,
+                        type.handle(),
+                        field.getBytes(UTF8),
+                        out);
+        NativeKeepAlive.keepAlive(cdrBuf);
+        NativeKeepAlive.keepAlive(type);
+        ReturnCodes.check(rc);
+        return Float128.fromBytes(out, 0);
     }
 
     /**

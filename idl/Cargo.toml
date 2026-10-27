@@ -2,6 +2,7 @@
 name = "int2dds-idl"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "IDL code generator for int2DDS - generates Rust and C type definitions from OMG IDL"
 
 [[bin]]

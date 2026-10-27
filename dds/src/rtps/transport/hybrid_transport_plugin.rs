@@ -10,7 +10,6 @@ use log::{debug, info};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
-use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
@@ -29,7 +28,6 @@ pub(crate) struct HybridTransportPlugin {
     udp_sender: UdpSender,
     tcp_plugin: TcpTransportPlugin,
     domain_id: u32,
-    participant_id: u32,
     working_ips: Vec<String>,
 
     // UDP listeners — multicast is always UDP
@@ -53,8 +51,9 @@ impl HybridTransportPlugin {
         let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, hybrid_config.udp)?;
 
         // Multicast first (domain-wide port, no per-participant collision).
-        let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
+        let discovery_mc_port =
+            hybrid_config.udp.port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
+        let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
 
         // Create TCP plugin (handles its own mux listener thread). The TCP listen
         // port comes from the per-participant TcpConfig (bind_port property, else
@@ -79,13 +78,16 @@ impl HybridTransportPlugin {
 
         let tcp_stream_source = tcp_plugin.take_stream_source();
 
-        info!("[HybridTransportPlugin] Created (domain={}, pid={})", domain_id, participant_id);
+        info!(
+            "[HybridTransportPlugin] Created (domain={}, pid={})",
+            domain_id,
+            tcp_plugin.participant_id()
+        );
 
         Ok(Self {
             udp_sender,
             tcp_plugin,
             domain_id,
-            participant_id,
             working_ips,
             discovery_multicast_listener: Mutex::new(discovery_mc),
             stream_source: Mutex::new(tcp_stream_source),
@@ -186,7 +188,7 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn participant_id(&self) -> u32 {
-        self.participant_id
+        self.tcp_plugin.participant_id()
     }
 
     fn close(&self) {
@@ -200,5 +202,35 @@ impl TransportPlugin for HybridTransportPlugin {
         }
 
         debug!("[HybridTransportPlugin] Closed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dcps::infrastructure::qos_policy::{PropertyQosPolicy, PROP_PARTICIPANT_ID};
+    use crate::rtps::transport::TransportConfig;
+
+    #[test]
+    fn participant_id_reports_the_fixed_id_of_the_tcp_plugin() {
+        let domain_id = crate::test_utils::unique_domain_id() as u32;
+        let mut property = PropertyQosPolicy::default();
+        property.add_property(PROP_PARTICIPANT_ID, "7", false);
+
+        // The caller passes 0 as the first id to search, as it does before any bind
+        let plugin = HybridTransportPlugin::new(
+            domain_id,
+            0,
+            "127.0.0.1".to_string(),
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            HybridConfig::from_property(&property, domain_id),
+        )
+        .expect("hybrid plugin");
+
+        assert_eq!(plugin.participant_id(), 7);
+
+        plugin.close();
     }
 }

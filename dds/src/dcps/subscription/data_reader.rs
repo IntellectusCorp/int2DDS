@@ -34,18 +34,19 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock, RwLock, Weak,
     },
 };
 
 use super::{
     data_reader_listener::DataReaderListener,
+    loaned_samples::{decode_once, LoanToken, LoanedSample, LoanedSamples},
     qos::DataReaderQos,
     query_condition::QueryCondition,
     read_condition::ReadCondition,
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
-    subscriber::Subscriber,
+    subscriber::{OnDataOnReadersGuard, Subscriber},
 };
 use crate::{
     common::{
@@ -79,7 +80,10 @@ use crate::{
         builtin::data::content_filtered_topic::ContentFilterProperty,
         common::{guid::Guid, sequence::SequenceNumber, types::ChangeKind},
         entities::{
-            history::{cache_change::CacheChange, history_cache::HistoryCache as _},
+            history::{
+                cache_change::CacheChange, history_cache::HistoryCache as _,
+                reader_history::ReaderHistoryCache,
+            },
             reader::Reader as RtpsReader,
         },
         logic::wlp_logic::LivelinessTransition,
@@ -137,19 +141,30 @@ pub trait DataReaderBase: DomainEntity + Send + Any {
     fn get_topicdescription(&self) -> DdsResult<Arc<dyn TopicDescription>>;
     fn get_subscriber(&self) -> DdsResult<Subscriber>;
     fn delete_contained_entities(&self) -> DdsResult<()>;
+    // Entry point for downcasting a trait object back to its `DataReader<Foo>`.
+    fn as_any(&self) -> &dyn Any;
 }
 
-pub(crate) trait DataReaderInternal: DataReaderBase {
+pub(crate) trait DataReaderInternal: DataReaderBase + EnableChild {
+    fn has_rtps_reader(&self) -> bool;
     fn disable(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataReaderBase<Qos = DataReaderQos> + Send>;
-    fn as_any(&self) -> &dyn Any;
     fn notify_data_available(&self);
+    // Group sequence number of every cached sample that matches the three state masks.
+    // None for a sample that carries no group sequence number.
+    fn get_group_seq_nums_of_matching_samples(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Option<SequenceNumber>>>;
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn mark_deleted_and_await_operation_completion(&self);
     fn is_builtin(&self) -> bool;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_readconditions(&self) -> DdsResult<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>;
+    fn has_outstanding_loans(&self) -> bool;
     fn delete_readcondition_internal(
         &self,
         condition: Arc<dyn ReadConditionTrait + Send + Sync>,
@@ -161,6 +176,17 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
 }
 
 // #[derive(Clone)]
+/// A read or take result element whose `SampleInfo` is finalized after selection.
+pub(crate) trait SelectedSample {
+    fn info_mut(&mut self) -> &mut SampleInfo;
+}
+
+impl<Foo> SelectedSample for DataSample<Foo> {
+    fn info_mut(&mut self) -> &mut SampleInfo {
+        &mut self.sample_info
+    }
+}
+
 pub struct DataReader<Foo> {
     // Indicates whether this entity is a built-in entity.
     //
@@ -195,11 +221,13 @@ pub struct DataReader<Foo> {
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     sample_lost_status: Arc<Mutex<SampleLostStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
-    change_callback: Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>,
+    change_callback: Arc<OnceLock<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>>,
     #[allow(clippy::type_complexity)]
-    status_callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
+    status_callback:
+        Arc<OnceLock<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>,
     _phantom: PhantomData<fn() -> Foo>, // Temporary
     datareader_cache: Arc<Mutex<DataReaderHistoryCache<Foo>>>,
+    outstanding_loans: Arc<AtomicUsize>,
 }
 
 impl<Foo> Debug for DataReader<Foo> {
@@ -275,6 +303,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             status_callback: self.status_callback.clone(),
             _phantom: self._phantom,
             datareader_cache: self.datareader_cache.clone(),
+            outstanding_loans: self.outstanding_loans.clone(),
         }
     }
 }
@@ -395,14 +424,17 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
 
             let status_callback = self
                 .status_callback
-                .as_ref()
+                .get()
                 .ok_or(DdsError::Error("Status callback is not initialized".to_string()))?
                 .clone();
             let change_callback = self
                 .change_callback
-                .as_ref()
+                .get()
                 .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
                 .clone();
+
+            // Resolved before the bridge guard is taken, because it reaches the bridge itself.
+            let subscriber_history_cache = subscriber.subscriber_history_cache()?;
 
             // Use Weak to avoid lifetime issues in closure
             let mut dcps_bridge = participant.get_dcps_bridge()?;
@@ -413,6 +445,8 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                         content_filter_property,
                         Some(change_callback),
                         Some(status_callback),
+                        subscriber.guid(),
+                        subscriber_history_cache,
                     )
                     .map_err(|e| DdsError::Error(e.message))?,
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
@@ -427,19 +461,28 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             rtps_reader
         };
 
+        let buffer_limit =
+            ReaderHistoryCache::buffer_limit_of(self.get_qos_arc()?.resource_limits.max_samples);
+
         // Common: Connect datareader cache to RTPS reader cache
         {
             let reader_cache = rtps_reader.reader_cache();
-            reader_cache
-                .lock()
-                .map_err(|e| DdsError::Error(e.to_string()))?
-                .set_datareader_cache(Arc::downgrade(&self.datareader_cache)
-                    as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
+            let mut cache_guard =
+                reader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache_guard.set_datareader_cache(Arc::downgrade(&self.datareader_cache)
+                as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
+
+            cache_guard.set_buffer_limit(buffer_limit);
         }
 
         Ok(())
     }
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
+        // A disabled reader has no RTPS reader yet. Enabling it announces the current QoS.
+        if self.is_enabled().is_err() {
+            return Ok(());
+        }
+
         let subscriber = self.get_subscriber()?;
         let topic = self.get_topic()?;
         let subscriber_qos = subscriber.get_qos_arc()?;
@@ -590,6 +633,10 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
 }
 
 impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
+    pub(crate) fn outstanding_loan_count(&self) -> usize {
+        self.outstanding_loans.load(Ordering::Acquire)
+    }
+
     /// Retrieves the key values for a data instance identified by its handle.
     ///
     /// This operation returns a data instance with only the key fields populated. The non-key
@@ -1420,19 +1467,37 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // are sitting in the cache. `handle_liveliness_changed_status` uses this same order.
         self.set_read_communication_status(true)?;
 
-        // Listener
-        if let Some(listener) = self.get_listener()? {
-            listener.on_data_available(self);
-        }
         let subscriber = self.subscriber_arc()?;
-        if let Some(listener) = subscriber.get_listener()? {
-            listener.on_data_available(self);
-            listener.on_data_on_readers(&subscriber);
-        }
         let participant = subscriber.participant_arc()?;
-        if let Some(listener) = participant.get_listener()? {
-            listener.on_data_available(self);
-            listener.on_data_on_readers(&subscriber);
+
+        // on_data_on_readers is tried on the Subscriber and on_data_available runs only when it
+        // was not called. Within on_data_available the most specific enabled listener wins.
+        if subscriber.get_listener_mask()?.contains(StatusKind::DATA_ON_READERS) {
+            if let Some(listener) = subscriber.get_listener()? {
+                let _marker = OnDataOnReadersGuard::new(subscriber.guid());
+                listener.on_data_on_readers(&subscriber);
+                return Ok(());
+            }
+        }
+
+        if self.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = self.get_listener()? {
+                listener.on_data_available(self);
+                return Ok(());
+            }
+        }
+
+        if subscriber.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = subscriber.get_listener()? {
+                listener.on_data_available(self);
+                return Ok(());
+            }
+        }
+
+        if participant.get_listener_mask()?.contains(StatusKind::DATA_AVAILABLE) {
+            if let Some(listener) = participant.get_listener()? {
+                listener.on_data_available(self);
+            }
         }
 
         Ok(())
@@ -1611,16 +1676,28 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
-        let topic_ordered = self.subscriber_topic_ordered();
+        let (group_ordered, topic_ordered) = match self.subscriber_arc() {
+            Ok(subscriber) => (
+                subscriber.presentation_group_ordered().unwrap_or(false),
+                subscriber.presentation_topic_ordered().unwrap_or(false),
+            ),
+            Err(_) => (false, false),
+        };
+
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
         let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
         // Enforce Lifespan QoS at read time so expired samples are never returned,
         // even if the periodic cleanup timer hasn't fired yet.
         guard.purge_expired_on_read()?;
-        // TOPIC ordered_access presents samples in topic-wide DESTINATION_ORDER across instances;
-        // otherwise return the per-instance storage order.
-        if topic_ordered {
+
+        // GROUP ordered_access presents samples in group sequence number order, TOPIC
+        // ordered_access in topic-wide DESTINATION_ORDER across instances. Otherwise return the
+        // per-instance storage order.
+        if group_ordered {
+            Ok(guard.get_changes_for_group_scoped_ordered_access())
+        } else if topic_ordered {
             Ok(guard.get_changes_for_topic_scoped_ordered_access())
         } else {
             Ok(guard.get_changes())
@@ -1639,10 +1716,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         self.subscriber.as_ref().and_then(|weak_ref| weak_ref.upgrade()).ok_or_else(|| {
             DdsError::Error("Subscriber reference is invalid or expired".to_string())
         })
-    }
-
-    fn subscriber_topic_ordered(&self) -> bool {
-        self.subscriber_arc().and_then(|s| s.presentation_topic_ordered()).unwrap_or(false)
     }
 
     pub(crate) fn is_subscriber_coherent(&self) -> bool {
@@ -1722,26 +1795,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// RTPS reader history keeps acquiring datareader cache lock on socket listening thread,
     /// So never try to acquire rtps reader cache lock while holding datareader cache lock.
     fn remove_change_from_rtps_reader_cache(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
-        if let Ok(weak_rtps_reader) = self.rtps_reader.lock().as_ref() {
-            let weak_rtps_reader = weak_rtps_reader
-                .as_ref()
-                .ok_or(DdsError::Error("RTPS Reader is not initialized".to_string()))?;
-            let rtps_reader = weak_rtps_reader
-                .upgrade()
-                .ok_or(DdsError::Error("Failed to upgrade rtps reader weak".to_string()))?;
-            let rtps_reader_cache = rtps_reader.reader_cache();
-            let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
-                DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
-            })?;
-            let res = cache_guard.remove_change(a_change);
-            if res.is_ok() {
-                Ok(())
-            } else {
-                Err(DdsError::Error(res.err().unwrap().to_string()))
-            }
-        } else {
-            Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
-        }
+        let rtps_reader = self.get_rtps_reader()?;
+
+        let rtps_reader_cache = rtps_reader.reader_cache();
+        let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
+            DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
+        })?;
+        cache_guard.remove_change(a_change).map_err(|e| DdsError::Error(e.to_string()))
     }
 
     /// Removes changes by the given change IDs from RTPS reader cache.
@@ -1750,26 +1810,15 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         &self,
         change_id_set: HashSet<ReaderChangeId>,
     ) -> DdsResult<()> {
-        if let Ok(weak_rtps_reader) = self.rtps_reader.lock().as_ref() {
-            let weak_rtps_reader = weak_rtps_reader
-                .as_ref()
-                .ok_or(DdsError::Error("RTPS Reader is not initialized".to_string()))?;
-            let rtps_reader = weak_rtps_reader
-                .upgrade()
-                .ok_or(DdsError::Error("Failed to upgrade rtps reader weak".to_string()))?;
-            let rtps_reader_cache = rtps_reader.reader_cache();
-            let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
-                DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
-            })?;
-            let res = cache_guard.remove_change_by_id_set(change_id_set);
-            if res.is_ok() {
-                Ok(())
-            } else {
-                Err(DdsError::Error(res.err().unwrap().to_string()))
-            }
-        } else {
-            Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
-        }
+        let rtps_reader = self.get_rtps_reader()?;
+
+        let rtps_reader_cache = rtps_reader.reader_cache();
+        let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
+            DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
+        })?;
+        cache_guard
+            .remove_change_by_id_set(change_id_set)
+            .map_err(|e| DdsError::Error(e.to_string()))
     }
 
     pub(crate) fn fallback_instance_handle(
@@ -2146,7 +2195,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         } else {
             (None, None)
         };
-        let mut reader = Self {
+        let reader = Self {
             is_builtin,
             guid,
             qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
@@ -2179,8 +2228,8 @@ impl<Foo: DdsType> DataReader<Foo> {
             )),
             subscription_matched_status: Arc::new(Mutex::new(SubscriptionMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
-            change_callback: None,
-            status_callback: None,
+            change_callback: Arc::new(OnceLock::new()),
+            status_callback: Arc::new(OnceLock::new()),
             _phantom: PhantomData,
             datareader_cache: Arc::new(Mutex::new(DataReaderHistoryCache::<Foo>::new(
                 Weak::new(),
@@ -2191,6 +2240,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 qos.ownership.kind,
                 qos.destination_order.kind,
             ))),
+            outstanding_loans: Arc::new(AtomicUsize::new(0)),
         };
 
         let reader_arc = Arc::new(reader.clone());
@@ -2208,10 +2258,11 @@ impl<Foo: DdsType> DataReader<Foo> {
             *self_ref = Some(reader_arc);
         }
 
+        // The callbacks are shared with the copy held in self_ref.
         let change_callback = reader.create_change_received_callback()?;
-        reader.change_callback = Some(change_callback.clone());
+        let _ = reader.change_callback.set(change_callback);
         let status_callback = reader.create_status_callback()?;
-        reader.status_callback = Some(status_callback.clone());
+        let _ = reader.status_callback.set(status_callback.clone());
 
         {
             let mut datareader_cache =
@@ -2359,25 +2410,47 @@ impl<Foo: DdsType> DataReader<Foo> {
         )
     }
 
-    // TODO
-    pub fn return_loan(&self) -> DdsResult<Vec<DataSample<Foo>>> {
-        // in: data_values: <Foo>[], sample_infos: SampleInfo[]
-        // out: DdsError_t, data_values: <Foo>[], sample_infos: SampleInfo[]
-        self.is_enabled()?;
-        /*
-            When calling read or take with a collection of max_len=0,
-            the DataReader "loans" its internal buffer to provide zero-copy access.
-            For this, the arguments of the read and take functions should be changed as follows:
-            pub fn read_with_params(
-                &self,
-                data_values: &mut Vec<DataSample<Foo>>, // For max_len check
-                sample_infos: &mut Vec<SampleInfo>,
-                // ...
-            )
-            Due to Rust's characteristics, receiving &mut T as an argument complicates ownership and lifetime management.
-            Additionally, receiving pointers as arguments requires unsafe blocks.
-        */
-        Err(DdsError::Unsupported)
+    // TODO: release loans from the subscriber's coherent access block when that block closes.
+    /// Ends a loan from `read_loaned`/`take_loaned` and their variants. Dropping the
+    /// loan does the same. A loan from another reader is handed back, still valid,
+    /// with `PreconditionNotMet`.
+    pub fn return_loan(
+        &self,
+        loan: LoanedSamples<Foo>,
+    ) -> Result<(), (DdsError, LoanedSamples<Foo>)> {
+        if loan.reader() != self.guid {
+            return Err((DdsError::PreconditionNotMet, loan));
+        }
+        drop(loan);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_or_take_loaned(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        direct_sample_states: Option<&[SampleStateKind]>,
+        direct_view_states: Option<&[ViewStateKind]>,
+        direct_instance_states: Option<&[InstanceStateKind]>,
+        condition: Option<&Arc<dyn ReadConditionTrait + Send + Sync>>,
+        single_instance: bool,
+        exact: bool,
+        take: bool,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let selected = self.select_samples(
+            max_samples,
+            handle,
+            direct_sample_states,
+            direct_view_states,
+            direct_instance_states,
+            condition,
+            single_instance,
+            exact,
+            take,
+            |change, info| LoanedSample::new(change.cloned(), info, self.type_support.clone()),
+        )?;
+        Ok(LoanedSamples::new(selected, LoanToken::new(self.guid, self.outstanding_loans.clone())))
     }
 
     pub fn read_next_sample(&self) -> DdsResult<DataSample<Foo>> {
@@ -2568,6 +2641,217 @@ impl<Foo: DdsType> DataReader<Foo> {
         let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
         self.owns_read_condition(&condition_trait)?;
         self.read_or_take(
+            max_samples,
+            previous_handle,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            true,
+            false,
+            true,
+        )
+    }
+
+    /// `read` that loans the samples instead of copying them (DDS v1.4 2.2.2.5.3.8 rule 3).
+    pub fn read_loaned(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_loaned(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            false,
+            false,
+            true,
+        )
+    }
+
+    pub fn read_instance_loaned(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            true,
+            false,
+        )
+    }
+
+    pub fn take_instance_loaned(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            true,
+            true,
+        )
+    }
+
+    pub fn read_next_instance_loaned(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            previous_handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_next_instance_loaned(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        self.read_or_take_loaned(
+            max_samples,
+            previous_handle,
+            Some(sample_states),
+            Some(view_states),
+            Some(instance_states),
+            None,
+            true,
+            false,
+            true,
+        )
+    }
+
+    pub fn read_w_condition_loaned<T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>>(
+        &self,
+        max_samples: i32,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_w_condition_loaned<T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>>(
+        &self,
+        max_samples: i32,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
+            max_samples,
+            InstanceHandle::NIL,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            false,
+            false,
+            true,
+        )
+    }
+
+    pub fn read_next_instance_w_condition_loaned<
+        T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>,
+    >(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
+            max_samples,
+            previous_handle,
+            None,
+            None,
+            None,
+            Some(&condition_trait),
+            true,
+            false,
+            false,
+        )
+    }
+
+    pub fn take_next_instance_w_condition_loaned<
+        T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>,
+    >(
+        &self,
+        max_samples: i32,
+        previous_handle: InstanceHandle,
+        condition: T,
+    ) -> DdsResult<LoanedSamples<Foo>> {
+        let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
+        self.owns_read_condition(&condition_trait)?;
+        self.read_or_take_loaned(
             max_samples,
             previous_handle,
             None,
@@ -2814,6 +3098,13 @@ impl<Foo: DdsType> DataReader<Foo> {
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
+        let mut is_limited_to_one_sample = false;
+
+        if let Ok(subscriber) = self.subscriber_arc() {
+            subscriber.check_group_access_block_open()?;
+            is_limited_to_one_sample = subscriber.is_group_order_enforced()?;
+        }
+
         if max_samples == 0 {
             return Err(DdsError::BadParameter);
         }
@@ -2829,7 +3120,16 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.set_read_communication_status(false)?;
         let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
-        let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
+
+        // Group ordered access hands out one sample per call, so that the application can move to
+        // the next reader of the returned list.
+        let mut remaining = if is_limited_to_one_sample {
+            1
+        } else if max_samples == -1 {
+            i32::MAX
+        } else {
+            max_samples
+        };
 
         let changes = self.get_available_changes()?;
 
@@ -2954,6 +3254,34 @@ impl<Foo: DdsType> DataReader<Foo> {
         exact: bool,
         take: bool,
     ) -> DdsResult<Vec<DataSample<Foo>>> {
+        self.select_samples(
+            max_samples,
+            handle,
+            direct_sample_states,
+            direct_view_states,
+            direct_instance_states,
+            condition,
+            single_instance,
+            exact,
+            take,
+            |change, info| self.to_data_sample(change, info),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_samples<R: SelectedSample>(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        direct_sample_states: Option<&[SampleStateKind]>,
+        direct_view_states: Option<&[ViewStateKind]>,
+        direct_instance_states: Option<&[InstanceStateKind]>,
+        condition: Option<&Arc<dyn ReadConditionTrait + Send + Sync>>,
+        single_instance: bool,
+        exact: bool,
+        take: bool,
+        shape: impl Fn(Option<&Arc<CacheChange>>, SampleInfo) -> R,
+    ) -> DdsResult<Vec<R>> {
         log::debug!(
             "read_or_take called: max_samples={}, handle={}, single_instance={}, exact={}, take={}",
             max_samples,
@@ -2972,6 +3300,13 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
+
+        let mut is_limited_to_one_sample = false;
+
+        if let Ok(subscriber) = self.subscriber_arc() {
+            subscriber.check_group_access_block_open()?;
+            is_limited_to_one_sample = subscriber.is_group_order_enforced()?;
+        }
 
         if max_samples == 0 {
             log::warn!("BadParameter: max_samples={}", max_samples);
@@ -2997,9 +3332,17 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.set_read_communication_status(false)?;
-        let mut result_samples: Vec<DataSample<Foo>> = Vec::new();
-        // TODO: The size of the collection may be additionally limited by the PRESENTATION QoS policy (2.2.3.6).
-        let mut remaining_samples = if max_samples == -1 { i32::MAX } else { max_samples };
+        let mut result_samples: Vec<R> = Vec::new();
+
+        // Group ordered access hands out one sample per call, so that the application can move to
+        // the next reader of the returned list.
+        let mut remaining_samples = if is_limited_to_one_sample {
+            1
+        } else if max_samples == -1 {
+            i32::MAX
+        } else {
+            max_samples
+        };
 
         // let rtps_reader = self.get_rtps_reader()?;
         // let mut changes = rtps_reader.available_changes();
@@ -3085,16 +3428,21 @@ impl<Foo: DdsType> DataReader<Foo> {
             }
             log::trace!("Change {} passed state mask filters", idx);
 
-            // 2. Create DataSample - use optimized version with pre-fetched instance_infos
-            match self.change_to_data_sample_with_infos(
+            // 2. Build the SampleInfo with the pre-fetched instance_infos
+            match self.sample_info_with_infos(
                 change,
                 change.instance_handle(),
                 sample_state,
-                Some(&instance_infos),
+                &instance_infos,
             ) {
-                Ok(data_sample) => {
+                Ok(sample_info) => {
                     if let Some(qc_expr) = &qc_expression {
-                        if !qc_expr.evaluate(&data_sample.data()?, &qc_parameters)? {
+                        // 2.2.4.5: a QueryCondition matches only samples whose data satisfies it.
+                        if !sample_info.valid_data {
+                            continue;
+                        }
+                        let data: &Foo = decode_once(change, self.type_support.as_ref())?;
+                        if !qc_expr.evaluate(data, &qc_parameters)? {
                             log::trace!(
                                 "Skipping change {}: QueryCondition expression failed",
                                 idx
@@ -3111,7 +3459,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     } else {
                         self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
                     }
-                    result_samples.push(data_sample);
+                    result_samples.push(shape(Some(change), sample_info));
                     remaining_samples -= 1;
                 }
                 Err(_) => {
@@ -3131,12 +3479,12 @@ impl<Foo: DdsType> DataReader<Foo> {
             if exact { Some(handle) } else { None },
             remaining_samples,
         )? {
-            result_samples.push(DataSample::new(None, sample_info, None));
+            result_samples.push(shape(None, sample_info));
         }
 
         // 2.2.2.5.1.8 Interpretation of the SampleInfo view_state
-        for sample in &result_samples {
-            self.mark_instance_as_viewed(sample.sample_info().instance_handle);
+        for sample in &mut result_samples {
+            self.mark_instance_as_viewed(sample.info_mut().instance_handle);
         }
 
         self.prune_read_samples_to_cache(&changes);
@@ -3263,17 +3611,6 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_state: SampleStateKind,
         cached_instance_infos: Option<&HashMap<InstanceHandle, InstanceInfo>>,
     ) -> DdsResult<DataSample<Foo>> {
-        // Check if change has valid data based on its kind
-        let has_valid_data = match change.kind() {
-            ChangeKind::Alive | ChangeKind::AliveFiltered => true,
-            ChangeKind::NotAliveDisposed
-            | ChangeKind::NotAliveUnregistered
-            | ChangeKind::NotAliveDisposedUnregistered => false,
-        };
-
-        let data = if has_valid_data { Some(change.data_bytes()) } else { None };
-
-        // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
         let instance_infos = match cached_instance_infos {
             Some(infos) => infos,
@@ -3282,18 +3619,34 @@ impl<Foo: DdsType> DataReader<Foo> {
                 &owned_instance_infos
             }
         };
+        let sample_info =
+            self.sample_info_with_infos(change, instance_handle, sample_state, instance_infos)?;
+        Ok(self.to_data_sample(Some(change), sample_info))
+    }
 
+    fn sample_info_with_infos(
+        &self,
+        change: &Arc<CacheChange>,
+        instance_handle: InstanceHandle,
+        sample_state: SampleStateKind,
+        instance_infos: &HashMap<InstanceHandle, InstanceInfo>,
+    ) -> DdsResult<SampleInfo> {
+        let has_valid_data = match change.kind() {
+            ChangeKind::Alive | ChangeKind::AliveFiltered => true,
+            ChangeKind::NotAliveDisposed
+            | ChangeKind::NotAliveUnregistered
+            | ChangeKind::NotAliveDisposedUnregistered => false,
+        };
         let info = instance_infos
             .get(&instance_handle)
             .ok_or(DdsError::Error("Instance not found".to_string()))?;
-
-        let sample_info = SampleInfo {
+        Ok(SampleInfo {
             sample_state,
             view_state: info.view_state,
             instance_state: info.instance_state,
             disposed_generation_count: info.disposed_generation_count,
             no_writers_generation_count: info.no_writers_generation_count,
-            sample_rank: 0, // Will be updated later
+            sample_rank: 0,
             generation_rank: 0,
             absolute_generation_rank: 0,
             source_timestamp: (*change.source_timestamp().as_ref().ok_or(DdsError::Error(
@@ -3303,8 +3656,21 @@ impl<Foo: DdsType> DataReader<Foo> {
             instance_handle,
             publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
             valid_data: has_valid_data,
-        };
-        Ok(DataSample::new(data, sample_info, Some(self.type_support.clone())))
+        })
+    }
+
+    fn to_data_sample(
+        &self,
+        change: Option<&Arc<CacheChange>>,
+        info: SampleInfo,
+    ) -> DataSample<Foo> {
+        match change {
+            Some(change) => {
+                let data = if info.valid_data { Some(change.data_bytes()) } else { None };
+                DataSample::new(data, info, Some(self.type_support.clone()))
+            }
+            None => DataSample::new(None, info, None),
+        }
     }
 
     /// Sort changes according to ORDER BY fields
@@ -3359,13 +3725,11 @@ impl<Foo: DdsType> DataReader<Foo> {
     }
 
     // Calculate sample_rank for all samples (based on sorted order)
-    fn update_all_sample_ranks(&self, samples: &mut [DataSample<Foo>]) {
+    fn update_all_sample_ranks<R: SelectedSample>(&self, samples: &mut [R]) {
         let total_samples = samples.len();
-        // Calculate sample_rank in sorted order
-        // samples[0] = oldest sample → highest rank
-        // samples[last] = newest sample → rank 0
+        // samples[0] = oldest sample -> highest rank; samples[last] = newest -> rank 0
         for (i, sample) in samples.iter_mut().enumerate() {
-            sample.sample_info.sample_rank = (total_samples - 1 - i) as i32;
+            sample.info_mut().sample_rank = (total_samples - 1 - i) as i32;
         }
     }
 
@@ -3510,6 +3874,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                         change.instance_handle(),
                         sample_state,
                     )?;
+                    if !data.sample_info().valid_data {
+                        continue;
+                    }
                     if query_condition.evaluate_expression(&data.data()?).unwrap_or(false) {
                         return Ok(true);
                     }
@@ -3806,9 +4173,21 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
         }
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
+    fn has_outstanding_loans(&self) -> bool {
+        self.outstanding_loan_count() > 0
+    }
+
+    fn has_rtps_reader(&self) -> bool {
+        self.get_rtps_reader().is_ok()
+    }
+
     fn disable(&self) -> DdsResult<()> {
         self.set_listener(None, StatusMask::default())
     }
@@ -3817,8 +4196,37 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         Box::new(self.clone())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn get_group_seq_nums_of_matching_samples(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<Option<SequenceNumber>>> {
+        let changes = self.get_available_changes()?;
+        let instance_infos = self.get_instance_infos()?;
+
+        let mut group_seq_nums = Vec::new();
+
+        for change in changes.iter() {
+            let sample_state =
+                self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
+
+            let (view_state, instance_state) = match instance_infos.get(&change.instance_handle()) {
+                Some(info) => (info.view_state, info.instance_state),
+                None => (ViewStateKind::NEW_VIEW_STATE, InstanceStateKind::ALIVE_INSTANCE_STATE),
+            };
+
+            if !sample_states.matches(sample_state)
+                || !view_states.matches(view_state)
+                || !instance_states.matches(instance_state)
+            {
+                continue;
+            }
+
+            group_seq_nums.push(change.presentation_info().group_seq_num);
+        }
+
+        Ok(group_seq_nums)
     }
 
     fn notify_data_available(&self) {
@@ -3924,14 +4332,18 @@ pub(crate) mod tests {
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
+    use crate::domain::domain_participant_listener::DomainParticipantListener;
     use crate::domain::qos::DomainParticipantQos;
     use crate::infrastructure::qos_policy::{
         DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
         PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
         ReliabilityQosPolicyKind,
     };
+    use crate::infrastructure::status::PublicationMatchedStatus;
     use crate::infrastructure::wait_set::WaitSet;
+    use crate::publication::data_writer::DataWriterBase;
     use crate::publication::data_writer_listener::DataWriterListener;
+    use crate::publication::publisher_listener::PublisherListener;
     use crate::publication::qos::{DataWriterQos, PublisherQos};
     use crate::rtps::entities::reader::StatefulReader;
     use crate::subscription::data_reader_listener::DataReaderListener;
@@ -3940,6 +4352,8 @@ pub(crate) mod tests {
     use crate::subscription::subscriber_listener::SubscriberListener;
     use crate::test_utils::unique_domain_id;
     use crate::topic::qos::TopicQos;
+    use crate::topic::topic_listener::TopicListener;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{sync_channel, SyncSender};
     use std::sync::Arc;
 
@@ -4112,9 +4526,8 @@ pub(crate) mod tests {
     /// `test_take_next_instance_surfaces_no_writers_after_writer_deleted`.
     ///
     /// The mask is what separates the two mechanisms: the listener takes data notifications, the
-    /// WaitSet takes everything else. Note that `handle_data_available_status` invokes the listener
-    /// without consulting the mask, so DATA_AVAILABLE is named here for intent rather than because
-    /// omitting it would silence the counter.
+    /// WaitSet takes everything else. DATA_AVAILABLE has to be named here, since
+    /// `handle_data_available_status` skips a listener whose mask leaves it out.
     const DATA_ONLY_LISTENER_MASK: StatusMask = StatusMask::DATA_AVAILABLE;
 
     struct SubListener {
@@ -7190,12 +7603,396 @@ pub(crate) mod tests {
         // set may be buffered on the reader.
         assert_eq!(is_relevant, Some(false), "sn5 should be received via GAP, not DATA");
         assert_eq!(
-            reader_cache.lock().unwrap().pending_coherent_len(writer_guid),
+            reader_cache.lock().unwrap().coherent_pending_change_count_for_writer(writer_guid),
             0,
             "no member of the GAPped set should be buffered"
         );
 
         publisher.end_coherent_changes().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    struct CountingSubscriberListener {
+        on_data_on_readers_count: Arc<AtomicUsize>,
+        does_notify_datareaders: bool,
+    }
+
+    impl SubscriberListener for CountingSubscriberListener {
+        fn on_data_on_readers(&self, subscriber: &Subscriber) {
+            self.on_data_on_readers_count.fetch_add(1, Ordering::AcqRel);
+
+            if self.does_notify_datareaders {
+                subscriber.notify_datareaders().unwrap();
+            }
+        }
+    }
+
+    struct CountingReaderListener {
+        on_data_available_count: Arc<AtomicUsize>,
+    }
+
+    impl DataReaderListener for CountingReaderListener {
+        type Foo = HelloWorld;
+
+        fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+            self.on_data_available_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    // Writes one sample to a Subscriber and a DataReader that both count their data callbacks.
+    fn count_data_callbacks_of_one_sample(
+        topic_name: &str,
+        does_notify_datareaders: bool,
+    ) -> (usize, usize) {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                topic_name,
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_keep_all_writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos,
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let on_data_on_readers_count = Arc::new(AtomicUsize::new(0));
+        let on_data_available_count = Arc::new(AtomicUsize::new(0));
+
+        let subscriber = participant
+            .create_subscriber(
+                SubscriberQos::default(),
+                Some(Arc::new(CountingSubscriberListener {
+                    on_data_on_readers_count: Arc::clone(&on_data_on_readers_count),
+                    does_notify_datareaders,
+                })),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_keep_all_reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos,
+                Some(Arc::new(CountingReaderListener {
+                    on_data_available_count: Arc::clone(&on_data_available_count),
+                })),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("timed out waiting for the reader");
+        wait_set.detach_condition(condition).unwrap();
+
+        writer
+            .write(&HelloWorld { index: 0, message: "sample".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+
+        // The listener that wins the dispatch is the one to wait for. Every other seat of the
+        // same dispatch is already settled once it has run.
+        let awaited = if does_notify_datareaders {
+            &on_data_available_count
+        } else {
+            &on_data_on_readers_count
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        while awaited.load(Ordering::Acquire) == 0 {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for the callback");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let counts = (
+            on_data_on_readers_count.load(Ordering::Acquire),
+            on_data_available_count.load(Ordering::Acquire),
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        counts
+    }
+
+    #[test]
+    fn test_on_data_on_readers_leaves_on_data_available_uncalled() {
+        let (on_data_on_readers, on_data_available) =
+            count_data_callbacks_of_one_sample("OnDataOnReadersWins", false);
+
+        assert_eq!(on_data_on_readers, 1);
+        assert_eq!(on_data_available, 0);
+    }
+
+    #[test]
+    fn test_notify_datareaders_reaches_the_reader_listener_from_on_data_on_readers() {
+        let (on_data_on_readers, on_data_available) =
+            count_data_callbacks_of_one_sample("NotifyDatareaders", true);
+
+        assert_eq!(on_data_on_readers, 1);
+        assert_eq!(on_data_available, 1);
+    }
+
+    struct MatchOnlyParticipantListener {
+        on_publication_matched_count: Arc<AtomicUsize>,
+    }
+
+    impl TopicListener for MatchOnlyParticipantListener {}
+
+    impl SubscriberListener for MatchOnlyParticipantListener {}
+
+    impl PublisherListener for MatchOnlyParticipantListener {
+        fn on_publication_matched(
+            &self,
+            _writer: &dyn DataWriterBase<Qos = DataWriterQos>,
+            _status: &PublicationMatchedStatus,
+        ) {
+            self.on_publication_matched_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl DomainParticipantListener for MatchOnlyParticipantListener {}
+
+    // A participant listener registered with StatusMask::default() has DATA_ON_READERS in its
+    // mask and inherits the no-op on_data_on_readers. The reader listener must still be called.
+    #[test]
+    fn test_participant_listener_with_the_default_mask_does_not_swallow_on_data_available() {
+        let factory = DomainParticipantFactory::get_instance();
+        let on_publication_matched_count = Arc::new(AtomicUsize::new(0));
+
+        let participant_listener = MatchOnlyParticipantListener {
+            on_publication_matched_count: Arc::clone(&on_publication_matched_count),
+        };
+
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                Some(Arc::new(participant_listener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "ParticipantListenerDefaultMask",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_keep_all_writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                reliable_keep_all_writer_qos,
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let on_data_available_count = Arc::new(AtomicUsize::new(0));
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let reliable_keep_all_reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                reliable_keep_all_reader_qos,
+                Some(Arc::new(CountingReaderListener {
+                    on_data_available_count: Arc::clone(&on_data_available_count),
+                })),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("timed out waiting for the reader");
+        wait_set.detach_condition(condition).unwrap();
+
+        writer
+            .write(&HelloWorld { index: 0, message: "sample".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        while on_data_available_count.load(Ordering::Acquire) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let on_data_available = on_data_available_count.load(Ordering::Acquire);
+        let on_publication_matched = on_publication_matched_count.load(Ordering::Acquire);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        assert!(on_publication_matched > 0, "the participant listener was never called");
+        assert_eq!(on_data_available, 1, "the reader listener must receive the sample");
+    }
+
+    #[test]
+    fn test_commit_drops_a_coherent_set_that_does_not_fit_and_keeps_the_sample_after_it() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "CommitCoherentSetTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(
+                SubscriberQos {
+                    presentation: PresentationQosPolicy {
+                        access_scope: PresentationQosAccessScopeKind::Topic,
+                        coherent_access: true,
+                        ordered_access: false,
+                    },
+                    ..Default::default()
+                },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<TestData>(
+                &topic,
+                DataReaderQos {
+                    history: HistoryQosPolicy {
+                        kind: HistoryQosPolicyKind::KeepLast(2),
+                        strict: true,
+                    },
+                    ..Default::default()
+                },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let writer_guid = Guid::new(
+            [1; 12],
+            crate::rtps::common::entity_id::EntityId::new(
+                [0, 0, 2],
+                crate::rtps::common::entity_kind::EntityKind::USER_DEFINED_WRITER_WITH_KEY,
+            ),
+        );
+        let change = |seq: i64, coherent_set: Option<i64>| {
+            let mut change = CacheChange::new(
+                ChangeKind::Alive,
+                writer_guid,
+                InstanceHandle::new([1; 16]),
+                SequenceNumber::from_i64(seq),
+                vec![0u8; 4],
+                None,
+            );
+            change.set_presentation_info(
+                crate::rtps::entities::history::cache_change::PresentationInfo {
+                    coherent_set: coherent_set.map(SequenceNumber::from_i64),
+                    ..Default::default()
+                },
+            );
+
+            change
+        };
+
+        // A set of three members on one instance exceeds the depth of 2. The sample after it
+        // is judged on its own.
+        let changes = vec![
+            (change(10, Some(10)), false),
+            (change(11, Some(10)), false),
+            (change(12, Some(10)), false),
+            (change(13, None), true),
+        ];
+
+        let rtps_reader = reader.get_rtps_reader().unwrap();
+        let available = rtps_reader
+            .reader_cache()
+            .lock()
+            .unwrap()
+            .commit_changes_to_datareader_cache(changes)
+            .unwrap();
+        drop(rtps_reader);
+
+        let stored: Vec<i64> =
+            available.iter().map(|change| change.sequence_number().to_i64()).collect();
+        assert_eq!(stored, vec![13]);
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();

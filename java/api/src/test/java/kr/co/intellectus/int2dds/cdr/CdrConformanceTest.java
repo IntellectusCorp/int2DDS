@@ -166,10 +166,9 @@ class CdrConformanceTest {
 
     @Test
     void theCoreDecodesTheWideStringFieldWeWrote() {
-        // serialize_wstring16 counts UTF-16 units and writes no terminator, so a
-        // count that includes one shifts the field by two bytes and leaves a
-        // trailing unit behind. Our own reader cannot see that -- it makes the
-        // same assumption the writer does.
+        // serialize_wstring16 writes the byte length and no terminator, so a
+        // unit count or a count that includes one shifts the field. Our own
+        // reader cannot see that -- it makes the same assumption the writer does.
         long wideInfo =
                 FfiAccess.typeInfoCreate(utf8("WideRecord"), Extensibility.APPENDABLE.value());
         assertNotEquals(0L, wideInfo, "type info handle");

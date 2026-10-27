@@ -38,7 +38,7 @@ pub fn init_from_env() {
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
     // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
     // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
-    // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of 127.0.0.1 (true, false) - Default: false
+    // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of one same-host destination (127.0.0.1, or the address pinned by INT2DDS_NETWORK_IP / INT2DDS_NETWORK_INTERFACE) (true, false) - Default: false
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP receive and send socket buffer sizes (bytes) - Default: OS default, with 1048576 (1MiB) receive / 65536 (64KiB) send requested when the default is smaller
     // - INT2DDS_UDP_RECV_BUFFER: Set the UDP receive socket buffer size (bytes), overriding INT2DDS_UDP_SOCKET_BUFFER for that direction - Default: INT2DDS_UDP_SOCKET_BUFFER
     // - INT2DDS_UDP_SEND_BUFFER: Set the UDP send socket buffer size (bytes), overriding INT2DDS_UDP_SOCKET_BUFFER for that direction - Default: INT2DDS_UDP_SOCKET_BUFFER
@@ -53,6 +53,7 @@ pub fn init_from_env() {
     // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
     // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 250
     // - INT2DDS_ENABLE_SEND_WINDOW: Bound a fragment burst by the peer's receive buffer. Unset sends every fragment of a change in one go (true, false) - Default: false
+    // - INT2DDS_XTYPES_RTI_KEY_COMPAT: Skip the XTypes 1.3 Table 19 key member rules in type matching, as RTI Connext does (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
     // - INT2DDS_TCP_PEER_SEARCH_SLOTS: Set how many participant slots a TCP peer named with the wildcard port stands for (1-125, one domain's port block) - Default: 16
@@ -60,8 +61,6 @@ pub fn init_from_env() {
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
 
     // - INT2DDS_EXTERNAL_ADDRESS: Public IPv4 advertised in SPDP for NAT/WAN traversal. Sockets still bind to local NICs.
-    // - INT2DDS_META_PORT: Pinned metatraffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
-    // - INT2DDS_USER_PORT: Pinned user-traffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
 
     // - TCP transport is configured per-participant via the
     //   int2dds.transport.TCPv4.* QoS properties (see dcps::infrastructure::qos_policy),
@@ -631,6 +630,18 @@ pub fn set_enable_send_window(is_enabled: bool) {
     unsafe { std::env::set_var("INT2DDS_ENABLE_SEND_WINDOW", is_enabled.to_string()) };
 }
 
+// Read `INT2DDS_XTYPES_RTI_KEY_COMPAT`. On, type matching skips the Table 19 key member rules
+// (enum literals, union labels, KeyHolder) and key bounds follow the ignore_*_bounds flags.
+pub fn get_xtypes_rti_key_compat() -> bool {
+    get_bool_env("INT2DDS_XTYPES_RTI_KEY_COMPAT").unwrap_or(false)
+}
+
+// Set the RTI key-assignability mode via `INT2DDS_XTYPES_RTI_KEY_COMPAT`.
+pub fn set_xtypes_rti_key_compat(is_enabled: bool) {
+    log::info!("Environment variable set: INT2DDS_XTYPES_RTI_KEY_COMPAT = {}", is_enabled);
+    unsafe { std::env::set_var("INT2DDS_XTYPES_RTI_KEY_COMPAT", is_enabled.to_string()) };
+}
+
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
 pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
     let raw = std::env::var("INT2DDS_EXTERNAL_ADDRESS").ok().filter(|s| !s.is_empty())?;
@@ -642,27 +653,6 @@ pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
                 raw,
                 e
             );
-            None
-        }
-    }
-}
-
-// Read the pinned metatraffic unicast port from `INT2DDS_META_PORT`.
-pub fn get_meta_port_override() -> Option<u16> {
-    parse_port_env("INT2DDS_META_PORT")
-}
-
-// Read the pinned user-traffic unicast port from `INT2DDS_USER_PORT`.
-pub fn get_user_port_override() -> Option<u16> {
-    parse_port_env("INT2DDS_USER_PORT")
-}
-
-fn parse_port_env(name: &str) -> Option<u16> {
-    let raw = std::env::var(name).ok().filter(|s| !s.is_empty())?;
-    match raw.parse::<u16>() {
-        Ok(port) => Some(port),
-        Err(e) => {
-            log::error!("Invalid {} value '{}': {}. Falling back to default.", name, raw, e);
             None
         }
     }

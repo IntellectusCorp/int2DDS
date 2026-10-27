@@ -36,8 +36,9 @@ extern crate md5;
 pub mod test_utils {
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    // 7400 + 250 * 232 + 11 = 65411, the last port mapping that fits a 16 bit UDP port.
-    const LAST_DOMAIN_ID: i32 = 232;
+    // The last domain whose whole port block stays below 32768, where the ephemeral
+    // port range of every supported OS starts at the earliest: 7400 + 250 * 100 + 249 = 32649.
+    const LAST_DOMAIN_ID: i32 = 100;
 
     static TEST_DOMAIN_ID_COUNTER: AtomicI32 = AtomicI32::new(0);
 

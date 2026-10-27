@@ -75,8 +75,7 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
-        /// Gets the factory's default participant QoS (properties only; user_data
-        /// has no native getter).
+        /// Gets the factory's default participant QoS (user_data and properties).
         /// </summary>
         public ParticipantQos GetDefaultParticipantQos()
         {

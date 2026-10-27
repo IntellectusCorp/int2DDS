@@ -39,11 +39,13 @@ impl PeerSpec {
     }
 
     /// The addresses this entry stands for. An entry with a real port is itself;
-    /// a wildcard is `slot(0) ..= slot(slots - 1)`.
-    pub(crate) fn expand(&self, slot: impl Fn(u32) -> u16, slots: u32) -> Vec<SocketAddr> {
+    /// a wildcard is every port of `slot(0) ..= slot(slots - 1)`, skipping slots without one.
+    pub(crate) fn expand(&self, slot: impl Fn(u32) -> Option<u16>, slots: u32) -> Vec<SocketAddr> {
         match self.port {
             Some(port) => vec![SocketAddr::new(self.ip, port)],
-            None => (0..slots).map(|i| SocketAddr::new(self.ip, slot(i))).collect(),
+            None => (0..slots)
+                .filter_map(|i| slot(i).map(|port| SocketAddr::new(self.ip, port)))
+                .collect(),
         }
     }
 }
@@ -121,7 +123,7 @@ mod tests {
         let spec = PeerSpec::new("192.168.0.5".parse().unwrap(), Some(7400));
 
         assert_eq!(
-            spec.expand(|i| 100 + i as u16, DEFAULT_PARTICIPANTS_PER_HOST),
+            spec.expand(|i| Some(100 + i as u16), DEFAULT_PARTICIPANTS_PER_HOST),
             vec!["192.168.0.5:7400".parse().unwrap()]
         );
     }
@@ -130,7 +132,7 @@ mod tests {
     fn the_wildcard_stands_for_every_slot_of_the_domain() {
         let spec: PeerSpec = "127.0.0.1:0".parse().unwrap();
 
-        let expanded = spec.expand(|i| 7400 + 2 * i as u16, DEFAULT_PARTICIPANTS_PER_HOST);
+        let expanded = spec.expand(|i| Some(7400 + 2 * i as u16), DEFAULT_PARTICIPANTS_PER_HOST);
 
         assert_eq!(expanded.len(), DEFAULT_PARTICIPANTS_PER_HOST as usize);
         assert_eq!(expanded[0], "127.0.0.1:7400".parse().unwrap());
@@ -147,6 +149,6 @@ mod tests {
     fn the_wildcard_follows_the_configured_slot_count() {
         let spec: PeerSpec = "127.0.0.1:0".parse().unwrap();
 
-        assert_eq!(spec.expand(|i| 7400 + 2 * i as u16, 3).len(), 3);
+        assert_eq!(spec.expand(|i| Some(7400 + 2 * i as u16), 3).len(), 3);
     }
 }

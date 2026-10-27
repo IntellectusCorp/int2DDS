@@ -24,7 +24,10 @@ namespace Int2Dds.Core
     {
         private const int DefaultBufferSize = 65536;
 
+        private delegate T SpanDeserializer(ReadOnlySpan<byte> data);
+
         private static readonly Func<byte[], T> s_deserializer = CreateDeserializer();
+        private static readonly SpanDeserializer? s_spanDeserializer = CreateSpanDeserializer();
 
         private static Func<byte[], T> CreateDeserializer()
         {
@@ -33,10 +36,22 @@ namespace Int2Dds.Core
             if (method == null)
                 throw new InvalidOperationException(
                     $"{typeof(T).Name} must have a public static DeserializeCdr(byte[]) method.");
+            if (Delegate.CreateDelegate(typeof(Func<byte[], T>), method, false) is Func<byte[], T> direct)
+                return direct;
             return (byte[] data) => (T)method.Invoke(null, new object[] { data });
         }
 
+        private static SpanDeserializer? CreateSpanDeserializer()
+        {
+            var method = typeof(T).GetMethod("DeserializeCdr", BindingFlags.Public | BindingFlags.Static,
+                null, new[] { typeof(ReadOnlySpan<byte>) }, null);
+            return method == null
+                ? null
+                : Delegate.CreateDelegate(typeof(SpanDeserializer), method, false) as SpanDeserializer;
+        }
+
         private readonly IntPtr _handle;
+        private readonly Subscriber _subscriber;
         private readonly Topic<T> _topic;
         private byte[] _buffer;
         private IntPtr _listenerContextHandle;
@@ -46,8 +61,9 @@ namespace Int2Dds.Core
         /// Creates a new DataReader. Normally called via Subscriber.CreateDataReader.
         /// </summary>
         internal DataReader(Subscriber subscriber, Topic<T> topic, DataReaderQos? qos = null,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
         {
+            _subscriber = subscriber;
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
@@ -117,8 +133,9 @@ namespace Int2Dds.Core
         /// Normally called via Subscriber.CreateDataReaderWithProfile.
         /// </summary>
         internal DataReader(Subscriber subscriber, Topic<T> topic, string qosPath,
-            IDataReaderListener? listener = null, uint statusMask = 0)
+            IDataReaderListener? listener = null, uint statusMask = 0xFFFFFFFF)
         {
+            _subscriber = subscriber;
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
@@ -322,7 +339,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_datareader_wait_for_historical_data(_handle, (long)timeout.TotalMilliseconds));
+                NativeMethods.int2dds_datareader_wait_for_historical_data(_handle, WaitTimeout.ToMilliseconds(timeout)));
         }
 
         /// <summary>
@@ -544,6 +561,21 @@ namespace Int2Dds.Core
             return guid;
         }
 
+        /// <summary>
+        /// Gets this DataReader's instance handle.
+        /// </summary>
+        public unsafe InstanceHandle GetInstanceHandle()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var handle = new byte[16];
+            fixed (byte* p = handle)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datareader_get_instance_handle(_handle, p));
+            }
+            return new InstanceHandle(handle);
+        }
+
         /// <summary>Returns whether the reader currently has any data available.</summary>
         public bool HasData()
         {
@@ -581,6 +613,159 @@ namespace Int2Dds.Core
                 if (loan != IntPtr.Zero)
                     NativeMethods.int2dds_datareader_return_serialized_loan(loan);
             }
+        }
+
+        /// <summary>
+        /// Loans matching samples without copying or removing them. Dispose the result (or pass it
+        /// to <see cref="ReturnLoan"/>) to return the loan. Empty when nothing matches.
+        /// </summary>
+        public LoanedSamples<T> ReadLoaned(int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var ret = NativeMethods.int2dds_datareader_read_loaned(
+                _handle, maxSamples, sampleStates, viewStates, instanceStates, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeLoaned(int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var ret = NativeMethods.int2dds_datareader_take_loaned(
+                _handle, maxSamples, sampleStates, viewStates, instanceStates, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadLoaned"/> for samples matching a Read/QueryCondition of this reader.</summary>
+        public LoanedSamples<T> ReadWithConditionLoaned(ReadCondition condition, int maxSamples = -1)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            var ret = NativeMethods.int2dds_datareader_read_w_condition_loaned(
+                _handle, condition.Handle, maxSamples, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadWithConditionLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeWithConditionLoaned(ReadCondition condition, int maxSamples = -1)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            var ret = NativeMethods.int2dds_datareader_take_w_condition_loaned(
+                _handle, condition.Handle, maxSamples, out var loan);
+            return WrapLoan(ret, loan);
+        }
+
+        /// <summary><see cref="ReadLoaned"/> limited to the instance <paramref name="handle"/>.</summary>
+        public LoanedSamples<T> ReadInstanceLoaned(InstanceHandle handle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(handle, maxSamples, sampleStates, viewStates, instanceStates, next: false, take: false);
+        }
+
+        /// <summary><see cref="ReadInstanceLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeInstanceLoaned(InstanceHandle handle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(handle, maxSamples, sampleStates, viewStates, instanceStates, next: false, take: true);
+        }
+
+        /// <summary>
+        /// <see cref="ReadInstanceLoaned"/> for the next instance after <paramref name="previousHandle"/>
+        /// that has matching samples; <see cref="InstanceHandle.Nil"/> starts from the first instance.
+        /// </summary>
+        public LoanedSamples<T> ReadNextInstanceLoaned(InstanceHandle previousHandle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(previousHandle, maxSamples, sampleStates, viewStates, instanceStates, next: true, take: false);
+        }
+
+        /// <summary><see cref="ReadNextInstanceLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeNextInstanceLoaned(InstanceHandle previousHandle, int maxSamples = -1,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            return LoanInstance(previousHandle, maxSamples, sampleStates, viewStates, instanceStates, next: true, take: true);
+        }
+
+        /// <summary><see cref="ReadNextInstanceLoaned"/> for samples matching a Read/QueryCondition of this reader.</summary>
+        public LoanedSamples<T> ReadNextInstanceWithConditionLoaned(InstanceHandle previousHandle, ReadCondition condition, int maxSamples = -1)
+        {
+            return LoanNextInstanceWithCondition(previousHandle, condition, maxSamples, take: false);
+        }
+
+        /// <summary><see cref="ReadNextInstanceWithConditionLoaned"/> that removes the samples from the cache.</summary>
+        public LoanedSamples<T> TakeNextInstanceWithConditionLoaned(InstanceHandle previousHandle, ReadCondition condition, int maxSamples = -1)
+        {
+            return LoanNextInstanceWithCondition(previousHandle, condition, maxSamples, take: true);
+        }
+
+        /// <summary>
+        /// Returns <paramref name="loan"/> to this reader. A loan from another reader throws
+        /// <see cref="DdsPreconditionNotMetException"/> and stays valid. A returned loan is ignored.
+        /// </summary>
+        public void ReturnLoan(LoanedSamples<T> loan)
+        {
+            if (loan == null) throw new ArgumentNullException(nameof(loan));
+            if (loan.IsReturned) return;
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_return_loan(_handle, loan.Handle));
+            loan.MarkReturned();
+        }
+
+        private unsafe LoanedSamples<T> LoanInstance(InstanceHandle handle, int maxSamples,
+            uint sampleStates, uint viewStates, uint instanceStates, bool next, bool take)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var key = handle.ToByteArray();
+            int ret;
+            IntPtr loan;
+            fixed (byte* pHandle = key)
+            {
+                ret = (next, take) switch
+                {
+                    (false, false) => NativeMethods.int2dds_datareader_read_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                    (false, true) => NativeMethods.int2dds_datareader_take_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                    (true, false) => NativeMethods.int2dds_datareader_read_next_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                    (true, true) => NativeMethods.int2dds_datareader_take_next_instance_loaned(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out loan),
+                };
+            }
+            return WrapLoan(ret, loan);
+        }
+
+        private unsafe LoanedSamples<T> LoanNextInstanceWithCondition(InstanceHandle previousHandle, ReadCondition condition, int maxSamples, bool take)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            var key = previousHandle.ToByteArray();
+            int ret;
+            IntPtr loan;
+            fixed (byte* pHandle = key)
+            {
+                ret = take
+                    ? NativeMethods.int2dds_datareader_take_next_instance_w_condition_loaned(_handle, pHandle, condition.Handle, maxSamples, out loan)
+                    : NativeMethods.int2dds_datareader_read_next_instance_w_condition_loaned(_handle, pHandle, condition.Handle, maxSamples, out loan);
+            }
+            return WrapLoan(ret, loan);
+        }
+
+        private LoanedSamples<T> WrapLoan(int ret, IntPtr loan)
+        {
+            if (ret == ReturnCode.NoData) return new LoanedSamples<T>(this, IntPtr.Zero);
+            ReturnCodeHelper.CheckReturn(ret);
+            return new LoanedSamples<T>(this, loan);
         }
 
         /// <summary>
@@ -863,11 +1048,14 @@ namespace Int2Dds.Core
 
         // -- Private helpers --------------------------------------------------
 
-        private byte[] CopyBuffer(int length)
+        private T DeserializeBuffer(int length)
         {
+            if (s_spanDeserializer != null)
+                return s_spanDeserializer(new ReadOnlySpan<byte>(_buffer, 0, length));
+
             var result = new byte[length];
             Buffer.BlockCopy(_buffer, 0, result, 0, length);
-            return result;
+            return s_deserializer(result);
         }
 
         private void GrowBuffer(int required)
@@ -899,7 +1087,7 @@ namespace Int2Dds.Core
 
                         if (validData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return new Sample<T>(data, true);
                         }
                         return new Sample<T>(default, false);
@@ -930,7 +1118,7 @@ namespace Int2Dds.Core
 
                         if (validData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return new Sample<T>(data, true);
                         }
                         return new Sample<T>(default, false);
@@ -963,7 +1151,7 @@ namespace Int2Dds.Core
                         var info = ConvertSampleInfo(ref nativeInfo);
                         if (nativeInfo.ValidData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return (new Sample<T>(data, true), info);
                         }
                         return (new Sample<T>(default, false), info);
@@ -996,7 +1184,7 @@ namespace Int2Dds.Core
                         var info = ConvertSampleInfo(ref nativeInfo);
                         if (nativeInfo.ValidData)
                         {
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            var data = DeserializeBuffer((int)actualSize);
                             return (new Sample<T>(data, true), info);
                         }
                         return (new Sample<T>(default, false), info);
@@ -1012,31 +1200,23 @@ namespace Int2Dds.Core
 
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                for (UIntPtr i = UIntPtr.Zero; (int)i < length; i = (UIntPtr)((int)i + 1))
                 {
-                    for (UIntPtr i = UIntPtr.Zero; (int)i < length; i = (UIntPtr)((int)i + 1))
+                    // Get sample info
+                    NativeSampleInfo nativeInfo;
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_sample_seq_get_info(seqHandle, i, &nativeInfo));
+
+                    var info = ConvertSampleInfo(ref nativeInfo);
+
+                    if (nativeInfo.ValidData)
                     {
-                        // Get sample info
-                        NativeSampleInfo nativeInfo;
-                        ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_sample_seq_get_info(seqHandle, i, &nativeInfo));
-
-                        var info = ConvertSampleInfo(ref nativeInfo);
-
-                        if (nativeInfo.ValidData)
-                        {
-                            // Get sample data
-                            ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_sample_seq_get_data(seqHandle, i, pBuffer,
-                                    (UIntPtr)_buffer.Length, out var actualSize));
-
-                            var data = s_deserializer(CopyBuffer((int)actualSize));
-                            results.Add((new Sample<T>(data, true), info));
-                        }
-                        else
-                        {
-                            results.Add((new Sample<T>(default, false), info));
-                        }
+                        var data = DeserializeBuffer(LoadSequenceData(seqHandle, i));
+                        results.Add((new Sample<T>(data, true), info));
+                    }
+                    else
+                    {
+                        results.Add((new Sample<T>(default, false), info));
                     }
                 }
             }
@@ -1044,7 +1224,35 @@ namespace Int2Dds.Core
             return results;
         }
 
-        private static unsafe SampleInfo ConvertSampleInfo(ref NativeSampleInfo native)
+        /// <summary>
+        /// Loads the serialized data of one sample in a sequence into the buffer, growing
+        /// it when the sample is larger than it. Returns the data length.
+        /// </summary>
+        private int LoadSequenceData(IntPtr seqHandle, UIntPtr index)
+        {
+            unsafe
+            {
+                while (true)
+                {
+                    fixed (byte* pBuffer = _buffer)
+                    {
+                        var ret = NativeMethods.int2dds_sample_seq_get_data(
+                            seqHandle, index, pBuffer, (UIntPtr)_buffer.Length, out var actualSize);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        return (int)actualSize;
+                    }
+                }
+            }
+        }
+
+        internal static unsafe SampleInfo ConvertSampleInfo(ref NativeSampleInfo native)
         {
             var instanceHandleBytes = new byte[16];
             var pubHandleBytes = new byte[16];
@@ -1087,6 +1295,7 @@ namespace Int2Dds.Core
                 _listenerContextHandle = IntPtr.Zero;
             }
 
+            _subscriber.UnregisterReader(this);
             NativeMethods.int2dds_delete_datareader(_handle);
             ArrayPool<byte>.Shared.Return(_buffer);
         }

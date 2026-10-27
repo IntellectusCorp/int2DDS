@@ -85,6 +85,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_qos_get_data_frag(IntPtr qos, out int value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_qos_get_user_data(IntPtr qos, byte* buf, UIntPtr capacity, out UIntPtr size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_qos_get_resource_limits(IntPtr qos, out int max_samples, out int max_instances, out int max_per_instance);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -203,6 +206,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datareader_qos_get_reader_data_lifecycle(IntPtr qos, out long autopurge_nowriter_ns, out long autopurge_disposed_ns);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_qos_get_user_data(IntPtr qos, byte* buf, UIntPtr capacity, out UIntPtr size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datareader_qos_destroy(IntPtr qos);
 
         // ── Topic QoS ───────────────────────────────────────────────────────
@@ -244,6 +250,12 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_topic_qos_set_data_representation(IntPtr qos, int kind);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_topic_qos_set_topic_data(IntPtr qos, byte* data, UIntPtr data_len);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_topic_qos_get_topic_data(IntPtr qos, byte* buf, UIntPtr capacity, out UIntPtr size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_topic_qos_destroy(IntPtr qos);
 
         // ── Participant QoS ─────────────────────────────────────────────────
@@ -253,6 +265,9 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_participant_qos_set_user_data(IntPtr qos, byte* data, UIntPtr data_len);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_get_user_data(IntPtr qos, byte* buf, UIntPtr capacity, out UIntPtr size_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_participant_qos_add_property(IntPtr qos, byte* name, byte* value, [MarshalAs(UnmanagedType.I1)] bool propagate);
@@ -288,6 +303,20 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_publisher_qos_set_partition(IntPtr qos, byte** partitions, UIntPtr partition_count);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_qos_set_presentation(IntPtr qos, int access_scope,
+            [MarshalAs(UnmanagedType.U1)] bool coherent_access, [MarshalAs(UnmanagedType.U1)] bool ordered_access);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_qos_get_presentation(IntPtr qos, out int access_scope,
+            [MarshalAs(UnmanagedType.U1)] out bool coherent_access, [MarshalAs(UnmanagedType.U1)] out bool ordered_access);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_publisher_qos_set_group_data(IntPtr qos, byte* data, UIntPtr data_len);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_publisher_qos_get_group_data(IntPtr qos, byte* buf, UIntPtr capacity, out UIntPtr size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_publisher_qos_destroy(IntPtr qos);
 
         // ── Subscriber QoS ──────────────────────────────────────────────────
@@ -297,6 +326,20 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_subscriber_qos_set_partition(IntPtr qos, byte** partitions, UIntPtr partition_count);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_qos_set_presentation(IntPtr qos, int access_scope,
+            [MarshalAs(UnmanagedType.U1)] bool coherent_access, [MarshalAs(UnmanagedType.U1)] bool ordered_access);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_qos_get_presentation(IntPtr qos, out int access_scope,
+            [MarshalAs(UnmanagedType.U1)] out bool coherent_access, [MarshalAs(UnmanagedType.U1)] out bool ordered_access);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscriber_qos_set_group_data(IntPtr qos, byte* data, UIntPtr data_len);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscriber_qos_get_group_data(IntPtr qos, byte* buf, UIntPtr capacity, out UIntPtr size_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_subscriber_qos_destroy(IntPtr qos);

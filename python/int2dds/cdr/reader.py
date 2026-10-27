@@ -7,6 +7,8 @@ from __future__ import annotations
 import struct
 from typing import TYPE_CHECKING
 
+from int2dds.cdr.float128 import Float128
+
 if TYPE_CHECKING:
     pass
 
@@ -256,6 +258,14 @@ class CdrReader:
         self._pos += 8
         return val
 
+    def read_f128(self) -> Float128:
+        """Read an IEEE binary128 (``float128``)."""
+        self._align(4 if self._xcdr2 else 8)
+        self._ensure(16)
+        val = Float128.from_bytes(self._buf[self._pos : self._pos + 16], self._le)
+        self._pos += 16
+        return val
+
     def read_char(self) -> str:
         """Read a single character (1 byte)."""
         self._ensure(1)
@@ -288,15 +298,13 @@ class CdrReader:
         """
         Read a length-prefixed wide string (UTF-16).
 
-        Length is the number of UTF-16 code units (NOT bytes, NOT including null).
-        No null terminator is read.
+        Length is the number of bytes (XTypes 1.3 7.4.1.1.2). No null terminator.
         """
-        code_units = self.read_u32()
-        if code_units == 0:
+        byte_count = self.read_u32() & ~1
+        if byte_count == 0:
             return ""
 
         self._align(2)
-        byte_count = code_units * 2
         self._ensure(byte_count)
         data = bytes(self._buf[self._pos : self._pos + byte_count])
         self._pos += byte_count
@@ -312,6 +320,30 @@ class CdrReader:
                 f"Sequence length {count} exceeds {self.remaining} remaining bytes"
             )
         return count
+
+    def read_prim_seq(self, fmt_char: str) -> list[float]:
+        """
+        Read a sequence of numeric primitives in a single struct call.
+
+        Args:
+            fmt_char: struct format character of the element (? b B h H i I q Q f d)
+        """
+        count = self.read_seq_header()
+        return self.read_prim_array(fmt_char, count)
+
+    def read_prim_array(self, fmt_char: str, count: int) -> list[float]:
+        """Read ``count`` numeric primitives in a single struct call."""
+        if count == 0:
+            return []
+
+        size = struct.calcsize("<" + fmt_char)
+        self._align(size)
+        self._ensure(count * size)
+
+        order = "<" if self._le else ">"
+        values = list(struct.unpack_from(f"{order}{count}{fmt_char}", self._buf, self._pos))
+        self._pos += count * size
+        return values
 
     def read_bytes(self, length: int) -> bytes:
         """Read raw bytes."""

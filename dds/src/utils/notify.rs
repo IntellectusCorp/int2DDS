@@ -47,7 +47,7 @@ pub(crate) fn callback_handle<T: ?Sized>(slot: &Mutex<Option<Arc<T>>>) -> Option
 /// The panic is contained, not hidden: it is logged with its payload, which is strictly more
 /// visible than the current behaviour of killing a background thread the application cannot
 /// observe. The callback's own work is still lost -- only the thread is saved.
-pub(crate) fn notify_user<F: FnOnce()>(context: &str, notify: F) {
+pub fn notify_user<F: FnOnce()>(context: &str, notify: F) {
     let was_in_listener = IN_LISTENER.with(|flag| flag.replace(true));
     let result = catch_unwind(AssertUnwindSafe(notify));
     IN_LISTENER.with(|flag| flag.set(was_in_listener));

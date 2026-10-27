@@ -12,17 +12,18 @@
 //! C users serialize data with IDL-generated code and pass CDR bytes
 //! directly via `int2dds_datawriter_write_serialized`.
 
+use int2dds::utils::notify::notify_user;
 use std::ffi::CStr;
 use std::sync::{Arc, RwLock};
 
 use int2dds::{
     common::instance_handle::InstanceHandle,
-    core::time::{Duration, Time},
+    core::time::Time,
     infrastructure::status::StatusMask,
     publication::{data_writer::SerializedWriteLoan, data_writer_listener::DataWriterListener},
 };
 
-use crate::data::Int2DdsData;
+use crate::{data::Int2DdsData, waitset::max_wait_from_ms};
 
 pub struct Int2DdsSerializedWriteLoan {
     inner: Option<SerializedWriteLoan>,
@@ -181,6 +182,61 @@ pub unsafe extern "C" fn int2dds_publisher_get_instance_handle(
     let publisher_ref = &*publisher;
     let handle = ffi_try!(publisher_ref.inner.get_instance_handle());
     *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
+/// Get the 16-byte instance handle of a DataWriter.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_instance_handle(
+    writer: *const Int2DdsDataWriter,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(handle_out);
+
+    let writer_ref = &*writer;
+    let handle = ffi_try!(writer_ref.inner.get_instance_handle());
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
+/// Begin a coherent set on a Publisher.
+///
+/// Samples written by the Publisher's DataWriters until the matching
+/// `int2dds_publisher_end_coherent_changes` form one coherent set. Calls may be nested.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_begin_coherent_changes(
+    publisher: *const Int2DdsPublisher,
+) -> Int2DdsRet {
+    check_null!(publisher);
+
+    ffi_try!((*publisher).inner.begin_coherent_changes());
+
+    INT2DDS_RET_OK
+}
+
+/// End the coherent set started by `int2dds_publisher_begin_coherent_changes`.
+///
+/// Returns PRECONDITION_NOT_MET without a matching begin call.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_end_coherent_changes(
+    publisher: *const Int2DdsPublisher,
+) -> Int2DdsRet {
+    check_null!(publisher);
+
+    ffi_try!((*publisher).inner.end_coherent_changes());
 
     INT2DDS_RET_OK
 }
@@ -353,14 +409,18 @@ unsafe fn attach_writer_listener(
     if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
         if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
             if status.current_count() > 0 {
-                listener_arc.on_publication_matched(&writer_handle.inner, &status);
+                notify_user("re-notify on_publication_matched", || {
+                    listener_arc.on_publication_matched(&writer_handle.inner, &status)
+                });
             }
         }
     }
     if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
         if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
             if status.total_count() > 0 {
-                listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
+                notify_user("re-notify on_offered_incompatible_qos", || {
+                    listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status)
+                });
             }
         }
     }
@@ -902,6 +962,8 @@ pub unsafe extern "C" fn int2dds_datawriter_write_serialized_w_timestamp(
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
+/// - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+///   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_wait_for_acknowledgments(
     writer: *const Int2DdsDataWriter,
@@ -910,10 +972,7 @@ pub unsafe extern "C" fn int2dds_datawriter_wait_for_acknowledgments(
     check_null!(writer);
 
     let writer_ref = &*writer;
-    let max_wait = Duration {
-        sec: (timeout_ms / 1000) as i32,
-        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-    };
+    let max_wait = max_wait_from_ms(timeout_ms);
 
     match writer_ref.inner.wait_for_acknowledgments(max_wait) {
         Ok(()) => INT2DDS_RET_OK,
@@ -926,6 +985,8 @@ pub unsafe extern "C" fn int2dds_datawriter_wait_for_acknowledgments(
 ///
 /// # Safety
 /// - `publisher` must be a valid publisher
+/// - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+///   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publisher_wait_for_acknowledgments(
     publisher: *const Int2DdsPublisher,
@@ -934,10 +995,7 @@ pub unsafe extern "C" fn int2dds_publisher_wait_for_acknowledgments(
     check_null!(publisher);
 
     let publisher_ref = &*publisher;
-    let max_wait = Duration {
-        sec: (timeout_ms / 1000) as i32,
-        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-    };
+    let max_wait = max_wait_from_ms(timeout_ms);
 
     match publisher_ref.inner.wait_for_acknowledgments(max_wait) {
         Ok(()) => INT2DDS_RET_OK,

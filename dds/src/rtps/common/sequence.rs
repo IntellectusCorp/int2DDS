@@ -16,6 +16,12 @@ pub struct SequenceNumber {
 
 pub type SequenceNumberSet = NumberSet<SequenceNumber>;
 
+// A position in one Publisher's group order, shared by every DataWriter attached to it.
+pub type GroupSequenceNumber = SequenceNumber;
+
+// A group coherent set, named by the group sequence number of its first member.
+pub type GroupCoherentSetId = SequenceNumber;
+
 impl SequenceNumber {
     pub const UNKNOWN: Self = Self { high: -1, low: 0 };
     pub const INIT: Self = Self { high: 0, low: 1 };

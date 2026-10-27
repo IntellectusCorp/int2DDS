@@ -40,7 +40,8 @@ pub fn jvm() -> Option<&'static JavaVM> {
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
     let _ = JVM.set(vm);
-    jni::sys::JNI_VERSION_1_8
+    // Android ART rejects anything newer than 1.6.
+    jni::sys::JNI_VERSION_1_6
 }
 
 /// The product version as UTF-8 bytes, for `NativeLoader`'s version check.
@@ -50,7 +51,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) 
 /// # Safety
 /// Invoked by the JVM under JNI conventions.
 #[no_mangle]
-pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeVersion<
+pub extern "system" fn Java_kr_co_intellectus_int2dds_internal_ffi_FfiHandwritten_readNativeVersion<
     'local,
 >(
     env: JNIEnv<'local>,

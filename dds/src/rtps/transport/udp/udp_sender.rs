@@ -14,6 +14,7 @@ use std::sync::Mutex;
 #[derive(Debug)]
 pub(crate) struct UdpSender {
     socket: Mutex<Option<Socket2>>,
+    port_manager: PortManager,
 }
 
 impl UdpSender {
@@ -46,9 +47,11 @@ impl UdpSender {
         socket.bind(&sock_addr)?;
         configure_send_buffer(&socket);
 
-        crate::common::enterprise_hooks::call_extended_discovery_init(&socket)?;
+        if let Err(e) = crate::common::enterprise_loader::extended_discovery_init(&socket) {
+            log::warn!("[udp_sender] Extended discovery init failed: {}", e);
+        }
 
-        Ok(Self { socket: Mutex::new(Some(socket)) })
+        Ok(Self { socket: Mutex::new(Some(socket)), port_manager: udp_config.port_manager })
     }
 
     /// Force close the socket even when there are other Arc references.
@@ -78,16 +81,16 @@ impl UdpSender {
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
-        let port = PortManager::get_discovery_traffic_multicast_port(domain_id);
+        let port = self.port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
         let multicast_target: SocketAddr = SocketAddr::new(IpAddr::V4(MULTICAST_IP), port);
         let sock_addr = SockAddr::from(multicast_target);
 
         let result = socket.send_to(data, &sock_addr);
         debug!("UDP multicast send (domain {}): {:?}", domain_id, result);
 
-        if let Err(e) = crate::common::enterprise_hooks::call_extended_discovery_send(
-            socket, port, data, domain_id,
-        ) {
+        if let Err(e) =
+            crate::common::enterprise_loader::extended_discovery_send(socket, port, data, domain_id)
+        {
             log::warn!("[udp_sender] Extended discovery send failed: {}", e);
         }
 

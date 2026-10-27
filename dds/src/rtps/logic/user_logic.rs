@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::count_filter::should_accept_count;
 use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::common::guid::{GroupDigest, Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
@@ -25,6 +25,8 @@ use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo};
 use crate::rtps::entities::history::history_cache::HistoryCache;
+use crate::rtps::entities::history::reader_history::CoherentSetCloseResult;
+use crate::rtps::entities::history::subscriber_history::SubscriberHistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
     FragmentInfo, FragmentSet, Reader, ReaderCallbackLease, StatefulReader, StatelessReader,
@@ -48,6 +50,7 @@ use crate::rtps::messages::submessages::gap::Gap;
 use crate::rtps::messages::submessages::heartbeat::Heartbeat;
 use crate::rtps::messages::submessages::heartbeat_frag::HeartbeatFrag;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
+use crate::rtps::messages::submessages::{gap, heartbeat};
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
@@ -59,12 +62,15 @@ use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
 use mio::Waker;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
 /// How many in-progress fragmented samples a participant holds before the oldest are evicted.
 /// One entry per (writer, reader, sample), so several readers of one topic each take a slot.
 const FRAGMENT_BUFFER_LIMIT: usize = 128;
+// Bytes those buffers may reserve together; a sample whose buffers alone exceed this is refused.
+const FRAGMENT_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
 // Payload one writer may pin waiting for a hole. In bytes because what it protects is the
 // allocator reuse the receive path needs, and a sample is a kilobyte or a megabyte.
 const IN_ORDER_BUFFER_BYTES: usize = 16 * 1024 * 1024;
@@ -506,40 +512,47 @@ fn send_credit_backstop() -> Duration {
 
 /// `exclude` must hold every key this call is about to write -- one DATA_FRAG fans out to one
 /// buffer per matched reader -- or an omitted key can become its own eviction victim.
+/// `held_bytes` is the running total kept beside the map, so this needs no extra shard walk.
 fn select_eviction_victims(
     buffers: &DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer>,
+    held_bytes: usize,
     max_size: usize,
+    max_bytes: usize,
+    incoming_bytes: usize,
     exclude: &[(Guid, EntityId, SequenceNumber)],
 ) -> Vec<(Guid, EntityId, SequenceNumber)> {
-    if buffers.len() <= max_size {
+    let mut count = buffers.len();
+    let mut bytes = held_bytes;
+    let over = |count: usize, bytes: usize| {
+        count > max_size || bytes.saturating_add(incoming_bytes) > max_bytes
+    };
+    if !over(count, bytes) {
         return Vec::new();
     }
-    let buffers_to_remove = buffers.len() - max_size;
 
-    let mut incomplete: Vec<_> = buffers
+    // Incomplete buffers go first, stalest first; then complete ones, oldest first.
+    let mut candidates: Vec<_> = buffers
         .iter()
-        .filter(|entry| !exclude.contains(entry.key()) && !entry.value().all_fragments_received())
-        .map(|entry| (*entry.key(), entry.value().last_updated))
+        .filter(|entry| !exclude.contains(entry.key()))
+        .map(|entry| {
+            let buffer = entry.value();
+            let complete = buffer.all_fragments_received();
+            let age = if complete { buffer.created_at } else { buffer.last_updated };
+            (complete, age, *entry.key(), buffer.total_size as usize)
+        })
         .collect();
-    incomplete.sort_by_key(|(_, last_updated)| *last_updated);
+    candidates.sort_by_key(|(complete, age, _, _)| (*complete, *age));
 
-    let mut victims: Vec<_> =
-        incomplete.into_iter().take(buffers_to_remove).map(|(key, _)| key).collect();
-
-    if victims.len() < buffers_to_remove {
-        let mut complete: Vec<_> = buffers
-            .iter()
-            .filter(|entry| {
-                !exclude.contains(entry.key()) && entry.value().all_fragments_received()
-            })
-            .map(|entry| (*entry.key(), entry.value().created_at))
-            .collect();
-        complete.sort_by_key(|(_, created_at)| *created_at);
-
-        let remaining = buffers_to_remove - victims.len();
-        victims.extend(complete.into_iter().take(remaining).map(|(key, _)| key));
+    let mut victims = Vec::new();
+    for (_, _, key, size) in candidates {
+        if !over(count, bytes) {
+            break;
+        }
+        victims.push(key);
+        count -= 1;
+        // Saturating: the relaxed counter may trail a concurrent insert or removal.
+        bytes = bytes.saturating_sub(size);
     }
-
     victims
 }
 
@@ -551,6 +564,8 @@ pub(crate) struct UserLogic {
     /// Keyed by the reader the DATA_FRAG was addressed to as well: the writer sends one copy
     /// per reader, and merging those streams completes a buffer only one of them is given.
     fragment_buffers: Arc<DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer>>,
+    // Sum of `total_size` over `fragment_buffers`, so the budget check needs no shard walk.
+    fragment_buffer_bytes: Arc<AtomicUsize>,
     /// Wire bytes charged toward each remote participant, shared by every send call so that
     /// consecutive and concurrent sends draw on one budget per peer instead of each opening a
     /// fresh window. Released when that peer answers, aged out by `SEND_CREDIT_BACKSTOP`.
@@ -566,6 +581,7 @@ impl UserLogic {
             participant: Arc::downgrade(&participant),
             transport,
             fragment_buffers: Arc::new(DashMap::new()),
+            fragment_buffer_bytes: Arc::new(AtomicUsize::new(0)),
             send_credit: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_waker: Arc::new(OnceLock::new()),
@@ -805,12 +821,21 @@ impl UserLogic {
                     // firstSN is the oldest held change, not the one resent; the reader drops
                     // below it, including samples this same pass is still repairing.
                     let heartbeat_info = (piggyback && is_last).then(|| {
+                        let group_info = if stateful_writer.is_group_access_scope() {
+                            stateful_writer.writer_cache().lock().ok().and_then(|cache| {
+                                stateful_writer
+                                    .create_heartbeat_group_info(&cache, first_sn, last_sn)
+                            })
+                        } else {
+                            None
+                        };
                         (
                             stateful_writer.heartbeat_count(),
                             first_sn,
                             last_sn,
                             false, // final_flag
                             false, // liveliness_flag = false for retransmission
+                            group_info,
                         )
                     });
 
@@ -869,12 +894,29 @@ impl UserLogic {
             .release(send_buffer);
 
         if !gap_list.is_empty() {
+            // One range serves every window the gap list is split into: a later window starts
+            // at a higher sequence number, so the bound taken from the lowest one holds there.
+            let group_info = gap_list.iter().min().and_then(|lowest_gapped_sn| {
+                if !stateful_writer.is_group_access_scope() {
+                    return None;
+                }
+
+                let writer_cache = stateful_writer.writer_cache();
+                let history_cache = writer_cache.lock().ok()?;
+                stateful_writer.create_gap_group_info(
+                    &history_cache,
+                    *lowest_gapped_sn,
+                    *lowest_gapped_sn,
+                )
+            });
+
             let buffer_list = MessageCreator::create_multiple_gap_msgs(
                 writer.guid(),
                 remote_reader_guid,
                 group_id,
                 writer.endpoint_id(),
                 &mut gap_list,
+                group_info,
             )
             .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
@@ -995,8 +1037,20 @@ impl UserLogic {
             for (fragment_num, count, is_last) in plan {
                 // The heartbeat rides the last datagram of the window, so the reader always has
                 // a trigger for the next NACK_FRAG.
-                let heartbeat_info = (piggyback && is_last)
-                    .then(|| (stateful_writer.heartbeat_count(), first_sn, last_sn, false, false));
+                let heartbeat_info = (piggyback && is_last).then(|| {
+                    (
+                        stateful_writer.heartbeat_count(),
+                        first_sn,
+                        last_sn,
+                        false,
+                        false,
+                        stateful_writer.create_heartbeat_group_info(
+                            &history_cache_guard,
+                            first_sn,
+                            last_sn,
+                        ),
+                    )
+                });
 
                 if self.send_data_frag_to_reader_proxy(
                     &change,
@@ -1253,13 +1307,16 @@ impl UserLogic {
 
                     // The heartbeat rides the last datagram of the window, not only the last of
                     // the sample: without it the reader has no trigger to ask for the rest.
-                    let heartbeat_info = (is_piggyback_wanted && is_last).then_some((
-                        heartbeat_count,
-                        first,
-                        last,
-                        false,
-                        false,
-                    ));
+                    let heartbeat_info = (is_piggyback_wanted && is_last).then(|| {
+                        (
+                            heartbeat_count,
+                            first,
+                            last,
+                            false,
+                            false,
+                            writer.create_heartbeat_group_info(history_cache, first, last),
+                        )
+                    });
 
                     if MessageCreator::create_data_frag_msg(
                         &a_change,
@@ -1297,8 +1354,16 @@ impl UserLogic {
 
             let is_piggyback_wanted =
                 members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
-            let heartbeat_info =
-                is_piggyback_wanted.then_some((heartbeat_count, first, last, false, false));
+            let heartbeat_info = is_piggyback_wanted.then(|| {
+                (
+                    heartbeat_count,
+                    first,
+                    last,
+                    false,
+                    false,
+                    writer.create_heartbeat_group_info(history_cache, first, last),
+                )
+            });
 
             debug!(
                 "[Data] Batched DATA sn={} to {} readers behind one participant",
@@ -1361,6 +1426,7 @@ impl UserLogic {
                             writer.endpoint_id(),
                             start,
                             end,
+                            writer.create_gap_group_info(history_cache, start, end),
                         ) {
                             Ok(buffer) => {
                                 if let Err(e) =
@@ -1427,6 +1493,11 @@ impl UserLogic {
                                         last_sn,
                                         false,
                                         false,
+                                        writer.create_heartbeat_group_info(
+                                            history_cache,
+                                            first_sn,
+                                            last_sn,
+                                        ),
                                     ))
                                 } else {
                                     None
@@ -1464,7 +1535,18 @@ impl UserLogic {
                             }
                         } else {
                             let heartbeat_info = if reliable && piggyback {
-                                Some((writer.heartbeat_count(), first_sn, last_sn, false, false))
+                                Some((
+                                    writer.heartbeat_count(),
+                                    first_sn,
+                                    last_sn,
+                                    false,
+                                    false,
+                                    writer.create_heartbeat_group_info(
+                                        history_cache,
+                                        first_sn,
+                                        last_sn,
+                                    ),
+                                ))
                             } else {
                                 None
                             };
@@ -1727,7 +1809,14 @@ impl UserLogic {
         writer_id: EntityId,
         fragment_num: u32,
         fragments_in_submessage: u16,
-        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(
+            u32,
+            SequenceNumber,
+            SequenceNumber,
+            bool,
+            bool,
+            Option<heartbeat::GroupInfo>,
+        )>,
         timestamp: DateTime<Utc>,
         send_buffer: &mut Vec<u8>,
     ) -> bool {
@@ -1823,16 +1912,19 @@ impl UserLogic {
         // Send heartbeat once per participant
         for (target_participant_prefix, locators) in participant_locators.iter() {
             let highest_sn = history_cache.highest_sn();
+            let first_sn = history_cache.get_seq_num_min().unwrap_or(highest_sn + 1);
+            let last_sn = history_cache.get_seq_num_max().unwrap_or(highest_sn);
             let buffer = MessageCreator::create_heartbeat_message(
                 writer.guid().prefix(),
                 *target_participant_prefix,
                 writer.heartbeat_count(),
                 EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
                 writer.endpoint_id(),
-                history_cache.get_seq_num_min().unwrap_or(highest_sn + 1),
-                history_cache.get_seq_num_max().unwrap_or(highest_sn),
+                first_sn,
+                last_sn,
                 false,
                 false,
+                writer.create_heartbeat_group_info(&history_cache, first_sn, last_sn),
             );
 
             if let Ok(buf) = buffer {
@@ -1911,6 +2003,8 @@ impl UserLogic {
         }
 
         let highest_sn = history_cache.highest_sn();
+        let first_sn = history_cache.get_seq_num_min().unwrap_or(highest_sn + 1);
+        let last_sn = history_cache.get_seq_num_max().unwrap_or(highest_sn);
 
         let buffer = MessageCreator::create_heartbeat_message(
             writer.guid().prefix(),
@@ -1918,10 +2012,11 @@ impl UserLogic {
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
-            history_cache.get_seq_num_min().unwrap_or(highest_sn + 1),
-            history_cache.get_seq_num_max().unwrap_or(highest_sn),
+            first_sn,
+            last_sn,
             false,
             false,
+            writer.create_heartbeat_group_info(history_cache, first_sn, last_sn),
         );
 
         if let Ok(buf) = buffer {
@@ -1951,6 +2046,7 @@ impl UserLogic {
                     writer.endpoint_id(),
                     min_sn,
                     last_irrelevant,
+                    writer.create_gap_group_info(history_cache, min_sn, last_irrelevant),
                 )?;
             }
         }
@@ -1965,6 +2061,7 @@ impl UserLogic {
         writer_entity_id: EntityId,
         gap_start: SequenceNumber,
         gap_end: SequenceNumber,
+        group_info: Option<gap::GroupInfo>,
     ) -> RtpsResult<()> {
         let buffer = MessageCreator::create_gap_msg_consecutive(
             local_guid,
@@ -1973,6 +2070,7 @@ impl UserLogic {
             writer_entity_id,
             gap_start,
             gap_end,
+            group_info,
         )
         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
@@ -2281,7 +2379,9 @@ impl UserLogic {
         changes: Vec<CacheChange>,
     ) -> RtpsResult<()> {
         for change in changes.into_iter() {
-            Self::deliver_change(reader, change);
+            if let Err(error) = self.deliver_change(reader, change) {
+                debug!("Delivering a change to reader {} failed: {}", reader.guid(), error);
+            }
         }
 
         Ok(())
@@ -2289,17 +2389,270 @@ impl UserLogic {
 
     // Add a change to the reader cache and notify every change it makes available:
     // none when held (TIME_BASED_FILTER) or buffered, several when a coherent set closes.
-    fn deliver_change(reader: &dyn Reader, change: CacheChange) {
-        let reader_cache = reader.reader_cache();
-        let mut res: Option<RtpsResult<Vec<Arc<CacheChange>>>> = None;
-        if let Ok(mut cache_guard) = reader_cache.lock() {
-            res = Some(cache_guard.add_change(change, true));
-        }
-        if let Some(Ok(changes)) = res {
-            for change in changes {
-                reader.on_change(change);
+    fn deliver_change(&self, reader: &dyn Reader, change: CacheChange) -> RtpsResult<()> {
+        if change.is_end_coherent_set() {
+            if let Some(group_coherent_set) = change.presentation_info().group_coherent_set {
+                return self.deliver_end_coherent_set(reader, change, group_coherent_set);
             }
         }
+
+        // A sample without a group sequence number has no group position and is stored as under
+        // TOPIC access scope.
+        let has_group_seq_num = change.presentation_info().group_seq_num.is_some();
+        let subscriber_history_cache = reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .and_then(StatefulReader::subscriber_history_cache)
+            .filter(|_| has_group_seq_num);
+
+        let reader_cache = reader.reader_cache();
+        let mut cache_guard = reader_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        match subscriber_history_cache {
+            // Not GROUP access scope. Stored right here.
+            None => {
+                let committed = cache_guard.add_change(change, true)?;
+                drop(cache_guard);
+
+                for change in committed {
+                    reader.on_change(change);
+                }
+            }
+            // GROUP access scope. Handed to the Subscriber HistoryCache, stored once the gate
+            // releases it.
+            Some(subscriber_history_cache) => {
+                let prepared = cache_guard.prepare_changes_to_commit(change, true);
+                drop(cache_guard);
+
+                // One lock over the hand-off, the gate and the storing, so no event slips in
+                // between them.
+                let reader_id = reader.guid().entity_id();
+                let mut subscriber_history_cache = subscriber_history_cache
+                    .lock()
+                    .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+                // A rejected sample is dropped on its own. The rest of the batch and the gate
+                // still run.
+                for (change, apply_filter) in prepared {
+                    let _ = subscriber_history_cache.add_change(reader_id, change, apply_filter);
+                }
+
+                let released = subscriber_history_cache.flush_pending_changes();
+                let participant = self.get_upgraded_participant()?;
+                let available = participant.commit_released_samples(released)?;
+                drop(subscriber_history_cache);
+
+                participant.notify_available_changes(available);
+            }
+        }
+
+        Ok(())
+    }
+
+    // Close this writer's portion of a group coherent set. The marker is a group boundary and is
+    // never stored: a complete portion is committed, an incomplete one takes its set down.
+    fn deliver_end_coherent_set(
+        &self,
+        reader: &dyn Reader,
+        marker: CacheChange,
+        group_coherent_set: SequenceNumber,
+    ) -> RtpsResult<()> {
+        // A marker without a group sequence number closes the set as under TOPIC access scope.
+        let has_group_seq_num = marker.presentation_info().group_seq_num.is_some();
+        let subscriber_history_cache = reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .and_then(StatefulReader::subscriber_history_cache)
+            .filter(|_| has_group_seq_num);
+
+        let reader_cache = reader.reader_cache();
+        let mut cache_guard = reader_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        let closed_result =
+            cache_guard.close_and_take_coherent_set(marker.writer_guid(), marker.sequence_number());
+
+        if matches!(closed_result, CoherentSetCloseResult::Incomplete) {
+            drop(cache_guard);
+
+            debug!(
+                "[UserLogic] Reader {} discarded its portion of group coherent set {}",
+                reader.guid(),
+                group_coherent_set.to_i64()
+            );
+
+            // Outside GROUP access scope this writer's portion was the whole set, so dropping
+            // it is all there is to do.
+            let Some(subscriber_history_cache) = subscriber_history_cache else {
+                return Ok(());
+            };
+
+            return self.discard_group_coherent_set(
+                subscriber_history_cache,
+                &marker,
+                group_coherent_set,
+            );
+        }
+
+        let members = closed_result.into_complete_members();
+
+        // Outside GROUP access scope this writer's portion is the whole set, so it is stored here.
+        let Some(subscriber_history_cache) = subscriber_history_cache else {
+            let members = members.into_iter().map(|member| (member, false)).collect::<Vec<_>>();
+            let committed = cache_guard.commit_changes_to_datareader_cache(members)?;
+            drop(cache_guard);
+
+            for change in committed {
+                reader.on_change(change);
+            }
+
+            return Ok(());
+        };
+        drop(cache_guard);
+
+        // One lock over the hand-off, the gate and the storing, so no event slips in between
+        // them.
+        let reader_id = reader.guid().entity_id();
+        let mut subscriber_history_cache = subscriber_history_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // The portion joins the group order under its own positions, and the marker takes the
+        // position the set ends at. A rejected one is dropped on its own.
+        for member in members {
+            let _ = subscriber_history_cache.add_change(reader_id, member, false);
+        }
+        let _ = subscriber_history_cache.add_change(reader_id, marker, false);
+
+        let released = subscriber_history_cache.flush_pending_changes();
+        let participant = self.get_upgraded_participant()?;
+        let available = participant.commit_released_samples(released)?;
+        drop(subscriber_history_cache);
+
+        participant.notify_available_changes(available);
+
+        Ok(())
+    }
+
+    // Hands a group coherent set no reader can complete to the group cursor and stores whatever
+    // the jump releases.
+    fn discard_group_coherent_set(
+        &self,
+        subscriber_history_cache: &Arc<Mutex<SubscriberHistoryCache>>,
+        marker: &CacheChange,
+        group_coherent_set: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let Some(end_group_seq_num) = marker.presentation_info().group_seq_num else {
+            return Err(RtpsError::new(
+                RtpsErrorCode::GroupSequenceNumberNotSet,
+                format!(
+                    "End Coherent Set of group coherent set {} from writer {} carries no group \
+                     sequence number",
+                    group_coherent_set.to_i64(),
+                    marker.writer_guid()
+                ),
+            ));
+        };
+
+        let mut subscriber_history_cache = subscriber_history_cache
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        subscriber_history_cache.discard_group_coherent_set(
+            marker.writer_guid(),
+            group_coherent_set,
+            end_group_seq_num,
+        )?;
+
+        // Jumping the cursor past the set can let the samples written after it through.
+        let released = subscriber_history_cache.flush_pending_changes();
+        let participant = self.get_upgraded_participant()?;
+        let available = participant.commit_released_samples(released)?;
+        drop(subscriber_history_cache);
+
+        participant.notify_available_changes(available);
+
+        Ok(())
+    }
+
+    // The Subscriber HistoryCaches behind these readers, each once. Readers of one Subscriber
+    // share one cache, and a reader outside GROUP access scope has none.
+    fn get_subscriber_history_caches(
+        readers: &[ReaderCallbackLease],
+    ) -> Vec<Arc<Mutex<SubscriberHistoryCache>>> {
+        let mut caches: Vec<Arc<Mutex<SubscriberHistoryCache>>> = Vec::new();
+
+        for reader in readers {
+            let Some(cache) = reader
+                .as_any()
+                .downcast_ref::<StatefulReader>()
+                .and_then(StatefulReader::subscriber_history_cache)
+            else {
+                continue;
+            };
+
+            if !caches.iter().any(|known| Arc::ptr_eq(known, cache)) {
+                caches.push(Arc::clone(cache));
+            }
+        }
+
+        caches
+    }
+
+    // Records a writer's Heartbeat group info in each Subscriber HistoryCache and commits whatever
+    // the gate releases on it.
+    fn record_heartbeat_group_info_and_flush(
+        &self,
+        subscriber_history_caches: &[Arc<Mutex<SubscriberHistoryCache>>],
+        remote_writer_guid: Guid,
+        group_info: heartbeat::GroupInfo,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in subscriber_history_caches {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+            cache.record_heartbeat_group_info(remote_writer_guid, group_info)?;
+
+            let released = cache.flush_pending_changes();
+            let participant = self.get_upgraded_participant()?;
+            let available = participant.commit_released_samples(released)?;
+            drop(cache);
+
+            participant.notify_available_changes(available);
+        }
+
+        Ok(())
+    }
+
+    // Records a writer's Gap group info in each Subscriber HistoryCache and commits whatever the
+    // gate releases on it.
+    fn record_gap_group_info_and_flush(
+        &self,
+        subscriber_history_caches: &[Arc<Mutex<SubscriberHistoryCache>>],
+        remote_writer_guid: Guid,
+        group_info: gap::GroupInfo,
+        filtered_count: Option<i64>,
+    ) -> RtpsResult<()> {
+        for subscriber_history_cache in subscriber_history_caches {
+            let mut cache = subscriber_history_cache
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+            cache.record_gap_group_info(remote_writer_guid, group_info, filtered_count)?;
+
+            let released = cache.flush_pending_changes();
+            let participant = self.get_upgraded_participant()?;
+            let available = participant.commit_released_samples(released)?;
+            drop(cache);
+
+            participant.notify_available_changes(available);
+        }
+
+        Ok(())
     }
 }
 
@@ -2332,20 +2685,26 @@ impl UserLogic {
         Ok(())
     }
 
-    /// Evict old reassembly buffers once the map is over its cap, sparing this sample's keys.
+    /// Evict old reassembly buffers once over the count cap or byte budget, sparing this sample.
     /// Called only when a DATA_FRAG opens a new buffer: `len` read-locks every shard.
     fn evict_fragment_buffers_if_full(
         &self,
         writer_guid: Guid,
         matched_readers: &[ReaderCallbackLease],
         sn: SequenceNumber,
+        incoming_bytes: usize,
     ) {
-        if self.fragment_buffers.len() <= FRAGMENT_BUFFER_LIMIT {
+        let held_bytes = self.fragment_buffer_bytes.load(Ordering::Relaxed);
+        if self.fragment_buffers.len() <= FRAGMENT_BUFFER_LIMIT
+            && held_bytes.saturating_add(incoming_bytes) <= FRAGMENT_BUFFER_BYTES
+        {
             return;
         }
         debug!(
-            "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
-            self.fragment_buffers.len()
+            "[UserLogic] Fragment buffers over budget ({} buffers, {} bytes held, {} incoming), cleaning up old buffers.",
+            self.fragment_buffers.len(),
+            held_bytes,
+            incoming_bytes
         );
         // This datagram writes one key per matched reader; excluding all of them is what stops
         // the arriving fragment from evicting its own buffer.
@@ -2353,8 +2712,13 @@ impl UserLogic {
             .iter()
             .map(|reader| (writer_guid, reader.guid().entity_id(), sn))
             .collect();
-        for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
-            self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
+        for (evicted_writer_guid, evicted_reader_id, evicted_sn) in self
+            .cleanup_old_fragment_buffers(
+                FRAGMENT_BUFFER_LIMIT,
+                FRAGMENT_BUFFER_BYTES,
+                incoming_bytes,
+                &arriving_keys,
+            )
         {
             // The bytes are gone, so the ledger must stop claiming them. The key names the
             // one reader that lost them; every other reader's buffer is still whole.
@@ -2390,13 +2754,22 @@ impl UserLogic {
     fn cleanup_old_fragment_buffers(
         &self,
         max_size: usize,
+        max_bytes: usize,
+        incoming_bytes: usize,
         exclude: &[(Guid, EntityId, SequenceNumber)],
     ) -> Vec<(Guid, EntityId, SequenceNumber)> {
-        let victims = select_eviction_victims(&self.fragment_buffers, max_size, exclude);
+        let victims = select_eviction_victims(
+            &self.fragment_buffers,
+            self.fragment_buffer_bytes.load(Ordering::Relaxed),
+            max_size,
+            max_bytes,
+            incoming_bytes,
+            exclude,
+        );
 
         let mut evicted = Vec::new();
         for key in &victims {
-            let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) else {
+            let Some(removed_buffer) = self.remove_fragment_buffer(key) else {
                 continue;
             };
             if removed_buffer.all_fragments_received() {
@@ -2461,13 +2834,68 @@ impl UserLogic {
     /// removed: it can never complete these, and `get_matched_readers` will not find it again,
     /// so nothing but this would ever reclaim them.
     pub(crate) fn forget_fragment_buffers_for_reader(&self, reader_id: EntityId) {
-        self.fragment_buffers.retain(|key, _| key.1 != reader_id);
+        self.retain_fragment_buffers(|key| key.1 != reader_id);
     }
 
     /// Drop every reassembly buffer waiting on `writer_guid`. Called when that writer is
     /// unmatched: it will send no further DATA_FRAG, so nothing but this would ever reclaim them.
     pub(crate) fn forget_fragment_buffers_for_writer(&self, writer_guid: Guid) {
-        self.fragment_buffers.retain(|key, _| key.0 != writer_guid);
+        self.retain_fragment_buffers(|key| key.0 != writer_guid);
+    }
+
+    /// Bytes `writer_guid`'s sample holds once every reader matched to it opens a buffer.
+    /// Counts all of them even for a directed repair, or repairs addressed one reader at a
+    /// time would slip a sample past the budget.
+    fn fragment_sample_footprint(
+        &self,
+        writer_guid: Guid,
+        addressed_reader_id: EntityId,
+        addressed_readers: usize,
+        total_size: u32,
+    ) -> RtpsResult<usize> {
+        let readers = if addressed_reader_id == EntityId::UNKNOWN {
+            addressed_readers
+        } else {
+            self.get_upgraded_participant()?
+                .find_reader_callback_leases_matched_with_remote_writer(writer_guid)?
+                .len()
+                .max(addressed_readers)
+        };
+        Ok((total_size as usize).saturating_mul(readers))
+    }
+
+    // The only ways buffers enter or leave the map, so `fragment_buffer_bytes` stays exact.
+    fn insert_fragment_buffer(
+        &self,
+        key: (Guid, EntityId, SequenceNumber),
+        buffer: FragmentBuffer,
+    ) -> dashmap::mapref::one::RefMut<'_, (Guid, EntityId, SequenceNumber), FragmentBuffer> {
+        match self.fragment_buffers.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.into_ref(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                self.fragment_buffer_bytes.fetch_add(buffer.total_size as usize, Ordering::Relaxed);
+                entry.insert(buffer)
+            }
+        }
+    }
+
+    fn remove_fragment_buffer(
+        &self,
+        key: &(Guid, EntityId, SequenceNumber),
+    ) -> Option<FragmentBuffer> {
+        let (_, buffer) = self.fragment_buffers.remove(key)?;
+        self.fragment_buffer_bytes.fetch_sub(buffer.total_size as usize, Ordering::Relaxed);
+        Some(buffer)
+    }
+
+    fn retain_fragment_buffers(&self, keep: impl Fn(&(Guid, EntityId, SequenceNumber)) -> bool) {
+        self.fragment_buffers.retain(|key, buffer| {
+            let kept = keep(key);
+            if !kept {
+                self.fragment_buffer_bytes.fetch_sub(buffer.total_size as usize, Ordering::Relaxed);
+            }
+            kept
+        });
     }
 
     /// The locators one message is actually written to: the highest-priority kind reachable on
@@ -2668,10 +3096,15 @@ impl UserLogic {
         }
 
         // Restore per-sample coherent/group presentation metadata.
+        let writer_group_info = inline_qos
+            .get_writer_group_info()
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes.as_slice()).ok())
+            .map(GroupDigest::new);
         cache_change.set_presentation_info(PresentationInfo {
             coherent_set: inline_qos.get_coherent_set(),
             group_seq_num: inline_qos.get_group_seq_num(),
             group_coherent_set: inline_qos.get_group_coherent_set(),
+            writer_group_info,
         });
 
         Ok(())
@@ -2809,6 +3242,8 @@ impl UnicastMessageProcessor for UserLogic {
             );
             return Ok(());
         }
+
+        let subscriber_history_caches = Self::get_subscriber_history_caches(&matched_readers);
 
         for reader in matched_readers {
             let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
@@ -2962,6 +3397,16 @@ impl UnicastMessageProcessor for UserLogic {
             }
             // Reported only once the flushed samples are safely in the reader's cache.
             acknack_result?;
+        }
+
+        // Nothing else in this Heartbeat depends on the group gate, and a failure here is
+        // already logged where it is made.
+        if let Some(group_info) = heartbeat.group_info {
+            let _ = self.record_heartbeat_group_info_and_flush(
+                &subscriber_history_caches,
+                remote_writer_guid,
+                group_info,
+            );
         }
 
         Ok(())
@@ -3271,18 +3716,37 @@ impl UnicastMessageProcessor for UserLogic {
                 let mut buffer = match self.fragment_buffers.get_mut(&key) {
                     Some(buffer) => buffer,
                     None => {
+                        let footprint = self.fragment_sample_footprint(
+                            remote_writer_guid,
+                            data_frag.reader_id,
+                            matched_readers.len(),
+                            total_size,
+                        )?;
+                        if footprint > FRAGMENT_BUFFER_BYTES {
+                            warn!(
+                                "[UserLogic] Sample sn={:?} from {} needs {} bytes of reassembly buffers, over the {} byte budget; dropping its fragments",
+                                data_frag.writer_sn, remote_writer_guid, footprint, FRAGMENT_BUFFER_BYTES
+                            );
+                            continue;
+                        }
                         self.evict_fragment_buffers_if_full(
                             remote_writer_guid,
                             &matched_readers,
                             data_frag.writer_sn,
+                            total_size as usize,
                         );
-                        self.fragment_buffers.entry(key).or_insert_with(|| {
-                            FragmentBuffer::new(
-                                data_frag.writer_sn,
-                                total_size,
-                                data_frag.fragment_size,
-                            )
-                        })
+                        let Some(new_buffer) = FragmentBuffer::new(
+                            data_frag.writer_sn,
+                            total_size,
+                            data_frag.fragment_size,
+                        ) else {
+                            warn!(
+                                "[UserLogic] Cannot allocate {} bytes to reassemble sn={:?} from {}; dropping its fragments",
+                                total_size, data_frag.writer_sn, remote_writer_guid
+                            );
+                            continue;
+                        };
+                        self.insert_fragment_buffer(key, new_buffer)
                     }
                 };
 
@@ -3291,6 +3755,11 @@ impl UnicastMessageProcessor for UserLogic {
                     if let Some(ts) = source_timestamp {
                         buffer.source_timestamp = Some(ts); // store source_timestamp from first fragment that equals to INFO_TS
                     }
+                }
+
+                // The sample's inline QoS rides its first fragment, so keep it for assembly.
+                if buffer.inline_qos.is_none() {
+                    buffer.inline_qos = data_frag.inline_qos();
                 }
 
                 // Fragments are copied straight out of the datagram; a per-fragment `Bytes::slice`
@@ -3348,9 +3817,10 @@ impl UnicastMessageProcessor for UserLogic {
             let received_fragments = FragmentSet::new();
 
             // Move payload from buffer without cloning
-            let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
+            let Some(mut buffer) = self.remove_fragment_buffer(&key) else {
                 continue;
             };
+            let assembled_inline_qos = buffer.inline_qos.take();
             // Use timestamp from first fragment, fallback to current message
             let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
             if assembled_timestamp.is_none() {
@@ -3413,6 +3883,10 @@ impl UnicastMessageProcessor for UserLogic {
             );
             assembled_change.set_shared_payload(payload);
             assembled_change.set_ownership_strength(ownership_strength);
+
+            if let Some(inline_qos) = &assembled_inline_qos {
+                self.apply_inline_qos_to_change(inline_qos, &mut assembled_change)?;
+            }
 
             let _ = self.deliver_change_to_reader(
                 assembled_change,
@@ -3554,6 +4028,8 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
+        let subscriber_history_caches = Self::get_subscriber_history_caches(&matched_readers);
+
         for reader in matched_readers {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
                 // Same rule as the DATA and HEARTBEAT paths: the batch is decided under the
@@ -3604,6 +4080,17 @@ impl UnicastMessageProcessor for UserLogic {
             }
         }
 
+        // Nothing else in this Gap depends on the group gate, and a failure here is already
+        // logged where it is made.
+        if let Some(group_info) = gap.group_info {
+            let _ = self.record_gap_group_info_and_flush(
+                &subscriber_history_caches,
+                remote_writer_guid,
+                group_info,
+                gap.filtered_count,
+            );
+        }
+
         Ok(())
     }
 }
@@ -3611,6 +4098,7 @@ impl UnicastMessageProcessor for UserLogic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::common::sequence::SequenceNumberSet;
     use std::collections::BTreeSet;
 
     fn fpm(n: u32) -> NonZeroU32 {
@@ -3845,7 +4333,7 @@ mod tests {
         for (fragment_num, count) in [(1u32, 2u16), (4, 1)] {
             for with_heartbeat in [false, true] {
                 let heartbeat = with_heartbeat.then(|| {
-                    (1u32, SequenceNumber::new(0, 1), SequenceNumber::new(0, 1), false, false)
+                    (1u32, SequenceNumber::new(0, 1), SequenceNumber::new(0, 1), false, false, None)
                 });
                 MessageCreator::create_data_frag_msg(
                     &change,
@@ -4614,6 +5102,32 @@ mod tests {
         fragments_in_submessage: u16,
         payload: Vec<u8>,
     ) {
+        feed_fragment_with_inline_qos(
+            user_logic,
+            participant_prefix,
+            writer_guid,
+            sn,
+            reader_id,
+            fragment_starting_num,
+            fragments_in_submessage,
+            payload,
+            None,
+        );
+    }
+
+    /// Like `feed_fragment`, but the submessage also carries `inline_qos`.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_fragment_with_inline_qos(
+        user_logic: &mut UserLogic,
+        participant_prefix: GuidPrefix,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+        reader_id: EntityId,
+        fragment_starting_num: u32,
+        fragments_in_submessage: u16,
+        payload: Vec<u8>,
+        inline_qos: Option<ParameterList>,
+    ) {
         let mut data_frag = DataFrag::new(
             reader_id,
             writer_guid.entity_id(),
@@ -4624,6 +5138,9 @@ mod tests {
             FRAG_TEST_SAMPLE_SIZE,
         );
         data_frag.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(payload)));
+        if let Some(inline_qos) = inline_qos {
+            data_frag.set_inline_qos_list(inline_qos);
+        }
 
         let rtps_header = Header::new(writer_guid.prefix());
         let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
@@ -4687,6 +5204,68 @@ mod tests {
             .map(|c| c.data_value().to_vec())
     }
 
+    /// The inline QoS the assembled sample at `sn` kept, if this reader holds it.
+    fn held_presentation_info(
+        reader: &Arc<StatefulReader>,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+    ) -> Option<PresentationInfo> {
+        reader
+            .reader_cache()
+            .lock()
+            .expect("cache lock")
+            .get_change(sn, writer_guid)
+            .map(|c| c.presentation_info().clone())
+    }
+
+    // A GROUP-scope sample larger than one fragment must keep the group sequence number its
+    // first fragment carried, or the Subscriber HistoryCache has nothing to order it by.
+    #[test]
+    fn a_fragmented_samples_group_inline_qos_survives_assembly() {
+        let (participant, mut user_logic, reader, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+
+        let mut inline_qos = ParameterList::default();
+        inline_qos.set_group_seq_num(SequenceNumber::from_i64(11));
+        inline_qos.set_coherent_set(sn);
+        inline_qos.set_group_coherent_set(SequenceNumber::from_i64(9));
+
+        // Only the first fragment carries it, and the sample is not assembled until the last.
+        feed_fragment_with_inline_qos(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            1,
+            vec![1, 1, 1, 1],
+            Some(inline_qos),
+        );
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            2,
+            3,
+            vec![2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4],
+        );
+
+        assert_eq!(held_sample(&reader, writer_guid, sn), Some(whole_sample()));
+        assert_eq!(
+            held_presentation_info(&reader, writer_guid, sn),
+            Some(PresentationInfo {
+                coherent_set: Some(sn),
+                group_seq_num: Some(SequenceNumber::from_i64(11)),
+                group_coherent_set: Some(SequenceNumber::from_i64(9)),
+                writer_group_info: None,
+            })
+        );
+    }
+
     /// Fragment numbers this reader's ledger still calls missing for `sn`. Empty means the
     /// ledger reads complete.
     fn ledger_missing(
@@ -4728,12 +5307,12 @@ mod tests {
                 EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
             );
             let mut buffer =
-                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE).unwrap();
             for fragment in 1..=4u32 {
                 buffer.copy_fragment_data(fragment, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
             }
             assert!(buffer.all_fragments_received(), "filler buffers must not be eviction bait");
-            user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
+            drop(user_logic.insert_fragment_buffer((writer_guid, reader_id, sn), buffer));
         }
     }
 
@@ -5298,6 +5877,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ignoring_a_remote_writer_frees_the_reassembly_buffers_waiting_on_it() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            1,
+            2,
+            vec![1, 1, 1, 1, 2, 2, 2, 2],
+        );
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)));
+
+        participant.ignore_publication(writer_guid).expect("ignore_publication");
+
+        assert!(
+            user_logic.fragment_buffers.is_empty(),
+            "every buffer waiting on the ignored writer must be freed"
+        );
+    }
+
     // --- Fragment reassembly: eviction must report exactly what it removed ---
 
     #[test]
@@ -5315,14 +5921,14 @@ mod tests {
             );
             let sn = SequenceNumber::new(0, 1);
             let mut buffer =
-                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE).unwrap();
             buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
-            user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
+            drop(user_logic.insert_fragment_buffer((writer_guid, reader_id, sn), buffer));
         }
 
         let before: std::collections::HashSet<_> =
             user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
-        let evicted = user_logic.cleanup_old_fragment_buffers(2, &[]);
+        let evicted = user_logic.cleanup_old_fragment_buffers(2, FRAGMENT_BUFFER_BYTES, 0, &[]);
         let after: std::collections::HashSet<_> =
             user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
 
@@ -5354,7 +5960,8 @@ mod tests {
                 );
                 let key = (writer_guid, reader_id, sn);
                 let mut buffer =
-                    FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+                    FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE)
+                        .unwrap();
                 buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
                 buffers.insert(key, buffer);
                 key
@@ -5362,7 +5969,14 @@ mod tests {
             .collect();
 
         let arriving_keys = [keys[0], keys[1]];
-        let victims = select_eviction_victims(&buffers, 3, &arriving_keys);
+        let victims = select_eviction_victims(
+            &buffers,
+            held(&buffers),
+            3,
+            FRAGMENT_BUFFER_BYTES,
+            0,
+            &arriving_keys,
+        );
 
         for key in &arriving_keys {
             assert!(!victims.contains(key), "no key being written may be its own eviction victim");
@@ -5372,6 +5986,110 @@ mod tests {
             vec![keys[2], keys[3], keys[4]],
             "eviction must move on to the next-oldest keys once every arriving key is excluded"
         );
+    }
+
+    type FragKey = (Guid, EntityId, SequenceNumber);
+
+    // What `fragment_buffer_bytes` would read for a map built outside `UserLogic`.
+    fn held(buffers: &DashMap<FragKey, FragmentBuffer>) -> usize {
+        buffers.iter().map(|entry| entry.value().total_size as usize).sum()
+    }
+
+    fn incomplete_test_buffers(n: u8) -> (DashMap<FragKey, FragmentBuffer>, Vec<FragKey>) {
+        let buffers = DashMap::new();
+        let reader_id = EntityId::new([0xA0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let sn = SequenceNumber::new(0, 1);
+        let keys = (0..n)
+            .map(|i| {
+                let writer_guid = Guid::new(
+                    [i; 12],
+                    EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+                );
+                let key = (writer_guid, reader_id, sn);
+                let mut buffer =
+                    FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE)
+                        .unwrap();
+                buffer.copy_fragment_data(1, &vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]);
+                buffers.insert(key, buffer);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                key
+            })
+            .collect();
+        (buffers, keys)
+    }
+
+    // Every insert and removal path must keep the byte counter equal to the map's real total.
+    #[test]
+    fn fragment_buffer_bytes_tracks_every_insert_and_removal() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
+        let user_logic = UserLogic::new(participant, transport);
+        let (source, keys) = incomplete_test_buffers(4);
+        for key in &keys {
+            let (_, buffer) = source.remove(key).unwrap();
+            drop(user_logic.insert_fragment_buffer(*key, buffer));
+        }
+        let size = FRAG_TEST_SAMPLE_SIZE as usize;
+        let counter = || user_logic.fragment_buffer_bytes.load(Ordering::Relaxed);
+        assert_eq!(counter(), 4 * size);
+
+        assert!(user_logic.remove_fragment_buffer(&keys[0]).is_some());
+        user_logic.forget_fragment_buffers_for_writer(keys[1].0);
+        assert_eq!(counter(), 2 * size);
+        user_logic.cleanup_old_fragment_buffers(1, FRAGMENT_BUFFER_BYTES, 0, &[]);
+        assert_eq!(counter(), size);
+        user_logic.forget_fragment_buffers_for_reader(keys[3].1);
+        assert_eq!(counter(), 0);
+        assert!(user_logic.fragment_buffers.is_empty());
+    }
+
+    // Under the count cap, the byte budget alone evicts the stalest until the new sample fits.
+    #[test]
+    fn byte_budget_evicts_stalest_until_the_incoming_sample_fits() {
+        let (buffers, keys) = incomplete_test_buffers(3);
+        let size = FRAG_TEST_SAMPLE_SIZE as usize;
+        // 3 held + 1 incoming = 4 samples against a budget of 2.
+        let victims = select_eviction_victims(&buffers, held(&buffers), 128, 2 * size, size, &[]);
+        assert_eq!(victims, vec![keys[0], keys[1]]);
+    }
+
+    // A sample whose buffers for every matched reader exceed the budget is refused, never
+    // allocated, whether it arrives as a burst or as a repair addressed to one reader.
+    #[test]
+    fn a_sample_over_the_byte_budget_is_refused() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let fragment_size: u16 = 1344;
+        // Fits the budget for one reader, not for the two matched.
+        let sample_size = (FRAGMENT_BUFFER_BYTES / 2 + 1) as u32;
+
+        for reader_id in [reader_a.guid().entity_id(), EntityId::UNKNOWN] {
+            let mut data_frag = DataFrag::new(
+                reader_id,
+                writer_guid.entity_id(),
+                sn,
+                1,
+                1,
+                fragment_size,
+                sample_size,
+            );
+            data_frag.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(vec![
+                0u8;
+                fragment_size as usize
+            ])));
+            let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+            let message_receiver = MessageReceiver::new(participant.guid().prefix(), &from_addr);
+            user_logic
+                .handle_datafrag_message(
+                    &Header::new(writer_guid.prefix()),
+                    &data_frag,
+                    &message_receiver,
+                )
+                .expect("handle_datafrag_message must not error");
+
+            assert!(user_logic.fragment_buffers.is_empty(), "reader_id={:?}", reader_id);
+            assert_eq!(user_logic.fragment_buffer_bytes.load(Ordering::Relaxed), 0);
+        }
     }
 
     /// One reader matched to `n` distinct synthetic writers, all reliable and primed past
@@ -5703,6 +6421,7 @@ mod tests {
             SequenceNumber::from_i64(first),
             SequenceNumber::from_i64(last),
             count,
+            None,
         );
         let rtps_header = Header::new(writer_guid.prefix());
         let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
@@ -5814,7 +6533,7 @@ mod tests {
         sn: SequenceNumber,
     ) {
         feed_fragment(user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1, 1, 1, 1]);
-        let heartbeat = Heartbeat::new(reader_id, writer_guid.entity_id(), sn, sn, 1);
+        let heartbeat = Heartbeat::new(reader_id, writer_guid.entity_id(), sn, sn, 1, None);
         let rtps_header = Header::new(writer_guid.prefix());
         let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
         user_logic
@@ -6180,5 +6899,309 @@ mod tests {
             user_logic.send_credit.get(&remote_prefix).is_none(),
             "a disabled window left a charge on the shared budget"
         );
+    }
+
+    const GROUP_TEST_TOPIC: &str = "group_gate_test_topic";
+
+    fn group_publisher_guid(prefix: GuidPrefix) -> Guid {
+        Guid::new(prefix, EntityId::new([0x0A, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_GROUP))
+    }
+
+    // One GROUP access scope reader matched to one writer of one remote Publisher, with the
+    // writer discovered so the announced writerSet can match, and its proxy primed so samples
+    // deliver on arrival instead of buffering.
+    fn group_reader_with_one_matched_writer(
+    ) -> (Arc<Participant>, UserLogic, Arc<StatefulReader>, Guid, GroupDigest) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
+        let user_logic = UserLogic::new(participant.clone(), transport);
+        participant.set_user_logic(Arc::new(Some(user_logic.clone())));
+
+        let writer_guid = Guid::new(
+            [0xD0; 12],
+            EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+        );
+        let publisher_guid = group_publisher_guid(writer_guid.prefix());
+
+        // What `discovered_writer_set` hashes, and therefore what a Heartbeat's writerSet has
+        // to equal for condition b to hold.
+        let mut publication = PublicationBuiltinTopicData::default();
+        publication.set_endpoint_guid(writer_guid);
+        publication.set_group_guid(publisher_guid);
+        participant
+            .remote_publications()
+            .entry(GROUP_TEST_TOPIC.to_string())
+            .or_default()
+            .insert(writer_guid, publication.clone());
+
+        let reader_entity_id =
+            EntityId::new([0xA0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let reader = Arc::new(StatefulReader::new(
+            Guid::new(participant.guid().prefix(), reader_entity_id),
+            TopicKind::NoKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            reader_entity_id,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant.guid(),
+        ));
+
+        let subscriber_history_cache = Arc::new(Mutex::new(SubscriberHistoryCache::new(
+            participant.remote_publications(),
+            true,
+            true,
+        )));
+        subscriber_history_cache
+            .lock()
+            .expect("subscriber history cache lock")
+            .add_matched_writer(reader_entity_id, writer_guid, publisher_guid)
+            .expect("writer announced a Publisher");
+        reader.set_subscriber_history_cache(subscriber_history_cache);
+
+        reader.matched_writer_add(WriterProxy::new(
+            writer_guid,
+            publisher_guid.entity_id(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            publication,
+            reader.get_update_status_callback(),
+        ));
+        let proxies = reader.writer_proxies();
+        let mut guard = proxies.lock().expect("writer proxies lock");
+        if let Some(proxy) = guard.iter_mut().find(|p| p.remote_writer_guid() == writer_guid) {
+            proxy.set_expected_sn(SequenceNumber::new(0, 1));
+        }
+        drop(guard);
+        participant.add_reader(GROUP_TEST_TOPIC, reader.clone());
+
+        let discovered_writer_set = GroupDigest::from_entity_ids(&[writer_guid.entity_id()]);
+
+        (participant, user_logic, reader, writer_guid, discovered_writer_set)
+    }
+
+    fn feed_group_data(
+        user_logic: &mut UserLogic,
+        participant_prefix: GuidPrefix,
+        writer_guid: Guid,
+        sequence_number: i64,
+        group_seq_num: i64,
+    ) {
+        let mut inline_qos = ParameterList::default();
+        inline_qos.set_group_seq_num(SequenceNumber::from_i64(group_seq_num));
+
+        feed_data(user_logic, participant_prefix, writer_guid, sequence_number, inline_qos);
+    }
+
+    fn feed_data(
+        user_logic: &mut UserLogic,
+        participant_prefix: GuidPrefix,
+        writer_guid: Guid,
+        sequence_number: i64,
+        inline_qos: ParameterList,
+    ) {
+        let mut data = Data::new(
+            EntityId::UNKNOWN,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(sequence_number),
+        );
+        data.set_inline_qos_list(inline_qos);
+        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(vec![0u8; 4])));
+
+        let rtps_header = Header::new(writer_guid.prefix());
+        let submessage_header = SubmessageHeader::new(SubmessageId::DATA, 0, 0);
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let mut message_receiver = MessageReceiver::new(participant_prefix, &from_addr);
+        let ts_header = SubmessageHeader::new(SubmessageId::INFO_TS, 0, 0);
+        message_receiver.from_timestamp(&ts_header, &InfoTimestamp::new(Utc::now()));
+
+        user_logic
+            .handle_data_message(&rtps_header, &submessage_header, &data, &message_receiver)
+            .expect("handle_data_message must not error");
+    }
+
+    fn feed_group_heartbeat(
+        user_logic: &mut UserLogic,
+        writer_guid: Guid,
+        first_sn: i64,
+        last_sn: i64,
+        count: u32,
+        group_info: Option<heartbeat::GroupInfo>,
+    ) {
+        let heartbeat = Heartbeat::new(
+            EntityId::UNKNOWN,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(first_sn),
+            SequenceNumber::from_i64(last_sn),
+            count,
+            group_info,
+        );
+        let rtps_header = Header::new(writer_guid.prefix());
+        let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
+
+        user_logic
+            .handle_heartbeat_message(&rtps_header, &submessage_header, &heartbeat)
+            .expect("handle_heartbeat_message must not error");
+    }
+
+    fn group_heartbeat_info(
+        current_gsn: i64,
+        first_gsn: i64,
+        last_gsn: i64,
+        writer_set: GroupDigest,
+    ) -> heartbeat::GroupInfo {
+        heartbeat::GroupInfo {
+            current_gsn: SequenceNumber::from_i64(current_gsn),
+            first_gsn: SequenceNumber::from_i64(first_gsn),
+            last_gsn: SequenceNumber::from_i64(last_gsn),
+            writer_set,
+            secure_writer_set: GroupDigest::EMPTY,
+        }
+    }
+
+    fn stored_group_seq_nums(reader: &StatefulReader) -> Vec<i64> {
+        reader
+            .available_changes()
+            .iter()
+            .filter_map(|change| change.presentation_info().group_seq_num)
+            .map(|group_seq_num| group_seq_num.to_i64())
+            .collect()
+    }
+
+    // Group sequence number 2 never arrives, so 3 may not be handed over on arrival.
+    fn group_reader_with_a_hole_at_two(
+    ) -> (Arc<Participant>, UserLogic, Arc<StatefulReader>, Guid, GroupDigest) {
+        let (participant, mut user_logic, reader, writer_guid, discovered_writer_set) =
+            group_reader_with_one_matched_writer();
+        let prefix = participant.guid().prefix();
+
+        feed_group_data(&mut user_logic, prefix, writer_guid, 1, 1);
+        feed_group_data(&mut user_logic, prefix, writer_guid, 2, 3);
+
+        (participant, user_logic, reader, writer_guid, discovered_writer_set)
+    }
+
+    #[test]
+    fn a_group_reader_stores_a_sample_without_a_group_seq_num_on_arrival() {
+        let (participant, mut user_logic, reader, writer_guid, _writer_set) =
+            group_reader_with_one_matched_writer();
+
+        feed_data(
+            &mut user_logic,
+            participant.guid().prefix(),
+            writer_guid,
+            1,
+            ParameterList::default(),
+        );
+
+        assert_eq!(reader.available_changes().len(), 1);
+    }
+
+    #[test]
+    fn a_group_reader_holds_a_sample_behind_a_hole() {
+        let (_participant, _user_logic, reader, _writer_guid, _writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1]);
+    }
+
+    #[test]
+    fn a_heartbeat_covering_the_hole_releases_the_held_sample() {
+        let (_participant, mut user_logic, reader, writer_guid, writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        // The group reached 3 and this writer never held 2, so nothing will ever fill it.
+        feed_group_heartbeat(
+            &mut user_logic,
+            writer_guid,
+            1,
+            2,
+            1,
+            Some(group_heartbeat_info(3, 3, 3, writer_set)),
+        );
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1, 3]);
+    }
+
+    #[test]
+    fn a_heartbeat_with_a_different_writer_set_keeps_the_sample_held() {
+        let (_participant, mut user_logic, reader, writer_guid, _writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        // A writer set we did not discover: the Heartbeat does not speak for the whole group.
+        let unknown_writer_set = GroupDigest::from_entity_ids(&[EntityId::new(
+            [0x09, 0x00, 0x00],
+            EntityKind::USER_DEFINED_WRITER_NO_KEY,
+        )]);
+        feed_group_heartbeat(
+            &mut user_logic,
+            writer_guid,
+            1,
+            2,
+            1,
+            Some(group_heartbeat_info(3, 3, 3, unknown_writer_set)),
+        );
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1]);
+    }
+
+    #[test]
+    fn a_gap_declaring_the_hole_gone_releases_the_held_sample() {
+        let (participant, mut user_logic, reader, writer_guid, writer_set) =
+            group_reader_with_one_matched_writer();
+        let prefix = participant.guid().prefix();
+
+        // Group sequence number 2 left with the sample that carried writer sequence number 2,
+        // so 3 waits behind both holes.
+        feed_group_data(&mut user_logic, prefix, writer_guid, 1, 1);
+        feed_group_data(&mut user_logic, prefix, writer_guid, 3, 3);
+
+        // Writer sequence number 2 is irrelevant, and the group position it carried is 2.
+        let gap = Gap::new(
+            EntityId::UNKNOWN,
+            writer_guid.entity_id(),
+            SequenceNumber::from_i64(2),
+            SequenceNumberSet::new_empty_with_base(SequenceNumber::from_i64(3)),
+            Some(gap::GroupInfo {
+                gap_start_gsn: SequenceNumber::from_i64(2),
+                gap_end_gsn: SequenceNumber::from_i64(2),
+            }),
+            None,
+        );
+        let rtps_header = Header::new(writer_guid.prefix());
+        user_logic
+            .handle_gap_message(&rtps_header, &gap)
+            .expect("handle_gap_message must not error");
+
+        // The Gap alone states nothing about where the group is, so it takes a Heartbeat too.
+        // Its first and last span the hole, so the Gap is the only thing that crosses it.
+        feed_group_heartbeat(
+            &mut user_logic,
+            writer_guid,
+            1,
+            3,
+            1,
+            Some(group_heartbeat_info(3, 1, 3, writer_set)),
+        );
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1, 3]);
+    }
+
+    // A peer that offers GROUP access scope but sends no group info leaves the gate with no
+    // evidence to cross a hole. Whether to break the wait is decided separately.
+    #[test]
+    fn heartbeats_without_group_info_leave_the_hole_held() {
+        let (_participant, mut user_logic, reader, writer_guid, _writer_set) =
+            group_reader_with_a_hole_at_two();
+
+        for count in 1..=3 {
+            feed_group_heartbeat(&mut user_logic, writer_guid, 1, 2, count, None);
+        }
+
+        assert_eq!(stored_group_seq_nums(&reader), vec![1]);
     }
 }

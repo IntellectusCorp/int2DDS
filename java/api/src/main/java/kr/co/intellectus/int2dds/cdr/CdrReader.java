@@ -199,6 +199,18 @@ public final class CdrReader {
         return Double.longBitsToDouble(readI64());
     }
 
+    /** Reads an IEEE binary128 ({@code float128}) with 8-byte alignment. */
+    public Float128 readF128() {
+        align(8);
+        require(16);
+        long first = data.getLong(pos);
+        long second = data.getLong(pos + 8);
+        pos += 16;
+        return data.order() == ByteOrder.LITTLE_ENDIAN
+                ? new Float128(first, second)
+                : new Float128(second, first);
+    }
+
     // ---- strings, sequences, raw bytes -----------------------------------
 
     private static final java.nio.charset.Charset UTF8 = java.nio.charset.Charset.forName("UTF-8");
@@ -223,19 +235,17 @@ public final class CdrReader {
     }
 
     /**
-     * Reads a CDR wstring: a uint32 count of UTF-16 units, then that many u16 units. No terminator,
-     * unlike {@link #readString}, so a count of zero is the empty wstring and not a malformed one.
+     * Reads a CDR wstring: a uint32 length in bytes (XTypes 1.3 7.4.1.1.2), then that many bytes
+     * as u16 units. No terminator, unlike {@link #readString}, so a length of zero is the empty
+     * wstring and not a malformed one.
      */
     public String readWString() {
-        int units = readI32();
-        if (units < 0) {
-            throw new CdrUnderflowException("Invalid wstring length: " + units);
-        }
-        long needed = 2L * units;
+        long needed = Integer.toUnsignedLong(readU32());
         if (needed > remaining()) {
             throw new CdrUnderflowException(
-                    "wstring claims " + units + " units but only " + remaining() + " bytes remain");
+                    "wstring claims " + needed + " bytes but only " + remaining() + " remain");
         }
+        int units = (int) (needed / 2);
         char[] chars = new char[units];
         for (int i = 0; i < units; i++) {
             chars[i] = (char) readU16();

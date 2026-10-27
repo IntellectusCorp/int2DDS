@@ -40,6 +40,11 @@ public final class PublicationBuiltinTopicData {
     private final int livelinessLeaseSeconds;
     private final int livelinessLeaseNanos;
     private final byte[] userData;
+    private final int presentationAccessScope;
+    private final boolean presentationCoherentAccess;
+    private final boolean presentationOrderedAccess;
+    private final byte[] topicData;
+    private final byte[] groupData;
     private final int instanceState;
     private final boolean hasData;
     private final TypeObject typeObject;
@@ -60,6 +65,11 @@ public final class PublicationBuiltinTopicData {
             int livelinessLeaseSeconds,
             int livelinessLeaseNanos,
             byte[] userData,
+            int presentationAccessScope,
+            boolean presentationCoherentAccess,
+            boolean presentationOrderedAccess,
+            byte[] topicData,
+            byte[] groupData,
             int instanceState,
             boolean hasData,
             TypeObject typeObject) {
@@ -78,6 +88,11 @@ public final class PublicationBuiltinTopicData {
         this.livelinessLeaseSeconds = livelinessLeaseSeconds;
         this.livelinessLeaseNanos = livelinessLeaseNanos;
         this.userData = userData;
+        this.presentationAccessScope = presentationAccessScope;
+        this.presentationCoherentAccess = presentationCoherentAccess;
+        this.presentationOrderedAccess = presentationOrderedAccess;
+        this.topicData = topicData;
+        this.groupData = groupData;
         this.instanceState = instanceState;
         this.hasData = hasData;
         this.typeObject = typeObject;
@@ -173,6 +188,29 @@ public final class PublicationBuiltinTopicData {
         return userData.clone();
     }
 
+    /** The publisher's presentation access scope: 0 = INSTANCE, 1 = TOPIC, 2 = GROUP. */
+    public int presentationAccessScope() {
+        return presentationAccessScope;
+    }
+
+    public boolean presentationCoherentAccess() {
+        return presentationCoherentAccess;
+    }
+
+    public boolean presentationOrderedAccess() {
+        return presentationOrderedAccess;
+    }
+
+    /** The raw {@code topic_data} bytes (defensively copied), possibly empty. */
+    public byte[] topicData() {
+        return topicData.clone();
+    }
+
+    /** The publisher's raw {@code group_data} bytes (defensively copied), possibly empty. */
+    public byte[] groupData() {
+        return groupData.clone();
+    }
+
     /**
      * Reads every field off a live native {@code PublicationBuiltinTopicData} box into an immutable
      * snapshot. {@code data} must still be valid when this is called; the caller retains ownership
@@ -199,6 +237,11 @@ public final class PublicationBuiltinTopicData {
                 0,
                 0,
                 0,
+                new byte[0],
+                0,
+                false,
+                false,
+                new byte[0],
                 new byte[0],
                 instanceState,
                 false,
@@ -295,6 +338,40 @@ public final class PublicationBuiltinTopicData {
                         },
                         userDataBytes));
 
+        int[] presentationAccessScope = new int[1];
+        boolean[] presentationCoherentAccess = new boolean[1];
+        boolean[] presentationOrderedAccess = new boolean[1];
+        ReturnCodes.check(
+                FfiAccess.pubDataGetPresentation(
+                        data,
+                        presentationAccessScope,
+                        presentationCoherentAccess,
+                        presentationOrderedAccess));
+
+        byte[][] topicDataBytes = new byte[1][];
+        ReturnCodes.check(
+                FfiAccess.readGrowableBytes(
+                        new FfiAccess.GrowableBytesGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.pubDataGetTopicData(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        topicDataBytes));
+
+        byte[][] groupDataBytes = new byte[1][];
+        ReturnCodes.check(
+                FfiAccess.readGrowableBytes(
+                        new FfiAccess.GrowableBytesGetter() {
+                            @Override
+                            public int get(long buf, long capacity, long sizeOut) {
+                                return FfiAccess.pubDataGetGroupData(
+                                        dataHandle, buf, capacity, sizeOut);
+                            }
+                        },
+                        groupDataBytes));
+
         return new PublicationBuiltinTopicData(
                 key,
                 endpointGuid,
@@ -311,6 +388,11 @@ public final class PublicationBuiltinTopicData {
                 leaseSeconds[0],
                 leaseNanos[0],
                 userDataBytes[0],
+                presentationAccessScope[0],
+                presentationCoherentAccess[0],
+                presentationOrderedAccess[0],
+                topicDataBytes[0],
+                groupDataBytes[0],
                 instanceState,
                 true,
                 typeObject);

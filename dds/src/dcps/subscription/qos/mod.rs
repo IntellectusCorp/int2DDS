@@ -158,6 +158,18 @@ impl Qos for DataReaderQos {
         Ok(())
     }
 
+    fn check_values(&self) -> DdsResult<()> {
+        self.deadline.check_values()?;
+        self.latency_budget.check_values()?;
+        self.liveliness.check_values()?;
+        self.reliability.check_values()?;
+        self.time_based_filter.check_values()?;
+        self.reader_data_lifecycle.check_values()?;
+        self.reader_reliability_extension.check_values()?;
+        self.history.check_values()?;
+        self.resource_limits.check_values()
+    }
+
     fn is_consistent(&self) -> DdsResult<()> {
         self.resource_limits.is_consistent()?;
         if self.resource_limits.max_samples_per_instance != LENGTH_UNLIMITED
@@ -182,16 +194,6 @@ pub struct SubscriberQos {
 }
 
 impl Qos for SubscriberQos {
-    fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if
-        // || self.partition != PartitionQosPolicy::default()
-        self.group_data != GroupDataQosPolicy::default() {
-            return Err(DdsError::Unsupported);
-        }
-
-        Ok(())
-    }
-
     fn check_immutable_change(&self, new_qos: &Self) -> DdsResult<()> {
         if self.presentation != new_qos.presentation {
             return Err(DdsError::ImmutablePolicy);

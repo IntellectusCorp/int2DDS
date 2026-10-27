@@ -28,6 +28,19 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_subscriber_delete_contained_entities(IntPtr subscriber);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_begin_access(IntPtr subscriber);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_end_access(IntPtr subscriber);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscriber_get_datareaders(IntPtr subscriber, uint sample_state_mask,
+            uint view_state_mask, uint instance_state_mask, byte* handles_out, UIntPtr capacity, out UIntPtr count_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_notify_datareaders(IntPtr subscriber);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_create_datareader(IntPtr subscriber, IntPtr topic, IntPtr qos, NativeDataReaderListener* listener, uint mask, out IntPtr reader_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -131,7 +144,52 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datareader_return_serialized_loan(IntPtr loan);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_read_loaned(IntPtr reader, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_take_loaned(IntPtr reader, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_read_w_condition_loaned(IntPtr reader, IntPtr condition, int max_samples, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_take_w_condition_loaned(IntPtr reader, IntPtr condition, int max_samples, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_read_instance_loaned(IntPtr reader, byte* handle, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_take_instance_loaned(IntPtr reader, byte* handle, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_read_next_instance_loaned(IntPtr reader, byte* previous_handle, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_take_next_instance_loaned(IntPtr reader, byte* previous_handle, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_read_next_instance_w_condition_loaned(IntPtr reader, byte* previous_handle, IntPtr condition, int max_samples, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_take_next_instance_w_condition_loaned(IntPtr reader, byte* previous_handle, IntPtr condition, int max_samples, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern UIntPtr int2dds_loaned_samples_length(IntPtr loan);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_loaned_samples_get_info(IntPtr loan, UIntPtr index, NativeSampleInfo* info_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_loaned_samples_get_data(IntPtr loan, UIntPtr index, out byte* data_out, out UIntPtr size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_return_loan(IntPtr reader, IntPtr loan);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datareader_get_guid(IntPtr reader, byte* guid_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_get_instance_handle(IntPtr reader, byte* handle_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datareader_has_data(IntPtr reader, [MarshalAs(UnmanagedType.U1)] out bool has_data_out);

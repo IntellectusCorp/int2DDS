@@ -4,6 +4,7 @@ mod bounded_types;
 mod collections;
 mod endianness;
 mod errors;
+mod float128;
 mod primitive;
 mod reader;
 pub mod xcdr;
@@ -14,6 +15,7 @@ pub use bounded_types::*;
 pub use collections::*;
 pub use endianness::*;
 pub use errors::*;
+pub use float128::{Float128, ParseFloat128Error};
 pub use primitive::*;
 pub use reader::*;
 

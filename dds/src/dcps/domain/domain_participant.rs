@@ -102,7 +102,7 @@ use crate::{
     publication::{publisher::Publisher, publisher_listener::PublisherListener, qos::PublisherQos},
     rtps::{
         builtin::data::participant_message_data::ParticipantMessageData,
-        common::{guid::Guid, rtps_error_code::RtpsErrorCode},
+        common::{entity_id::EntityId, guid::Guid, rtps_error_code::RtpsErrorCode},
         dcps_bridge::dcps_bridge::DcpsBridge,
         entities::{
             entity::Entity as RtpsEntity, participant::Participant as RtpsParticipant,
@@ -352,6 +352,22 @@ impl EnableChild for DomainParticipant {
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
+    fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
+        if self.is_enabled().is_err() {
+            self.get_rtps_participant()?.set_local_user_data(qos.user_data.clone());
+            return Ok(());
+        }
+
+        let dcps_bridge = self.get_dcps_bridge()?;
+        let dcps_bridge = dcps_bridge
+            .as_ref()
+            .ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?;
+
+        // This is the only changeable QoS for DomainParticipant.
+        dcps_bridge
+            .update_participant(qos.user_data.clone())
+            .map_err(|e| DdsError::Error(e.message))
+    }
     fn enable_child_entities(&self) -> DdsResult<()> {
         // Helper macro to reduce repetitive code
         macro_rules! enable_entities {
@@ -418,8 +434,8 @@ impl DomainParticipant {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<Self> {
-        let dcps_bridge = DcpsBridge::new(domain_id as u32, &qos.property)
-            .map_err(|e| DdsError::Error(e.message))?;
+        let dcps_bridge =
+            DcpsBridge::new(domain_id as u32, &qos).map_err(|e| DdsError::Error(e.message))?;
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
 
         let mut participant = Self {
@@ -655,7 +671,7 @@ impl DomainParticipant {
     }
 
     // TODO: RTPS layer implementation must be completed first (Built-in)
-    pub fn ignore_participant(&self, _handle: InstanceHandle) -> DdsResult<()> {
+    pub fn ignore_participant(&self, handle: InstanceHandle) -> DdsResult<()> {
         /*
             This operation allows the application to instruct the service to locally ignore a specific remote DomainParticipant.
             After this operation is called, the service will behave locally as if the remote participant does not exist.
@@ -677,29 +693,30 @@ impl DomainParticipant {
 
             Error codes that may be returned in addition to standard error codes: OUT_OF_RESOURCES.
         */
-        // match &self.rtps_participant {
-        //     None => DdsError::NotEnabled,
-        //     Some(participant) => {
-        //         if participant.ignore_participant(instance_handle_to_guid(handle).guid_prefix) {
-        //             DdsError::Ok
-        //         } else {
-        //             DdsError::BadParameter
-        //         }
-        //     }
-        // }
+        let _operation = self.lifecycle.begin_operation()?;
+        self.is_enabled()?;
+        self.reject_local_entity_handle(handle)?;
 
-        // Expected code..
-        // match self.is_enabled() {
-        //     DdsError::Ok => (),
-        //     err_code => return Err(err_code),
-        // }
-        // self.rtps_participant.ignore_participant(handle.to_guid().prefix())
+        let participant_prefix = handle.to_guid().prefix();
+        self.get_rtps_participant()?
+            .ignore_participant(participant_prefix)
+            .map_err(|e| DdsError::Error(e.message))?;
 
-        Err(DdsError::Unsupported)
+        // Every endpoint the participant announced loses its only writer.
+        self.revoke_sedp_writer_ownership_of_builtin_instances::<PublicationBuiltinTopicData>(
+            "DCPSPublication",
+            Guid::new(participant_prefix, EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER),
+            None,
+        )?;
+        self.revoke_sedp_writer_ownership_of_builtin_instances::<SubscriptionBuiltinTopicData>(
+            "DCPSSubscription",
+            Guid::new(participant_prefix, EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER),
+            None,
+        )
     }
 
     // TODO: RTPS layer implementation must be completed first (Built-in)
-    pub fn ignore_publication(&self, _handle: InstanceHandle) -> DdsResult<()> {
+    pub fn ignore_publication(&self, handle: InstanceHandle) -> DdsResult<()> {
         /*
             ignore_publication
             This operation allows the application to instruct the service to locally ignore a remote publication.
@@ -718,16 +735,24 @@ impl DomainParticipant {
 
             OUT_OF_RESOURCES
         */
-        // match self.is_enabled() {
-        //     DdsError::Ok => (),
-        //     err_code => return Err(err_code),
-        // }
+        let _operation = self.lifecycle.begin_operation()?;
+        self.is_enabled()?;
+        self.reject_local_entity_handle(handle)?;
 
-        Err(DdsError::Unsupported)
+        self.get_rtps_participant()?
+            .ignore_publication(handle.to_guid())
+            .map_err(|e| DdsError::Error(e.message))?;
+
+        // The remote SEDP writer stays matched, so only this instance loses its writer.
+        self.revoke_sedp_writer_ownership_of_builtin_instances::<PublicationBuiltinTopicData>(
+            "DCPSPublication",
+            Guid::new(handle.to_guid().prefix(), EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER),
+            Some(handle),
+        )
     }
 
     // TODO: RTPS layer implementation must be completed first (Built-in)
-    pub fn ignore_subscription(&self, _handle: InstanceHandle) -> DdsResult<()> {
+    pub fn ignore_subscription(&self, handle: InstanceHandle) -> DdsResult<()> {
         /*
             This operation allows the application to instruct the service to locally ignore a remote subscription.
             A subscription is defined by the combination of a topic name and the user data and partition set configured in the Subscriber
@@ -745,12 +770,20 @@ impl DomainParticipant {
 
             OUT_OF_RESOURCES
         */
-        // match self.is_enabled() {
-        //     DdsError::Ok => (),
-        //     err_code => return Err(err_code),
-        // }
+        let _operation = self.lifecycle.begin_operation()?;
+        self.is_enabled()?;
+        self.reject_local_entity_handle(handle)?;
 
-        Err(DdsError::Unsupported)
+        self.get_rtps_participant()?
+            .ignore_subscription(handle.to_guid())
+            .map_err(|e| DdsError::Error(e.message))?;
+
+        // The remote SEDP writer stays matched, so only this instance loses its writer.
+        self.revoke_sedp_writer_ownership_of_builtin_instances::<SubscriptionBuiltinTopicData>(
+            "DCPSSubscription",
+            Guid::new(handle.to_guid().prefix(), EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER),
+            Some(handle),
+        )
     }
 
     /// Creates a new `Publisher` for publishing data.
@@ -805,6 +838,7 @@ impl DomainParticipant {
             }
         };
 
+        qos.check_values()?;
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
 
@@ -1027,6 +1061,7 @@ impl DomainParticipant {
             }
         };
 
+        qos.check_values()?;
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
 
@@ -1672,7 +1707,9 @@ impl DomainParticipant {
 
         let qos = self.resolve_topic_qos(qos.into());
 
+        qos.check_values()?;
         qos.is_consistent()?;
+        self.check_topic_type_matches(topic_name, type_name)?;
         let handle = self.create_instance_handle()?;
 
         let type_support = Foo::TypeSupport::default();
@@ -2027,6 +2064,16 @@ impl DomainParticipant {
         }
     }
 
+    /// A participant cannot hold two topics with the same name but different types.
+    fn check_topic_type_matches(&self, topic_name: &str, type_name: &str) -> DdsResult<()> {
+        match self.find_topic_by_name(topic_name)? {
+            Some(existing) if existing.get_type_name() != type_name => {
+                Err(DdsError::PreconditionNotMet)
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn find_topic_description_by_name(
         &self,
         topic_name: &str,
@@ -2063,7 +2110,6 @@ impl DomainParticipant {
             Retrieves a list of DomainParticipants that the application has not specified to "ignore" through the ignore_participant operation.
             If the infrastructure does not maintain connectivity information locally
         */
-        // TODO: Filter out participants ignored via ignore_participant operation
         let _operation = self.lifecycle.begin_operation()?;
         let rtps_participant = self.get_rtps_participant()?;
         let proxy_datas = rtps_participant.remote_participant_proxy_datas();
@@ -2093,7 +2139,6 @@ impl DomainParticipant {
             The get_discovered_participants operation can be used to find currently discovered DomainParticipants.
             If the infrastructure does not maintain the information needed to fill participant_data,
         */
-        // TODO: Filter out participants ignored via ignore_participant operation
         let _operation = self.lifecycle.begin_operation()?;
         let participant_guid = participant_handle.to_guid();
         let rtps_participant = self.get_rtps_participant()?;
@@ -2226,6 +2271,7 @@ impl DomainParticipant {
         match qos.into() {
             QosKind::Default => self.reset_default_publisher_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_publisher_qos.lock() {
                     Ok(mut default_qos) => {
@@ -2282,6 +2328,7 @@ impl DomainParticipant {
         match qos.into() {
             QosKind::Default => self.reset_default_subscriber_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_subscriber_qos.lock() {
                     Ok(mut default_qos) => {
@@ -2335,6 +2382,7 @@ impl DomainParticipant {
         match qos.into() {
             QosKind::Default => self.reset_default_topic_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_topic_qos.lock() {
                     Ok(mut default_qos) => {
@@ -2424,7 +2472,7 @@ impl DomainParticipant {
         }
     }
 
-    fn get_publishers(&self) -> DdsResult<Vec<Arc<Publisher>>> {
+    pub(crate) fn get_publishers(&self) -> DdsResult<Vec<Arc<Publisher>>> {
         match self.publishers.lock() {
             Ok(mut publishers) => {
                 let mut valid_publishers = Vec::new();
@@ -2442,7 +2490,7 @@ impl DomainParticipant {
         }
     }
 
-    fn get_subscribers(&self) -> DdsResult<Vec<Arc<Subscriber>>> {
+    pub(crate) fn get_subscribers(&self) -> DdsResult<Vec<Arc<Subscriber>>> {
         match self.subscribers.lock() {
             Ok(mut subscribers) => {
                 let mut valid_subscribers = Vec::new();
@@ -2705,10 +2753,12 @@ impl DomainParticipant {
         // existing callers are unaffected.
         let qos = self.resolve_topic_qos(qos.into());
 
+        qos.check_values()?;
         qos.is_consistent()?;
+        let type_name = type_support.get_type_name().to_string();
+        self.check_topic_type_matches(topic_name, &type_name)?;
         let handle = self.create_instance_handle()?;
 
-        let type_name = type_support.get_type_name().to_string();
         self.register_type_for_topic(type_support, &type_name)?;
 
         let self_ref = self
@@ -3043,6 +3093,37 @@ impl DomainParticipant {
         } else {
             Err(DdsError::NotEnabled)
         }
+    }
+
+    // Returns BadParameter when the handle identifies this participant or one of its entities.
+    fn reject_local_entity_handle(&self, handle: InstanceHandle) -> DdsResult<()> {
+        let local_prefix = self.get_instance_handle()?.to_guid().prefix();
+
+        if handle.to_guid().prefix() == local_prefix {
+            log::debug!("Rejected ignore of local entity {}", handle);
+            return Err(DdsError::BadParameter);
+        }
+
+        Ok(())
+    }
+
+    // Marks the built-in topic instances announced by the SEDP writer NOT_ALIVE_NO_WRITERS. With
+    // None, every instance of that writer is marked.
+    fn revoke_sedp_writer_ownership_of_builtin_instances<Foo: 'static + Clone + Debug>(
+        &self,
+        builtin_topic_name: &str,
+        sedp_writer_guid: Guid,
+        instance_handle: Option<InstanceHandle>,
+    ) -> DdsResult<()> {
+        let builtin_reader =
+            self.get_builtin_subscriber()?.lookup_datareader::<Foo>(builtin_topic_name)?;
+
+        let datareader_cache = builtin_reader.get_datareader_cache()?;
+        let datareader_cache =
+            datareader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        datareader_cache.revoke_writer_ownership(sedp_writer_guid, instance_handle, true, true)?;
+
+        Ok(())
     }
 
     pub(crate) fn disable(&self) -> DdsResult<()> {
@@ -4791,5 +4872,39 @@ mod domain_participant_tests {
         // Should return error on deleted participant
         let result = participant_clone.get_builtin_subscriber();
         assert!(result.is_err(), "get_builtin_subscriber on deleted participant should fail");
+    }
+
+    #[test]
+    fn create_topic_rejects_same_name_with_different_type() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let _topic = participant
+            .create_topic::<HelloWorld>(
+                "dup_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let res = participant.create_topic::<TestData>(
+            "dup_topic",
+            "TestData",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        );
+        assert!(matches!(res, Err(DdsError::PreconditionNotMet)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

@@ -198,6 +198,11 @@ impl SedpLogic {
                     self.type_lookup_pending.lock().ok().and_then(|mut map| map.remove(related));
                 let prefix = pending.as_ref().map(|(p, _)| *p).unwrap_or(replier_prefix);
 
+                debug!(
+                    "[TypeLookup] getTypeDependencies reply: {} id(s), continuation {}B",
+                    dependent_typeids.len(),
+                    continuation_point.len()
+                );
                 let mut needed: Vec<TypeIdentifier> = Vec::new();
                 if let Ok(registry) = participant.type_registry().read() {
                     for dep in &dependent_typeids {
@@ -358,6 +363,7 @@ impl SedpLogic {
         if type_ids.is_empty() {
             return Ok(());
         }
+        debug!("[TypeLookup] getTypes request to {:?}: {} id(s)", remote_prefix, type_ids.len());
         let pending = self.type_lookup_pending.clone();
         let root = type_ids[0].clone();
         let call = TypeLookupCall::GetTypes(GetTypesIn { type_ids });
@@ -369,7 +375,10 @@ impl SedpLogic {
                     map.insert(request_id.clone(), (remote_prefix, root));
                 }
                 let request = TypeLookupRequest {
-                    header: RequestHeader { request_id, instance_name: String::new() },
+                    header: RequestHeader {
+                        request_id,
+                        instance_name: type_lookup_instance_name(remote_prefix),
+                    },
                     data: call,
                 };
                 request.serialize()
@@ -383,6 +392,7 @@ impl SedpLogic {
         root: TypeIdentifier,
         continuation_point: Vec<u8>,
     ) -> RtpsResult<()> {
+        debug!("[TypeLookup] getTypeDependencies request to {:?}", remote_prefix);
         let pending = self.type_lookup_pending.clone();
         let input = GetTypeDependenciesIn { type_ids: vec![root.clone()], continuation_point };
         self.send_type_lookup_request(
@@ -393,7 +403,10 @@ impl SedpLogic {
                     map.insert(request_id.clone(), (remote_prefix, root));
                 }
                 let request = TypeLookupRequest {
-                    header: RequestHeader { request_id, instance_name: String::new() },
+                    header: RequestHeader {
+                        request_id,
+                        instance_name: type_lookup_instance_name(remote_prefix),
+                    },
                     data: TypeLookupCall::GetTypeDependencies(input),
                 };
                 request.serialize()
@@ -448,7 +461,18 @@ impl SedpLogic {
         if already {
             return;
         }
-        let _ = self.request_get_type_dependencies(remote_prefix, type_id.clone(), Vec::new());
+        // SEDP re-announcements must not issue a second request while one is outstanding.
+        let in_flight = self
+            .type_lookup_pending
+            .lock()
+            .map(|map| map.values().any(|(p, root)| *p == remote_prefix && root == type_id))
+            .unwrap_or(false);
+        if in_flight {
+            return;
+        }
+        // getTypes first: some vendors (e.g. Cyclone) do not implement getTypeDependencies.
+        // Missing dependencies of the reply are fetched by further getTypes rounds.
+        let _ = self.request_get_types(remote_prefix, vec![type_id.clone()]);
     }
 
     /// Build a CacheChange for `payload`, track it on `writer`, and send it.
@@ -477,4 +501,14 @@ impl SedpLogic {
             writer_entity_id,
         )
     }
+}
+
+/// `instance_name` addressing the TypeLookup service of `prefix` (XTypes 1.3 §7.6.3.3.4).
+fn type_lookup_instance_name(prefix: GuidPrefix) -> String {
+    let hex: String = Guid::new(prefix, EntityId::PARTICIPANT)
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("dds.builtin.TOS.{hex}")
 }

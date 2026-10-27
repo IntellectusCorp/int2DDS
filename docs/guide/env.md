@@ -27,6 +27,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
 | `INT2DDS_SEND_CREDIT_BACKSTOP_MS`    | Writer send-credit backstop (ms)           | 250                     |
 | `INT2DDS_ENABLE_SEND_WINDOW`         | Bound fragment sends by peer receive buffer | false                  |
+| `INT2DDS_XTYPES_RTI_KEY_COMPAT`      | Skip XTypes key member rules (RTI Connext) | false                   |
 | `INT2DDS_NACK_RESPONSE_DELAY_MS`     | Writer delay before repair reply (ms)      | 0                       |
 | `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` | Writer piggyback HEARTBEAT off    | false                   |
 | `INT2DDS_SEDP_HEARTBEAT_MS`          | SEDP heartbeat period (ms)                 | heartbeat_period (2000) |
@@ -37,8 +38,6 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_FUNCTION_TIMING`            | Enable function timing                     | false                   |
 | `INT2DDS_FUNCTION_TIMING_LOG_PATH`   | Function timing log path                   | ./function_timing.log   |
 | `INT2DDS_EXTERNAL_ADDRESS`           | Public IPv4 advertised in SPDP (NAT/WAN)   | none                    |
-| `INT2DDS_META_PORT`                  | Pinned metatraffic unicast port            | RTPS standard           |
-| `INT2DDS_USER_PORT`                  | Pinned user-traffic unicast port           | RTPS standard           |
 
 ---
 
@@ -157,6 +156,7 @@ cargo run --example hello_world_pub
 ### INT2DDS_NETWORK_INTERFACE
 
 Specifies the network interface name to use (e.g., eth0, wlan0, en0).
+The first non-loopback IPv4 address of that interface is used for every socket.
 If not specified, all available interfaces will be used.
 
 #### Configuration
@@ -177,7 +177,7 @@ cargo run --example hello_world_pub
 
 ### INT2DDS_NETWORK_IP
 
-Directly specifies the network IP address to use.
+Directly specifies the IPv4 address to use for every socket.
 If not specified, all available addresses will be used.
 
 #### Configuration
@@ -196,6 +196,19 @@ export INT2DDS_NETWORK_IP=192.168.1.100
 cargo run --example hello_world_pub
 ```
 
+### Network selection rules
+
+1. `INT2DDS_NETWORK_IP` is checked first. A non-loopback IPv4 address pins every
+   socket (send, receive and the addresses announced to other participants) to it.
+2. Otherwise `INT2DDS_NETWORK_INTERFACE` is checked. An interface with a
+   non-loopback IPv4 address pins every socket to that address.
+3. Otherwise all available interfaces are used.
+
+A value that cannot be used (malformed, empty, IPv6, loopback, or an interface
+without an IPv4 address) logs a warning and is ignored, as if it were not set.
+Release builds keep only error logs, so there the value is ignored without any log.
+While an address is pinned, `INT2DDS_USE_LOOPBACK_INTERFACE` does not add 127.0.0.1.
+
 ### INT2DDS_USE_LOOPBACK_INTERFACE
 
 Enables the loopback interface for endpoint communication. <br>
@@ -206,7 +219,7 @@ However, new participants will not be discovered since loopback multicast discov
 
 #### Interaction with Other Settings
 
-- When int2DDS-feature provides the working IP, this setting is ignored. The feature-specified NIC takes full control of the network interface selection.
+- While `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE` pins an address, this setting is ignored and 127.0.0.1 is not added.
 - If no network interfaces are available (e.g., WiFi and Ethernet disconnected), loopback is automatically used without setting this variable.
 
 #### Configuration
@@ -233,7 +246,7 @@ same host and multicast traffic must not leave the machine.
 
 #### Interaction with Other Settings
 
-- When int2DDS-feature provides the working IP, this setting is ignored. The feature-specified NIC takes full control of the network interface selection.
+- While `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE` pins an address, this setting is ignored and multicast goes out through the pinned address.
 - Use together with `INT2DDS_USE_LOOPBACK_INTERFACE=true`. The multicast group is joined on each working IP, so 127.0.0.1 must be in the working IP list for the loopback-sent multicast to be received.
 
 #### Configuration
@@ -567,7 +580,7 @@ Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages a
 - The port must be the remote participant's **metatraffic unicast port** (discovery unicast port)
 - Port calculation: `7400 + (250 * domain_id) + 10 + (2 * participant_id)`
   - `participant_id` is assigned sequentially starting from 0 for each participant created on the same host
-- When the remote peer is behind NAT, point this at its `INT2DDS_EXTERNAL_ADDRESS:META_PORT` (see [NAT / WAN Traversal Settings](#nat--wan-traversal-settings))
+- When the remote peer is behind NAT, point this at its `INT2DDS_EXTERNAL_ADDRESS` and metatraffic unicast port (see [NAT / WAN Traversal Settings](#nat--wan-traversal-settings))
 
 #### Configuration
 
@@ -712,6 +725,38 @@ export INT2DDS_ENABLE_SEND_WINDOW=true
 cargo run --example hello_world_pub
 ```
 
+### INT2DDS_XTYPES_RTI_KEY_COMPAT
+
+Whether type matching skips the key member rules of DDS-XTypes 1.3 Table 19.
+By default a writer type is assignable to a reader type only if its key maps
+onto the reader's key without loss:
+
+- every literal of a `@key` enum on the writer exists on the reader,
+- a `@key` string, sequence or map has a reader bound at least as large, even
+  when `ignore_string_bounds`/`ignore_sequence_bounds` is set,
+- a `@key` struct keeps the same key members (KeyHolder) on both sides,
+- every union case of a `@key` union selects a reader case.
+
+RTI Connext does not apply these rules and matches such pairs. Set this to
+`true` to match the same way when talking to Connext; key bounds then follow
+the `ignore_*_bounds` flags. Read each time a writer and reader are matched.
+
+- Default: `false`
+- Values other than `true`/`1` and `false`/`0` are logged at warn level and
+  ignored -- the default `false` is used.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_XTYPES_RTI_KEY_COMPAT = "true"
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_XTYPES_RTI_KEY_COMPAT=true
+```
+
 ### INT2DDS_SEND_CREDIT_BACKSTOP_MS
 
 How long wire bytes sent toward a remote participant keep counting against
@@ -802,22 +847,19 @@ deployments do not need any of these settings — the default behavior works.
 | Variable                    | Effect                                        |
 | --------------------------- | --------------------------------------------- |
 | `INT2DDS_EXTERNAL_ADDRESS`  | Replaces the IP advertised in SPDP locators   |
-| `INT2DDS_META_PORT`         | Pins the metatraffic unicast port             |
-| `INT2DDS_USER_PORT`         | Pins the user-traffic unicast port            |
 | `INT2DDS_INITIAL_PEERS`     | Sends SPDP via unicast to the listed peers    |
 
 Sockets still bind to the local NIC IP (or `0.0.0.0`); only the *advertised*
-address changes. When `INT2DDS_META_PORT` / `INT2DDS_USER_PORT` are set, the
-RTPS standard port formula is bypassed entirely and `domain_id` no longer
-affects the port — the value you provide is used directly for the first
-participant on the host.
+address changes. The ports themselves come from the RTPS port formula, whose
+parameters are participant QoS properties (see
+[Port parameters](#port-parameters)).
 
 ### INT2DDS_INITIAL_PEERS (required for WAN)
 
 SPDP defaults to multicast, which does not cross the public Internet. Each
-side must list the *other* side's `EXTERNAL_ADDRESS:META_PORT` so the initial
-discovery packet is sent via unicast. Without this, no participant data
-(DATA(p)) is ever exchanged. See the full description in
+side must list the *other* side's `EXTERNAL_ADDRESS` and metatraffic unicast
+port so the initial discovery packet is sent via unicast. Without this, no
+participant data (DATA(p)) is ever exchanged. See the full description in
 [INT2DDS_INITIAL_PEERS](#int2dds_initial_peers).
 
 ### INT2DDS_EXTERNAL_ADDRESS
@@ -828,84 +870,101 @@ IP. When unset, every working NIC IP is advertised (default behavior).
 - Format: a single IPv4 address (e.g. `203.0.113.50`)
 - An invalid value is logged at error level and the default is used.
 
-### INT2DDS_META_PORT / INT2DDS_USER_PORT
+### Port parameters
 
-Pin the metatraffic and user-traffic unicast ports. When set, the RTPS
-standard formula `7400 + 250*domain_id + 10/11 + 2*pid` is replaced with:
-
-```
-metatraffic_port(pid) = INT2DDS_META_PORT + 2 * pid
-user_port(pid)        = INT2DDS_USER_PORT + 2 * pid
-```
-
-`pid` is the participant_id, assigned sequentially starting from 0 for each
-DomainParticipant created in the same process.
-
-#### Recommended: USER = META + 1
-
-Set `INT2DDS_USER_PORT = INT2DDS_META_PORT + 1`. This mirrors the RTPS
-standard offsets (`+10` for metatraffic, `+11` for user-traffic), so meta
-comes first and user immediately follows. With N participants on the host,
-every port used falls inside the single contiguous range:
+Every port int2DDS binds comes from the RTPS port formula (RTPS 2.5, 9.6.2):
 
 ```
-[INT2DDS_META_PORT, INT2DDS_META_PORT + 2N - 1]
+discovery multicast = PB + DG * domain_id + d0
+discovery unicast   = PB + DG * domain_id + d1 + PG * pid
+user multicast      = PB + DG * domain_id + d2
+user unicast        = PB + DG * domain_id + d3 + PG * pid
+TCP listen          = PB + DG * domain_id + PG * pid
+```
+
+`pid` is the participant id. The first participant on a host takes 0, and a
+participant whose ports are already bound moves on to the next id, so
+participants in separate processes on one host never compete for a port.
+
+The seven parameters are participant `PropertyQosPolicy` entries. There is no
+environment variable for them.
+
+| Property                                      | Parameter | Default |
+| --------------------------------------------- | --------- | ------- |
+| `int2dds.transport.port_base`                 | PB        | 7400    |
+| `int2dds.transport.domain_id_gain`            | DG        | 250     |
+| `int2dds.transport.participant_id_gain`       | PG        | 2       |
+| `int2dds.transport.discovery_multicast_offset`| d0        | 0       |
+| `int2dds.transport.discovery_unicast_offset`  | d1        | 10      |
+| `int2dds.transport.user_multicast_offset`     | d2        | 1       |
+| `int2dds.transport.user_unicast_offset`       | d3        | 11      |
+
+A value that does not parse as an unsigned integer, or a PG of 0, is logged at
+warn level and the default is kept. A port the formula pushes past 65535 fails
+participant creation with the computed port in the error.
+
+The id search stops at the last participant id whose ports still belong to
+the domain (119 with the defaults). Only a port already in use moves the
+search on. Any other bind error, such as a port inside a reserved range, fails
+participant creation at once. `int2dds.participant_id` pins the id instead of
+searching: only that id is tried, and creation fails when its ports are taken.
+
+For NAT, `port_base` is usually the only parameter to change. With the other
+defaults and domain 0, the unicast ports of N participants on one host fall in
+the single contiguous range:
+
+```
+[port_base + 10, port_base + 10 + 2N - 1]
 ```
 
 so a NAT router needs only **one range-forwarding rule**.
 
+#### Configuration
+
+```rust
+let mut qos = DomainParticipantQos::default();
+qos.property.add_property("int2dds.transport.port_base", "55000", false);
+```
+
+```json
+{
+  "property": {
+    "value": [
+      { "name": "int2dds.transport.port_base", "value": "55000", "propagate": false }
+    ]
+  }
+}
+```
+
 ### Example: AWS EC2 talking to a remote peer at `198.51.100.7`
 
-On the EC2 instance:
+On the EC2 instance, with `int2dds.transport.port_base` = `55000` in the
+participant QoS of both sides:
 
 ```bash
 export INT2DDS_EXTERNAL_ADDRESS=3.34.X.Y
-export INT2DDS_META_PORT=55000
-export INT2DDS_USER_PORT=55001               # META + 1
-export INT2DDS_INITIAL_PEERS=198.51.100.7:55000   # remote peer's META port
+export INT2DDS_INITIAL_PEERS=198.51.100.7:55010   # remote peer's discovery unicast port
 ```
 
-Security Group inbound rule: allow UDP `55000-55001` (or `55000-55009` for
+Security Group inbound rule: allow UDP `55010-55011` (or `55010-55019` for
 up to 5 participants).
 
 ### Example: Home/office router talking to a remote peer at `3.34.X.Y`
 
 ```bash
 export INT2DDS_EXTERNAL_ADDRESS=203.0.113.50
-export INT2DDS_META_PORT=55000
-export INT2DDS_USER_PORT=55001
-export INT2DDS_INITIAL_PEERS=3.34.X.Y:55000       # remote peer's META port
+export INT2DDS_INITIAL_PEERS=3.34.X.Y:55010       # remote peer's discovery unicast port
 ```
 
 NAT rule on the router (single host, single participant):
 
 ```
-WAN 203.0.113.50:55000-55001 (UDP) -> LAN <private IP>:55000-55001
+WAN 203.0.113.50:55010-55011 (UDP) -> LAN <private IP>:55010-55011
 ```
 
-For N participants on the same host, widen the range to `55000` through
-`55000 + 2N - 1`.
-
-### Example: Multiple int2DDS processes on the same host
-
-Environment variables are per-OS-process. Two int2DDS programs on the same
-host read identical env values and would otherwise compete for the same port
-range. Give each program its own META/USER values:
-
-```bash
-# Process A
-export INT2DDS_META_PORT=55000
-export INT2DDS_USER_PORT=55001
-./my_app_a
-
-# Process B (same host, separate shell/script)
-export INT2DDS_META_PORT=56000
-export INT2DDS_USER_PORT=56001
-./my_app_b
-```
-
-Within a single process, multiple DomainParticipants are spaced automatically
-by `2 * pid`, so you only need to plan port ranges *between* processes.
+For N participants on the same host, widen the range to `55010` through
+`55010 + 2N - 1`. Participants in different processes on that host take the
+next participant id automatically, so one `port_base` covers all of them.
 
 
 ---

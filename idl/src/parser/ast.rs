@@ -119,6 +119,8 @@ pub enum TypeSpec {
     Uint64,
     Float32,
     Float64,
+    /// `long double`
+    Float128,
 
     // Strings
     String(Option<u32>),

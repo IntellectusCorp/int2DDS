@@ -133,6 +133,20 @@ impl Drop for Topic {
 impl_topic_description!(Topic);
 impl_dds_entity!(Topic, TopicQos);
 impl EnableChild for Topic {
+    fn update_rtps_entity(&self, _qos: &Self::Qos) -> DdsResult<()> {
+        let participant = self.get_participant()?;
+        let topic_name = self.get_name();
+
+        for publisher in participant.get_publishers()? {
+            publisher.update_rtps_writers_of_topic(topic_name)?;
+        }
+        for subscriber in participant.get_subscribers()? {
+            subscriber.update_rtps_readers_of_topic(topic_name)?;
+        }
+
+        Ok(())
+    }
+
     impl_check_parent_enabled!(get_participant);
 }
 impl DomainEntity for Topic {}

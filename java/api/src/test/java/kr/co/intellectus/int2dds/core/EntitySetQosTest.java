@@ -30,10 +30,10 @@ import org.junit.jupiter.api.Test;
  * one of those types' {@code check_immutable_change} lists, so a non-default value is accepted at
  * create time and a further change is accepted after the entity is enabled. Publisher and
  * Subscriber use {@code Partition} (supported, outside {@code Presentation}, their one immutable
- * policy); DomainParticipant uses {@code Property}, since {@code UserData} is that type's one
- * unsupported policy (dds/src/dcps/domain/qos/mod.rs).
+ * policy); DomainParticipant uses {@code Property}.
  *
- * <p>Publisher, Subscriber, DomainParticipant and Topic have no {@code getQos()} yet, so those are
+ * <p>{@code Partition} has no native getter, {@code Property} reads back only as text, and Topic
+ * has no {@code getQos()} yet, so the Publisher, Subscriber, DomainParticipant and Topic cases are
  * treated as a can-fail round trip through the absence of a thrown exception, which {@link
  * kr.co.intellectus.int2dds.internal.ReturnCodes#check} would raise on any non-OK status.
  */

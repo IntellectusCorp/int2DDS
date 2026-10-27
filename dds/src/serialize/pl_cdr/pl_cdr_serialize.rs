@@ -193,6 +193,12 @@ impl PlCdrSerializer {
             ParameterValue::EndpointGuid(guid) => {
                 buffer.extend_from_slice(&guid.to_bytes());
             }
+            ParameterValue::GroupGuid(guid) => {
+                buffer.extend_from_slice(&guid.to_bytes());
+            }
+            ParameterValue::GroupEntityId(entity_id) => {
+                buffer.extend_from_slice(&entity_id.to_bytes());
+            }
             ParameterValue::BuiltinEndpointSet(bes) => {
                 self.write_u32(&mut buffer, *bes);
             }
@@ -756,6 +762,7 @@ pub fn merge_serialized_data(
 /// Convenience functions for creating RTPS discovery messages
 pub mod discovery_helpers {
     use super::*;
+    use crate::infrastructure::qos_policy::UserDataQosPolicy;
 
     /// Create SPDP participant discovery message
     #[allow(clippy::too_many_arguments)]
@@ -765,6 +772,7 @@ pub mod discovery_helpers {
         vendor_id: VendorId,
         entity_name: Option<String>,
         locators: Vec<(ParameterId, i32, u32, [u8; 16])>, // (param_id, kind, port, address)
+        user_data: &UserDataQosPolicy,
         receive_buffer_size: Option<u32>,
     ) -> Result<Vec<u8>, String> {
         let mut builder = RtpsMessageBuilder::new(true) // Little endian
@@ -786,6 +794,10 @@ pub mod discovery_helpers {
         // Add locators
         for (param_id, kind, port, address) in locators {
             builder = builder.add_locator(param_id, kind, port, address);
+        }
+
+        if !user_data.value.is_empty() {
+            builder = builder.add_user_data(user_data.value.clone());
         }
 
         // Omitted (not just zero) when the live socket size is unknown, so a peer
@@ -862,6 +874,12 @@ impl super::ParsedBuiltinTopicData {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidParticipantGuid,
                 value: ParameterValue::ParticipantGuid(*guid),
+            });
+        }
+        if let Some(guid) = &self.group_guid {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidGroupGuid,
+                value: ParameterValue::GroupGuid(*guid),
             });
         }
 
@@ -1114,6 +1132,7 @@ mod tests {
             crate::rtps::common::types::VENDORID_INT2,
             None,
             Vec::new(),
+            &Default::default(),
             Some(SAMPLE_RECEIVE_BUFFER_SIZE),
         )
         .expect("serialize SPDP participant message");
@@ -1136,6 +1155,7 @@ mod tests {
             crate::rtps::common::types::VENDORID_INT2,
             None,
             Vec::new(),
+            &Default::default(),
             None,
         )
         .expect("serialize SPDP participant message");

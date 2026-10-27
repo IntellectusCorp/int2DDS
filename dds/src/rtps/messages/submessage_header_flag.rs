@@ -17,6 +17,8 @@ pub(crate) enum SubmessageFlagType {
     LivelinessFlag,
     InfoReplyFlag,
     InvalidateFlag,
+    GroupInfoFlag,
+    FilteredCountFlag,
 }
 
 pub(crate) struct SubmessageHeaderFlag {
@@ -89,6 +91,16 @@ impl SubmessageHeaderFlag {
             SubmessageFlagType::InvalidateFlag => {
                 if submessage_id == SubmessageId::INFO_TS {
                     self.flag |= 0x02
+                }
+            }
+            SubmessageFlagType::GroupInfoFlag => match submessage_id {
+                SubmessageId::HEARTBEAT => self.flag |= 0x08,
+                SubmessageId::GAP => self.flag |= 0x02,
+                _ => {}
+            },
+            SubmessageFlagType::FilteredCountFlag => {
+                if submessage_id == SubmessageId::GAP {
+                    self.flag |= 0x04
                 }
             }
         }

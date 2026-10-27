@@ -51,6 +51,8 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
         "use {}::serialize::cdr::serializer::primitive::PrimitiveSerialize;",
         opts.crate_path
     ));
+    gen.line("#[allow(unused_imports)]");
+    gen.line(&format!("use {}::serialize::Float128;", opts.crate_path));
     gen.line("");
 
     for exc in &model.exceptions {
@@ -1384,6 +1386,7 @@ impl<'a> RpcGen<'a> {
                 | ResolvedType::U64
                 | ResolvedType::F32
                 | ResolvedType::F64
+                | ResolvedType::F128
                 | ResolvedType::Char
                 | ResolvedType::WChar
         )
@@ -1402,6 +1405,7 @@ impl<'a> RpcGen<'a> {
             ResolvedType::U64 => "u64".to_string(),
             ResolvedType::F32 => "f32".to_string(),
             ResolvedType::F64 => "f64".to_string(),
+            ResolvedType::F128 => "Float128".to_string(),
             ResolvedType::Char => "u8".to_string(),
             ResolvedType::WChar => "WChar".to_string(),
             ResolvedType::String { .. } => "String".to_string(),

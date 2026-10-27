@@ -9,6 +9,7 @@ import java.util.Objects;
  */
 public class TopicQos {
 
+    private TopicData topicData;
     private Reliability reliability;
     private Durability durability;
     private History history;
@@ -22,6 +23,14 @@ public class TopicQos {
     private DataRepresentation dataRepresentation;
 
     public TopicQos() {}
+
+    public TopicData getTopicData() {
+        return topicData;
+    }
+
+    public void setTopicData(TopicData topicData) {
+        this.topicData = topicData;
+    }
 
     public Reliability getReliability() {
         return reliability;
@@ -120,7 +129,8 @@ public class TopicQos {
             return false;
         }
         TopicQos other = (TopicQos) o;
-        return Objects.equals(reliability, other.reliability)
+        return Objects.equals(topicData, other.topicData)
+                && Objects.equals(reliability, other.reliability)
                 && Objects.equals(durability, other.durability)
                 && Objects.equals(history, other.history)
                 && Objects.equals(deadline, other.deadline)
@@ -136,6 +146,7 @@ public class TopicQos {
     @Override
     public int hashCode() {
         return Objects.hash(
+                topicData,
                 reliability,
                 durability,
                 history,
@@ -151,7 +162,9 @@ public class TopicQos {
 
     @Override
     public String toString() {
-        return "TopicQos{reliability="
+        return "TopicQos{topicData="
+                + topicData
+                + ", reliability="
                 + reliability
                 + ", durability="
                 + durability

@@ -13,6 +13,7 @@ namespace Int2Dds.Qos
         public Lifespan? Lifespan { get; set; }
         public Ownership? Ownership { get; set; }
         public DataRepresentation? DataRepresentation { get; set; }
+        public TopicData? TopicData { get; set; }
 
         public TopicQos() { }
     }

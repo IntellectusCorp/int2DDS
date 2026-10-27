@@ -11,7 +11,7 @@ use crate::xtypes::type_object::EquivalenceHash;
 use crate::xtypes::type_registry::TypeRegistry;
 use crate::xtypes::{
     CompleteBitmaskType, CompleteBitsetType, CompleteEnumeratedType, CompleteStructType,
-    CompleteTypeObject, CompleteUnionType, TypeIdentifier,
+    CompleteTypeObject, CompleteUnionType, TryConstructKind, TypeIdentifier,
 };
 
 /// Maximum nested type-resolution depth. A remote peer controls the
@@ -203,6 +203,7 @@ impl DynamicType {
                 is_key: member.common.member_flags.is_key(),
                 is_optional: member.common.member_flags.is_optional(),
                 is_must_understand: member.common.member_flags.is_must_understand(),
+                try_construct: member.common.member_flags.try_construct(),
                 index,
             };
 
@@ -286,13 +287,19 @@ impl DynamicType {
                 labels: member.common.label_seq.clone(),
                 is_default: member.common.member_flags.is_default(),
                 is_must_understand: member.common.member_flags.is_must_understand(),
+                try_construct: member.common.member_flags.try_construct(),
                 index,
             };
             member_by_id.insert(descriptor.member_id, index);
             members.push(descriptor);
         }
 
-        let union_desc = UnionDescriptor { discriminator_type, members, member_by_id };
+        let union_desc = UnionDescriptor {
+            discriminator_type,
+            discriminator_try_construct: union_type.discriminator.member_flags.try_construct(),
+            members,
+            member_by_id,
+        };
 
         Ok(Self {
             type_name,
@@ -709,6 +716,8 @@ pub struct MemberDescriptor {
     pub is_optional: bool,
     /// Whether this field must be understood
     pub is_must_understand: bool,
+    /// Behavior when a received value cannot construct this member
+    pub try_construct: TryConstructKind,
     /// Index in the member sequence
     pub index: usize,
 }
@@ -776,6 +785,7 @@ pub struct EnumLiteralDescriptor {
 pub struct UnionDescriptor {
     /// Type of the discriminator (primitive or enum)
     discriminator_type: Box<DynamicTypeKind>,
+    discriminator_try_construct: TryConstructKind,
     /// Case members in declaration order
     members: Vec<UnionMemberDescriptor>,
     /// Map from member ID to index
@@ -786,6 +796,11 @@ impl UnionDescriptor {
     /// Get the discriminator type kind.
     pub fn discriminator_type(&self) -> &DynamicTypeKind {
         &self.discriminator_type
+    }
+
+    /// Behavior when a received discriminator cannot construct the local type.
+    pub fn discriminator_try_construct(&self) -> TryConstructKind {
+        self.discriminator_try_construct
     }
 
     /// Get all case members in declaration order.
@@ -823,7 +838,9 @@ pub struct UnionMemberDescriptor {
     pub is_default: bool,
     /// Whether this member must be understood
     pub is_must_understand: bool,
-    /// Index in the member sequence (branch id is `index + 1`)
+    /// Behavior when a received value cannot construct this member
+    pub try_construct: TryConstructKind,
+    /// Index in the member sequence
     pub index: usize,
 }
 

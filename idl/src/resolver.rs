@@ -240,10 +240,18 @@ impl Resolver {
 
         let mut constants = Vec::new();
         for (qname, cdef) in &self.const_defs {
+            let resolved_type = self.resolve_type_spec(&cdef.type_spec)?;
+            // No target language has a binary128 literal; the value would need converting at
+            // generation time.
+            if matches!(resolved_type, ResolvedType::F128) {
+                return Err(ResolveError {
+                    message: format!("const '{}': long double constants are not supported", qname),
+                });
+            }
             constants.push(ResolvedConst {
                 name: cdef.name.clone(),
                 qualified_name: qname.to_string(),
-                resolved_type: self.resolve_type_spec(&cdef.type_spec)?,
+                resolved_type,
                 value: const_value(&cdef.value),
             });
         }
@@ -482,6 +490,7 @@ impl Resolver {
             TypeSpec::Uint64 => Ok(ResolvedType::U64),
             TypeSpec::Float32 => Ok(ResolvedType::F32),
             TypeSpec::Float64 => Ok(ResolvedType::F64),
+            TypeSpec::Float128 => Ok(ResolvedType::F128),
             TypeSpec::String(bound) => Ok(ResolvedType::String { bound: *bound }),
             TypeSpec::WString(bound) => Ok(ResolvedType::WString { bound: *bound }),
             TypeSpec::Sequence(elem, bound) => Ok(ResolvedType::Sequence {
@@ -496,7 +505,10 @@ impl Resolver {
                 let resolved_key = self.resolve_type_spec(key)?;
                 // A floating-point key has neither Eq nor Hash, so it cannot back a Rust
                 // map; reject it rather than emit non-compiling code (spec §7.2.4.2.5).
-                if matches!(resolved_key, ResolvedType::F32 | ResolvedType::F64) {
+                if matches!(
+                    resolved_key,
+                    ResolvedType::F32 | ResolvedType::F64 | ResolvedType::F128
+                ) {
                     return Err(ResolveError {
                         message: "floating-point map key is not supported".to_string(),
                     });

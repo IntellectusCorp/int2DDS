@@ -468,6 +468,32 @@ namespace Int2Dds.Core
             }
         }
 
+        /// <summary>
+        /// Gets the current QoS policies of this Topic.
+        /// Only TopicData has a native getter. The other policies are left null.
+        /// </summary>
+        public TopicQos GetQos()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_topic_get_qos(_handle, out var qosHandle));
+            try
+            {
+                unsafe
+                {
+                    return new TopicQos
+                    {
+                        TopicData = new TopicData(
+                            QosMarshal.ReadBytes(qosHandle, NativeMethods.int2dds_topic_qos_get_topic_data)),
+                    };
+                }
+            }
+            finally
+            {
+                NativeMethods.int2dds_topic_qos_destroy(qosHandle);
+            }
+        }
+
         private static void ApplyTopicQos(IntPtr qosHandle, TopicQos qos)
         {
             if (qos.Reliability != null)
@@ -514,6 +540,18 @@ namespace Int2Dds.Core
             if (qos.DataRepresentation != null)
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_topic_qos_set_data_representation(
                     qosHandle, (int)qos.DataRepresentation.Kind));
+
+            if (qos.TopicData != null && qos.TopicData.Data != null)
+            {
+                unsafe
+                {
+                    fixed (byte* pData = qos.TopicData.Data)
+                    {
+                        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_topic_qos_set_topic_data(
+                            qosHandle, pData, (UIntPtr)qos.TopicData.Data.Length));
+                    }
+                }
+            }
         }
 
         /// <summary>

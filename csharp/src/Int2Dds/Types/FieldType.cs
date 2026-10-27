@@ -24,5 +24,6 @@ namespace Int2Dds.Types
         public const int Sequence = 17;
         public const int Array = 18;
         public const int Map = 19;
+        public const int Float128 = 20;
     }
 }

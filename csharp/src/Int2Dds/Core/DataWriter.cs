@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using System.Text;
+using Int2Dds.Cdr;
 using Int2Dds.Conditions;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
@@ -20,6 +21,17 @@ namespace Int2Dds.Core
     {
         private static readonly bool s_hasKey =
             typeof(T).GetCustomAttribute<DdsTypeAttribute>()?.HasKey ?? false;
+
+        private static readonly Func<T, bool, CdrWriter>? s_writerSerializer = CreateWriterSerializer();
+
+        private static Func<T, bool, CdrWriter>? CreateWriterSerializer()
+        {
+            var method = typeof(T).GetMethod("SerializeCdrWriter", BindingFlags.Public | BindingFlags.Instance,
+                null, new[] { typeof(bool) }, null);
+            return method == null || method.ReturnType != typeof(CdrWriter)
+                ? null
+                : Delegate.CreateDelegate(typeof(Func<T, bool, CdrWriter>), null, method, false) as Func<T, bool, CdrWriter>;
+        }
 
         private readonly IntPtr _handle;
         private readonly Topic<T> _topic;
@@ -191,7 +203,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var data = sample.SerializeCdr(_xcdr2);
+            var data = Serialize(sample, out var writer);
 
             unsafe
             {
@@ -203,6 +215,22 @@ namespace Int2Dds.Core
                             pData, (UIntPtr)data.Length));
                 }
             }
+            writer?.Release();
+        }
+
+        /// <summary>
+        /// Serializes <paramref name="sample"/>, reading the CDR writer's buffer in place when the type
+        /// exposes <c>SerializeCdrWriter</c>. Release <paramref name="writer"/> once the bytes are consumed.
+        /// </summary>
+        private ReadOnlySpan<byte> Serialize(T sample, out CdrWriter? writer)
+        {
+            if (s_writerSerializer != null)
+            {
+                writer = s_writerSerializer(sample, _xcdr2);
+                return writer.WrittenSpan;
+            }
+            writer = null;
+            return sample.SerializeCdr(_xcdr2);
         }
 
         /// <summary>
@@ -214,7 +242,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var data = sample.SerializeCdr(_xcdr2);
+            var data = Serialize(sample, out var writer);
 
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             var elapsed = timestamp.ToUniversalTime() - epoch;
@@ -232,6 +260,7 @@ namespace Int2Dds.Core
                             sec, nanosec));
                 }
             }
+            writer?.Release();
         }
 
         /// <summary>
@@ -400,7 +429,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_datawriter_wait_for_acknowledgments(_handle, (long)timeout.TotalMilliseconds));
+                NativeMethods.int2dds_datawriter_wait_for_acknowledgments(_handle, WaitTimeout.ToMilliseconds(timeout)));
         }
 
         public (int totalCount, int currentCount) GetPublicationMatchedStatus()
@@ -475,6 +504,21 @@ namespace Int2Dds.Core
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_guid(_handle, p));
             }
             return guid;
+        }
+
+        /// <summary>
+        /// Gets this DataWriter's instance handle.
+        /// </summary>
+        public unsafe InstanceHandle GetInstanceHandle()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var handle = new byte[16];
+            fixed (byte* p = handle)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_get_instance_handle(_handle, p));
+            }
+            return new InstanceHandle(handle);
         }
 
         /// <summary>

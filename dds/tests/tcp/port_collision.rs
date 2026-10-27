@@ -28,6 +28,14 @@ fn tcp_qos(bind_port: u16) -> DomainParticipantQos {
     DomainParticipantQos { property, ..Default::default() }
 }
 
+/// Ports the OS hands out as free right now. A fixed number can fall inside a
+/// range Windows reserves, where binding it fails for reasons the test is not about.
+fn free_tcp_ports<const N: usize>() -> [u16; N] {
+    let listeners: Vec<std::net::TcpListener> =
+        (0..N).map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("a free port")).collect();
+    std::array::from_fn(|i| listeners[i].local_addr().expect("bound address").port())
+}
+
 /// Pure-TCP participant QoS with no pinned port, leaving the listen port to the
 /// domain formula.
 fn tcp_qos_unpinned() -> DomainParticipantQos {
@@ -59,15 +67,15 @@ fn two_tcp_participants_coexist_without_a_pinned_port() {
 fn second_tcp_participant_on_busy_port_errors_without_panicking() {
     let factory = DomainParticipantFactory::get_instance();
     let domain = next_domain_id();
-    const PORT: u16 = 17400;
+    let [port] = free_tcp_ports();
 
     // First participant binds the pinned port and must stay alive while the
     // second one attempts the same port.
     let first = factory
-        .create_participant(domain, tcp_qos(PORT), None, StatusMask::default())
+        .create_participant(domain, tcp_qos(port), None, StatusMask::default())
         .expect("first TCP participant should bind the pinned listen port");
 
-    let second = factory.create_participant(domain, tcp_qos(PORT), None, StatusMask::default());
+    let second = factory.create_participant(domain, tcp_qos(port), None, StatusMask::default());
     assert!(
         second.is_err(),
         "second TCP participant must fail on the in-use listen port instead of binding it"
@@ -83,12 +91,13 @@ fn distinct_ports_let_two_tcp_participants_coexist() {
     let domain = next_domain_id();
 
     // Same process, same domain, distinct per-participant TCP listen ports.
+    let [port_a, port_b] = free_tcp_ports();
     let a = factory
-        .create_participant(domain, tcp_qos(17410), None, StatusMask::default())
-        .expect("participant A binds 17410");
+        .create_participant(domain, tcp_qos(port_a), None, StatusMask::default())
+        .expect("participant A binds its own port");
     let b = factory
-        .create_participant(domain, tcp_qos(17412), None, StatusMask::default())
-        .expect("participant B binds 17412 (distinct port, no collision)");
+        .create_participant(domain, tcp_qos(port_b), None, StatusMask::default())
+        .expect("participant B binds a distinct port, no collision");
 
     a.delete_contained_entities().unwrap();
     factory.delete_participant(a).unwrap();

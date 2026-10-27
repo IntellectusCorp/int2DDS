@@ -33,8 +33,8 @@ Add int2DDS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-int2dds = "0.1.8"
-int2dds-derive = "0.1.8"
+int2dds = "1.0.0"
+int2dds-derive = "1.0.0"
 ```
 
 ### Basic Example
@@ -296,10 +296,11 @@ cd java
 ./gradlew test
 ```
 
-The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variable → bundled JAR resources → `java.library.path`. Gradle's test and example tasks point `INT2DDS_JAVA_LIB` at `target/release/` for you; set it by hand only when running outside Gradle:
+JDK 8–21 use the JNI library `int2dds_java`; JDK 22+ use FFM against the plain C ABI library `int2dds_ffi`, with no JNI involved. Build both with `cargo build --release -p int2dds-java -p int2dds-ffi`. The native loader looks in this order: an environment variable → bundled JAR resources → `java.library.path`. The variable is `INT2DDS_JAVA_LIB` on JDK 8–21 and `INT2DDS_FFI_PATH` (the library or its directory, shared with C# and Python) on JDK 22+. Gradle's test and example tasks point both at `target/release/` for you; set them by hand only when running outside Gradle:
 
 ```bash
-export INT2DDS_JAVA_LIB=/abs/path/to/target/release/libint2dds_java.so
+export INT2DDS_JAVA_LIB=/abs/path/to/target/release/libint2dds_java.so   # JDK 8-21
+export INT2DDS_FFI_PATH=/abs/path/to/target/release/libint2dds_ffi.so    # JDK 22+
 ```
 
 See [java/README.md](java/README.md) for the full guide.
@@ -353,13 +354,13 @@ int2DDS supports various environment variables for configuration:
 - `INT2DDS_FORCE_LOOPBACK_MULTICAST`: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing, use together with `INT2DDS_USE_LOOPBACK_INTERFACE`
 - `INT2DDS_MULTICAST_TTL`: IPv4 multicast TTL fallback (0-255), used when `PropertyQosPolicy` has no `int2dds.transport.UDPv4.multicast_ttl` entry (default: 1)
 - `INT2DDS_INITIAL_PEERS`: Initial peer list for unicast (format: "ip:port,ip:port,...")
+- `INT2DDS_NETWORK_IP`: Pin every socket to this IPv4 address (checked first; an unusable value is ignored)
+- `INT2DDS_NETWORK_INTERFACE`: Pin every socket to the IPv4 address of this interface (e.g., "eth0", "Ethernet")
 
 ### int2DDS-feature dependent Environment Variables
 
 These variables require [int2DDS-feature](https://github.com/IntellectusCorp/int2DDS-feature-releases) binary. Place the binary in the same directory as your executable.
 
-- `INT2DDS_NETWORK_INTERFACE`: Specify network interface (e.g., "eth0", "Ethernet")
-- `INT2DDS_NETWORK_IP`: Specify network IP address directly
 - `INT2DDS_EXTENDED_DISCOVERY`: Enable extended discovery alongside multicast
 
 ### Performance Monitoring Environment Variables

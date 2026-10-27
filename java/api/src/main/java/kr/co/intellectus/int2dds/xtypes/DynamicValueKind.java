@@ -33,4 +33,5 @@ public final class DynamicValueKind {
     public static final int MAP = 22;
     public static final int OPTIONAL = 23;
     public static final int NULL = 24;
+    public static final int FLOAT128 = 25;
 }

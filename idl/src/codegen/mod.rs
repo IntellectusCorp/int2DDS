@@ -137,6 +137,7 @@ pub(crate) fn field_type_code(ty: &ResolvedType) -> Option<i32> {
         ResolvedType::String { .. } => 13,
         ResolvedType::WChar => 14,
         ResolvedType::WString { .. } => 15,
+        ResolvedType::F128 => 20,
         _ => return None,
     })
 }

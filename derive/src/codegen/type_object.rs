@@ -717,9 +717,10 @@ pub fn generate_has_type_object_union_impl(
                 None => quote! { #crate_path::xtypes::TypeIdentifier::None },
             };
 
+            // Member id 0 is the discriminator; branches are numbered from 1 (see union_ops).
             quote! {
                 #crate_path::xtypes::MinimalUnionMember::new(
-                    #index as u32,
+                    #index as u32 + 1,
                     #crate_path::xtypes::MemberFlag::default(),
                     #member_type_id,
                     vec![#disc_value],
@@ -743,7 +744,7 @@ pub fn generate_has_type_object_union_impl(
 
             quote! {
                 #crate_path::xtypes::CompleteUnionMember::new(
-                    #index as u32,
+                    #index as u32 + 1,
                     #crate_path::xtypes::MemberFlag::default(),
                     #member_type_id,
                     vec![#disc_value],

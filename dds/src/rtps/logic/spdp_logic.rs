@@ -76,7 +76,6 @@ impl SpdpLogic {
             None,
             heartbeat_period.to_std_duration(),
             domain_id,
-            self.create_spdp_message()?,
         ));
 
         Ok(())
@@ -89,10 +88,9 @@ impl SpdpLogic {
         start_time: Option<Instant>,
         duration: StdDuration,
         domain_id: DomainId,
-        data: Option<Arc<Vec<u8>>>,
     ) -> RtpsResult<()> {
         let start = Instant::now();
-        match data {
+        match self.create_spdp_message()? {
             Some(ref data) => {
                 let _ = self
                     .transport
@@ -116,7 +114,6 @@ impl SpdpLogic {
 
         let timer_id = TimerId::SpdpMulticast { domain_id };
 
-        let data_arc = Arc::new(data);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
                 timer_id,
@@ -124,7 +121,6 @@ impl SpdpLogic {
                 false, // one-shot timer
                 {
                     let participant_weak = self.participant.clone();
-                    let data_arc = data_arc.clone();
                     move || {
                         if let Some(participant) = participant_weak.upgrade() {
                             if !participant.is_terminated() {
@@ -135,7 +131,6 @@ impl SpdpLogic {
                                         Some(Instant::now()),
                                         duration,
                                         domain_id,
-                                        (*data_arc).clone(),
                                     ),
                                 );
                             }

@@ -1,4 +1,5 @@
 using System;
+using Int2Dds.Cdr;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
@@ -32,6 +33,7 @@ namespace Int2Dds.Xtypes
         Map = 22,
         Optional = 23,
         Null = 24,
+        Float128 = 25,
     }
 
     /// <summary>
@@ -75,6 +77,12 @@ namespace Int2Dds.Xtypes
         public static DynamicValue U64(ulong v) => Wrap(NativeMethods.int2dds_dynamic_value_u64(v, out IntPtr h), h);
         public static DynamicValue F32(float v) => Wrap(NativeMethods.int2dds_dynamic_value_f32(v, out IntPtr h), h);
         public static DynamicValue F64(double v) => Wrap(NativeMethods.int2dds_dynamic_value_f64(v, out IntPtr h), h);
+
+        public static unsafe DynamicValue F128(Float128 v)
+        {
+            fixed (byte* p = v.ToBytes())
+                return Wrap(NativeMethods.int2dds_dynamic_value_f128(p, out IntPtr h), h);
+        }
         public static DynamicValue Byte(byte v) => Wrap(NativeMethods.int2dds_dynamic_value_byte(v, out IntPtr h), h);
         public static DynamicValue Bitmask(ulong v) => Wrap(NativeMethods.int2dds_dynamic_value_bitmask(v, out IntPtr h), h);
         public static DynamicValue Bitset(ulong v) => Wrap(NativeMethods.int2dds_dynamic_value_bitset(v, out IntPtr h), h);
@@ -174,6 +182,14 @@ namespace Int2Dds.Xtypes
         public ulong AsU64() { ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_value_as_u64(_handle, out ulong v)); return v; }
         public float AsF32() { ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_value_as_f32(_handle, out float v)); return v; }
         public double AsF64() { ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_value_as_f64(_handle, out double v)); return v; }
+
+        public unsafe Float128 AsF128()
+        {
+            var bytes = new byte[16];
+            fixed (byte* p = bytes)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_value_as_f128(_handle, p));
+            return Float128.FromBytes(bytes, 0);
+        }
         public byte AsChar8() { ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_value_as_char8(_handle, out byte v)); return v; }
         public ulong AsBitmask() { ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_value_as_bitmask(_handle, out ulong v)); return v; }
         public ulong AsBitset() { ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_value_as_bitset(_handle, out ulong v)); return v; }

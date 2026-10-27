@@ -12,6 +12,8 @@ on:
       - "idl/**"
       - "java/**"
       - ".github/workflows/java.yml"
+      - ".github/scripts/ci/check-jni-drift.sh"
+      - ".github/scripts/ci/check-idl-java.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rustfmt.toml"
@@ -43,7 +45,7 @@ jobs:
 
       - name: Check for generator drift
         shell: bash
-        run: ./java/scripts/check-jni-drift.sh
+        run: ./.github/scripts/ci/check-jni-drift.sh
 
       - name: Verify the C ABI surface against the FFI library
         shell: bash
@@ -62,19 +64,9 @@ jobs:
             echo "ERROR: gen-jni parsed $parsed C ABI functions, libint2dds_ffi.so exports $abi" >&2
             exit 1
           fi
-
-          # The JDK 22+ Panama (FFM) backend reuses the JNI .so, which only
-          # works while the dependency rlib's #[no_mangle]
-          # symbols reach the dynamic symbol table. They do so because the
-          # forwarders reference them — a linker dead-code pass would drop them
-          # again if that ever stopped being true.
-          reexported=$(nm -D --defined-only target/release/libint2dds_java.so \
-                       | grep -c ' T int2dds_')
-          echo "int2dds_ symbols re-exported from the JNI library: $reexported"
-          if [ "$reexported" -ne "$abi" ]; then
-            echo "ERROR: expected $abi re-exported C ABI symbols, found $reexported" >&2
-            exit 1
-          fi
+          # The JDK 22+ FFM backend binds libint2dds_ffi.so directly, so the
+          # count above is also the symbol set it resolves; the JNI library's
+          # own exports no longer matter to it.
 
   idl-java-codegen:
     name: Generated Java compiles and is current
@@ -111,13 +103,13 @@ jobs:
       # builds java/api/build/classes itself when the runner has none.
       - name: Check the IDL Java backend
         shell: bash
-        run: ./java/scripts/check-idl-java.sh
+        run: ./.github/scripts/ci/check-idl-java.sh
 
   # The JNI crate's own tests and the Java suite against the built library.
   # Windows is in the matrix because the JNI path is the one every JDK below
   # 22 uses, and the Gradle scripts pick the platform library name themselves.
   jni-tests:
-    name: JNI tests (${{ matrix.os }})
+    name: Java tests, JNI and FFM (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -156,20 +148,28 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build the JNI library and run the crate tests
+      - name: Build the JNI and FFI libraries and run the crate tests
         shell: bash
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: |
-          cargo build --release -p int2dds-java
+          cargo build --release -p int2dds-java -p int2dds-ffi
           cargo test -p int2dds-java
 
       # The Test tasks derive INT2DDS_JAVA_LIB from the OS and isolate the run
       # on a loopback-only random domain (java/api/build.gradle.kts).
-      - name: Run the Java suite
+      - name: Run the Java suite (JDK 17, JNI backend)
         shell: bash
         working-directory: java
         run: ./gradlew test --console=plain
+
+      # The same suite on the JDK 22+ FFM backend, against libint2dds_ffi alone:
+      # the build makes the JNI library unloadable for this run, so anything
+      # still reaching JNI fails. JDK 25 is provisioned by the foojay resolver.
+      - name: Run the Java suite (JDK 25, FFM backend)
+        shell: bash
+        working-directory: java
+        run: ./gradlew test -PtestJavaVersion=25 --console=plain
 
       - name: Upload test reports
         if: failure()

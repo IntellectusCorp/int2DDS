@@ -12,7 +12,7 @@ from int2dds.exceptions import DdsAlreadyDeleted, check_ret
 
 if TYPE_CHECKING:
     from int2dds.core.publisher import Publisher
-    from int2dds.core.qos import ParticipantQos
+    from int2dds.core.qos import ParticipantQos, TopicQos
     from int2dds.core.subscriber import Subscriber
     from int2dds.core.topic import ContentFilteredTopic, Topic
     from int2dds.types.base import DdsType
@@ -55,8 +55,8 @@ def _apply_participant_qos(handle: CData, qos: ParticipantQos) -> None:
     Property entries are additive (merged onto whatever the handle already
     holds), preserving values the caller did not override.
     """
-    if qos.user_data is not None and qos.user_data.data:
-        data_ptr = ffi.from_buffer(qos.user_data.data)
+    if qos.user_data is not None:
+        data_ptr = ffi.from_buffer(qos.user_data.data) if qos.user_data.data else ffi.NULL
         check_ret(lib.int2dds_participant_qos_set_user_data(
             handle, data_ptr, len(qos.user_data.data)))
 
@@ -290,7 +290,7 @@ class DomainParticipant:
         self,
         topic_name: str,
         type_class: type[T],
-        qos: None = None,
+        qos: TopicQos | None = None,
     ) -> Topic[T]:
         """
         Create a Topic for this participant.
@@ -298,7 +298,7 @@ class DomainParticipant:
         Args:
             topic_name: The name of the topic
             type_class: The DDS type class (must have _dds_type_name and _extensibility)
-            qos: Optional TopicQos (not yet implemented)
+            qos: Optional TopicQos; None uses the default QoS
 
         Returns:
             A new Topic instance
@@ -371,6 +371,46 @@ class DomainParticipant:
         check_ret(lib.int2dds_participant_get_current_time(self._handle, sec_out, nsec_out))
         return sec_out[0], nsec_out[0]
 
+    def get_instance_handle(self) -> bytes:
+        """Get this participant's 16-byte instance handle."""
+        buf = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_participant_get_instance_handle(
+            self._handle, ffi.cast("uint8_t(*)[16]", buf)))
+        return bytes(ffi.buffer(buf, 16))
+
+    def ignore_participant(self, handle: bytes) -> None:
+        """Ignore a remote participant and its endpoints. Cannot be reversed.
+
+        Raises for the handle of this participant itself (BAD_PARAMETER).
+        """
+        if len(handle) != 16:
+            raise ValueError("instance handle must be 16 bytes")
+        handle_c = ffi.new("uint8_t[16]", list(handle))
+        check_ret(lib.int2dds_participant_ignore_participant(
+            self._handle, ffi.cast("const uint8_t(*)[16]", handle_c)))
+
+    def ignore_publication(self, handle: bytes) -> None:
+        """Ignore a remote publication. Cannot be reversed.
+
+        Raises for the handle of a local DataWriter (BAD_PARAMETER).
+        """
+        if len(handle) != 16:
+            raise ValueError("instance handle must be 16 bytes")
+        handle_c = ffi.new("uint8_t[16]", list(handle))
+        check_ret(lib.int2dds_participant_ignore_publication(
+            self._handle, ffi.cast("const uint8_t(*)[16]", handle_c)))
+
+    def ignore_subscription(self, handle: bytes) -> None:
+        """Ignore a remote subscription. Cannot be reversed.
+
+        Raises for the handle of a local DataReader (BAD_PARAMETER).
+        """
+        if len(handle) != 16:
+            raise ValueError("instance handle must be 16 bytes")
+        handle_c = ffi.new("uint8_t[16]", list(handle))
+        check_ret(lib.int2dds_participant_ignore_subscription(
+            self._handle, ffi.cast("const uint8_t(*)[16]", handle_c)))
+
     def contains_entity(self, handle: bytes) -> bool:
         """Return whether an entity with the given 16-byte instance handle
         belongs to this participant."""
@@ -428,11 +468,11 @@ class DomainParticipant:
     def get_qos(self) -> ParticipantQos:
         """Get the current QoS of this participant.
 
-        Reports the PropertyQosPolicy entries currently in effect (including any
-        transport/discovery properties resolved at creation). user_data has no
-        native getter and is left unset.
+        Reports user_data and the PropertyQosPolicy entries currently in effect
+        (including any transport/discovery properties resolved at creation).
         """
-        from int2dds.core.qos import ParticipantQos, Property
+        from int2dds.core.discovery import _read_bytes
+        from int2dds.core.qos import ParticipantQos, Property, UserData
 
         qos_ptr = ffi.new("Int2DdsParticipantQos **")
         check_ret(lib.int2dds_participant_get_qos(self._handle, qos_ptr))
@@ -447,7 +487,9 @@ class DomainParticipant:
 
             check_ret(lib.int2dds_participant_qos_get_properties_with_prefix(
                 handle, b"", _collect, ffi.NULL))
-            return ParticipantQos(property=prop)
+            user_data = UserData(
+                data=_read_bytes(lib.int2dds_participant_qos_get_user_data, handle))
+            return ParticipantQos(user_data=user_data, property=prop)
         finally:
             lib.int2dds_participant_qos_destroy(handle)
 
@@ -455,8 +497,8 @@ class DomainParticipant:
         """Set the QoS of this participant.
 
         The given policies are merged onto the participant's current QoS, so
-        properties not present in ``qos`` are preserved. Setting a non-default
-        user_data raises, matching the core (UserDataQosPolicy is not mutable).
+        properties not present in ``qos`` are preserved. A given user_data
+        (including empty bytes) replaces the current one.
         """
         qos_ptr = ffi.new("Int2DdsParticipantQos **")
         check_ret(lib.int2dds_participant_get_qos(self._handle, qos_ptr))

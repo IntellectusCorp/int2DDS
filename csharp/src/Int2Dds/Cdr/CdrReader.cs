@@ -35,49 +35,59 @@ namespace Int2Dds.Cdr
         /// <summary>
         /// Create a reader from a byte array, parsing the 4-byte encapsulation header.
         /// </summary>
-        public CdrReader(byte[] data) : this((ReadOnlySpan<byte>)data)
+        /// <remarks>Reads <paramref name="data"/> in place; do not modify it while reading.</remarks>
+        public CdrReader(byte[] data)
         {
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            _data = data;
+            (_littleEndian, _xcdr2) = ParseEncapsulationHeader(data);
+            _headerSize = 4;
+            _pos = 4; // skip encapsulation header
         }
 
         /// <summary>
         /// Create a reader that parses the 4-byte encapsulation header to detect
         /// endianness and XCDR version.
         /// </summary>
-        public CdrReader(ReadOnlySpan<byte> data)
+        public CdrReader(ReadOnlySpan<byte> data) : this(CopyOf(data))
+        {
+        }
+
+        private static byte[] CopyOf(ReadOnlySpan<byte> data)
+        {
+            var copy = CdrWriter.AllocateUninitialized(data.Length);
+            data.CopyTo(copy);
+            return copy;
+        }
+
+        private static (bool LittleEndian, bool Xcdr2) ParseEncapsulationHeader(byte[] data)
         {
             if (data.Length < 4)
                 throw new CdrUnderflowException("Data too short for encapsulation header.");
 
-            _data = data.ToArray();
-
             // Encapsulation header is always big-endian
-            ushort encapId = (ushort)((_data[0] << 8) | _data[1]);
+            ushort encapId = (ushort)((data[0] << 8) | data[1]);
 
             switch (encapId)
             {
                 case EncapCdrLe:
-                    _littleEndian = true; _xcdr2 = false; break;
-                case EncapCdrBe:
-                    _littleEndian = false; _xcdr2 = false; break;
                 case EncapPlCdrLe:
-                    _littleEndian = true; _xcdr2 = false; break;
+                    return (true, false);
+                case EncapCdrBe:
                 case EncapPlCdrBe:
-                    _littleEndian = false; _xcdr2 = false; break;
+                    return (false, false);
                 case EncapCdr2Le:
                 case EncapDcdr2Le:
                 case EncapPlCdr2Le:
-                    _littleEndian = true; _xcdr2 = true; break;
+                    return (true, true);
                 case EncapCdr2Be:
                 case EncapDcdr2Be:
                 case EncapPlCdr2Be:
-                    _littleEndian = false; _xcdr2 = true; break;
+                    return (false, true);
                 default:
                     throw new CdrInvalidEncapsulationException(
                         $"Unrecognized encapsulation ID: 0x{encapId:X4}");
             }
-
-            _headerSize = 4;
-            _pos = 4; // skip encapsulation header
         }
 
         /// <summary>
@@ -97,7 +107,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public static CdrReader FromRaw(ReadOnlySpan<byte> data, bool littleEndian = true, bool xcdr2 = false)
         {
-            return new CdrReader(data.ToArray(), littleEndian, xcdr2);
+            return new CdrReader(CopyOf(data), littleEndian, xcdr2);
         }
 
         /// <summary>Number of bytes remaining to be read.</summary>
@@ -237,6 +247,19 @@ namespace Int2Dds.Cdr
             }
         }
 
+        /// <summary>Read an IEEE binary128 (<c>float128</c>) with 8-byte alignment.</summary>
+        public Float128 ReadF128()
+        {
+            Align(8);
+            EnsureRemaining(16);
+            var span = _data.AsSpan(_pos);
+            Float128 value = _littleEndian
+                ? new Float128(BinaryPrimitives.ReadUInt64LittleEndian(span), BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(8)))
+                : new Float128(BinaryPrimitives.ReadUInt64BigEndian(span.Slice(8)), BinaryPrimitives.ReadUInt64BigEndian(span));
+            _pos += 16;
+            return value;
+        }
+
         /// <summary>Read a 64-bit double with 8-byte alignment.</summary>
         public double ReadF64()
         {
@@ -270,23 +293,22 @@ namespace Int2Dds.Cdr
         }
 
         /// <summary>
-        /// Read a CDR wstring (wide string): uint32 length (number of UTF-16 code units including null)
-        /// + UTF-16 code units (each 2 bytes) + null terminator.
-        /// Returns the decoded string (without null terminator).
+        /// Read a CDR wstring (wide string): uint32 length in bytes (XTypes 1.3 7.4.1.1.2)
+        /// + UTF-16 code units (each 2 bytes). No null terminator.
         /// </summary>
         public string ReadWString()
         {
-            uint cdrLen = ReadU32(); // number of UTF-16 code units including null
-            if (cdrLen == 0)
-                return string.Empty;
+            uint byteLen = ReadU32();
+            if (byteLen > (uint)Remaining)
+                throw new CdrUnderflowException(
+                    $"wstring length {byteLen} exceeds {Remaining} remaining bytes.");
 
-            int strLen = (int)(cdrLen - 1); // exclude null terminator
+            int strLen = (int)(byteLen / 2);
             var chars = new char[strLen];
             for (int i = 0; i < strLen; i++)
             {
                 chars[i] = (char)ReadU16();
             }
-            ReadU16(); // consume null terminator
             return new string(chars);
         }
 
@@ -305,7 +327,7 @@ namespace Int2Dds.Cdr
         public byte[] ReadBytes(int length)
         {
             EnsureRemaining(length);
-            var result = new byte[length];
+            var result = CdrWriter.AllocateUninitialized(length);
             Buffer.BlockCopy(_data, _pos, result, 0, length);
             _pos += length;
             return result;

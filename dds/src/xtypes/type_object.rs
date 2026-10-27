@@ -3797,6 +3797,7 @@ impl_primitive_has_type_object! {
     u64 => Uint64, "uint64",
     f32 => Float32, "float32",
     f64 => Float64, "float64",
+    crate::serialize::Float128 => Float128, "float128",
     char => Char8, "char",
 }
 
