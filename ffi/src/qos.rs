@@ -41,21 +41,9 @@ use int2dds::{
 
 use super::error::*;
 
-/// Convert a nanosecond count to a DDS Duration, treating any value whose
-/// seconds part would overflow i32 (>= 2^31 - 1 seconds, e.g. i64::MAX or a
-/// roundtripped infinite lease) as Duration::infinite(). Negative clamps to zero.
-/// This keeps get->set roundtrips of INFINITE lossless across the ns-based C API;
-/// the previous plain div/mod overflowed i32 and produced a negative duration,
-/// which made local endpoints advertise a broken QoS and reject remote vendors.
+/// Convert nanoseconds to a Duration; values beyond the i32 seconds range become infinite.
 fn ns_to_duration(ns: i64) -> Duration {
-    if ns < 0 {
-        return Duration::zero();
-    }
-    let sec = ns / 1_000_000_000;
-    if sec >= i32::MAX as i64 {
-        return Duration::infinite();
-    }
-    Duration { sec: sec as i32, nanosec: (ns % 1_000_000_000) as u32 }
+    crate::waitset::to_duration(ns, 1_000_000_000)
 }
 
 /// Convert a DDS Duration to nanoseconds, mapping infinite to i64::MAX.
@@ -2546,6 +2534,23 @@ pub(crate) unsafe fn copy_octets_to_c(
 mod tests {
     use super::*;
     use std::ptr;
+
+    #[test]
+    fn negative_ns_stays_negative_and_round_trips() {
+        for ns in [-1, -999_999_999, -1_000_000_000, -1_500_000_000] {
+            let d = ns_to_duration(ns);
+            assert!(d.is_negative() && d.nanosec < 1_000_000_000, "{ns} -> {d:?}");
+            assert_eq!(duration_to_ns(&d), ns);
+        }
+        assert!(ns_to_duration(i64::MIN).is_negative());
+    }
+
+    #[test]
+    fn non_negative_ns_converts_exactly_and_saturates_to_infinite() {
+        assert_eq!(ns_to_duration(0), Duration::zero());
+        assert_eq!(ns_to_duration(1_500_000_000), Duration { sec: 1, nanosec: 500_000_000 });
+        assert!(ns_to_duration(i64::MAX).is_infinite());
+    }
 
     #[test]
     fn writer_qos_default_data_representation_is_xcdr1() {

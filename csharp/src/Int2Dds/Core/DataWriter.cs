@@ -429,7 +429,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_datawriter_wait_for_acknowledgments(_handle, (long)timeout.TotalMilliseconds));
+                NativeMethods.int2dds_datawriter_wait_for_acknowledgments(_handle, WaitTimeout.ToMilliseconds(timeout)));
         }
 
         public (int totalCount, int currentCount) GetPublicationMatchedStatus()

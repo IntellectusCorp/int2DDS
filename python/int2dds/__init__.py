@@ -94,7 +94,7 @@ except ImportError as e:
     import warnings
     warnings.warn(f"int2dds core modules not available: {e}")
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __all__ = [
     # Core entities
     "DomainParticipant",

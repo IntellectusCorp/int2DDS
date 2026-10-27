@@ -13,7 +13,7 @@ const EXPECTED_ABI_VERSION: u32 = 1;
 
 #[cfg(windows)]
 const LIBRARY_NAME: &str = "int2dds_enterprise.dll";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const LIBRARY_NAME: &str = "libint2dds_enterprise.so";
 #[cfg(target_os = "macos")]
 const LIBRARY_NAME: &str = "libint2dds_enterprise.dylib";

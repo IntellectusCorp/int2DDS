@@ -838,6 +838,7 @@ impl DomainParticipant {
             }
         };
 
+        qos.check_values()?;
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
 
@@ -1060,6 +1061,7 @@ impl DomainParticipant {
             }
         };
 
+        qos.check_values()?;
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
 
@@ -1705,6 +1707,7 @@ impl DomainParticipant {
 
         let qos = self.resolve_topic_qos(qos.into());
 
+        qos.check_values()?;
         qos.is_consistent()?;
         self.check_topic_type_matches(topic_name, type_name)?;
         let handle = self.create_instance_handle()?;
@@ -2268,6 +2271,7 @@ impl DomainParticipant {
         match qos.into() {
             QosKind::Default => self.reset_default_publisher_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_publisher_qos.lock() {
                     Ok(mut default_qos) => {
@@ -2324,6 +2328,7 @@ impl DomainParticipant {
         match qos.into() {
             QosKind::Default => self.reset_default_subscriber_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_subscriber_qos.lock() {
                     Ok(mut default_qos) => {
@@ -2377,6 +2382,7 @@ impl DomainParticipant {
         match qos.into() {
             QosKind::Default => self.reset_default_topic_qos(),
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_topic_qos.lock() {
                     Ok(mut default_qos) => {
@@ -2747,6 +2753,7 @@ impl DomainParticipant {
         // existing callers are unaffected.
         let qos = self.resolve_topic_qos(qos.into());
 
+        qos.check_values()?;
         qos.is_consistent()?;
         let type_name = type_support.get_type_name().to_string();
         self.check_topic_type_matches(topic_name, &type_name)?;

@@ -667,8 +667,9 @@ impl ThreadMonitor {
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     fn get_fallback_process_threads() -> (u32, Vec<String>) {
         let mut thread_details = Vec::new();
-        let current_thread_id = thread::current().id();
-        let current_thread_name = thread::current().name().unwrap_or("main");
+        let current_thread = thread::current();
+        let current_thread_id = current_thread.id();
+        let current_thread_name = current_thread.name().unwrap_or("main");
 
         let estimated_count = thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
 

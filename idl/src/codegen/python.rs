@@ -1206,6 +1206,24 @@ impl<'a> PyGen<'a> {
         )
     }
 
+    // struct format character for elements written by write_prim_seq/write_prim_array.
+    fn prim_format_char(element: &ResolvedType) -> Option<&'static str> {
+        match element {
+            ResolvedType::Bool => Some("?"),
+            ResolvedType::U8 | ResolvedType::UInt8 => Some("B"),
+            ResolvedType::I8 => Some("b"),
+            ResolvedType::I16 => Some("h"),
+            ResolvedType::U16 => Some("H"),
+            ResolvedType::I32 => Some("i"),
+            ResolvedType::U32 => Some("I"),
+            ResolvedType::I64 => Some("q"),
+            ResolvedType::U64 => Some("Q"),
+            ResolvedType::F32 => Some("f"),
+            ResolvedType::F64 => Some("d"),
+            _ => None,
+        }
+    }
+
     /// Wrap `body` in an XCDR2 DHEADER when `framed`; XCDR1 writes the body flat.
     fn emit_dheader_write<F: FnOnce(&mut Self)>(&mut self, framed: bool, body: F) {
         if !framed {
@@ -1314,6 +1332,11 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{}._serialize_cdr_inline(w)", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
+                if let Some(format_char) = Self::prim_format_char(element) {
+                    self.line(&format!("w.write_prim_seq({}, \"{}\")", accessor, format_char));
+                    return;
+                }
+
                 let framed = Self::is_non_primitive_element(element);
                 self.emit_dheader_write(framed, |g| {
                     g.line(&format!("w.write_seq_header(len({}))", accessor));
@@ -1324,6 +1347,14 @@ impl<'a> PyGen<'a> {
                 });
             }
             ResolvedType::Array { element, size } => {
+                if let Some(format_char) = Self::prim_format_char(element) {
+                    self.line(&format!(
+                        "w.write_prim_array({}, \"{}\", {})",
+                        accessor, format_char, size
+                    ));
+                    return;
+                }
+
                 self.line(&format!(
                     "assert len({}) == {}, \"Array size mismatch\"",
                     accessor, size
@@ -1593,6 +1624,11 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, cls));
             }
             ResolvedType::Sequence { element, .. } => {
+                if let Some(format_char) = Self::prim_format_char(element) {
+                    self.line(&format!("{} = r.read_prim_seq(\"{}\")", name, format_char));
+                    return;
+                }
+
                 let framed = Self::is_non_primitive_element(element);
                 self.emit_dheader_read(framed, name, |g| {
                     g.line(&format!("_{}_count = r.read_seq_header()", name));
@@ -1606,6 +1642,14 @@ impl<'a> PyGen<'a> {
                 });
             }
             ResolvedType::Array { element, size } => {
+                if let Some(format_char) = Self::prim_format_char(element) {
+                    self.line(&format!(
+                        "{} = r.read_prim_array(\"{}\", {})",
+                        name, format_char, size
+                    ));
+                    return;
+                }
+
                 let framed = Self::is_non_primitive_element(element);
                 self.emit_dheader_read(framed, name, |g| {
                     g.line(&format!("{} = []", name));
@@ -1684,6 +1728,44 @@ mod tests {
             code
         );
         assert!(!code.contains("xcdr2: bool = True"), "no XCDR2-default convenience: {}", code);
+    }
+
+    #[test]
+    fn test_primitive_collections_use_bulk_calls() {
+        let defs = parse_idl(
+            r#"
+            struct Bulk {
+                sequence<float> values;
+                sequence<octet> raw;
+                long fixed[4];
+                double matrix[3][4];
+                sequence<boolean> flags;
+                sequence<string> names;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Bulk.idl", &PythonOptions::new());
+
+        for expected in [
+            "w.write_prim_seq(self.values, \"f\")",
+            "w.write_prim_seq(self.raw, \"B\")",
+            "w.write_prim_array(self.fixed, \"i\", 4)",
+            "w.write_prim_array(_item, \"d\", 4)",
+            "w.write_prim_seq(self.flags, \"?\")",
+            "values = r.read_prim_seq(\"f\")",
+            "raw = r.read_prim_seq(\"B\")",
+            "fixed = r.read_prim_array(\"i\", 4)",
+            "_matrix_item = r.read_prim_array(\"d\", 4)",
+            "flags = r.read_prim_seq(\"?\")",
+        ] {
+            assert!(code.contains(expected), "missing `{}`: {}", expected, code);
+        }
+
+        // Non-primitive elements keep the per-element loop
+        assert!(code.contains("w.write_string(_item)"), "string loop: {}", code);
+        assert!(!code.contains("assert len(self.fixed)"), "struct.pack checks size: {}", code);
     }
 
     #[test]

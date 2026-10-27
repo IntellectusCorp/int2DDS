@@ -106,7 +106,8 @@ public final class NativeLoader {
         String v = (p == null) ? null : p.getImplementationVersion();
         // When running from a Gradle source set rather than the packaged JAR there
         // is no manifest; fall back to the native version so tests still run.
-        return (v == null) ? nativeVersion : v;
+        // Android has no manifest either and reports "0.0" instead of null.
+        return (v == null || v.equals("0.0")) ? nativeVersion : v;
     }
 
     private static void doLoad() {

@@ -383,6 +383,7 @@ impl DomainParticipantFactory {
     }
 
     pub fn set_qos(&self, qos: DomainParticipantFactoryQos) -> DdsResult<()> {
+        qos.check_values()?;
         qos.check_unsupported_policies()?;
         qos.is_consistent()?;
 
@@ -417,6 +418,7 @@ impl DomainParticipantFactory {
                 Err(e) => Err(DdsError::Error(e.to_string())),
             },
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_participant_qos.lock() {
                     Ok(mut default_qos) => {
