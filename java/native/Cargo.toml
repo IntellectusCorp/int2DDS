@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "JNI bindings for int2DDS"
+publish = false
 
 [lib]
 name = "int2dds_java"

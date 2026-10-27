@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "C FFI bindings for int2DDS DDS implementation"
+publish = false
 keywords = ["dds", "ffi", "c-bindings", "interop"]
 categories = ["network-programming", "api-bindings", "external-ffi-bindings"]
 documentation = "https://docs.rs/int2dds-ffi"
