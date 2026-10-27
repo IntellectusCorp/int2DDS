@@ -418,31 +418,113 @@ impl SedpLogic {
     }
 }
 
+// DDS 1.4 2.2.3.13: an empty list is the default "" partition; either side may use fnmatch
+// patterns, but two names that both contain wildcards never match.
 fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
-    if requested.is_empty() && offered.is_empty() {
-        return true;
-    }
-    let requested = if requested.is_empty() { vec!["".into()] } else { requested.to_vec() };
-    let offered = if offered.is_empty() { vec!["".into()] } else { offered.to_vec() };
+    let default = [String::new()];
+    let requested = if requested.is_empty() { &default[..] } else { requested };
+    let offered = if offered.is_empty() { &default[..] } else { offered };
+    requested.iter().any(|r| offered.iter().any(|o| partition_names_match(r, o)))
+}
 
-    for r in &requested {
-        for o in &offered {
-            if r == o || r == "*" || o == "*" {
-                return true;
-            }
-            if let Some(prefix) = r.strip_suffix('*') {
-                if o.starts_with(prefix) {
-                    return true;
-                }
-            }
-            if let Some(suffix) = r.strip_prefix('*') {
-                if o.ends_with(suffix) {
-                    return true;
-                }
-            }
+fn partition_names_match(a: &str, b: &str) -> bool {
+    match (has_wildcard(a), has_wildcard(b)) {
+        (false, false) => a == b,
+        (true, false) => fnmatch(a, b),
+        (false, true) => fnmatch(b, a),
+        (true, true) => false,
+    }
+}
+
+fn has_wildcard(name: &str) -> bool {
+    let p: Vec<char> = name.chars().collect();
+    let mut i = 0;
+    while i < p.len() {
+        match p[i] {
+            '\\' => i += 1,
+            '*' | '?' => return true,
+            '[' if bracket_match(&p, i, '\0').is_some() => return true,
+            _ => {}
         }
+        i += 1;
     }
     false
+}
+
+// POSIX fnmatch with no flags: `*`, `?`, `[...]` (`!`/`^` negation, ranges) and `\` escapes.
+fn fnmatch(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() {
+            let step = match p[pi] {
+                '*' => {
+                    star = Some((pi + 1, ni));
+                    pi += 1;
+                    continue;
+                }
+                '?' => Some(1),
+                '[' => match bracket_match(&p, pi, n[ni]) {
+                    Some((true, next)) => Some(next - pi),
+                    Some((false, _)) => None,
+                    None => (n[ni] == '[').then_some(1),
+                },
+                '\\' if pi + 1 < p.len() => (p[pi + 1] == n[ni]).then_some(2),
+                c => (c == n[ni]).then_some(1),
+            };
+            if let Some(len) = step {
+                pi += len;
+                ni += 1;
+                continue;
+            }
+        }
+        match star {
+            Some((sp, sn)) => {
+                pi = sp;
+                ni = sn + 1;
+                star = Some((sp, sn + 1));
+            }
+            None => return false,
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
+}
+
+// Matches `ch` against the bracket expression opening at `p[start]`.
+// Returns (matched, index past `]`), or None when the bracket is not closed.
+fn bracket_match(p: &[char], start: usize, ch: char) -> Option<(bool, usize)> {
+    let mut i = start + 1;
+    let negated = matches!(p.get(i), Some('!' | '^'));
+    if negated {
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    loop {
+        let mut lo = *p.get(i)?;
+        if lo == ']' && !first {
+            return Some((matched != negated, i + 1));
+        }
+        first = false;
+        if lo == '\\' {
+            i += 1;
+            lo = *p.get(i)?;
+        }
+        if p.get(i + 1) == Some(&'-') && p.get(i + 2).is_some_and(|&c| c != ']') {
+            let mut hi = p[i + 2];
+            i += 3;
+            if hi == '\\' {
+                hi = *p.get(i)?;
+                i += 1;
+            }
+            matched |= lo <= ch && ch <= hi;
+        } else {
+            matched |= lo == ch;
+            i += 1;
+        }
+    }
 }
 
 /// Initialization
@@ -4478,5 +4560,54 @@ mod tests {
 
         let monitor = participant.liveliness_monitor();
         assert!(monitor.lock().expect("liveliness monitor lock").is_none());
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn partition_lists_match_on_any_shared_name_and_default_is_empty_name() {
+        assert!(is_partition_compatible(&[], &[]));
+        assert!(is_partition_compatible(&names(&[""]), &[]));
+        assert!(is_partition_compatible(&[], &names(&[""])));
+        assert!(is_partition_compatible(&names(&["a", "b"]), &names(&["c", "b"])));
+        assert!(!is_partition_compatible(&names(&["p1"]), &[]));
+        assert!(!is_partition_compatible(&names(&["p1"]), &names(&["P1"])));
+    }
+
+    #[test]
+    fn partition_wildcards_apply_on_either_side() {
+        for (pattern, name) in [("p*", "p1"), ("*", "p1"), ("p?", "p1"), ("[pq]1", "p1"), ("*", "")]
+        {
+            assert!(is_partition_compatible(&names(&[pattern]), &names(&[name])), "{pattern}");
+            assert!(is_partition_compatible(&names(&[name]), &names(&[pattern])), "{pattern}");
+        }
+        assert!(is_partition_compatible(&names(&["*"]), &[]));
+        assert!(!is_partition_compatible(&names(&["p?"]), &names(&["p12"])));
+    }
+
+    #[test]
+    fn two_wildcard_partition_names_never_match() {
+        assert!(!is_partition_compatible(&names(&["p*"]), &names(&["p*"])));
+        assert!(!is_partition_compatible(&names(&["*"]), &names(&["p?"])));
+    }
+
+    #[test]
+    fn fnmatch_follows_posix_rules() {
+        assert!(fnmatch("a*b*c", "aXXbYc"));
+        assert!(!fnmatch("a*b*c", "aXXbY"));
+        assert!(fnmatch("sensor/*", "sensor/a/b"));
+        assert!(fnmatch("[a-c]x", "bx"));
+        assert!(!fnmatch("[!a-c]x", "bx"));
+        assert!(fnmatch("[^a-c]x", "dx"));
+        assert!(fnmatch("[]]", "]"));
+        assert!(fnmatch("a[b", "a[b"));
+        assert!(fnmatch("파티*", "파티션"));
+        assert!(fnmatch("p\\*", "p*"));
+        assert!(!fnmatch("p\\*", "p1"));
+        assert!(!has_wildcard("p\\*"));
+        assert!(!has_wildcard("a[b"));
+        assert!(has_wildcard("a[b]"));
     }
 }
