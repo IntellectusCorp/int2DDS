@@ -3,7 +3,12 @@ name = "int2dds-idl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "IDL code generator for int2DDS - generates Rust and C type definitions from OMG IDL"
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "IDL code generator for int2DDS - generates Rust, C, Python, C#, Java and XML type definitions from OMG IDL"
+readme = "README.md"
 
 [[bin]]
 name = "int2dds-idl"
@@ -18,6 +23,6 @@ md5 = "0.8.0"
 dialoguer = { version = "0.11", default-features = false, features = ["completion"] }
 
 [dev-dependencies]
-int2dds = { path = "../dds" }
+int2dds.workspace = true
 speedy = "0.8.0"
 log = "0.4.11"
