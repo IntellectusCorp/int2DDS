@@ -18,6 +18,6 @@ md5 = "0.8.0"
 dialoguer = { version = "0.11", default-features = false, features = ["completion"] }
 
 [dev-dependencies]
-int2dds = { path = "../dds" }
+int2dds.workspace = true
 speedy = "0.8.0"
 log = "0.4.11"
