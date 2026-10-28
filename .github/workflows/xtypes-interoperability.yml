@@ -3,7 +3,7 @@ run-name: "XTypes interop test ${{ github.head_ref }}"
 on:
   workflow_dispatch:
     inputs:
-      enable_int2dds_logging:
+      upload_int2dds_logs:
         description: "Upload int2DDS logs"
         required: false
         type: boolean
@@ -166,7 +166,7 @@ jobs:
           executable-pattern: ${{ matrix.dds.pattern }}
           role: ${{ matrix.role }}
           dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
-          enable-int2dds-logging: ${{ inputs.enable_int2dds_logging }}
+          upload-int2dds-logs: ${{ inputs.upload_int2dds_logs }}
 
   merge_files:
     needs: test_all_dds

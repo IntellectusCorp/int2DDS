@@ -11,8 +11,8 @@ description = "DDS-RPC (Remote Procedure Call over DDS) implementation for int2D
 readme = "README.md"
 
 [dependencies]
-int2dds = { path = "../dds" }
-int2dds-derive = { path = "../derive" }
+int2dds.workspace = true
+int2dds-derive.workspace = true
 speedy = "0.8.0"
 log = "0.4"
 
