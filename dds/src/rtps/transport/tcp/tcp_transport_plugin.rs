@@ -141,8 +141,9 @@ impl TcpTransportPlugin {
             ));
         }
 
-        let dial_allowed = Self::allowed_dial_addresses(&peers);
-        let dial_allowed_hosts = Self::allowed_dial_hosts(&peers);
+        let pinned = working_ip.parse::<IpAddr>().ok().filter(|ip| !ip.is_unspecified());
+        let dial_allowed = Self::allowed_dial_addresses(&peers, pinned);
+        let dial_allowed_hosts = Self::allowed_dial_hosts(&peers, pinned);
         let announce_targets = Mutex::new(AnnounceTargets::new(
             Self::candidates(
                 domain_id,
@@ -386,28 +387,37 @@ impl TcpTransportPlugin {
             .collect()
     }
 
-    /// The loopback address a peer on this host is reached under, and `None` for
-    /// a peer anywhere else.
-    fn loopback_form(ip: IpAddr) -> Option<IpAddr> {
+    /// The addresses discovery may rewrite a peer on this host to: loopback, and
+    /// the pinned egress address when this host owns it. Empty for a peer anywhere
+    /// else.
+    fn same_host_forms(ip: IpAddr, pinned: Option<IpAddr>) -> Vec<IpAddr> {
         if !is_same_host(SocketAddr::new(ip, 0)) {
-            return None;
+            return Vec::new();
         }
-        Some(match ip {
+        let loopback = match ip {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        })
+        };
+        std::iter::once(loopback)
+            .chain(pinned.filter(|pinned| {
+                pinned.is_ipv4() == ip.is_ipv4() && is_same_host(SocketAddr::new(*pinned, 0))
+            }))
+            .collect()
     }
 
     /// Every address an outbound dial is permitted to reach: the configured
-    /// peers, plus the loopback address discovery substitutes for the ones that
-    /// live on this host.
-    fn allowed_dial_addresses(initial_peers: &[PeerSpec]) -> Vec<SocketAddr> {
+    /// peers, plus the addresses discovery substitutes for the ones that live on
+    /// this host.
+    fn allowed_dial_addresses(
+        initial_peers: &[PeerSpec],
+        pinned: Option<IpAddr>,
+    ) -> Vec<SocketAddr> {
         let mut allowed = Vec::new();
         for peer in initial_peers {
             let Some(port) = peer.port else {
                 continue;
             };
-            let forms = std::iter::once(peer.ip).chain(Self::loopback_form(peer.ip));
+            let forms = std::iter::once(peer.ip).chain(Self::same_host_forms(peer.ip, pinned));
             for addr in forms.map(|ip| SocketAddr::new(ip, port)) {
                 if !allowed.contains(&addr) {
                     allowed.push(addr);
@@ -418,11 +428,11 @@ impl TcpTransportPlugin {
     }
 
     /// Every host an outbound dial is permitted to reach: the configured hosts,
-    /// plus the loopback address that stands for the ones living on this host.
-    fn allowed_dial_hosts(initial_peers: &[PeerSpec]) -> HashSet<IpAddr> {
+    /// plus the addresses that stand for the ones living on this host.
+    fn allowed_dial_hosts(initial_peers: &[PeerSpec], pinned: Option<IpAddr>) -> HashSet<IpAddr> {
         initial_peers
             .iter()
-            .flat_map(|peer| std::iter::once(peer.ip).chain(Self::loopback_form(peer.ip)))
+            .flat_map(|peer| std::iter::once(peer.ip).chain(Self::same_host_forms(peer.ip, pinned)))
             .collect()
     }
 
@@ -838,7 +848,7 @@ mod tests {
     fn a_same_host_peer_is_also_allowed_at_its_loopback_form() {
         let configured: SocketAddr = "127.0.0.2:8650".parse().unwrap();
 
-        let allowed = TcpTransportPlugin::allowed_dial_addresses(&[configured.into()]);
+        let allowed = TcpTransportPlugin::allowed_dial_addresses(&[configured.into()], None);
 
         assert!(allowed.contains(&configured));
         assert!(allowed.contains(&"127.0.0.1:8650".parse().unwrap()));
@@ -1137,6 +1147,55 @@ mod tests {
         plugin.close();
     }
 
+    /// With egress pinned, discovery reaches a same-host peer at the pinned
+    /// address, so a peer named by loopback has to be dialable there too.
+    #[test]
+    fn a_same_host_peer_named_by_loopback_is_dialable_at_the_pinned_address() {
+        let Some(pinned) = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|iface| iface.ip())
+            .find(|ip| ip.is_ipv4() && !ip.is_loopback())
+        else {
+            return;
+        };
+        let domain = next_test_domain();
+        let cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec![PeerSpec::searched(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            ..TcpConfig::default()
+        };
+        let plugin = TcpTransportPlugin::new(
+            domain,
+            0,
+            pinned.to_string(),
+            vec![pinned.to_string()],
+            [0u8; 12],
+            cfg,
+        )
+        .expect("plugin creation");
+
+        let slot = PortManager::default().calculate_tcp_physical_port(domain, 1).unwrap();
+        assert!(
+            plugin.should_dial(&SocketAddr::new(pinned, slot)),
+            "a same-host peer at the pinned address {pinned}:{slot} is refused"
+        );
+
+        plugin.close();
+    }
+
+    /// A pinned address is only checked for its form, so one this host does not
+    /// own must not open the gate to whoever holds it.
+    #[test]
+    fn a_pinned_address_this_host_does_not_own_is_not_allowed() {
+        let not_owned: IpAddr = "192.0.2.10".parse().unwrap();
+        let loopback = PeerSpec::searched(IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        let hosts = TcpTransportPlugin::allowed_dial_hosts(&[loopback], Some(not_owned));
+
+        assert!(!hosts.contains(&not_owned), "{hosts:?}");
+    }
+
     /// A peer on another host is never rewritten, so the gate stays exactly as
     /// the operator declared it.
     #[test]
@@ -1144,7 +1203,7 @@ mod tests {
         let configured: SocketAddr = "203.0.113.7:8650".parse().unwrap();
 
         assert_eq!(
-            TcpTransportPlugin::allowed_dial_addresses(&[configured.into()]),
+            TcpTransportPlugin::allowed_dial_addresses(&[configured.into()], None),
             vec![configured]
         );
     }
