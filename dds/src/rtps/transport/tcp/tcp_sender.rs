@@ -706,7 +706,8 @@ mod tests {
         let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
         let addr = SocketAddr::from(([192, 0, 2, 1], port));
         let probe =
-            crate::rtps::transport::tcp::dial::start_dial(addr, Duration::from_secs(1)).ok()?;
+            crate::rtps::transport::tcp::dial::start_dial(addr, None, Duration::from_secs(1))
+                .ok()?;
         std::thread::sleep(Duration::from_millis(150));
         let unanswered = matches!(probe.take_error(), Ok(None))
             && matches!(probe.peer_addr(), Err(error) if error.kind() == io::ErrorKind::NotConnected);
