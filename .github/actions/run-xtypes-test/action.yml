@@ -15,7 +15,7 @@ inputs:
     required: false
     default: 'false'
   enable-int2dds-logging:
-    description: 'Enable int2DDS logging'
+    description: 'Upload int2DDS logs'
     required: false
     default: 'false'
 runs:

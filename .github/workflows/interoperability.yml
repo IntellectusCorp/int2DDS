@@ -18,11 +18,10 @@ on:
         required: false
         type: choice
         options:
-          - opendds
-          - fastdds
           - connext
-          - dustdds
-          - intercom
+          - cyclone
+          - fastdds
+          - opendds
           - coredx
           - int2DDS
           - all
