@@ -11,13 +11,13 @@ description = "Rust implementation of the Data Distribution Service (DDS) middle
 keywords = ["dds", "rtps", "middleware", "pubsub", "realtime"]
 categories = ["network-programming", "embedded", "api-bindings"]
 documentation = "https://docs.rs/int2dds"
-readme = "../README.md"
+readme = "README.md"
 
 [features]
 default = []
 
 [dependencies]
-int2dds-derive = { path = "../derive" }
+int2dds-derive.workspace = true
 mio = { version = "1.0.2", features = ["net", "os-poll"] }
 network-interface = "2.0.0"
 const-default = { version = "1.0.0", features = ["derive", "std", "alloc"] }

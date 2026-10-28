@@ -15,6 +15,13 @@ homepage = "https://github.com/IntellectusCorp/int2DDS"
 edition = "2021"
 rust-version = "1.89.0"
 
+# Internal crates. crates.io drops `path` on publish, so each needs `version`;
+# keep it equal to workspace.package.version when bumping.
+[workspace.dependencies]
+int2dds = { path = "dds", version = "1.0.0" }
+int2dds-derive = { path = "derive", version = "1.0.0" }
+int2dds-ffi = { path = "ffi", version = "1.0.0" }
+
 [profile.dev]
 opt-level = 1
 

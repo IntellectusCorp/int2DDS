@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Procedural macros for int2DDS - DdsType derive macro for automatic type support generation"
+readme = "README.md"
 keywords = ["dds", "derive", "macro", "codegen"]
 categories = [
     "development-tools::procedural-macro-helpers",

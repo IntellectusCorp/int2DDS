@@ -1,5 +1,5 @@
 #![allow(clippy::needless_doctest_main)]
-#![doc = include_str!("../../README.md")]
+#![doc = include_str!("../README.md")]
 
 #[cfg(test)]
 extern crate self as int2dds;
