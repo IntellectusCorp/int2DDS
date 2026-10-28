@@ -1,19 +1,36 @@
 //! How an outbound TCP connection is opened.
 
 use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+static BIND_FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Send the SYN and return at once with a non-blocking stream that is still
 /// connecting. It turns writable once the peer answers either way, and only
 /// its pending error then tells an accepted connection from a refused one.
 #[cfg_attr(not(windows), allow(unused_variables))]
-pub(crate) fn start_dial(addr: SocketAddr, wait: Duration) -> io::Result<TcpStream> {
+pub(crate) fn start_dial(
+    addr: SocketAddr,
+    bind_ip: Option<IpAddr>,
+    wait: Duration,
+) -> io::Result<TcpStream> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(addr),
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
+
+    if let Some(bind_ip) = bind_ip.filter(|bind_ip| bind_ip.is_ipv4() == addr.is_ipv4()) {
+        if let Err(error) = socket.bind(&SocketAddr::new(bind_ip, 0).into()) {
+            if !BIND_FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
+                log::error!("[TcpSender] Failed to bind to {}: {}", bind_ip, error);
+            }
+            return Err(error);
+        }
+        BIND_FAILURE_REPORTED.store(false, Ordering::Relaxed);
+    }
     // Windows answers a refused SYN by sending it again and reports the refusal
     // only once its retries run out, which turns a cheap refusal into a timeout
     // that earns a backoff.
@@ -146,7 +163,7 @@ mod tests {
 
         let call = Instant::now();
         let wait = Duration::from_secs(5);
-        let error = start_dial(closed, wait)
+        let error = start_dial(closed, None, wait)
             .and_then(|stream| wait_for_dial(&stream, wait))
             .expect_err("nothing listens there");
 

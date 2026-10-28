@@ -88,7 +88,7 @@ impl TcpTransportPlugin {
     pub(crate) fn new(
         domain_id: u32,
         participant_id: u32,
-        working_ip: String,
+        bind_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
         tcp_config: TcpConfig,
@@ -96,7 +96,7 @@ impl TcpTransportPlugin {
         Self::new_with_tls(
             domain_id,
             participant_id,
-            working_ip,
+            bind_ip,
             working_ips,
             guid_prefix,
             None,
@@ -109,7 +109,7 @@ impl TcpTransportPlugin {
     pub(crate) fn new_with_tls(
         domain_id: u32,
         participant_id: u32,
-        working_ip: String,
+        bind_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
@@ -141,7 +141,7 @@ impl TcpTransportPlugin {
             ));
         }
 
-        let pinned = working_ip.parse::<IpAddr>().ok().filter(|ip| !ip.is_unspecified());
+        let pinned = bind_ip.parse::<IpAddr>().ok().filter(|ip| !ip.is_unspecified());
         let dial_allowed = Self::allowed_dial_addresses(&peers, pinned);
         let dial_allowed_hosts = Self::allowed_dial_hosts(&peers, pinned);
         let announce_targets = Mutex::new(AnnounceTargets::new(
@@ -184,8 +184,8 @@ impl TcpTransportPlugin {
         // Every address this participant answers on, so the sender can tell
         // a frame aimed at ourselves from one aimed at a peer.
         let mut local_ips = working_ips.clone();
-        if !local_ips.contains(&working_ip) {
-            local_ips.push(working_ip);
+        if !local_ips.contains(&bind_ip) {
+            local_ips.push(bind_ip);
         }
 
         let sender = TcpSender::new(
@@ -193,6 +193,7 @@ impl TcpTransportPlugin {
             participant_id,
             local_ips,
             listener_port,
+            pinned,
             guid_prefix,
             tls_config,
             Arc::clone(&shared),
