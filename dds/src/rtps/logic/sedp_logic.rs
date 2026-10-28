@@ -2376,7 +2376,7 @@ impl SedpLogic {
                 writer_entity_id,
                 Vec::new(),
                 acknack_count,
-                SequenceNumber::new(0, 0),
+                SequenceNumber::new(0, 1),
                 true,
             ) {
                 Ok(buffer) => {
@@ -3209,7 +3209,7 @@ impl UnicastMessageProcessor for SedpLogic {
     fn handle_acknack_message(
         &mut self,
         rtps_header: &Header,
-        _submessage_header: &SubmessageHeader,
+        submessage_header: &SubmessageHeader,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
         if acknack.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
@@ -3263,9 +3263,15 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        // Preemptive ACKNACK (RTPS 8.4.12.2) carries seqbase < 1 as an explicit
-        // reset signal and bypasses the count/debounce check.
-        let is_preemptive = acknack.reader_sn_state.bitmap_base().to_i64() < 1;
+        // A preemptive ACKNACK reports nothing and bypasses the count/debounce check. Some stacks
+        // mark it with the invalid base 0; the valid form is base 1 without the final flag, which
+        // every plain ack reporting nothing carries.
+        let is_preemptive = acknack.reader_sn_state.num_bits() == 0
+            && match acknack.reader_sn_state.bitmap_base().to_i64() {
+                base if base < 1 => true,
+                1 => !submessage_header.final_flag().unwrap_or(false),
+                _ => false,
+            };
         let now = Instant::now();
         if !should_accept_count(
             "[SEDP] [AckNack]",
@@ -3929,10 +3935,10 @@ mod tests {
         assert_eq!(
             acknacks,
             vec![
-                (EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER, 0, 0, false),
-                (EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER, 0, 0, false),
+                (EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER, 1, 0, false),
+                (EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER, 1, 0, false),
             ],
-            "each SEDP reader must send one preemptive ACKNACK: base 0, empty, no final flag"
+            "each SEDP reader must send one preemptive ACKNACK: base 1, empty, no final flag"
         );
     }
 
@@ -4153,6 +4159,18 @@ mod tests {
         bitmap_base: SequenceNumber,
         count: u32,
     ) -> (Header, SubmessageHeader, AckNack) {
+        let (header, _, acknack) = preemptive_acknack(bitmap_base, count);
+        let mut flag = SubmessageHeaderFlag::new();
+        flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
+        flag.add_flag(SubmessageFlagType::FinalFlag, SubmessageId::ACKNACK);
+        (header, SubmessageHeader::new(SubmessageId::ACKNACK, flag.flag, 0), acknack)
+    }
+
+    /// The same ACKNACK without the final flag: a reader asking for a heartbeat.
+    fn preemptive_acknack(
+        bitmap_base: SequenceNumber,
+        count: u32,
+    ) -> (Header, SubmessageHeader, AckNack) {
         let mut flag = SubmessageHeaderFlag::new();
         flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
 
@@ -4356,7 +4374,8 @@ mod tests {
         thread::sleep(StdDuration::from_millis(300));
         let fired_while_settled = fired.load(std::sync::atomic::Ordering::SeqCst);
 
-        let (header, submessage_header, preemptive) = plain_acknack(SequenceNumber::new(0, 0), 2);
+        let (header, submessage_header, preemptive) =
+            preemptive_acknack(SequenceNumber::new(0, 0), 2);
         sedp_logic
             .handle_acknack_message(&header, &submessage_header, &preemptive)
             .expect("the preemptive acknack is accepted");
@@ -4385,6 +4404,47 @@ mod tests {
         );
     }
 
+    /// A base below 1 is not a valid sequence number set, so a preemptive ACKNACK may also come
+    /// as base 1 with nothing missing; only the missing final flag tells it from a plain ack.
+    #[test]
+    fn a_preemptive_acknack_with_base_one_is_told_apart_by_its_final_flag() {
+        let (mut sedp_logic, participant, remote_prefix, last_sn, _sends) =
+            sedp_publications_writer(false);
+        let acked_sn = || {
+            participant
+                .sedp_builtin_publications_writer()
+                .matched_reader_lookup(Guid::new(
+                    remote_prefix,
+                    EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+                ))
+                .expect("the reader stays matched")
+                .max_acked_sn()
+        };
+
+        let (header, submessage_header, acknack) = plain_acknack(last_sn + 1, 1);
+        sedp_logic
+            .handle_acknack_message(&header, &submessage_header, &acknack)
+            .expect("the settling acknack is accepted");
+        let (header, submessage_header, final_ack) = plain_acknack(SequenceNumber::new(0, 1), 2);
+        sedp_logic
+            .handle_acknack_message(&header, &submessage_header, &final_ack)
+            .expect("the final-flag acknack is accepted");
+        let acked_after_final_ack = acked_sn();
+        let (header, submessage_header, preemptive) =
+            preemptive_acknack(SequenceNumber::new(0, 1), 3);
+        sedp_logic
+            .handle_acknack_message(&header, &submessage_header, &preemptive)
+            .expect("the preemptive acknack is accepted");
+        let acked_after_preemptive = acked_sn();
+
+        assert_eq!(acked_after_final_ack, last_sn, "a final-flag ack must not void any acks");
+        assert_eq!(
+            acked_after_preemptive,
+            SequenceNumber::new(0, 0),
+            "base 1 without the final flag is a preemptive ACKNACK and must void the acks"
+        );
+    }
+
     /// A writer with nothing announced has nothing a remote could have lost, so a keepalive
     /// heartbeat from it would only cost traffic; a later announcement re-arms the timer.
     #[test]
@@ -4407,7 +4467,8 @@ mod tests {
             SequenceNumber::UNKNOWN,
         ));
 
-        let (header, submessage_header, preemptive) = plain_acknack(SequenceNumber::new(0, 0), 1);
+        let (header, submessage_header, preemptive) =
+            preemptive_acknack(SequenceNumber::new(0, 0), 1);
         sedp_logic
             .handle_acknack_message(&header, &submessage_header, &preemptive)
             .expect("the acknack is accepted");
