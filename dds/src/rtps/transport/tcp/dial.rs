@@ -22,7 +22,12 @@ pub(crate) fn start_dial(
         Some(socket2::Protocol::TCP),
     )?;
 
-    if let Some(bind_ip) = bind_ip.filter(|bind_ip| bind_ip.is_ipv4() == addr.is_ipv4()) {
+    // A loopback peer never sees the pinned egress address, and Windows refuses
+    // to reach loopback from a socket bound to any other interface.
+    let bind_ip = bind_ip.filter(|bind_ip| {
+        bind_ip.is_ipv4() == addr.is_ipv4() && (bind_ip.is_loopback() || !addr.ip().is_loopback())
+    });
+    if let Some(bind_ip) = bind_ip {
         if let Err(error) = socket.bind(&SocketAddr::new(bind_ip, 0).into()) {
             if !BIND_FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
                 log::error!("[TcpSender] Failed to bind to {}: {}", bind_ip, error);
