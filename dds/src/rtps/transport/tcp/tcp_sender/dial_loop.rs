@@ -106,7 +106,7 @@ impl DialLoop {
             if cancelled.load(Ordering::Acquire) {
                 continue;
             }
-            let mut stream = match start_dial(key.0, sender.connect_timeout) {
+            let mut stream = match start_dial(key.0, sender.bind_ip, sender.connect_timeout) {
                 Ok(stream) => mio::net::TcpStream::from_std(stream),
                 Err(error) => {
                     sender.record_dial_result(key, &cancelled, Err(error));
