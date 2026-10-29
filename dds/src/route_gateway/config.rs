@@ -1,4 +1,4 @@
-//! Configuration loading for the Route Gateway binary.
+//! Configuration loading for a Route Gateway.
 //!
 //! Loads a JSON file describing the LocalNode (LAN side) and RemoteNode
 //! (WAN side) participants and the topic filter applied by AutoRelay.
@@ -117,7 +117,7 @@ pub struct AutoRelayConfig {
     #[serde(default = "default_filter")]
     pub filter: String,
 
-    /// Path to an external `qos_profiles.json` file (same format as
+    /// Path to an external QoS profile file, JSON or XML (same format as
     /// [`QosProvider`] accepts). Loaded before `qos_profiles`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos_profiles_file: Option<String>,

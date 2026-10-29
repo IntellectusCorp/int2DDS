@@ -2,7 +2,7 @@
 //!
 //! An `InstanceHandle` uniquely identifies a data instance within a topic. It is derived
 //! from the key fields of the data type and is used in operations like `register_instance()`,
-//! `write()`, and `dispose()`.
+//! `write()`, and `dispose()`. It also identifies entities, derived from their GUID.
 
 use std::ops::{Index, IndexMut};
 
