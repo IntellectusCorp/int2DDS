@@ -2552,12 +2552,15 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let reliability = self.get_qos_arc()?.reliability;
-        if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-            let rtps_writer = self.get_rtps_writer()?;
-            if rtps_writer.wait_for_all_acked(max_wait) {
-                return Ok(());
-            }
+        if reliability.kind != ReliabilityQosPolicyKind::Reliable {
+            return Ok(());
         }
+
+        let rtps_writer = self.get_rtps_writer()?;
+        if !rtps_writer.wait_for_all_acked(max_wait) {
+            return Err(DdsError::Timeout);
+        }
+
         Ok(())
     }
 }
