@@ -630,7 +630,7 @@ impl DomainParticipantFactory {
     /// Retrieves `DomainParticipantQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///   Pass `""` to use the default profile (resolved via `default_profile_path()`).
     ///
     /// # Errors
@@ -649,7 +649,7 @@ impl DomainParticipantFactory {
     /// Retrieves `PublisherQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -664,7 +664,7 @@ impl DomainParticipantFactory {
     /// Retrieves `SubscriberQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -679,7 +679,7 @@ impl DomainParticipantFactory {
     /// Retrieves `TopicQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -694,7 +694,7 @@ impl DomainParticipantFactory {
     /// Retrieves `DataWriterQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -709,7 +709,7 @@ impl DomainParticipantFactory {
     /// Retrieves `DataReaderQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.

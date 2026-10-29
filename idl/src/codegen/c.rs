@@ -8,7 +8,7 @@ use crate::types::*;
 /// String representation mode for C code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StringMode {
-    /// Current behavior: char field[N] fixed arrays.
+    /// Current behavior: `char field[N]` fixed arrays.
     /// Default for backwards compatibility.
     #[default]
     FixedArray,

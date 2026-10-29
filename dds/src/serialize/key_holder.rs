@@ -6,7 +6,7 @@
 //! PLAIN_CDR2 big-endian with maximum alignment 4 and no member headers.
 //!
 //! This trait is the static (derive-generated) counterpart of the runtime
-//! projection in [`crate::xtypes::dynamic_serialization`]; the two must produce
+//! projection in `crate::xtypes::dynamic_serialization`; the two must produce
 //! byte-identical KeyHash streams. Derived structs/enums implement it via the
 //! proc-macro; primitive and string leaves implement it here.
 

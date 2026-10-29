@@ -123,7 +123,7 @@ pub struct AutoRelayConfig {
     pub qos_profiles_file: Option<String>,
 
     /// Inline QoS profile definitions. Accepts the same shape as a JSON file
-    /// passed to [`QosProvider::load_json`] — either a single `QosLibrary`
+    /// passed to `QosProvider::load_json` — either a single `QosLibrary`
     /// object or a `{ "libraries": { ... } }` wrapper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos_profiles: Option<serde_json::Value>,
