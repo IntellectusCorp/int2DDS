@@ -2338,9 +2338,6 @@ impl TypeConsistencyKind {
 /// This QoS policy determines how strictly types are matched between DataWriters
 /// and DataReaders, and how the middleware handles type evolution.
 ///
-/// **Note**: This QoS policy is defined for compatibility with DDS-XTypes specification.
-/// The compatibility checking logic may be extended in future versions.
-///
 /// # Values
 /// - `DisallowTypeCoercion`: Strict type matching required
 /// - `AllowTypeCoercion`: Allow compatible type coercion (default per DDS-XTypes spec)
@@ -2396,11 +2393,14 @@ pub struct TypeConsistencyEnforcementQosPolicy {
     pub ignore_sequence_bounds: bool,
     /// Ignore differences in string bounds when matching types.
     pub ignore_string_bounds: bool,
-    /// Ignore member names when matching types (use hash-based matching).
+    /// Match members by id only. Otherwise a member whose name and id do not agree
+    /// between the two types is rejected.
     pub ignore_member_names: bool,
-    /// Prevent type widening (adding new members to received types).
+    /// Reject a reader type that has non-optional members the writer type lacks.
     pub prevent_type_widening: bool,
-    /// Force TypeObject validation even if hash matches.
+    /// Reject a match when only one side has a TypeIdentifier, or when a TypeObject
+    /// needed for the check is unavailable. Otherwise such a match is accepted. Two
+    /// endpoints that both lack a TypeIdentifier match without a type check.
     pub force_type_validation: bool,
 }
 

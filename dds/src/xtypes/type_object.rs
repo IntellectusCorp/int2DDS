@@ -64,7 +64,9 @@ pub mod type_kind {
     pub const EK_BOTH: u8 = 0xF3;
 }
 
-/// Member flag values. `TRY_CONSTRUCT_*` are values of the two low bits; the others are bit masks.
+/// Member flag values of the in-memory model: `TRY_CONSTRUCT_*` are values of the two low
+/// bits, the others are bit masks. The DDS-XTypes wire encoding differs (TRY_CONSTRUCT is
+/// 1 to 3); `serialize_type_object` converts between the two.
 pub mod member_flag {
     pub const TRY_CONSTRUCT_DISCARD: u16 = 0;
     pub const TRY_CONSTRUCT_USE_DEFAULT: u16 = 1;
@@ -76,8 +78,10 @@ pub mod member_flag {
     pub const IS_DEFAULT: u16 = 1 << 6;
 }
 
-/// Type flag values. `IS_FINAL`, `IS_APPENDABLE` and `IS_MUTABLE` are values of the two low
-/// bits; the others are bit masks.
+/// Type flag values of the in-memory model: `IS_FINAL`, `IS_APPENDABLE` and `IS_MUTABLE` are
+/// values of the two low bits, the others are bit masks. The DDS-XTypes wire encoding differs
+/// (IS_FINAL = 1, IS_APPENDABLE = 2, IS_MUTABLE = 4, IS_NESTED = 8, IS_AUTOID_HASH = 16);
+/// `serialize_type_object` converts between the two.
 pub mod type_flag {
     pub const IS_FINAL: u16 = 0;
     pub const IS_APPENDABLE: u16 = 1;
@@ -86,7 +90,8 @@ pub mod type_flag {
     pub const IS_AUTOID_HASH: u16 = 1 << 3;
 }
 
-/// 14-byte equivalence hash computed from a serialized minimal or complete TypeObject.
+/// 14-byte equivalence hash of a minimal or complete TypeObject: the first 14 bytes of the MD5
+/// of its XCDR2 little-endian serialization, as computed by `spec_hash`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EquivalenceHash(pub [u8; 14]);
 
@@ -345,7 +350,11 @@ impl TypeIdentifier {
         }
     }
 
-    /// Serialize the TypeIdentifier to bytes.
+    /// Serialize in the packed little-endian form of the in-memory model: the discriminator
+    /// byte, then the fields with no alignment padding and model (not wire) flag values.
+    /// Hash-based identifiers and `None` are byte-identical to their XCDR2 form, which is what
+    /// the TypeLookup and TypeInformation codecs rely on; identifiers nested in a TypeObject
+    /// are written in the XCDR2 form by `serialize_type_object`.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);
@@ -1479,7 +1488,7 @@ impl MinimalStructType {
         self.member_seq.push(member);
     }
 
-    /// Serialize to bytes.
+    /// Serialize in the packed form of the in-memory model (see [`TypeObject::serialize`]).
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);
@@ -3522,8 +3531,10 @@ impl TypeObject {
         crate::xtypes::type_object_xcdr::spec_hash(self)
     }
 
-    /// Serialize TypeObject to bytes.
-    /// Format: [EK_MINIMAL/EK_COMPLETE] [TypeObject data...]
+    /// Serialize in the packed little-endian form of the in-memory model: the EquivalenceKind
+    /// byte, then the body with no DHEADER, no alignment padding and model (not wire) flag
+    /// values. The XCDR2 wire form used by TypeLookup and the EquivalenceHash is
+    /// `serialize_type_object`.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);
@@ -3552,8 +3563,9 @@ impl TypeObject {
         }
     }
 
-    /// Deserialize TypeObject from bytes.
-    /// Returns the deserialized TypeObject and number of bytes consumed.
+    /// Deserialize a TypeObject from bytes produced by [`serialize`](Self::serialize).
+    ///
+    /// Returns the TypeObject and the number of bytes consumed.
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
         if data.is_empty() {
             return Err("Empty data for TypeObject".to_string());

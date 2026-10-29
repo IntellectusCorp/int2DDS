@@ -14,7 +14,8 @@ autonomous driving, robotics, industrial automation, and defense.
 - Topic types defined with `#[derive(DdsType)]`
 - UDP multicast and TCP transports
 - Fragmentation of large samples
-- XCDR2 serialization
+- XCDR1 and XCDR2 serialization
+- DDS-XTypes: TypeObject discovery, type assignability checking, and dynamic types
 - Windows, Linux, and macOS
 - Interoperable with other RTPS/DDS implementations
 

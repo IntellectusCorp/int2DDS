@@ -253,7 +253,7 @@ declaration. It refuses:
 |---|---|
 | `union`, `bitmask`, `bitset` | no Java mapping implemented yet |
 | `map<K, V>` | no Java mapping implemented yet |
-| `@optional` members | needs the XCDR2 mutable member encoding |
+| `@optional` members | the optional member framing (XCDR1 parameter header, XCDR2 presence flag, or EMHEADER under MUTABLE) is not emitted yet |
 | `@extensibility(MUTABLE)` structs | same — EMHEADER framing is not emitted yet |
 | struct inheritance | no Java mapping implemented yet |
 | `enum` with no variants | an empty Java `enum` body is not valid Java |

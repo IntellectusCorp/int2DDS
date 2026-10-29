@@ -5,8 +5,8 @@
 //!
 //! # Key Components
 //!
-//! - [`TypeObject`] - Complete type description
-//! - [`TypeIdentifier`] - Compact type reference with hash
+//! - [`TypeObject`] - Full type description (Complete or Minimal)
+//! - [`TypeIdentifier`] - Compact type reference (discriminator + optional hash)
 //! - [`EquivalenceHash`] - 14-byte MD5-based type hash
 //! - [`DynamicType`] - Runtime type descriptor from TypeObject
 //! - [`DynamicData`] - Runtime data container for dynamic types
@@ -16,8 +16,8 @@
 //!
 //! DDS-XTYPES enables type evolution and compatibility checking between
 //! different versions of the same type. The [`TypeObject`] contains full
-//! type information while [`TypeIdentifier`] provides a compact hash for
-//! efficient matching.
+//! type information while [`TypeIdentifier`] identifies a type compactly
+//! for efficient matching, by hash for types that have a TypeObject.
 //!
 //! # Dynamic Types
 //!

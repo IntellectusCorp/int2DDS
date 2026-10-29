@@ -8,7 +8,7 @@
 //! This trait is the static (derive-generated) counterpart of the runtime
 //! projection in `crate::xtypes::dynamic_serialization`; the two must produce
 //! byte-identical KeyHash streams. Derived structs/enums implement it via the
-//! proc-macro; primitive and string leaves implement it here.
+//! proc-macro; primitives, strings, arrays and `Vec` implement it here.
 
 use crate::serialize::cdr::{
     Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult, XcdrSerialize,
@@ -35,9 +35,11 @@ pub trait KeyHolder {
         Self: Sized;
 
     /// Maximum serialized size (max alignment 4) of this value's key-holder form,
-    /// or `None` when it has no finite maximum (unbounded string/sequence/map),
-    /// in which case the KeyHash is always the MD5 of the actual stream. Used for
-    /// the raw(≤16)/MD5 threshold of KeyHash step 5.
+    /// or `None` when no finite maximum is known: standalone strings and sequences
+    /// (their bound is a field attribute applied by the owning struct) and `@key`
+    /// members routed through [`KeyHolderFallback`]. `None` makes the KeyHash
+    /// always the MD5 of the actual stream. Used for the raw(≤16)/MD5 threshold of
+    /// KeyHash step 5.
     fn key_holder_max_size() -> Option<usize>
     where
         Self: Sized;
@@ -70,12 +72,12 @@ pub fn align_up(pos: usize, align: usize) -> usize {
 ///   `KeyHolderAccessor<T>` (the *specific* path): the member is projected.
 /// - Any other serializable member type (one whose XCDR serialization is
 ///   implemented without the derive) auto-refs to the [`KeyHolderFallback`] trait
-///   impl: the member is written/read whole via XCDR and reports no finite
+///   impl: the member is written/read whole via XCDR and reports no known
 ///   maximum size (=> the enclosing key holder always hashes).
 pub struct KeyHolderAccessor<T>(pub core::marker::PhantomData<T>);
 
 /// Fallback for `@key` member types that do NOT implement [`KeyHolder`]: whole
-/// XCDR (PLAIN_CDR2) round-trip, no finite maximum size.
+/// XCDR (PLAIN_CDR2) round-trip, no known maximum size.
 pub trait KeyHolderFallback<T> {
     fn kh_serialize(&self, value: &T, serializer: &mut Xcdr2Serializer) -> XcdrResult<()>;
     fn kh_deserialize(&self, deserializer: &mut Xcdr2Deserializer) -> XcdrResult<T>;
