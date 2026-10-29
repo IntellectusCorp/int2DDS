@@ -536,10 +536,41 @@ mod tests {
         drop(listener);
 
         let wait = crate::rtps::transport::TcpConfig::default().connect_timeout;
-        let error = start_dial(closed, wait)
+        let error = start_dial(closed, None, wait)
             .and_then(|stream| wait_for_dial(&stream, wait))
             .expect_err("nothing listens on a closed port");
 
         assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    /// Only Linux routes all of 127.0.0.0/8 to loopback, so a second local
+    /// address is available there without any setup.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dial_leaves_from_the_given_bind_ip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_ip: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+        let wait = Duration::from_secs(1);
+
+        let stream = start_dial(listener.local_addr().unwrap(), Some(bind_ip), wait).unwrap();
+        wait_for_dial(&stream, wait).unwrap();
+        let (_accepted, peer) = listener.accept().unwrap();
+
+        assert_eq!(peer.ip(), bind_ip);
+    }
+
+    /// The bind IP is no address of this host, so the dial gets through only
+    /// if a loopback peer skips the bind.
+    #[test]
+    fn a_dial_to_loopback_ignores_a_non_loopback_bind_ip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let wait = Duration::from_secs(1);
+
+        let stream = start_dial(listener.local_addr().unwrap(), Some(bind_ip), wait).unwrap();
+        wait_for_dial(&stream, wait).unwrap();
+        let (_accepted, peer) = listener.accept().unwrap();
+
+        assert!(peer.ip().is_loopback());
     }
 }
