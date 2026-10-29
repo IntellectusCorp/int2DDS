@@ -62,20 +62,6 @@ pub enum LcHint {
     Dheader,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LengthCode {
-    /// LC 0-3: Length is 1, 2, 4 or 8 bytes, no NEXTINT
-    Direct = 0,
-    /// LC 4: NEXTINT holds the length
-    NextInt = 4,
-    /// LC 5: Length is 4 + NEXTINT
-    NextIntMul4 = 5,
-    /// LC 6: Length is 4 + NEXTINT * 4
-    NextIntMul8 = 6,
-    /// LC 7: Length is 4 + NEXTINT * 8
-    Nested = 7,
-}
-
 impl MemberHeader {
     pub fn new(member_id: u32, length: usize) -> Self {
         Self { member_id, member_length: length as u32, must_understand: false }
