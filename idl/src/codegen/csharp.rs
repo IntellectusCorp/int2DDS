@@ -1,7 +1,8 @@
-/// C# code generation backend.
-///
-/// Generates C# classes with CDR serialization methods
-/// that use the Int2Dds C# CDR library.
+//! C# code generation backend.
+//!
+//! Generates C# classes with CDR serialization methods
+//! that use the Int2Dds C# CDR library.
+
 use crate::naming;
 use crate::types::*;
 

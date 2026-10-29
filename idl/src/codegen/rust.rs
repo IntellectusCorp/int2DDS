@@ -1,6 +1,7 @@
-/// Rust code generation backend.
-///
-/// Generates .rs files with `#[derive(DdsType)]` structs from the resolved IDL model.
+//! Rust code generation backend.
+//!
+//! Generates .rs files with `#[derive(DdsType)]` structs from the resolved IDL model.
+
 use crate::naming;
 use crate::types::*;
 

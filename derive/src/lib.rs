@@ -6,7 +6,8 @@ use syn::{parse_macro_input, DeriveInput};
 mod codegen;
 mod dds_type;
 
-/// Procedural macro to derive DdsType for structs
+/// Procedural macro to derive DdsType for structs, tuple structs, enums (including IDL unions),
+/// bitmasks and bitsets
 #[proc_macro_derive(DdsType, attributes(dds, dds_type))]
 pub fn derive_dds_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

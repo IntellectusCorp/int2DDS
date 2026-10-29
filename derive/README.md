@@ -6,14 +6,11 @@ OMG Data Distribution Service (DDS) with RTPS protocol support.
 This crate provides `#[derive(DdsType)]`, which generates the type support a Rust type needs to be
 used as a DDS topic type: XCDR serialization, key handling, and the XTypes TypeObject.
 
-The generated code depends on `int2dds`, so both crates must be added as dependencies.
-
 ## Installation
 
 ```toml
 [dependencies]
 int2dds = "1.0.0"
-int2dds-derive = "1.0.0"
 speedy = "0.8"
 log = "0.4"
 ```
@@ -21,7 +18,7 @@ log = "0.4"
 ## Usage
 
 ```rust,ignore
-use int2dds_derive::DdsType;
+use int2dds::DdsType;
 
 #[derive(DdsType)]
 #[dds_type(final)] // extensibility: final, appendable (default) or mutable
@@ -34,7 +31,7 @@ struct SensorReading {
 }
 ```
 
-The derive also implements `Debug`, `Clone`, `PartialEq` and `Default` for the type.
+The derive also implements `Debug`, `Clone`, `PartialEq`, `Default` and `speedy::Writable`/`speedy::Readable` for the type.
 Use `#[dds_type(no_default)]`, `#[dds_type(no_partialeq)]` or `#[dds_type(no_additional_derives)]`
 to opt out.
 

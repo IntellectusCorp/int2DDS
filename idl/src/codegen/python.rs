@@ -1,7 +1,8 @@
-/// Python code generation backend.
-///
-/// Generates Python dataclasses with CDR serialization methods
-/// that use the int2dds Python CDR library.
+//! Python code generation backend.
+//!
+//! Generates Python dataclasses with CDR serialization methods
+//! that use the int2dds Python CDR library.
+
 use crate::naming;
 use crate::types::*;
 

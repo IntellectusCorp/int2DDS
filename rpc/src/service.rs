@@ -1,7 +1,7 @@
 //! Service — the callee-side handler for function-call style RPC.
 //!
-//! Each generated service wraps a Replier, dispatching incoming requests to
-//! the user's trait implementation and sending back serialized replies.
+//! Each generated service wraps a `Service`, which uses a Replier to dispatch incoming
+//! requests to the user's trait implementation and send back serialized replies.
 
 use std::sync::Arc;
 
