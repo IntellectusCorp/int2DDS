@@ -57,7 +57,7 @@ pub enum TypeCompatibilityError {
     /// String bound exceeded (writer bound > reader bound).
     StringBoundExceeded { member_name: String, writer_bound: u32, reader_bound: u32 },
 
-    /// Type widening not allowed (writer has extra members).
+    /// Type widening not allowed (reader has extra members).
     TypeWideningNotAllowed { extra_members: Vec<String> },
 
     /// Key member mismatch between writer and reader.

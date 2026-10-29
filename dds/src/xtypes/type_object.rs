@@ -64,7 +64,7 @@ pub mod type_kind {
     pub const EK_BOTH: u8 = 0xF3;
 }
 
-/// Member flags bit positions
+/// Member flag values. `TRY_CONSTRUCT_*` are values of the two low bits; the others are bit masks.
 pub mod member_flag {
     pub const TRY_CONSTRUCT_DISCARD: u16 = 0;
     pub const TRY_CONSTRUCT_USE_DEFAULT: u16 = 1;
@@ -76,7 +76,8 @@ pub mod member_flag {
     pub const IS_DEFAULT: u16 = 1 << 6;
 }
 
-/// Type flags bit positions
+/// Type flag values. `IS_FINAL`, `IS_APPENDABLE` and `IS_MUTABLE` are values of the two low
+/// bits; the others are bit masks.
 pub mod type_flag {
     pub const IS_FINAL: u16 = 0;
     pub const IS_APPENDABLE: u16 = 1;
@@ -85,7 +86,7 @@ pub mod type_flag {
     pub const IS_AUTOID_HASH: u16 = 1 << 3;
 }
 
-/// 14-byte equivalence hash computed from serialized MinimalTypeObject.
+/// 14-byte equivalence hash computed from a serialized minimal or complete TypeObject.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EquivalenceHash(pub [u8; 14]);
 
@@ -344,7 +345,7 @@ impl TypeIdentifier {
         }
     }
 
-    /// Serialize the TypeIdentifier to bytes (XCDR2 format).
+    /// Serialize the TypeIdentifier to bytes.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);
@@ -352,6 +353,7 @@ impl TypeIdentifier {
     }
 
     /// Serialize as a PID_TYPE_IDV1 (0x0069) parameter payload: a CDR_LE (XCDRv1)
+    /// encapsulation header followed by the serialized TypeIdentifier.
     pub fn serialize_for_parameter_v1(&self) -> Vec<u8> {
         let mut buffer = vec![0x00, 0x01, 0x00, 0x00];
         self.serialize_into(&mut buffer);
@@ -456,7 +458,7 @@ impl TypeIdentifier {
         }
     }
 
-    /// Deserialize a TypeIdentifier from bytes (XCDR2 format).
+    /// Deserialize a TypeIdentifier from bytes produced by [`serialize`](Self::serialize).
     ///
     /// Returns the TypeIdentifier and the number of bytes consumed.
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -1477,7 +1479,7 @@ impl MinimalStructType {
         self.member_seq.push(member);
     }
 
-    /// Serialize to bytes for hash computation.
+    /// Serialize to bytes.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);

@@ -20,7 +20,7 @@ pub use serializer::sequence::SequenceSerialize;
 pub use serializer::string::StringSerialize;
 pub use serializer::CdrSerializerCommon;
 
-/// XCDR v2 extensibility kinds
+/// XCDR extensibility kinds
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensibilityKind {
     Final,      // No extensibility, fastest serialization
@@ -64,15 +64,15 @@ pub enum LcHint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LengthCode {
-    /// LC 0-3: Length is directly in lower 16 bits (0-65535 bytes)
+    /// LC 0-3: Length is 1, 2, 4 or 8 bytes, no NEXTINT
     Direct = 0,
-    /// LC 4: Next 4 bytes contain the actual length
+    /// LC 4: NEXTINT holds the length
     NextInt = 4,
-    /// LC 5: Length is (next 4 bytes) * 4
+    /// LC 5: Length is 4 + NEXTINT
     NextIntMul4 = 5,
-    /// LC 6: Length is (next 4 bytes) * 8
+    /// LC 6: Length is 4 + NEXTINT * 4
     NextIntMul8 = 6,
-    /// LC 7: Nested length (complex case)
+    /// LC 7: Length is 4 + NEXTINT * 8
     Nested = 7,
 }
 

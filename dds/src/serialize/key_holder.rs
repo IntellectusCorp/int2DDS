@@ -65,14 +65,13 @@ pub fn align_up(pos: usize, align: usize) -> usize {
 /// member through the right projection without knowing at macro-expansion time
 /// whether the member's type implements [`KeyHolder`].
 ///
-/// - Member types that implement `KeyHolder` (primitives, strings, keyed nested
-///   structs) resolve the inherent methods on `KeyHolderAccessor<T>` (the
-///   *specific* path): the member is projected.
-/// - Any other serializable member type (a no-key nested aggregate used as a
-///   whole key member, e.g. `Guid`) auto-refs to the [`KeyHolderFallback`] trait
+/// - Member types that implement `KeyHolder` (primitives, strings, derived nested
+///   structs with or without keys) resolve the inherent methods on
+///   `KeyHolderAccessor<T>` (the *specific* path): the member is projected.
+/// - Any other serializable member type (one whose XCDR serialization is
+///   implemented without the derive) auto-refs to the [`KeyHolderFallback`] trait
 ///   impl: the member is written/read whole via XCDR and reports no finite
-///   maximum size (=> the enclosing key holder always hashes, matching the
-///   dynamic path's `type_kind_max_size` for a whole no-key aggregate).
+///   maximum size (=> the enclosing key holder always hashes).
 pub struct KeyHolderAccessor<T>(pub core::marker::PhantomData<T>);
 
 /// Fallback for `@key` member types that do NOT implement [`KeyHolder`]: whole
@@ -213,10 +212,10 @@ impl KeyHolder for WString {
 }
 
 /// A fixed-size array `[T; N]` projects element-wise: each element is written as
-/// its own key holder (nested aggregates as FINAL), so a `[Point; 2]` of two `i32`
-/// fields is the 16 contiguous bytes and stays raw. Non-primitive elements keep the
+/// its own key holder (nested aggregates as FINAL). Non-primitive elements keep the
 /// collection DHEADER (DDS-XTypes 7.6.8 excludes only encapsulation, type and
-/// member headers from the key holder). Its maximum size is the packed
+/// member headers from the key holder), so a `[Point; 2]` of two `i32` fields is
+/// 4 + 16 = 20 bytes and is hashed. Its maximum size is the packed
 /// (max-align-4) sum of `N` element key holders plus that DHEADER.
 impl<T: KeyHolder, const N: usize> KeyHolder for [T; N] {
     #[inline]
@@ -271,7 +270,8 @@ impl<T: KeyHolder, const N: usize> KeyHolder for [T; N] {
 /// A sequence `Vec<T>` writes its `u32` length then each element as its own key
 /// holder (nested aggregates as FINAL), behind the collection DHEADER when the
 /// element is non-primitive, matching the dynamic path's key-holder sequence
-/// form. It has no finite maximum size, so a sequence key always hashes (MD5).
+/// form. A standalone sequence reports no finite maximum size; the owning struct
+/// supplies one for a `#[dds(bound = N)]` sequence key field.
 impl<T: KeyHolder> KeyHolder for Vec<T> {
     #[inline]
     fn serialize_key_holder(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
