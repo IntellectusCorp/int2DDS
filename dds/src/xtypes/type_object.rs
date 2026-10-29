@@ -2320,6 +2320,11 @@ pub struct CommonDiscriminatorMember {
 }
 
 impl CommonDiscriminatorMember {
+    /// XTypes 7.2.2.4.4.4.6: the discriminator is always must-understand.
+    pub fn new(member_flags: MemberFlag, type_id: TypeIdentifier) -> Self {
+        Self { member_flags: MemberFlag(member_flags.0 | member_flag::IS_MUST_UNDERSTAND), type_id }
+    }
+
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         self.member_flags.serialize_into(buffer);
         self.type_id.serialize_into(buffer);
@@ -2352,10 +2357,7 @@ impl MinimalUnionType {
     pub fn new(flags: TypeFlag, disc_flags: MemberFlag, disc_type: TypeIdentifier) -> Self {
         Self {
             union_flags: flags,
-            discriminator: CommonDiscriminatorMember {
-                member_flags: disc_flags,
-                type_id: disc_type,
-            },
+            discriminator: CommonDiscriminatorMember::new(disc_flags, disc_type),
             member_seq: Vec::new(),
         }
     }
@@ -2425,10 +2427,7 @@ impl CompleteUnionType {
     ) -> Self {
         Self {
             union_flags: flags,
-            discriminator: CommonDiscriminatorMember {
-                member_flags: disc_flags,
-                type_id: disc_type,
-            },
+            discriminator: CommonDiscriminatorMember::new(disc_flags, disc_type),
             header: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
             member_seq: Vec::new(),
         }
