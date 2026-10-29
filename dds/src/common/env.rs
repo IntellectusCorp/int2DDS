@@ -300,6 +300,9 @@ pub fn set_shm_buffer_size(size: usize) {
 ///     println!("Initial peer: {}", peer);
 /// }
 /// ```
+pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
+    std::env::var("INT2DDS_INITIAL_PEERS").ok().map(|s| parse_initial_peers(&s)).unwrap_or_default()
+}
 
 /// Parse a comma-separated initial peers string into `SocketAddr`s.
 pub fn parse_initial_peers(peers_str: &str) -> Vec<std::net::SocketAddr> {
@@ -316,10 +319,6 @@ pub fn parse_initial_peers(peers_str: &str) -> Vec<std::net::SocketAddr> {
             }
         })
         .collect()
-}
-
-pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
-    std::env::var("INT2DDS_INITIAL_PEERS").ok().map(|s| parse_initial_peers(&s)).unwrap_or_default()
 }
 
 /// Set initial peers via environment variable

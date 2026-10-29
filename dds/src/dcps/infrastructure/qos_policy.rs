@@ -11,7 +11,7 @@
 //!
 //! | Policy | Description | Applicable to |
 //! |--------|-------------|---------------|
-//! | [`DurabilityQosPolicy`] | Historical data for late joiners (Volatile, TransientLocal) | DataWriter, DataReader, Topic |
+//! | [`DurabilityQosPolicy`] | Historical data for late joiners (Volatile, TransientLocal; Transient and Persistent are not yet implemented and behave as TransientLocal) | DataWriter, DataReader, Topic |
 //! | [`DeadlineQosPolicy`] | Maximum time between updates | DataWriter, DataReader, Topic |
 //! | [`OwnershipQosPolicy`] | Instance ownership (Shared, Exclusive) | DataWriter, DataReader, Topic |
 //! | [`OwnershipStrengthQosPolicy`] | Exclusive ownership priority | DataWriter |
@@ -28,6 +28,10 @@
 //! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
 //! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
 //! | [`PresentationQosPolicy`] | Coherent/ordered access for change groups | Publisher, Subscriber |
+//! | [`TimeBasedFilterQosPolicy`] | Minimum separation between samples | DataReader |
+//! | [`UserDataQosPolicy`] | Arbitrary user data attached to entity | DomainParticipant, DataWriter, DataReader |
+//! | [`TopicDataQosPolicy`] | Arbitrary data attached to Topic | Topic |
+//! | [`GroupDataQosPolicy`] | Arbitrary data attached to Publisher/Subscriber | Publisher, Subscriber |
 //!
 //! ## int2DDS Extension QoS Policies
 //!
@@ -42,12 +46,8 @@
 //!
 //! | Policy | Description | Applicable to |
 //! |--------|-------------|---------------|
-//! | [`UserDataQosPolicy`] | Arbitrary user data attached to entity | DomainParticipant, DataWriter, DataReader |
 //! | [`LatencyBudgetQosPolicy`] | Acceptable delivery delay hint | DataWriter, DataReader, Topic |
 //! | [`TransportPriorityQosPolicy`] | Transport priority for delivery | DataWriter, Topic |
-//! | [`TimeBasedFilterQosPolicy`] | Minimum separation between samples | DataReader |
-//! | [`TopicDataQosPolicy`] | Arbitrary data attached to Topic | Topic |
-//! | [`GroupDataQosPolicy`] | Arbitrary data attached to Publisher/Subscriber | Publisher, Subscriber |
 //! | [`DurabilityServiceQosPolicy`] | Transient/Persistent service config | DataWriter, Topic |
 
 use const_default::ConstDefault;
@@ -288,12 +288,13 @@ impl HistoryQosPolicyKind {
 /// - The `depth` parameter directly determines `max_samples_per_instance`.
 /// - `ResourceLimitsQosPolicy.max_samples_per_instance` is **ignored**.
 /// - When limit exceeded: oldest sample is automatically removed.
-/// - **Reliable mode**: Removes unacknowledged samples forcefully (triggers `unacked_sample_removed` callback).
+/// - **Reliable mode**: Removes the oldest sample even if it is not yet acknowledged.
 /// - **Best-Effort mode**: Simply removes the oldest sample.
 ///
 /// ## KeepAll
 /// - Uses `ResourceLimitsQosPolicy.max_samples_per_instance` as the actual limit.
 /// - **Reliable mode**: Blocks waiting for ACKs up to `max_blocking_time`, returns `Timeout` when it expires.
+///   A keyed writer returns `OutOfResources` without blocking when no instance holds more than one sample.
 /// - **Best-Effort mode**: Removes oldest sample when limit exceeded.
 /// - **`strict: false`**: A volatile writer removes samples acknowledged by all matched readers
 ///   from its history. Default is `true` (keep all samples).
@@ -410,7 +411,7 @@ impl HistoryQosPolicy {
 /// time-sensitive data that becomes stale after a certain period.
 ///
 /// # Default
-/// `Duration::INFINITE` - Samples never expire.
+/// `Duration::infinite()` - Samples never expire.
 ///
 /// # Example
 /// ```no_run
@@ -592,8 +593,6 @@ impl QosPolicy for OwnershipQosPolicy {
 /// When `OwnershipQosPolicy::Exclusive` is used, the DataWriter with the
 /// highest ownership strength value wins ownership of the instance.
 ///
-/// **Note**: This QoS policy is currently unsupported.
-///
 /// # Default
 /// `0`
 #[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
@@ -667,13 +666,13 @@ impl QosPolicy for WriterDataLifecycleQosPolicy {
 /// Delay before purging samples when an instance has no more writers (`NOT_ALIVE_NO_WRITERS` state).
 /// - This occurs when all DataWriters unregister the instance (with `autodispose_unregistered_instances = false`)
 /// - After the delay, all samples for that instance are removed from the DataReader's cache
-/// - Default: `Duration::INFINITE` (never purge)
+/// - Default: `Duration::infinite()` (never purge)
 ///
 /// ## autopurge_disposed_samples_delay
 /// Delay before purging samples when an instance is disposed (`NOT_ALIVE_DISPOSED` state).
 /// - This occurs when a DataWriter calls `dispose()` or unregisters with `autodispose_unregistered_instances = true`
 /// - After the delay, all samples for that instance are removed from the DataReader's cache
-/// - Default: `Duration::INFINITE` (never purge)
+/// - Default: `Duration::infinite()` (never purge)
 #[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderDataLifecycleQosPolicy {
@@ -727,8 +726,6 @@ impl ReaderDataLifecycleQosPolicy {
 }
 
 /// Specifies the access scope for coherent and ordered access.
-///
-/// **Note**: This QoS policy is currently unsupported.
 #[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
 #[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum PresentationQosAccessScopeKind {
@@ -813,8 +810,6 @@ impl QosPolicy for TransportPriorityQosPolicy {
 /// The data is propagated via discovery and can be used for application-level
 /// identification or configuration sharing.
 ///
-/// **Note**: This QoS policy is currently unsupported.
-///
 /// # Default
 /// Empty byte vector.
 #[derive(DdsType, ConstDefault, Eq)]
@@ -832,8 +827,6 @@ impl QosPolicy for UserDataQosPolicy {
 
 /// Attaches arbitrary data to a Topic, propagated via discovery.
 ///
-/// **Note**: This QoS policy is currently unsupported.
-///
 /// # Default
 /// Empty byte vector.
 #[derive(DdsType, ConstDefault, Eq)]
@@ -850,8 +843,6 @@ impl QosPolicy for TopicDataQosPolicy {
 }
 
 /// Attaches arbitrary data to Publisher/Subscriber, propagated via discovery.
-///
-/// **Note**: This QoS policy is currently unsupported.
 ///
 /// # Default
 /// Empty byte vector.
@@ -891,8 +882,8 @@ pub struct BinaryProperty {
     pub propagate: bool,
 }
 
-/// Property key for IPv4 multicast TTL. int2dds-owned namespace; the matching
-/// reader lives in `rtps::transport::transport_config`.
+/// Property key for IPv4 multicast TTL. int2dds-owned namespace. Falls back to the
+/// `INT2DDS_MULTICAST_TTL` env var when absent.
 pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
 
 /// Transport selection (`udp` | `tcp` | `hybrid` | `shm`). Falls back to the
@@ -931,7 +922,7 @@ pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 /// `true`: also dial runtime-discovered peers.
 pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
 
-/// ---------TCP QoS ----------
+// ---------TCP QoS ----------
 /// TCP listen (server bind) port. Used exactly as given, so a port already
 /// taken fails participant creation rather than being searched around. When
 /// absent, the formula `PB + DG * domain_id + PG * participant_id` is walked
@@ -1116,7 +1107,7 @@ impl PropertyQosPolicy {
 /// **Note**: This QoS policy is currently unsupported.
 ///
 /// # Default
-/// `Duration::ZERO`
+/// `Duration::zero()`
 #[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
 #[dds_type(crate_path = "crate")]
 #[serde(default)]
@@ -1145,7 +1136,7 @@ impl LatencyBudgetQosPolicy {
 /// This QoS policy is RxO (requested/offered).
 ///
 /// # Default
-/// `Duration::INFINITE` - No deadline.
+/// `Duration::infinite()` - No deadline.
 ///
 /// # Example
 /// ```no_run
@@ -1239,10 +1230,8 @@ impl DeadlineQosPolicy {
 /// DataReader will only receive samples at the specified minimum interval,
 /// filtering out samples that arrive too quickly.
 ///
-/// **Note**: This QoS policy is currently unsupported.
-///
 /// # Default
-/// `Duration::ZERO` - No filtering.
+/// `Duration::zero()` - No filtering.
 #[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
 #[dds_type(crate_path = "crate")]
 #[serde(default)]
@@ -1411,7 +1400,8 @@ impl QosPolicy for EntityFactoryQosPolicy {
 ///
 /// # Pattern Matching
 /// - Concrete names (e.g., "sensors/temperature") match exactly
-/// - Regular expressions (e.g., "sensors/*") match against concrete names
+/// - fnmatch patterns (e.g., "sensors/*") match against concrete names
+/// - Two names that both contain wildcards do not match each other
 /// - Two entities match if they share at least one common partition
 #[derive(DdsType, ConstDefault, Eq)]
 #[dds_type(crate_path = "crate")]
@@ -1663,8 +1653,8 @@ impl LivelinessQosPolicy {
 ///
 /// - `Volatile`: No historical data sent to late joiners (default)
 /// - `TransientLocal`: Historical data kept in DataWriter memory
-/// - `Transient`: Historical data kept in external service (Unsupported)
-/// - `Persistent`: Historical data persisted to storage (Unsupported)
+/// - `Transient`: Not yet implemented, behaves as `TransientLocal`
+/// - `Persistent`: Not yet implemented, behaves as `TransientLocal`
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
 #[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
@@ -1675,9 +1665,9 @@ pub enum DurabilityQosPolicyKind {
     Volatile,
     /// Historical data is kept in DataWriter memory for late joiners.
     TransientLocal,
-    /// Historical data is stored in external durability service. (Unsupported)
+    /// Not yet implemented, behaves as `TransientLocal`.
     Transient,
-    /// Historical data is persisted to non-volatile storage. (Unsupported)
+    /// Not yet implemented, behaves as `TransientLocal`.
     Persistent,
 }
 
@@ -1704,8 +1694,8 @@ impl DurabilityQosPolicyKind {
 /// # Values
 /// - `Volatile`: Historical data is NOT sent to late-joining DataReaders (default)
 /// - `TransientLocal`: Historical data is sent to late-joining DataReaders
-/// - `Transient`: Historical data managed by external durability service (Unsupported)
-/// - `Persistent`: Historical data persisted to non-volatile storage (Unsupported)
+/// - `Transient`: Not yet implemented, behaves as `TransientLocal`
+/// - `Persistent`: Not yet implemented, behaves as `TransientLocal`
 ///
 /// # Example
 /// ```no_run
@@ -1759,8 +1749,8 @@ impl DurabilityQosPolicyKind {
 /// ```
 ///
 /// # Note
-/// Only `Volatile` and `TransientLocal` are currently supported.
-/// `Transient` and `Persistent` require an external durability service.
+/// `Transient` and `Persistent` are not yet implemented. They are accepted and keep
+/// historical data in DataWriter memory, the same as `TransientLocal`.
 #[derive(DdsType, ConstDefault, Copy, Eq)]
 #[dds_type(crate_path = "crate")]
 pub struct DurabilityQosPolicy {
@@ -1968,7 +1958,7 @@ impl ResourceLimitsQosPolicy {
 /// **Note**: This QoS policy is currently unsupported.
 ///
 /// # Default
-/// - `service_cleanup_delay`: Duration::ZERO
+/// - `service_cleanup_delay`: `Duration::zero()`
 /// - `history_kind`: KeepLast(1)
 /// - All limits: LENGTH_UNLIMITED
 #[derive(DdsType, Copy, Eq)]
@@ -2483,12 +2473,7 @@ pub struct WriterReliabilityExtensionQosPolicy {
     pub nack_suppression_duration: Duration,
 
     /// Delay before responding to a NACK, both for a whole-sample ACKNACK and for a NACK_FRAG.
-    ///
-    /// Default: 0. This was a merge window folding several requests into one repair round.
-    /// A fragmented send is now bounded by the peer's receive buffer and carries one heartbeat
-    /// per window, so the reader asks once per round and there is nothing left to merge; the
-    /// delay would only add a fixed cost to every round. Set it back to 100ms to restore the
-    /// merge.
+    /// Default: 0
     pub nack_response_delay: Duration,
 }
 
@@ -2627,11 +2612,7 @@ pub struct ReaderReliabilityExtensionQosPolicy {
     pub preemptive_acknack_delay: Duration,
 
     /// Delay before sending the first NACK_FRAG for a sample's missing fragments.
-    ///
-    /// Default: 0. This was a debounce against one NACK_FRAG per DATA_FRAG. A fragmented send
-    /// is now bounded by the peer's receive buffer and carries one heartbeat per window, so the
-    /// reader is triggered once per window and there is nothing left to collapse. Set it back to
-    /// 80ms to restore the debounce.
+    /// Default: 5ms
     pub nack_frag_response_delay: Duration,
 
     /// Delay before retrying a NACK_FRAG that got no reply.

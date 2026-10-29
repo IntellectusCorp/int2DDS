@@ -5,8 +5,9 @@
 //! a topic or by calling `Topic::set_listener()`.
 //!
 //! Currently, the `TopicListener` provides callbacks for inconsistent topic detection,
-//! which occurs when multiple topics with the same name but incompatible types or QoS
-//! policies are discovered in the same domain.
+//! which occurs when a remote endpoint on a topic with the same name disagrees on keyed
+//! versus keyless, or fails the type compatibility check. QoS mismatches are reported as
+//! incompatible QoS instead.
 
 use crate::infrastructure::status::InconsistentTopicStatus;
 

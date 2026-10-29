@@ -4,7 +4,7 @@
 //! about topics and topic-like entities (such as ContentFilteredTopic and MultiTopic).
 //! It allows retrieval of the topic name, type name, and associated DomainParticipant.
 //!
-//! This trait is implemented by `Topic`, `ContentFilteredTopic`, and `MultiTopic`, providing
+//! This trait is implemented by `Topic` and `ContentFilteredTopic`, providing
 //! a uniform way to query their properties regardless of the specific topic variant.
 
 use std::any::Any;
@@ -56,7 +56,7 @@ macro_rules! impl_topic_description_impl {
             }
         }
         impl $type {
-            /// Wrapper for Condition::get_trigger_value()
+            /// Wrapper for TopicDescription::get_participant()
             #[inline]
             pub fn get_participant(&self) -> DdsResult<DomainParticipant> {
                 <Self as TopicDescription>::get_participant(self)

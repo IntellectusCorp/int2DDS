@@ -746,8 +746,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// assigns a source timestamp when this operation is called. This timestamp is available
     /// to DataReaders through the `source_timestamp` field in `SampleInfo`.
     ///
-    /// As a side effect, this operation asserts liveliness for the DataWriter, its Publisher,
-    /// and the DomainParticipant.
+    /// As a side effect, this operation asserts liveliness according to the LIVELINESS kind:
+    /// the DomainParticipant for MANUAL_BY_PARTICIPANT and the DataWriter for MANUAL_BY_TOPIC.
+    /// Nothing is asserted for AUTOMATIC.
     ///
     /// # Arguments
     ///
@@ -763,8 +764,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// * `PreconditionNotMet` - The handle is valid but doesn't match the data instance
-    /// * `BadParameter` - The handle is invalid
+    /// * `PreconditionNotMet` - The handle is not `InstanceHandle::NIL` and doesn't match the data instance
+    /// * `BadParameter` - The source timestamp is invalid
     /// * `Timeout` - Reliability QoS is RELIABLE and max_blocking_time expired before space became available
     /// * `OutOfResources` - Resource limits exceeded and space won't become available
     /// * The writer has been deleted
@@ -944,8 +945,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     ///
     /// # Arguments
     /// * `serialized_data` - CDR-encoded bytes (with encapsulation header)
-    /// * `serialized_key` - CDR-encoded key bytes for instance identification.
-    ///   If `None`, `InstanceHandle::NIL` is used (unkeyed topic).
+    /// * `serialized_key` - Ignored. The key and instance handle are always computed from
+    ///   `serialized_data`.
     pub fn write_serialized(
         &self,
         serialized_data: &[u8],
@@ -1279,7 +1280,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         }
     }
-    /// Look up an instance handle using pre-serialized key bytes.
+    /// Look up the instance handle for the key fields of `instance`.
     pub fn lookup_instance(&self, instance: &Foo) -> DdsResult<InstanceHandle> {
         // in: instance: <Foo>
         // out: InstanceHandle
@@ -2196,7 +2197,6 @@ where
     /// # Errors
     ///
     /// Returns an error if:
-    /// * `Timeout` - Same conditions as `write()` when RELIABILITY QoS is RELIABLE
     /// * `OutOfResources` - Resource limits exceeded
     /// * The writer has been deleted
     pub fn register_instance(&self, instance: &Foo) -> DdsResult<InstanceHandle> {

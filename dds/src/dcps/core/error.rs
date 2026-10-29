@@ -46,8 +46,8 @@ impl fmt::Display for DdsError {
 }
 impl std::error::Error for DdsError {}
 
-/// Return code representing the different errors
+/// Return code representing success or the different errors
 pub type ReturnCode = i32;
 
-/// pub: reused by DDS-RPC crate
+/// Return code for success.
 pub const RETCODE_OK: ReturnCode = 0;

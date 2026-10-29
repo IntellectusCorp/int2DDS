@@ -105,9 +105,11 @@ impl DomainParticipantFactory {
     /// # Arguments
     ///
     /// * `domain_id` - The domain ID to join. Participants in different domains cannot communicate.
-    /// * `qos_list` - Quality of Service policies for the participant. Use `DomainParticipantQos::default()` for defaults.
+    ///   `DEFAULT_DOMAIN_ID` (-1) reads the domain from the `DDS_DOMAIN_ID` env var, or 0 if unset.
+    /// * `qos_list` - Quality of Service policies for the participant. Use `PARTICIPANT_QOS_DEFAULT` for the configured default.
     /// * `listener` - Optional listener for status notifications. Pass `None` if not needed.
-    /// * `mask` - Status mask indicating which status changes trigger listener callbacks. Use `StatusMask::default()` to disable all.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///   `StatusMask::default()` enables all statuses.
     ///
     /// # Returns
     ///
@@ -116,7 +118,7 @@ impl DomainParticipantFactory {
     /// # Errors
     ///
     /// Returns an error if:
-    /// * The QoS policies are inconsistent or unsupported
+    /// * `BadParameter` - `domain_id` is negative and not `DEFAULT_DOMAIN_ID`
     /// * System resources are insufficient
     /// * Network initialization fails
     pub fn create_participant(
@@ -442,13 +444,15 @@ impl DomainParticipantFactory {
 
     // ========== QoS Profile methods ==========
 
-    /// Loads QoS profiles from one or more JSON files.
+    /// Loads QoS profiles from one or more JSON or XML files.
     ///
     /// The loaded profiles can be used with `create_participant_with_profile` and
     /// `get_*_qos_from_profile` methods to create entities with predefined QoS settings.
     ///
     /// Multiple files can be loaded incrementally. If a library with the same name
     /// already exists, it will be replaced by the new one.
+    ///
+    /// Files with the `.xml` extension also load their `<types>` into the type registry.
     ///
     /// # Arguments
     /// * `paths` - Slice of file paths to load QoS profiles from
