@@ -1,27 +1,29 @@
 //! Quality of Service (QoS) policies for topics.
 //!
 //! This module defines the QoS policies that control the behavior of `Topic` entities.
-//! Topic QoS policies define characteristics that are inherited by DataWriters and
-//! DataReaders created for the topic (unless overridden).
+//! Topic QoS is applied to a DataWriter or DataReader QoS only through
+//! `Publisher::copy_from_topic_qos` or `Subscriber::copy_from_topic_qos`.
 //!
 //! # Available QoS Policies
 //!
 //! Topics support a wide range of QoS policies including:
 //! - **TopicData**: Application-specific data attached to the topic
 //! - **Durability**: Whether late-joining readers receive historical data
-//! - **DurabilityService**: Configuration for durability service
 //! - **Deadline**: Maximum time between data updates
-//! - **LatencyBudget**: Hint for transport latency optimization
 //! - **Liveliness**: How writers assert they are alive
 //! - **Reliability**: RELIABLE or BEST_EFFORT delivery
 //! - **DestinationOrder**: Ordering of samples (by reception or source timestamp)
 //! - **History**: Number of samples to keep (KEEP_LAST vs KEEP_ALL)
 //! - **ResourceLimits**: Memory usage limits
-//! - **TransportPriority**: Priority hint for the transport layer
 //! - **Lifespan**: Maximum validity time for samples
 //! - **Ownership**: Shared or exclusive ownership mode
+//! - **DataRepresentation**: Data encoding (XCDR1, XCDR2)
 //!
-//! Default QoS can be accessed via `TOPIC_QOS_DEFAULT` or `TopicQos::default()`.
+//! **DurabilityService**, **LatencyBudget**, and **TransportPriority** are defined but
+//! unsupported; a non-default value is rejected with `Unsupported`.
+//!
+//! `TOPIC_QOS_DEFAULT` selects the configured default QoS; `TopicQos::default()` is the
+//! spec default value.
 
 use const_default::ConstDefault;
 

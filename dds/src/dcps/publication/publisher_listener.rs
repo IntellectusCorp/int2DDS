@@ -4,9 +4,9 @@
 //! about status changes related to a `Publisher` and its child DataWriters. Listeners are
 //! registered when creating a Publisher or by calling `Publisher::set_listener()`.
 //!
-//! The publisher listener receives the same callbacks as DataWriterListener, allowing it
-//! to handle events from all DataWriters created by this publisher when they don't have
-//! their own listeners registered.
+//! The publisher listener receives the same callbacks as DataWriterListener for all
+//! DataWriters created by this publisher. A DataWriter status is delivered to the writer's,
+//! the publisher's, and the participant's listener, each gated by the writer's status mask.
 
 use crate::infrastructure::status::{
     LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,

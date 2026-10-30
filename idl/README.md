@@ -61,7 +61,9 @@ skips Java rather than failing the whole run, while an explicit `--java` fails.
 ## CLI options
 
 ```
-Usage: int2dds-idl [OPTIONS] <INPUT.idl>
+Usage: int2dds-idl [OPTIONS] <INPUT.idl>...
+
+Run without arguments to start an interactive wizard.
 
 OPTIONS:
     -r, --rust <PATH>         Generate Rust output to PATH
@@ -147,8 +149,9 @@ as a reference to that type in the *dependency's* package, not a re-definition:
   consuming build exposes each dependency package at that path (one module/crate
   per package, types at `<pkg>::<kind>::<Type>`). Serialization of the nested type
   travels with its own `#[derive(DdsType)]`, so no extra `use` is needed.
-- **C / Python / C#:** still emit the bare leaf name for external references; the
-  consuming build must bring the dependency type (and, for C/Python, its
+- **Python:** a referenced type is imported with `from <module> import <Type>`.
+- **C / C#:** still emit the bare leaf name for external references; the
+  consuming build must bring the dependency type (and, for C, its
   serialization helpers) into scope. Full path/import emission for these backends
   is pending.
 - **Java:** a reference is emitted as the bare leaf name, which resolves only when
@@ -250,7 +253,7 @@ declaration. It refuses:
 |---|---|
 | `union`, `bitmask`, `bitset` | no Java mapping implemented yet |
 | `map<K, V>` | no Java mapping implemented yet |
-| `@optional` members | needs the XCDR2 mutable member encoding |
+| `@optional` members | the optional member framing (XCDR1 parameter header, XCDR2 presence flag, or EMHEADER under MUTABLE) is not emitted yet |
 | `@extensibility(MUTABLE)` structs | same — EMHEADER framing is not emitted yet |
 | struct inheritance | no Java mapping implemented yet |
 | `enum` with no variants | an empty Java `enum` body is not valid Java |
@@ -295,19 +298,22 @@ For actual ROS2 ↔ DDS communication, also align at runtime: ROS2 prefixes topi
 The pipeline is also available as a library:
 
 ```rust
-use int2dds_idl::{parser, resolver, codegen, naming};
+use int2dds_idl::{codegen, parser, resolver};
 
-let source = std::fs::read_to_string("HelloWorld.idl")?;
-let defs   = parser::parse_idl(&source)?;
-let model  = resolver::resolve(defs)?;             // -> IdlModel (resolved IR)
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let source = std::fs::read_to_string("HelloWorld.idl")?;
+    let defs = parser::parse_idl(&source).map_err(|e| e.to_string())?;
+    let model = resolver::resolve(defs).map_err(|e| e.to_string())?; // -> IdlModel (resolved IR)
 
-let opts = codegen::rust::RustOptions { crate_path: "int2dds".into() };
-let code = codegen::rust::generate(&model, "HelloWorld.idl", &opts);
-std::fs::write("hello_world.rs", code)?;
+    let opts = codegen::rust::RustOptions { crate_path: "int2dds".into() };
+    let code = codegen::rust::generate(&model, "HelloWorld.idl", &opts);
+    std::fs::write("hello_world.rs", code)?;
+    Ok(())
+}
 ```
 
 `IdlModel` (in `int2dds_idl::types`) is the resolved intermediate representation shared by
-all backends (`codegen::{rust, c, python, csharp, xml, rpc}`).
+all backends (`codegen::{rust, c, python, csharp, java, xml, rpc}`).
 
 ## Project layout
 

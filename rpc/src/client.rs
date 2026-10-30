@@ -1,7 +1,7 @@
 //! Client — the caller-side proxy for function-call style RPC.
 //!
-//! Each generated client wraps a Requester, providing typed methods that
-//! serialize a request, send it, and wait for the corresponding reply.
+//! Each generated client wraps a `Client`, which uses a Requester to provide typed
+//! methods that serialize a request, send it, and wait for the corresponding reply.
 
 use std::time::Duration;
 

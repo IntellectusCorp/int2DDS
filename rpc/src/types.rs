@@ -1,7 +1,7 @@
 //! Common wire types shared across all RPC interactions.
 //!
 //! Includes SampleIdentity for request-reply correlation, RemoteExceptionCode
-//! for standard error codes, and the Request/Reply envelope traits.
+//! for standard error codes, and the Request/Reply envelope structs.
 
 use std::any::Any;
 use std::fmt::Debug;

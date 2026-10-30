@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 description = "DDS-RPC (Remote Procedure Call over DDS) implementation for int2DDS"
 readme = "README.md"
+keywords = ["dds", "rpc", "rtps", "request-reply", "middleware"]
+categories = ["network-programming"]
+documentation = "https://docs.rs/int2dds-rpc"
 
 [dependencies]
 int2dds.workspace = true

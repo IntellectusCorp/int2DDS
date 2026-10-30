@@ -239,8 +239,8 @@ impl Subscriber {
     /// you can use the reader's `read()` or `take()` methods to access data samples published by
     /// data writers on the same topic. You can also use a listener to be notified when data arrives.
     ///
-    /// The data reader will be automatically enabled if the participant's QoS policy
-    /// `autoenable_created_entities` is set to true (which is the default).
+    /// The data reader will be automatically enabled if this subscriber is enabled and its
+    /// `entity_factory.autoenable_created_entities` is set to true (which is the default).
     ///
     /// # Type Parameters
     ///
@@ -250,7 +250,7 @@ impl Subscriber {
     ///
     /// * `topic_description` - The topic to subscribe to. Can be a `Topic` or `ContentFilteredTopic`.
     ///   Must belong to the same `DomainParticipant` as this subscriber.
-    /// * `qos` - Quality of Service policies for the data reader. Use `DataReaderQos::default()` for defaults.
+    /// * `qos` - Quality of Service policies for the data reader. Use `DATAREADER_QOS_DEFAULT` for the configured default.
     /// * `listener` - Optional listener for notifications (e.g., data available, subscription matched). Pass `None` if not needed.
     /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
     ///
@@ -261,34 +261,13 @@ impl Subscriber {
     /// # Errors
     ///
     /// Returns an error if:
+    /// * `PreconditionNotMet` - This is a built-in subscriber
     /// * The subscriber has been deleted
     /// * The topic does not belong to the same `DomainParticipant` as this subscriber
     /// * Type support for the topic is not found
     /// * The QoS policies are inconsistent
     /// * The DCPS bridge is not initialized
     /// * The topic description type is unsupported
-    /// Resolution chain for `QosKind::Default`: registered default → configured
-    /// default profile → spec default. `QosKind::Specific` is used as-is.
-    ///
-    /// Shared by `create_datareader` and `create_datareader_dynamic` so both entry
-    /// points resolve the default sentinel identically.
-    fn resolve_datareader_qos(&self, qos: QosKind<DataReaderQos>) -> DataReaderQos {
-        match qos {
-            QosKind::Specific(q) => q,
-            QosKind::Default => {
-                if let Some(registered) =
-                    self.default_datareader_qos.lock().ok().and_then(|g| g.clone())
-                {
-                    registered
-                } else {
-                    DomainParticipantFactory::get_instance()
-                        .get_datareader_qos_from_profile("")
-                        .unwrap_or_default()
-                }
-            }
-        }
-    }
-
     pub fn create_datareader<Foo: DdsType>(
         &self,
         topic_description: &dyn TopicDescription,
@@ -410,6 +389,28 @@ impl Subscriber {
         Ok(datareader)
     }
 
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_datareader` and `create_datareader_dynamic` so both entry
+    /// points resolve the default sentinel identically.
+    fn resolve_datareader_qos(&self, qos: QosKind<DataReaderQos>) -> DataReaderQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_datareader_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else {
+                    DomainParticipantFactory::get_instance()
+                        .get_datareader_qos_from_profile("")
+                        .unwrap_or_default()
+                }
+            }
+        }
+    }
+
     /// Creates a new `DataReader` using QoS settings from a loaded profile.
     ///
     /// This is a convenience method that retrieves QoS from the profile and delegates
@@ -492,11 +493,17 @@ impl Subscriber {
     /// )?;
     ///
     /// // Read data
-    /// let samples = reader.take(10)?;
-    /// for sample in samples {
-    ///     if let Some(data) = sample.data() {
-    ///         let id: i32 = data.get("id")?;
-    ///         println!("Received id: {}", id);
+    /// let samples = reader.take(
+    ///     10,
+    ///     &[SampleStateKind::ANY_SAMPLE_STATE],
+    ///     &[ViewStateKind::ANY_VIEW_STATE],
+    ///     &[InstanceStateKind::ANY_INSTANCE_STATE],
+    /// )?;
+    /// for sample in samples.iter() {
+    ///     if let Ok(data) = sample.data() {
+    ///         if let Ok(id) = data.get::<i32>("id") {
+    ///             println!("Received id: {}", id);
+    ///         }
     ///     }
     /// }
     /// ```

@@ -179,7 +179,7 @@ impl RtpsErrorCode {
     }
 }
 
-/// Helper trait - handles &str, String, Option<String>
+/// Helper trait - handles `&str`, `String`, `Option<String>`
 pub trait IntoMessage {
     fn into_message(self) -> Option<String>;
 }
