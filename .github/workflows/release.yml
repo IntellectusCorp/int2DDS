@@ -61,6 +61,23 @@ jobs:
           name: release-notes
           path: release-notes.md
 
+      # Third-party license notices for every binary artifact. Generated once here
+      # (the job every packaging job already waits for) and downloaded next to
+      # LICENSE and NOTICE wherever those two are staged. --fail turns about.toml's
+      # accepted list into a gate: a dependency outside it fails the release.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+
+      - name: Generate third-party license notices
+        run: cargo about generate --workspace --locked --fail -o LICENSE-THIRD-PARTY.md about.hbs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-notices
+          path: LICENSE-THIRD-PARTY.md
+          if-no-files-found: error
+
   native-linux-gnu:
     needs: prepare
     strategy:
@@ -127,6 +144,11 @@ jobs:
 
       - name: Fail if the committed cbindgen header is stale
         run: git diff --exit-code ffi/include/int2dds-ffi.h
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: .
 
       - name: Stage archive
         run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu "${{ matrix.max_glibc }}"
@@ -279,6 +301,11 @@ jobs:
               '
           fi
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Stage archive
         run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" musl
 
@@ -352,6 +379,11 @@ jobs:
         shell: bash
         run: git diff --exit-code ffi/include/int2dds-ffi.h
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Stage archive
         shell: pwsh
         run: ./.github/scripts/ci/stage-native.ps1 -Triple "${{ matrix.triple }}" -DistName "${{ matrix.dist }}" -Version "${{ needs.prepare.outputs.version }}"
@@ -419,6 +451,11 @@ jobs:
             -output target/universal2-apple-darwin/release/int2dds-idl
           echo "== universal2 slices =="
           lipo -info target/universal2-apple-darwin/release/libint2dds_ffi.dylib
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: .
 
       - name: Stage archives
         run: |
@@ -519,6 +556,11 @@ jobs:
           done
           find "$root" -type f | sort
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Pack
         run: dotnet pack csharp/src/Int2Dds/Int2Dds.csproj -c Release -o dist/nuget
 
@@ -564,6 +606,13 @@ jobs:
             echo "ERROR: expected 10 native RIDs in the nupkg, found $count" >&2
             exit 1
           fi
+          for f in LICENSE NOTICE LICENSE-THIRD-PARTY.md; do
+            if ! grep -qE " $f\$" <<< "$listing"; then
+              echo "ERROR: nupkg missing $f at the package root" >&2
+              echo "$listing" >&2
+              exit 1
+            fi
+          done
           test -f "dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.snupkg"
 
       - name: Build dotnet-libs zip
@@ -575,6 +624,7 @@ jobs:
           dotnet build csharp/src/Int2Dds/Int2Dds.csproj -c Release
           stage="dist/dotnet-libs/Int2Dds-$VERSION-dotnet-libs"
           mkdir -p "$stage"
+          cp LICENSE NOTICE LICENSE-THIRD-PARTY.md "$stage/"
           for tfm in net45 net48 netstandard2.0 netstandard2.1 net6.0 net8.0 net10.0; do
             src="csharp/src/Int2Dds/bin/Release/$tfm"
             if [[ ! -f "$src/Int2Dds.dll" ]]; then
@@ -638,10 +688,15 @@ jobs:
           done
           ls -1 native-root
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Build wheels
         run: ./.github/scripts/ci/repack-wheels.sh "${{ needs.prepare.outputs.version }}" native-root
 
-      - name: Verify wheel count
+      - name: Verify wheels
         shell: bash
         run: |
           set -euo pipefail
@@ -656,7 +711,26 @@ jobs:
           # The sdist filename uses base_version for the same reason as the nupkg:
           # python -m build names it from the static version in pyproject.toml,
           # which is always the base version without a suffix.
-          test -f "dist/wheels/int2dds-${{ needs.prepare.outputs.base_version }}.tar.gz"
+          sdist="dist/wheels/int2dds-${{ needs.prepare.outputs.base_version }}.tar.gz"
+          test -f "$sdist"
+          for whl in "${whls[@]}"; do
+            listing="$(unzip -l "$whl")"
+            for f in LICENSE NOTICE LICENSE-THIRD-PARTY.md; do
+              if ! grep -qE "\.dist-info/licenses/$f\$" <<< "$listing"; then
+                echo "ERROR: $whl missing $f" >&2
+                echo "$listing" >&2
+                exit 1
+              fi
+            done
+          done
+          sdist_listing="$(tar -tzf "$sdist")"
+          for f in LICENSE NOTICE LICENSE-THIRD-PARTY.md; do
+            if ! grep -qE "^int2dds-[^/]+/$f\$" <<< "$sdist_listing"; then
+              echo "ERROR: $sdist missing $f" >&2
+              echo "$sdist_listing" >&2
+              exit 1
+            fi
+          done
 
       - name: Smoke test the linux x86_64 wheel
         shell: bash
@@ -739,6 +813,11 @@ jobs:
           done
           find "$root" -type f | sort
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: .
+
       - name: Build the JAR and the examples
         working-directory: java
         run: ./gradlew :api:jar :examples:classes --console=plain
@@ -751,6 +830,9 @@ jobs:
           jar="java/api/build/libs/int2dds-api-${{ needs.prepare.outputs.base_version }}.jar"
           listing="$(unzip -l "$jar")"
           paths=(
+            "META-INF/LICENSE"
+            "META-INF/NOTICE"
+            "META-INF/LICENSE-THIRD-PARTY.md"
             "META-INF/versions/22/kr/co/intellectus/int2dds/internal/NativeLoader.class"
             "native/windows-x86_64/int2dds_ffi.dll"
             "native/windows-x86_64/int2dds_java.dll"

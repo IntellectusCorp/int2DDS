@@ -1,0 +1,36 @@
+# cargo-about configuration for LICENSE-THIRD-PARTY.md, the third-party license
+# notices shipped with every binary release artifact (rendered from about.hbs).
+
+# Licenses a dependency may be used under, in priority order: a crate offering
+# `MIT OR Apache-2.0` is taken under Apache-2.0. Any license outside this list
+# fails `cargo about generate --fail`.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unlicense",
+]
+
+# Every target the release builds, so one file covers all native archives.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "armv7-unknown-linux-gnueabihf",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "armv7-unknown-linux-musleabihf",
+    "x86_64-pc-windows-msvc",
+    "i686-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+workarounds = ["ring"]

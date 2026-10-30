@@ -73,15 +73,48 @@ jobs:
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
         run: cargo build --target armv7-unknown-linux-gnueabihf
 
+  # Fails when a dependency is licensed outside about.toml's accepted list or its
+  # license cannot be determined. Same command as the release workflow's
+  # LICENSE-THIRD-PARTY.md generation, so a problem surfaces here first.
+  # cargo-about collects license texts only, so the second step fails when a crate
+  # in the same dependency graph (normal dependencies, every target) ships a
+  # NOTICE file that the generated file would have to carry.
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+
+      - name: Check third-party licenses
+        run: cargo about generate --workspace --locked --fail -o "$RUNNER_TEMP/LICENSE-THIRD-PARTY.md" about.hbs
+
+      - name: Check for upstream NOTICE files
+        run: |
+          cargo tree --workspace --locked -e normal --target all --prefix none --format '{p}' \
+            | sed -E 's/ \((\*|proc-macro)\)//g' | grep -v -e ' (' -e '^$' | sort -u \
+            | sed -E 's/^(.*) v(.*)$/\1-\2/' > "$RUNNER_TEMP/crates.txt"
+          for crate in $(cat "$RUNNER_TEMP/crates.txt"); do
+            find "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/"$crate" -maxdepth 1 -type f -iname 'NOTICE*'
+          done > "$RUNNER_TEMP/notices.txt"
+          if [ -s "$RUNNER_TEMP/notices.txt" ]; then
+            echo "Dependencies ship NOTICE files that LICENSE-THIRD-PARTY.md does not reproduce:"
+            cat "$RUNNER_TEMP/notices.txt"
+            exit 1
+          fi
+
   cross-platform-build:
     runs-on: ubuntu-latest
-    needs: [build, build-arm32]
+    needs: [build, build-arm32, licenses]
     if: always()
     steps:
       - name: Check build result
         run: |
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.build-arm32.result }}" != "success" ]; then
-            echo "Build failed on one or more platforms"
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.build-arm32.result }}" != "success" ] || [ "${{ needs.licenses.result }}" != "success" ]; then
+            echo "Build or license check failed"
             exit 1
           fi
           echo "All builds succeeded"

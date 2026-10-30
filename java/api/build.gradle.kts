@@ -122,6 +122,14 @@ tasks.withType<Test>().configureEach {
 
 tasks.jar {
     archiveBaseName.set("int2dds-api")
+    into("META-INF") {
+        // LICENSE-THIRD-PARTY.md exists only in the release workflow; Gradle skips it when absent.
+        from(
+            rootProject.file("../LICENSE"),
+            rootProject.file("../NOTICE"),
+            rootProject.file("../LICENSE-THIRD-PARTY.md")
+        )
+    }
     into("META-INF/versions/9") {
         from(java9.output)
     }
