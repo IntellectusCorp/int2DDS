@@ -7,14 +7,13 @@
 //! budget, which bounds memory rather than answering congestion.
 
 use std::io::{self, Read, Write};
+use std::net::IpAddr;
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-
-use rustls::pki_types::ServerName;
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
@@ -316,14 +315,12 @@ fn retryable(error: &io::Error) -> bool {
     matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
-/// The client side of a TLS session that has not started its handshake yet.
-pub(crate) fn tls_client(config: &TlsConfig) -> io::Result<rustls::ClientConnection> {
+/// The client side of a TLS session to `peer` that has not started its handshake yet.
+pub(crate) fn tls_client(config: &TlsConfig, peer: IpAddr) -> io::Result<rustls::ClientConnection> {
     let client_config = config.build_client_config().map_err(|error| {
         transport_io_error(TransportErrorCode::TlsConfigError, error.to_string())
     })?;
-    let server_name = ServerName::try_from(config.server_name().to_string()).map_err(|error| {
-        transport_io_error(TransportErrorCode::TlsConfigError, error.to_string())
-    })?;
+    let server_name = config.server_name_for(peer)?;
     rustls::ClientConnection::new(client_config, server_name).map_err(|error| {
         transport_io_error(TransportErrorCode::TlsHandshakeFailed, error.to_string())
     })
@@ -335,7 +332,7 @@ fn handshake(
     config: &TlsConfig,
     wait: Duration,
 ) -> io::Result<rustls::ClientConnection> {
-    let mut tls = tls_client(config)?;
+    let mut tls = tls_client(config, socket.peer_addr()?.ip())?;
     socket.set_read_timeout(Some(wait))?;
     socket.set_write_timeout(Some(wait))?;
     let mut io = socket;
@@ -477,7 +474,7 @@ mod tests {
             ca_file: cert_file.clone(),
             cert_file,
             key_file,
-            server_name: "localhost".to_string(),
+            server_name: Some("localhost".to_string()),
             verify_peer: false,
         };
 

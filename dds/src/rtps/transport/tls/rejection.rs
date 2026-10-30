@@ -1,0 +1,41 @@
+//! Why a TLS handshake refused a peer, in terms an operator can act on.
+
+use std::io;
+
+use rustls::{AlertDescription, CertificateError, Error};
+
+/// The reason a handshake failed on certificate grounds, or `None` when the
+/// failure had nothing to do with certificates. Handshake errors arrive
+/// wrapped in an [`io::Error`], the way the TLS stream reports them.
+pub(crate) fn rejection_reason(error: &io::Error) -> Option<&'static str> {
+    let error = error.get_ref()?.downcast_ref::<Error>()?;
+    match error {
+        Error::InvalidCertificate(reason) => Some(match reason {
+            CertificateError::UnknownIssuer => "certificate is not signed by a trusted CA",
+            CertificateError::Expired | CertificateError::ExpiredContext { .. } => {
+                "certificate has expired"
+            }
+            CertificateError::NotValidYet | CertificateError::NotValidYetContext { .. } => {
+                "certificate is not valid yet"
+            }
+            CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. } => {
+                "certificate does not carry the configured server name"
+            }
+            CertificateError::InvalidPurpose | CertificateError::InvalidPurposeContext { .. } => {
+                "certificate is not issued for this role"
+            }
+            _ => "certificate is invalid",
+        }),
+        Error::NoCertificatesPresented => Some("peer presented no certificate"),
+        Error::AlertReceived(
+            AlertDescription::BadCertificate
+            | AlertDescription::UnsupportedCertificate
+            | AlertDescription::CertificateRevoked
+            | AlertDescription::CertificateExpired
+            | AlertDescription::CertificateUnknown
+            | AlertDescription::UnknownCA
+            | AlertDescription::CertificateRequired,
+        ) => Some("peer rejected this participant's certificate"),
+        _ => None,
+    }
+}

@@ -1595,7 +1595,7 @@ mod tests {
             ca_file: cert_file.clone(),
             cert_file,
             key_file,
-            server_name: "localhost".to_string(),
+            server_name: Some("localhost".to_string()),
             verify_peer: true,
         })
     }

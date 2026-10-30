@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::warn;
+use log::{error, warn};
 use mio::Token;
 
 use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
@@ -12,6 +12,7 @@ use crate::rtps::transport::tcp::framing::{
     TcpBufferPool, TcpFrame, TcpFrameKind, TcpFrameReadState, TcpReadOutcome,
 };
 use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
+use crate::rtps::transport::tls::rejection::rejection_reason;
 use crate::rtps::transport::tls::TlsConfig;
 use crate::rtps::transport::tokens::ListenerToken;
 
@@ -287,6 +288,11 @@ impl TcpListener {
 
         if !self.ready_frames.is_empty() {
             connection.first_frame_deadline = None;
+        }
+        if let Err(error) = &read_result {
+            if let Some(reason) = rejection_reason(error) {
+                error!("TLS handshake from {source} rejected: {reason} ({error})");
+            }
         }
         let terminal = matches!(read_result, Ok(TcpReadOutcome::Closed) | Err(_));
         for frame in self.ready_frames.drain(..) {
@@ -724,7 +730,7 @@ mod tests {
             ca_file: cert_file.clone(),
             cert_file,
             key_file,
-            server_name: "localhost".to_string(),
+            server_name: Some("localhost".to_string()),
             verify_peer: false,
         }
     }

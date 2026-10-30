@@ -26,18 +26,18 @@ pub struct TlsNodeConfig {
     pub cert_file: String,
     /// Path to a PEM file containing this peer's private key.
     pub key_file: String,
-    /// SNI server name sent during TLS handshake (client side).
-    /// Defaults to `"localhost"` when omitted.
-    #[serde(default = "default_server_name")]
-    pub server_name: String,
+    /// Name every server certificate must carry. When omitted, the server
+    /// certificate is verified in full except for its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
     /// Require the remote peer to present a certificate (mutual TLS).
-    /// Defaults to `false`.
-    #[serde(default)]
+    /// Defaults to `true`.
+    #[serde(default = "default_verify_peer")]
     pub verify_peer: bool,
 }
 
-fn default_server_name() -> String {
-    "localhost".to_string()
+fn default_verify_peer() -> bool {
+    true
 }
 
 /// Configuration for one side of a Route Gateway.
@@ -84,7 +84,9 @@ impl NodeConfig {
             property.add_property("int2dds.tls.ca_file", &tls.ca_file, false);
             property.add_property("int2dds.tls.cert_file", &tls.cert_file, false);
             property.add_property("int2dds.tls.key_file", &tls.key_file, false);
-            property.add_property("int2dds.tls.server_name", &tls.server_name, false);
+            if let Some(server_name) = &tls.server_name {
+                property.add_property("int2dds.tls.server_name", server_name, false);
+            }
             property.add_property(
                 "int2dds.tls.verify_peer",
                 if tls.verify_peer { "true" } else { "false" },
@@ -318,7 +320,7 @@ mod tests {
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         let tls = cfg.remote.tls.expect("tls present");
         assert_eq!(tls.ca_file, "/etc/ssl/ca.pem");
-        assert_eq!(tls.server_name, "gateway.example.com");
+        assert_eq!(tls.server_name.as_deref(), Some("gateway.example.com"));
         assert!(tls.verify_peer);
     }
 
@@ -333,7 +335,7 @@ mod tests {
                 ca_file: "/etc/ssl/ca.pem".to_string(),
                 cert_file: "/etc/ssl/cert.pem".to_string(),
                 key_file: "/etc/ssl/key.pem".to_string(),
-                server_name: "gw.example.com".to_string(),
+                server_name: Some("gw.example.com".to_string()),
                 verify_peer: true,
             }),
         };
@@ -419,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn tls_server_name_defaults_to_localhost() {
+    fn tls_defaults_to_mutual_tls_without_a_server_name() {
         let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": {
@@ -428,9 +430,13 @@ mod tests {
             }
         }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
-        let tls = cfg.remote.tls.unwrap();
-        assert_eq!(tls.server_name, "localhost");
-        assert!(!tls.verify_peer);
+        let tls = cfg.remote.tls.as_ref().unwrap();
+        assert_eq!(tls.server_name, None);
+        assert!(tls.verify_peer);
+
+        let qos = cfg.remote.to_participant_qos();
+        assert!(qos.property.find_property("int2dds.tls.server_name").is_none());
+        assert_eq!(qos.property.find_property("int2dds.tls.verify_peer"), Some("true"));
     }
 
     #[test]

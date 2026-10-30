@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use log::warn;
+use log::{error, warn};
 use mio::{Events, Interest, Poll, Token};
 
 use super::{ConnectionKey, Slot, TcpSender};
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::dial::start_dial;
 use crate::rtps::transport::tcp::sync_connection::{tls_client, OutboundConnection};
+use crate::rtps::transport::tls::rejection::rejection_reason;
 
 /// How long the dial worker waits before checking whether it should still run.
 const DIAL_WORKER_IDLE_TICK: Duration = Duration::from_millis(200);
@@ -147,7 +148,7 @@ impl DialLoop {
         let tls = match (outcome, sender.tls_config.as_deref()) {
             (Err(error), _) => Err(error),
             (Ok(()), None) => Ok(None),
-            (Ok(()), Some(config)) => tls_client(config).map(Some),
+            (Ok(()), Some(config)) => tls_client(config, dialing.key.0.ip()).map(Some),
         };
         match tls {
             Ok(Some(tls)) => {
@@ -201,6 +202,9 @@ impl DialLoop {
             }
             Some(error) => {
                 if let Some(Dialing { key, cancelled, .. }) = self.remove_dial(token) {
+                    if let Some(reason) = rejection_reason(&error) {
+                        error!("TLS handshake with {} rejected: {reason} ({error})", key.0);
+                    }
                     let error = transport_io_error(
                         TransportErrorCode::TlsHandshakeFailed,
                         format!("TLS handshake with {} failed: {error}", key.0),

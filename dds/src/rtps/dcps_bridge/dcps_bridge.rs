@@ -880,6 +880,7 @@ mod tests {
                 writer::{reader_locator::ReaderLocator, reader_proxy::ReaderProxy},
             },
             logic::common::MulticastThreadHandler as _,
+            transport::tls::test_pki::{LeafSpec, TestCa},
         },
         subscription::qos::{DataReaderQos, SubscriberQos},
         test_utils::unique_domain_id,
@@ -2238,46 +2239,22 @@ mod tests {
         }
     }
 
-    /// One CA and the PEM files of the leaf certificates it signs, all valid for `localhost`
-    /// as both client and server.
+    /// One CA and the files of the leaf certificates it signs, each usable as
+    /// both client and server.
     struct TestPki {
         dir: tempfile::TempDir,
-        ca: rcgen::Certificate,
-        ca_key: rcgen::KeyPair,
+        ca: TestCa,
     }
 
     impl TestPki {
         fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-            let ca_key = rcgen::KeyPair::generate().unwrap();
-            let ca = params.self_signed(&ca_key).unwrap();
-            std::fs::write(dir.path().join("ca.pem"), ca.pem()).unwrap();
-            Self { dir, ca, ca_key }
+            Self { dir: tempfile::tempdir().unwrap(), ca: TestCa::root("ca") }
         }
 
         /// Issues a leaf certificate and returns its TLS config and DER encoding.
-        fn issue(&self, name: &str) -> (crate::rtps::transport::tls::TlsConfig, Vec<u8>) {
-            let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-            params.extended_key_usages = vec![
-                rcgen::ExtendedKeyUsagePurpose::ServerAuth,
-                rcgen::ExtendedKeyUsagePurpose::ClientAuth,
-            ];
-            let key = rcgen::KeyPair::generate().unwrap();
-            let cert = params.signed_by(&key, &self.ca, &self.ca_key).unwrap();
-            let cert_file = self.dir.path().join(format!("{name}.pem"));
-            let key_file = self.dir.path().join(format!("{name}.key"));
-            std::fs::write(&cert_file, cert.pem()).unwrap();
-            std::fs::write(&key_file, key.serialize_pem()).unwrap();
-            let config = crate::rtps::transport::tls::TlsConfig {
-                ca_file: self.dir.path().join("ca.pem"),
-                cert_file,
-                key_file,
-                server_name: "localhost".to_string(),
-                verify_peer: true,
-            };
-            (config, cert.der().to_vec())
+        fn issue(&self, name: &'static str) -> (crate::rtps::transport::tls::TlsConfig, Vec<u8>) {
+            let leaf = self.ca.issue(LeafSpec::named(name));
+            (leaf.config(self.dir.path(), &[&self.ca]), leaf.der)
         }
     }
 

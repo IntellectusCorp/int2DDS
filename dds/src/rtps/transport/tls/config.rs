@@ -9,16 +9,19 @@
 //! Errors are surfaced via [`io::Error`] using the shared
 //! [`TransportErrorCode`] catalogue (codes 780–789).
 
-use std::{fs::File, io, io::BufReader, path::PathBuf, sync::Arc};
+use std::{fs::File, io, io::BufReader, net::IpAddr, path::PathBuf, sync::Arc};
 
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
     ClientConfig, RootCertStore, ServerConfig,
 };
 
 use crate::{
     infrastructure::qos_policy::PropertyQosPolicy,
-    rtps::transport::error::{transport_io_error, TransportErrorCode},
+    rtps::transport::{
+        error::{transport_io_error, TransportErrorCode},
+        tls::verifier::NameAgnosticServerVerifier,
+    },
 };
 
 /// Property keys recognised by [`TlsConfig::from_property`].
@@ -43,12 +46,11 @@ pub struct TlsConfig {
     pub cert_file: PathBuf,
     /// Path to a PEM file containing this peer's private key.
     pub key_file: PathBuf,
-    /// SNI server name to present when connecting (client side).
-    /// On the server side this field is informational only.
-    pub server_name: String,
-    /// Require the remote peer to present a certificate (mutual TLS).
-    /// Server side: enforce client certificates.
-    /// Client side: always verifies the server certificate (rustls default).
+    /// Name every server certificate must carry. When unset, the server
+    /// certificate is verified in full except for its name.
+    pub server_name: Option<String>,
+    /// Require the remote peer to present a certificate (mutual TLS); on by
+    /// default. The server certificate is verified either way.
     pub verify_peer: bool,
 }
 
@@ -71,10 +73,11 @@ impl TlsConfig {
         let ca_file = require_property(property, keys::CA_FILE)?.into();
         let cert_file = require_property(property, keys::CERT_FILE)?.into();
         let key_file = require_property(property, keys::KEY_FILE)?.into();
-        let server_name =
-            property.find_property(keys::SERVER_NAME).unwrap_or("localhost").to_string();
+        let server_name = property.find_property(keys::SERVER_NAME).map(str::to_string);
+        // Only an explicit "false" turns mutual TLS off, so a mistyped value
+        // cannot silently accept unauthenticated peers.
         let verify_peer =
-            property.find_property(keys::VERIFY_PEER).map(|v| v == "true").unwrap_or(false);
+            property.find_property(keys::VERIFY_PEER).map(|v| v != "false").unwrap_or(true);
 
         Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer }))
     }
@@ -121,10 +124,13 @@ impl TlsConfig {
         let cert_chain = self.load_cert_chain()?;
         let key = self.load_private_key()?;
 
-        let cfg = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(cert_chain, key)
-            .map_err(rustls_to_io)?;
+        let builder = match self.server_name {
+            Some(_) => ClientConfig::builder().with_root_certificates(roots),
+            None => ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(NameAgnosticServerVerifier::new(roots)?),
+        };
+        let cfg = builder.with_client_auth_cert(cert_chain, key).map_err(rustls_to_io)?;
         Ok(Arc::new(cfg))
     }
 
@@ -150,8 +156,14 @@ impl TlsConfig {
         Ok(Arc::new(cfg))
     }
 
-    pub fn server_name(&self) -> &str {
-        self.server_name.as_str()
+    /// The name handed to the handshake when dialing `peer`. Without a
+    /// configured name the peer's address stands in, which sends no SNI.
+    pub(crate) fn server_name_for(&self, peer: IpAddr) -> io::Result<ServerName<'static>> {
+        match &self.server_name {
+            Some(name) => ServerName::try_from(name.clone())
+                .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string())),
+            None => Ok(ServerName::from(peer)),
+        }
     }
 }
 
@@ -227,15 +239,15 @@ mod tests {
         assert_eq!(cfg.ca_file, PathBuf::from("/etc/ssl/ca.pem"));
         assert_eq!(cfg.cert_file, PathBuf::from("/etc/ssl/cert.pem"));
         assert_eq!(cfg.key_file, PathBuf::from("/etc/ssl/key.pem"));
-        assert_eq!(cfg.server_name, "gateway.example.com");
+        assert_eq!(cfg.server_name.as_deref(), Some("gateway.example.com"));
         assert!(cfg.verify_peer);
     }
 
     #[test]
-    fn server_name_defaults_to_localhost() {
+    fn defaults_to_mutual_tls_without_a_server_name() {
         let p = pq(&[(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")]);
         let cfg = TlsConfig::from_property(&p).unwrap().unwrap();
-        assert_eq!(cfg.server_name, "localhost");
-        assert!(!cfg.verify_peer);
+        assert_eq!(cfg.server_name, None);
+        assert!(cfg.verify_peer);
     }
 }
