@@ -88,6 +88,7 @@ impl Slot {
 pub(crate) struct TcpSender {
     working_ips: Vec<String>,
     listener_port: u16,
+    bind_ip: Option<IpAddr>,
 
     connect_timeout: Duration,
     tls_handshake_timeout: Duration,
@@ -110,6 +111,7 @@ impl TcpSender {
         _participant_id: u32,
         working_ips: Vec<String>,
         listener_port: u16,
+        bind_ip: Option<IpAddr>,
         _local_guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
         shared: Arc<ConnectionRegistry>,
@@ -119,6 +121,7 @@ impl TcpSender {
         let sender = Arc::new(Self {
             working_ips,
             listener_port,
+            bind_ip,
             connect_timeout: tcp_config.connect_timeout,
             tls_handshake_timeout: tcp_config.tls_handshake_timeout,
             stats: Arc::new(SendStats::default()),
@@ -428,6 +431,7 @@ mod tests {
             0,
             vec!["192.0.2.1".into()],
             7400,
+            None,
             [0; 12],
             None,
             registry,
@@ -702,7 +706,8 @@ mod tests {
         let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
         let addr = SocketAddr::from(([192, 0, 2, 1], port));
         let probe =
-            crate::rtps::transport::tcp::dial::start_dial(addr, Duration::from_secs(1)).ok()?;
+            crate::rtps::transport::tcp::dial::start_dial(addr, None, Duration::from_secs(1))
+                .ok()?;
         std::thread::sleep(Duration::from_millis(150));
         let unanswered = matches!(probe.take_error(), Ok(None))
             && matches!(probe.peer_addr(), Err(error) if error.kind() == io::ErrorKind::NotConnected);
@@ -808,6 +813,7 @@ mod tests {
         let sender = Arc::new(TcpSender {
             working_ips: vec![],
             listener_port: 0,
+            bind_ip: None,
             connect_timeout: Duration::from_secs(1),
             tls_handshake_timeout: Duration::from_secs(1),
             stats: Arc::new(SendStats::default()),
@@ -853,6 +859,7 @@ mod tests {
             let sender = TcpSender {
                 working_ips: vec![],
                 listener_port: 0,
+                bind_ip: None,
                 connect_timeout: Duration::from_secs(1),
                 tls_handshake_timeout: Duration::from_secs(1),
                 stats: Arc::new(SendStats::default()),
@@ -921,6 +928,7 @@ mod tests {
             0,
             vec![],
             0,
+            None,
             [0; 12],
             Some(Arc::new(tls)),
             registry,
@@ -1015,6 +1023,7 @@ mod tests {
             0,
             vec!["192.0.2.1".into()],
             7400,
+            None,
             [0; 12],
             Some(Arc::new(tls)),
             registry,
