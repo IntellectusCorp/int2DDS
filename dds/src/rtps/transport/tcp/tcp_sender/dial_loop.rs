@@ -25,8 +25,9 @@ struct Dialing {
     cancelled: Arc<AtomicBool>,
     stream: mio::net::TcpStream,
     deadline: Instant,
-    /// Present once the TCP connection is up and its TLS handshake is under way.
-    tls: Option<rustls::ClientConnection>,
+    /// Present once the TCP connection is up and its TLS handshake is under
+    /// way, with the generation of the policy the handshake follows.
+    tls: Option<(rustls::ClientConnection, u64)>,
 }
 
 /// Dials still waiting for their peer, all watched by one poll so that none
@@ -177,7 +178,7 @@ impl DialLoop {
         let Some(dialing) = self.dialing.get_mut(&token) else {
             return;
         };
-        let Some(tls) = dialing.tls.as_mut() else {
+        let Some((tls, _)) = dialing.tls.as_mut() else {
             return;
         };
         let error = match tls.complete_io(&mut dialing.stream) {
@@ -213,14 +214,41 @@ impl DialLoop {
                 }
             }
             None => {
-                let Some(Dialing { key, cancelled, stream, tls: Some(tls), .. }) =
+                let Some(Dialing { key, cancelled, stream, tls: Some((tls, generation)), .. }) =
                     self.remove_dial(token)
                 else {
                     return;
                 };
-                let result =
-                    OutboundConnection::over_tls(stream.into(), tls, &sender.shared.tuning);
-                sender.record_dial_result(key, &cancelled, result);
+                let judged = match sender.tls.as_ref() {
+                    Some(client) => client.judge_again(&tls, generation, key.0.ip()),
+                    None => Ok(generation),
+                };
+                match judged {
+                    Ok(judged) => {
+                        let result = OutboundConnection::over_tls(
+                            stream.into(),
+                            tls,
+                            judged,
+                            &sender.shared.tuning,
+                        );
+                        sender.record_dial_result(key, &cancelled, result);
+                        sender.recheck_if_reloaded_since(judged);
+                    }
+                    Err(error) => {
+                        let error = io::Error::new(io::ErrorKind::InvalidData, error);
+                        let reason = rejection_reason(&error).unwrap_or("certificate is invalid");
+                        error!(
+                            "TLS handshake with {} rejected by the reloaded policy: {reason} \
+                             ({error})",
+                            key.0
+                        );
+                        let error = transport_io_error(
+                            TransportErrorCode::TlsHandshakeFailed,
+                            format!("TLS handshake with {} failed: {error}", key.0),
+                        );
+                        sender.record_dial_result(key, &cancelled, Err(error));
+                    }
+                }
             }
         }
     }

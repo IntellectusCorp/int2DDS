@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
+use crate::rtps::transport::tls::policy::VerifiedPeer;
 #[cfg(test)]
 use crate::rtps::transport::tls::{client::TlsClient, TlsConfig};
 
@@ -110,6 +111,7 @@ pub(crate) enum SendOutcome {
 pub(crate) struct OutboundConnection {
     state: Mutex<ConnectionState>,
     failed: AtomicBool,
+    peer: Option<VerifiedPeer>,
 }
 
 struct ConnectionState {
@@ -139,8 +141,8 @@ impl OutboundConnection {
         match tls_config {
             None => Self::plain(socket, tuning),
             Some(config) => {
-                let tls = handshake(&socket, config, tls_handshake_timeout)?;
-                Self::over_tls(socket, tls, tuning)
+                let (tls, generation) = handshake(&socket, config, tls_handshake_timeout)?;
+                Self::over_tls(socket, tls, generation, tuning)
             }
         }
     }
@@ -156,11 +158,21 @@ impl OutboundConnection {
     pub(crate) fn over_tls(
         socket: TcpStream,
         tls: rustls::ClientConnection,
+        generation: u64,
         tuning: &TcpSocketTuning,
     ) -> io::Result<Self> {
         apply_socket_tuning(&socket, tuning);
         socket.set_nonblocking(true)?;
-        Ok(Self::over(Wire::Tls(Box::new(rustls::StreamOwned::new(tls, socket)))))
+        let peer =
+            tls.peer_certificates().map(|chain| VerifiedPeer { chain: chain.to_vec(), generation });
+        let mut connection = Self::over(Wire::Tls(Box::new(rustls::StreamOwned::new(tls, socket))));
+        connection.peer = peer;
+        Ok(connection)
+    }
+
+    /// What the peer proved during the handshake; absent on a plain connection.
+    pub(crate) fn verified_peer(&self) -> Option<&VerifiedPeer> {
+        self.peer.as_ref()
     }
 
     fn over(wire: Wire) -> Self {
@@ -172,6 +184,7 @@ impl OutboundConnection {
                 last_progress: Instant::now(),
             }),
             failed: AtomicBool::new(false),
+            peer: None,
         }
     }
 
@@ -232,6 +245,12 @@ impl OutboundConnection {
             Err(error) if retryable(&error) => Ok(SendOutcome::Sent),
             Err(error) => Err(self.fail(error)),
         }
+    }
+
+    /// Closes the connection at once instead of when the last holder lets go.
+    pub(crate) fn close(&self) {
+        self.failed.store(true, Ordering::Release);
+        let _ = self.lock().wire.socket().shutdown(std::net::Shutdown::Both);
     }
 
     fn fail(&self, error: io::Error) -> io::Error {
@@ -320,8 +339,11 @@ fn handshake(
     socket: &TcpStream,
     config: &TlsConfig,
     wait: Duration,
-) -> io::Result<rustls::ClientConnection> {
-    let mut tls = TlsClient::new(config)?.connect(socket.peer_addr()?.ip())?;
+) -> io::Result<(rustls::ClientConnection, u64)> {
+    let (mut tls, generation) = TlsClient::new(std::sync::Arc::new(
+        crate::rtps::transport::tls::policy::TlsPolicyHandle::new(config)?,
+    ))?
+    .connect(socket.peer_addr()?.ip())?;
     socket.set_read_timeout(Some(wait))?;
     socket.set_write_timeout(Some(wait))?;
     let mut io = socket;
@@ -335,7 +357,7 @@ fn handshake(
     }
     socket.set_read_timeout(None)?;
     socket.set_write_timeout(None)?;
-    Ok(tls)
+    Ok((tls, generation))
 }
 
 #[cfg(test)]

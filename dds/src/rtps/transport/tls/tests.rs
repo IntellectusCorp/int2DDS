@@ -18,6 +18,7 @@ use crate::{
     rtps::transport::tls::{
         client::TlsClient,
         config::keys,
+        policy::TlsPolicyHandle,
         rejection::rejection_reason,
         test_pki::{with_crls, with_lists, LeafSpec, TestCa},
         verifier::PeerServerVerifier,
@@ -39,7 +40,7 @@ pub(super) struct Outcome {
 /// Runs a handshake between the client and server sides that `client` and
 /// `server` build, with the client dialing [`PEER`].
 pub(super) fn handshake(client: &TlsConfig, server: &TlsConfig) -> io::Result<Outcome> {
-    let client = TlsClient::new(client)?.connect(PEER)?;
+    let (client, _) = TlsClient::new(Arc::new(TlsPolicyHandle::new(client)?))?.connect(PEER)?;
     let server = ServerConnection::new(server.build_server_config()?).map_err(io::Error::other)?;
     Ok(drive(client, server))
 }
@@ -641,4 +642,94 @@ fn lists_apply_only_after_the_chain_and_alongside_a_server_name() {
     client_config.server_name = Some("server.int2dds.test".to_string());
     let outcome = handshake(&client_config, &server.config(dir.path(), &[&ca])).unwrap();
     assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+fn handshake_between(client: &Arc<TlsPolicyHandle>, server: &TlsPolicyHandle) -> Outcome {
+    let (client, _) = TlsClient::new(Arc::clone(client)).unwrap().connect(PEER).unwrap();
+    let server = ServerConnection::new(Arc::clone(&server.current().server)).unwrap();
+    drive(client, server)
+}
+
+#[test]
+fn a_reload_applies_a_newly_published_crl_to_the_next_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let client_policy = Arc::new(TlsPolicyHandle::new(&client.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_crls(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[ca.crl(&[], 2999)],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    let crl_file = &server_config.revocation.as_ref().unwrap().crl_file;
+    std::fs::write(crl_file, ca.crl(&[client.serial], 2999)).unwrap();
+    server_policy.reload().unwrap();
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert_rejected!(outcome.server, CertificateError::Revoked);
+}
+
+#[test]
+fn a_reload_that_cannot_read_a_file_keeps_the_policy_in_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let client_policy = Arc::new(TlsPolicyHandle::new(&client.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_crls(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[ca.crl(&[client.serial], 2999)],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    std::fs::write(&server_config.revocation.as_ref().unwrap().crl_file, "not a CRL").unwrap();
+    assert!(server_policy.reload().is_err());
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert_rejected!(outcome.server, CertificateError::Revoked);
+}
+
+#[test]
+fn a_reload_keeps_the_certificate_the_participant_started_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stranger_ca = TestCa::root("stranger-ca");
+    let client_policy = Arc::new(
+        TlsPolicyHandle::new(&ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]))
+            .unwrap(),
+    );
+    let server_config = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    let replacement = stranger_ca.issue(LeafSpec::named("replacement"));
+    std::fs::write(&server_config.cert_file, &replacement.cert_pem).unwrap();
+    std::fs::write(&server_config.key_file, &replacement.key_pem).unwrap();
+    server_policy.reload().unwrap();
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn only_a_successful_reload_starts_a_new_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let config = with_crls(
+        ca.issue(LeafSpec::named("node")).config(dir.path(), &[&ca]),
+        &[ca.crl(&[], 2999)],
+    );
+    let policy = Arc::new(TlsPolicyHandle::new(&config).unwrap());
+    let client = TlsClient::new(Arc::clone(&policy)).unwrap();
+    assert_eq!(client.connect(PEER).unwrap().1, 0);
+
+    policy.reload().unwrap();
+    assert_eq!(policy.current().generation, 1);
+
+    std::fs::write(&config.revocation.as_ref().unwrap().crl_file, "not a CRL").unwrap();
+    assert!(policy.reload().is_err());
+    assert_eq!(policy.current().generation, 1);
+    assert_eq!(client.connect(PEER).unwrap().1, 1);
 }

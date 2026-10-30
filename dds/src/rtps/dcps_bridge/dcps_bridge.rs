@@ -370,6 +370,10 @@ impl DcpsBridge {
         Ok(Arc::try_unwrap(self.participant.clone()).unwrap_or_else(|a| (*a).clone()))
     }
 
+    pub(crate) fn reload_tls_policy(&self) -> std::io::Result<()> {
+        self.socket.transport().reload_tls_policy()
+    }
+
     pub(crate) fn update_participant(&self, user_data: UserDataQosPolicy) -> RtpsResult<()> {
         self.participant.set_local_user_data(user_data);
 

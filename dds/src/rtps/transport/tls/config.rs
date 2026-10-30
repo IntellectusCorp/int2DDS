@@ -12,9 +12,11 @@
 use std::{fs::File, io, io::BufReader, path::PathBuf, sync::Arc};
 
 use rustls::{
-    client::WebPkiServerVerifier,
-    pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer},
-    server::WebPkiClientVerifier,
+    client::{danger::ServerCertVerifier, WebPkiServerVerifier},
+    pki_types::{
+        CertificateDer, CertificateRevocationListDer, PrivateKeyDer, ServerName, UnixTime,
+    },
+    server::{danger::ClientCertVerifier, WebPkiClientVerifier},
     ClientConfig, RootCertStore, ServerConfig,
 };
 use webpki::{BorrowedCertRevocationList, CertRevocationList};
@@ -129,6 +131,56 @@ pub struct TlsConfig {
     pub deny_file: Option<PathBuf>,
 }
 
+/// The dialing and accepting configurations of one participant.
+pub(crate) struct TlsPolicy {
+    pub(crate) client: Arc<ClientConfig>,
+    pub(crate) server: Arc<ServerConfig>,
+    pub(crate) dialed_peer_verifier: Arc<dyn ServerCertVerifier>,
+    /// Absent without mutual TLS, where an accepted peer presents nothing.
+    pub(crate) accepted_peer_verifier: Option<Arc<dyn ClientCertVerifier>>,
+    pub(crate) generation: u64,
+}
+
+impl TlsPolicy {
+    /// Judges, under this policy, the chain a dialed peer presented.
+    pub(crate) fn check_dialed_peer(
+        &self,
+        chain: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+    ) -> Result<(), rustls::Error> {
+        let (end_entity, intermediates) =
+            chain.split_first().ok_or(rustls::Error::NoCertificatesPresented)?;
+        self.dialed_peer_verifier
+            .verify_server_cert(end_entity, intermediates, server_name, &[], UnixTime::now())
+            .map(|_| ())
+    }
+
+    /// Judges, under this policy, the chain an accepted peer presented.
+    /// Without mutual TLS there is nothing to judge.
+    pub(crate) fn check_accepted_peer(
+        &self,
+        chain: &[CertificateDer<'_>],
+    ) -> Result<(), rustls::Error> {
+        let Some(verifier) = &self.accepted_peer_verifier else {
+            return Ok(());
+        };
+        let (end_entity, intermediates) =
+            chain.split_first().ok_or(rustls::Error::NoCertificatesPresented)?;
+        verifier.verify_client_cert(end_entity, intermediates, UnixTime::now()).map(|_| ())
+    }
+}
+
+pub(crate) struct OwnCertificate {
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+}
+
+pub(crate) struct TrustFiles {
+    roots: Arc<RootCertStore>,
+    crls: Vec<CertificateRevocationListDer<'static>>,
+    lists: Option<Arc<PeerLists>>,
+}
+
 impl TlsConfig {
     /// Try to read a TLS config from a [`PropertyQosPolicy`].
     ///
@@ -223,15 +275,61 @@ impl TlsConfig {
         }
     }
 
-    /// Build a `rustls::ClientConfig` for outgoing TCP connections.
-    pub fn build_client_config(&self) -> io::Result<Arc<ClientConfig>> {
-        let roots = self.load_root_store()?;
-        let cert_chain = self.load_cert_chain()?;
-        let key = self.load_private_key()?;
+    pub(crate) fn load_own_certificate(&self) -> io::Result<OwnCertificate> {
+        Ok(OwnCertificate { cert_chain: self.load_cert_chain()?, key: self.load_private_key()? })
+    }
 
-        let mut verifier = WebPkiServerVerifier::builder(Arc::new(roots));
+    pub(crate) fn load_trust(&self) -> io::Result<TrustFiles> {
+        Ok(TrustFiles {
+            roots: Arc::new(self.load_root_store()?),
+            crls: match &self.revocation {
+                Some(revocation) => revocation.load_crls()?,
+                None => Vec::new(),
+            },
+            lists: PeerLists::load(self)?.map(Arc::new),
+        })
+    }
+
+    /// Both sides of the policy from the same files, so a dialed peer and an
+    /// accepted peer are judged by the same CAs, CRLs and lists.
+    pub(crate) fn build_policy(
+        &self,
+        own: &OwnCertificate,
+        trust: &TrustFiles,
+    ) -> io::Result<TlsPolicy> {
+        let dialed_peer_verifier = self.dialed_peer_verifier(trust)?;
+        let accepted_peer_verifier = self.accepted_peer_verifier(trust)?;
+        let client = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::clone(&dialed_peer_verifier))
+            .with_client_auth_cert(own.cert_chain.clone(), own.key.clone_key())
+            .map_err(rustls_to_io)?;
+        let server = match &accepted_peer_verifier {
+            Some(verifier) => {
+                ServerConfig::builder().with_client_cert_verifier(Arc::clone(verifier))
+            }
+            None => ServerConfig::builder().with_no_client_auth(),
+        }
+        .with_single_cert(own.cert_chain.clone(), own.key.clone_key())
+        .map_err(rustls_to_io)?;
+        Ok(TlsPolicy {
+            client: Arc::new(client),
+            server: Arc::new(server),
+            dialed_peer_verifier,
+            accepted_peer_verifier,
+            generation: 0,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_server_config(&self) -> io::Result<Arc<ServerConfig>> {
+        Ok(self.build_policy(&self.load_own_certificate()?, &self.load_trust()?)?.server)
+    }
+
+    fn dialed_peer_verifier(&self, trust: &TrustFiles) -> io::Result<Arc<dyn ServerCertVerifier>> {
+        let mut verifier = WebPkiServerVerifier::builder(Arc::clone(&trust.roots));
         if let Some(revocation) = &self.revocation {
-            verifier = verifier.with_crls(revocation.load_crls()?);
+            verifier = verifier.with_crls(trust.crls.clone());
             if revocation.allow_unknown_status {
                 verifier = verifier.allow_unknown_revocation_status();
             }
@@ -242,51 +340,36 @@ impl TlsConfig {
         let verifier = verifier
             .build()
             .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
-
-        let lists = PeerLists::load(self)?.map(Arc::new);
-        let builder = match (&self.server_name, lists) {
-            (Some(_), None) => ClientConfig::builder().with_webpki_verifier(verifier),
-            (server_name, lists) => {
-                let verifier = PeerServerVerifier::new(verifier, server_name.is_none(), lists);
-                ClientConfig::builder().dangerous().with_custom_certificate_verifier(verifier)
-            }
-        };
-        let cfg = builder.with_client_auth_cert(cert_chain, key).map_err(rustls_to_io)?;
-        Ok(Arc::new(cfg))
+        Ok(match (&self.server_name, trust.lists.clone()) {
+            (Some(_), None) => verifier,
+            (server_name, lists) => PeerServerVerifier::new(verifier, server_name.is_none(), lists),
+        })
     }
 
-    /// Build a `rustls::ServerConfig` for the incoming TCP listener.
-    pub fn build_server_config(&self) -> io::Result<Arc<ServerConfig>> {
-        let roots = self.load_root_store()?;
-        let cert_chain = self.load_cert_chain()?;
-        let key = self.load_private_key()?;
-
-        let builder = ServerConfig::builder();
-        let cfg = if self.verify_peer {
-            let mut verifier = WebPkiClientVerifier::builder(Arc::new(roots));
-            if let Some(revocation) = &self.revocation {
-                verifier = verifier.with_crls(revocation.load_crls()?);
-                if revocation.allow_unknown_status {
-                    verifier = verifier.allow_unknown_revocation_status();
-                }
-                if revocation.enforce_expiry {
-                    verifier = verifier.enforce_revocation_expiration();
-                }
+    fn accepted_peer_verifier(
+        &self,
+        trust: &TrustFiles,
+    ) -> io::Result<Option<Arc<dyn ClientCertVerifier>>> {
+        if !self.verify_peer {
+            return Ok(None);
+        }
+        let mut verifier = WebPkiClientVerifier::builder(Arc::clone(&trust.roots));
+        if let Some(revocation) = &self.revocation {
+            verifier = verifier.with_crls(trust.crls.clone());
+            if revocation.allow_unknown_status {
+                verifier = verifier.allow_unknown_revocation_status();
             }
-            let mut verifier = verifier.build().map_err(|e| {
-                transport_io_error(TransportErrorCode::TlsConfigError, e.to_string())
-            })?;
-            if let Some(lists) = PeerLists::load(self)? {
-                verifier = PeerClientVerifier::new(verifier, Arc::new(lists));
+            if revocation.enforce_expiry {
+                verifier = verifier.enforce_revocation_expiration();
             }
-            builder
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(cert_chain, key)
-                .map_err(rustls_to_io)?
-        } else {
-            builder.with_no_client_auth().with_single_cert(cert_chain, key).map_err(rustls_to_io)?
-        };
-        Ok(Arc::new(cfg))
+        }
+        let verifier = verifier
+            .build()
+            .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
+        Ok(Some(match trust.lists.clone() {
+            Some(lists) => PeerClientVerifier::new(verifier, lists),
+            None => verifier,
+        }))
     }
 }
 

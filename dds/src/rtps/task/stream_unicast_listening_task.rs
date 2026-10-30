@@ -76,6 +76,7 @@ impl StreamUnicastListeningTask {
             }
 
             listener.expire_connections(poll.registry(), Instant::now());
+            listener.recheck_tls_peers(poll.registry());
             while let Some(message) = shared.try_receive_self_delivery() {
                 if participant.is_terminated() {
                     shared.clear_self_delivery_waker();

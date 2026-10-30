@@ -179,6 +179,12 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// of lingering until OS keepalive. Connectionless transports have nothing
     /// to close — default no-op; only the TCP plugin overrides this.
     fn disconnect_peer(&self, _locators: &[Locator]) {}
+
+    /// Re-read the TLS trust files and apply them to new connections. Fails
+    /// with `Unsupported` on a transport that carries no TLS policy.
+    fn reload_tls_policy(&self) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this transport has no TLS policy"))
+    }
 }
 
 /// Factory for creating transport plugin instances.

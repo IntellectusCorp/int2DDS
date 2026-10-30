@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use mio::{Poll, Waker};
 
 use self::dial_loop::{DialLoop, DIAL_WAKE_TOKEN};
@@ -30,6 +30,8 @@ use crate::rtps::transport::tcp::sync_connection::{
     OutboundConnection, SendOutcome, SEND_QUEUE_BYTE_BUDGET,
 };
 use crate::rtps::transport::tls::client::TlsClient;
+use crate::rtps::transport::tls::config::TlsPolicy;
+use crate::rtps::transport::tls::rejection::rejection_reason;
 use crate::rtps::transport::TcpConfig;
 
 #[derive(Default)]
@@ -371,6 +373,49 @@ impl TcpSender {
         self.shared.clear_peer_backoff(addr);
         if let Some(waker) = self.dial_waker.get() {
             let _ = waker.wake();
+        }
+    }
+
+    /// Closes every TLS connection whose peer `policy` no longer accepts. The
+    /// frames still owed to that peer go to a new dial, which the same policy
+    /// then judges.
+    pub(crate) fn recheck_tls_peers(&self, policy: &TlsPolicy) {
+        let Some(client) = &self.tls else {
+            return;
+        };
+        let refused: Vec<_> = self
+            .slots
+            .iter()
+            .filter_map(|entry| {
+                let Slot::Live(connection) = entry.value() else {
+                    return None;
+                };
+                let chain = &connection.verified_peer()?.chain;
+                let server_name = client.server_name_for(entry.key().0.ip());
+                policy
+                    .check_dialed_peer(chain, &server_name)
+                    .err()
+                    .map(|error| (*entry.key(), Arc::clone(connection), error))
+            })
+            .collect();
+        for (key, connection, error) in refused {
+            let error = io::Error::new(io::ErrorKind::InvalidData, error);
+            let reason = rejection_reason(&error).unwrap_or("certificate is invalid");
+            error!("TLS peer {} fails the reloaded policy: {reason} ({error})", key.0);
+            connection.close();
+            self.evict_connection(key, &connection);
+        }
+    }
+
+    /// A connection judged under `judged` may have turned live just after a
+    /// reload swept the live ones, so it is judged here instead.
+    fn recheck_if_reloaded_since(&self, judged: u64) {
+        let Some(client) = &self.tls else {
+            return;
+        };
+        let policy = client.current_policy();
+        if policy.generation != judged {
+            self.recheck_tls_peers(&policy);
         }
     }
 
@@ -934,7 +979,12 @@ mod tests {
             0,
             None,
             [0; 12],
-            Some(TlsClient::new(&tls).unwrap()),
+            Some(
+                TlsClient::new(Arc::new(
+                    crate::rtps::transport::tls::policy::TlsPolicyHandle::new(&tls).unwrap(),
+                ))
+                .unwrap(),
+            ),
             registry,
             &config,
             Arc::new(AtomicBool::new(false)),
@@ -1032,7 +1082,12 @@ mod tests {
             7400,
             None,
             [0; 12],
-            Some(TlsClient::new(&tls).unwrap()),
+            Some(
+                TlsClient::new(Arc::new(
+                    crate::rtps::transport::tls::policy::TlsPolicyHandle::new(&tls).unwrap(),
+                ))
+                .unwrap(),
+            ),
             registry,
             &config,
             Arc::new(AtomicBool::new(false)),
@@ -1062,5 +1117,123 @@ mod tests {
 
         sender.shutdown();
         drop(stalled);
+    }
+
+    #[test]
+    fn a_handshake_under_way_during_a_reload_is_judged_by_the_new_policy() {
+        use crate::rtps::transport::tls::policy::TlsPolicyHandle;
+        use crate::rtps::transport::tls::test_pki::{with_crls, LeafSpec, TestCa};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let peer = ca.issue(LeafSpec::named("peer"));
+        let own = with_crls(
+            ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]),
+            &[ca.crl(&[], 2999)],
+        );
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let config = TcpConfig { connect_timeout: Duration::from_secs(3), ..TcpConfig::default() };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()));
+        let sender = TcpSender::new(
+            0,
+            0,
+            vec![],
+            0,
+            None,
+            [0; 12],
+            Some(TlsClient::new(Arc::clone(&policy)).unwrap()),
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let message = test_message(0x02, b"over tls");
+        sender.send_to(listener.local_addr().unwrap(), TcpFrameKind::UserData, &message).unwrap();
+        let socket = accept_within(&listener, Duration::from_secs(3)).unwrap();
+        // The ClientHello has gone out, so the session follows the policy before the reload.
+        let mut hello = [0u8; 1];
+        assert_eq!(socket.peek(&mut hello).unwrap(), 1);
+
+        let crl_file = &own.revocation.as_ref().unwrap().crl_file;
+        std::fs::write(crl_file, ca.crl(&[peer.serial], 2999)).unwrap();
+        policy.reload().unwrap();
+
+        let server_config = peer.config(dir.path(), &[&ca]).build_server_config().unwrap();
+        let mut stream =
+            rustls::StreamOwned::new(rustls::ServerConnection::new(server_config).unwrap(), socket);
+        let mut received = vec![0u8; test_framed(&message).len()];
+        assert!(stream.read_exact(&mut received).is_err());
+        assert_eq!(sender.connection_count(), 0);
+
+        sender.shutdown();
+    }
+
+    #[test]
+    fn a_reload_closes_only_the_connections_the_new_policy_refuses() {
+        use crate::rtps::transport::tls::policy::TlsPolicyHandle;
+        use crate::rtps::transport::tls::test_pki::{with_crls, LeafSpec, TestCa};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let revoked = ca.issue(LeafSpec::named("revoked"));
+        let kept = ca.issue(LeafSpec::named("kept"));
+        let own = with_crls(
+            ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]),
+            &[ca.crl(&[], 2999)],
+        );
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let config = TcpConfig { connect_timeout: Duration::from_secs(3), ..TcpConfig::default() };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()));
+        let sender = TcpSender::new(
+            0,
+            0,
+            vec![],
+            0,
+            None,
+            [0; 12],
+            Some(TlsClient::new(Arc::clone(&policy)).unwrap()),
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let message = test_message(0x02, b"over tls");
+        let mut peers = Vec::new();
+        for leaf in [&revoked, &kept] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            sender.send_to(address, TcpFrameKind::UserData, &message).unwrap();
+            let socket = accept_within(&listener, Duration::from_secs(3)).unwrap();
+            let server_config = leaf.config(dir.path(), &[&ca]).build_server_config().unwrap();
+            let mut stream = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(server_config).unwrap(),
+                socket,
+            );
+            let mut received = vec![0u8; test_framed(&message).len()];
+            stream.read_exact(&mut received).unwrap();
+            peers.push((address, stream));
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while sender.connection_count() < 2 {
+            assert!(Instant::now() < deadline, "both connections should turn live");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let crl_file = &own.revocation.as_ref().unwrap().crl_file;
+        std::fs::write(crl_file, ca.crl(&[revoked.serial], 2999)).unwrap();
+        policy.reload().unwrap();
+        sender.recheck_tls_peers(&policy.current());
+
+        assert_eq!(sender.connection_count(), 1);
+        let mut rest = [0u8; 1];
+        assert!(!matches!(peers[0].1.read(&mut rest), Ok(read) if read > 0));
+        let (kept_address, kept_stream) = &mut peers[1];
+        sender.send_to(*kept_address, TcpFrameKind::UserData, &message).unwrap();
+        let mut received = vec![0u8; test_framed(&message).len()];
+        kept_stream.read_exact(&mut received).unwrap();
+        assert_eq!(received, test_framed(&message));
+
+        sender.shutdown();
     }
 }

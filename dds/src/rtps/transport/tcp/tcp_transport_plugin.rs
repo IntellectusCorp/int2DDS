@@ -28,7 +28,7 @@ use crate::rtps::transport::tcp::peer_candidates::{AnnounceTargets, PEER_PRUNE_D
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
-use crate::rtps::transport::tls::{client::TlsClient, TlsConfig};
+use crate::rtps::transport::tls::{client::TlsClient, policy::TlsPolicyHandle, TlsConfig};
 use crate::rtps::transport::{TcpConfig, TransportType};
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
@@ -83,6 +83,8 @@ pub(crate) struct TcpTransportPlugin {
     /// Derived from this participant's own certificate, so a peer can check the
     /// GUID prefix against the TLS connection it arrives on.
     identity: Option<[u8; IDENTITY_LEN]>,
+
+    tls_policy: Option<Arc<TlsPolicyHandle>>,
 }
 
 /// What TCP reports as the traffic it can absorb: the largest an SPDP
@@ -181,11 +183,12 @@ impl TcpTransportPlugin {
 
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let tls_policy = tls_config.as_deref().map(TlsPolicyHandle::new).transpose()?.map(Arc::new);
         let (listener, participant_id) = Self::bind_listener(
             domain_id,
             participant_id,
             tuning,
-            tls_config.clone(),
+            tls_policy.clone(),
             &tcp_config,
         )?;
         let listener_port = listener.port();
@@ -207,7 +210,7 @@ impl TcpTransportPlugin {
             listener_port,
             pinned,
             guid_prefix,
-            tls_config.as_deref().map(TlsClient::new).transpose()?,
+            tls_policy.clone().map(TlsClient::new).transpose()?,
             Arc::clone(&shared),
             &tcp_config,
             Arc::clone(&shutdown),
@@ -235,6 +238,7 @@ impl TcpTransportPlugin {
             listener: Mutex::new(Some(listener)),
             shared,
             identity,
+            tls_policy,
         })
     }
 
@@ -252,14 +256,14 @@ impl TcpTransportPlugin {
         domain_id: u32,
         first_participant_id: u32,
         tuning: TcpSocketTuning,
-        tls_config: Option<Arc<TlsConfig>>,
+        tls_policy: Option<Arc<TlsPolicyHandle>>,
         tcp_config: &TcpConfig,
     ) -> io::Result<(TcpListener, u32)> {
-        let open = |port: u16, tls_config: Option<Arc<TlsConfig>>| {
+        let open = |port: u16, tls_policy: Option<Arc<TlsPolicyHandle>>| {
             TcpListener::new(
                 port,
                 tuning,
-                tls_config,
+                tls_policy,
                 tcp_config.tls_handshake_timeout,
                 tcp_config.first_frame_timeout,
             )
@@ -273,7 +277,7 @@ impl TcpTransportPlugin {
         };
 
         if let Some(port) = tcp_config.bind_port {
-            return open(port, tls_config)
+            return open(port, tls_policy)
                 .map(|listener| (listener, first_participant_id))
                 .map_err(|e| {
                     log::error!(
@@ -309,7 +313,7 @@ impl TcpTransportPlugin {
         let mut last_error = None;
         for participant_id in first_participant_id..=last_participant_id {
             let port = port_manager.calculate_tcp_physical_port(domain_id, participant_id)?;
-            match open(port, tls_config.clone()) {
+            match open(port, tls_policy.clone()) {
                 Ok(listener) => return Ok((listener, participant_id)),
                 Err(e)
                     if e.kind() == io::ErrorKind::AddrInUse
@@ -588,6 +592,17 @@ impl TcpTransportPlugin {
 impl TransportPlugin for TcpTransportPlugin {
     fn identity_bytes(&self) -> Option<[u8; IDENTITY_LEN]> {
         self.identity
+    }
+
+    fn reload_tls_policy(&self) -> io::Result<()> {
+        match &self.tls_policy {
+            Some(policy) => {
+                policy.reload()?;
+                self.sender.recheck_tls_peers(&policy.current());
+                Ok(())
+            }
+            None => Err(io::Error::new(io::ErrorKind::Unsupported, "TCP runs without TLS")),
+        }
     }
 
     /// A frame the socket will not take is queued rather than dropped, so no
@@ -1627,5 +1642,19 @@ mod tests {
         second.close();
         plain.close();
         unverified.close();
+    }
+
+    #[test]
+    fn only_a_tls_participant_can_reload_its_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let tls = make_tls_plugin(next_test_domain(), Some(self_signed_tls(dir.path())));
+        let plain = make_tls_plugin(next_test_domain(), None);
+
+        assert!(tls.reload_tls_policy().is_ok());
+        let error = plain.reload_tls_policy().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+
+        tls.close();
+        plain.close();
     }
 }

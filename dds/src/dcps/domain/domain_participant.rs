@@ -3202,6 +3202,20 @@ impl DomainParticipant {
         Ok(*self.guid)
     }
 
+    /// Re-reads the TLS CA, CRL and list files and applies them to new connections; if any
+    /// file fails to load, the policy in force is kept. The certificate and key are not
+    /// re-read, since the GUID is bound to them. `PreconditionNotMet` when TLS is off.
+    pub fn reload_tls_policy(&self) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
+        let bridge = self.get_dcps_bridge()?;
+        let bridge =
+            bridge.as_ref().ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?;
+        bridge.reload_tls_policy().map_err(|e| match e.kind() {
+            std::io::ErrorKind::Unsupported => DdsError::PreconditionNotMet,
+            _ => DdsError::Error(e.to_string()),
+        })
+    }
+
     pub(crate) fn delete(&mut self) -> DdsResult<()> {
         // Clean up builtin entities to break self-reference cycles
         self.cleanup_builtin_entities();
