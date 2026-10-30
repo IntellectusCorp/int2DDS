@@ -34,6 +34,17 @@ pub struct TlsNodeConfig {
     /// Defaults to `true`.
     #[serde(default = "default_verify_peer")]
     pub verify_peer: bool,
+    /// Path to a PEM file holding one CRL per issuing CA. When omitted,
+    /// certificates are not checked for revocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crl_file: Option<String>,
+    /// `"allow"` accepts a certificate whose issuer has no CRL in `crl_file`;
+    /// anything else, including omitting it, rejects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crl_unknown_status: Option<String>,
+    /// Reject a certificate when its issuer's CRL is past its next update.
+    #[serde(default)]
+    pub crl_enforce_expiry: bool,
 }
 
 fn default_verify_peer() -> bool {
@@ -92,6 +103,15 @@ impl NodeConfig {
                 if tls.verify_peer { "true" } else { "false" },
                 false,
             );
+            if let Some(crl_file) = &tls.crl_file {
+                property.add_property("int2dds.tls.crl_file", crl_file, false);
+                if let Some(status) = &tls.crl_unknown_status {
+                    property.add_property("int2dds.tls.crl_unknown_status", status, false);
+                }
+                if tls.crl_enforce_expiry {
+                    property.add_property("int2dds.tls.crl_enforce_expiry", "true", false);
+                }
+            }
         }
         DomainParticipantQos { property, ..Default::default() }
     }
@@ -337,6 +357,9 @@ mod tests {
                 key_file: "/etc/ssl/key.pem".to_string(),
                 server_name: Some("gw.example.com".to_string()),
                 verify_peer: true,
+                crl_file: None,
+                crl_unknown_status: None,
+                crl_enforce_expiry: false,
             }),
         };
         let qos = node.to_participant_qos();
@@ -418,6 +441,35 @@ mod tests {
         assert!(cfg.auto_relay.default_local_reader_qos.is_none());
         assert!(cfg.auto_relay.qos_profiles.is_none());
         assert!(cfg.topic_relays.is_empty());
+    }
+
+    #[test]
+    fn crl_settings_reach_the_participant_only_with_a_crl_file() {
+        let parse = |tls: &str| {
+            let json = format!(
+                r#"{{ "route_gateway": {{
+                    "local":  {{ "domain_id": 0, "transport": "udp" }},
+                    "remote": {{ "domain_id": 1, "transport": "tcp", "tls": {tls} }}
+                }}}}"#
+            );
+            RouteGatewayConfig::from_json(&json).unwrap().remote.to_participant_qos().property
+        };
+
+        let property = parse(
+            r#"{ "ca_file": "/a", "cert_file": "/b", "key_file": "/c",
+                 "crl_unknown_status": "allow", "crl_enforce_expiry": true }"#,
+        );
+        assert!(property.find_property("int2dds.tls.crl_file").is_none());
+        assert!(property.find_property("int2dds.tls.crl_unknown_status").is_none());
+        assert!(property.find_property("int2dds.tls.crl_enforce_expiry").is_none());
+
+        let property = parse(
+            r#"{ "ca_file": "/a", "cert_file": "/b", "key_file": "/c", "crl_file": "/crl.pem",
+                 "crl_unknown_status": "allow", "crl_enforce_expiry": true }"#,
+        );
+        assert_eq!(property.find_property("int2dds.tls.crl_file"), Some("/crl.pem"));
+        assert_eq!(property.find_property("int2dds.tls.crl_unknown_status"), Some("allow"));
+        assert_eq!(property.find_property("int2dds.tls.crl_enforce_expiry"), Some("true"));
     }
 
     #[test]

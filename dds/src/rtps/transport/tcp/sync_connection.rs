@@ -476,6 +476,7 @@ mod tests {
             key_file,
             server_name: Some("localhost".to_string()),
             verify_peer: false,
+            revocation: None,
         };
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

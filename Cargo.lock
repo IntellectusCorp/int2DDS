@@ -1073,6 +1073,7 @@ dependencies = [
  "roxmltree",
  "rustls",
  "rustls-pemfile",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "smallvec",

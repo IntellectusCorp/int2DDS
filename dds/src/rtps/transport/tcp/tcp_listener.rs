@@ -732,6 +732,7 @@ mod tests {
             key_file,
             server_name: Some("localhost".to_string()),
             verify_peer: false,
+            revocation: None,
         }
     }
 

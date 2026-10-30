@@ -915,6 +915,7 @@ mod tests {
             key_file,
             server_name: Some("localhost".to_string()),
             verify_peer: false,
+            revocation: None,
         };
         let server_config = tls.build_server_config().unwrap();
         let config = TcpConfig {
@@ -995,6 +996,7 @@ mod tests {
             key_file,
             server_name: Some("localhost".to_string()),
             verify_peer: false,
+            revocation: None,
         };
         let server_config = tls.build_server_config().unwrap();
 

@@ -1597,6 +1597,7 @@ mod tests {
             key_file,
             server_name: Some("localhost".to_string()),
             verify_peer: true,
+            revocation: None,
         })
     }
 

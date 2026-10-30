@@ -4,16 +4,14 @@
 //! there is no name a peer's certificate could be expected to carry. Identity
 //! is established by binding the GUID prefix to the certificate instead.
 
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     client::WebPkiServerVerifier,
     pki_types::{CertificateDer, ServerName, UnixTime},
-    CertificateError, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
+    CertificateError, DigitallySignedStruct, Error, SignatureScheme,
 };
-
-use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 
 /// Runs every standard server certificate check except the name match.
 #[derive(Debug)]
@@ -22,11 +20,10 @@ pub(crate) struct NameAgnosticServerVerifier {
 }
 
 impl NameAgnosticServerVerifier {
-    pub(crate) fn new(roots: RootCertStore) -> io::Result<Arc<Self>> {
-        let inner = WebPkiServerVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
-        Ok(Arc::new(Self { inner }))
+    /// Wraps a verifier already built with the trust roots and revocation
+    /// policy, so those stay configured in one place.
+    pub(crate) fn new(inner: Arc<WebPkiServerVerifier>) -> Arc<Self> {
+        Arc::new(Self { inner })
     }
 }
 

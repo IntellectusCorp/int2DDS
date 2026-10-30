@@ -12,9 +12,12 @@
 use std::{fs::File, io, io::BufReader, net::IpAddr, path::PathBuf, sync::Arc};
 
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
+    client::WebPkiServerVerifier,
+    pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer, ServerName},
+    server::WebPkiClientVerifier,
     ClientConfig, RootCertStore, ServerConfig,
 };
+use webpki::{BorrowedCertRevocationList, CertRevocationList};
 
 use crate::{
     infrastructure::qos_policy::PropertyQosPolicy,
@@ -31,6 +34,67 @@ pub mod keys {
     pub const KEY_FILE: &str = "int2dds.tls.key_file";
     pub const SERVER_NAME: &str = "int2dds.tls.server_name";
     pub const VERIFY_PEER: &str = "int2dds.tls.verify_peer";
+    pub const CRL_FILE: &str = "int2dds.tls.crl_file";
+    pub const CRL_UNKNOWN_STATUS: &str = "int2dds.tls.crl_unknown_status";
+    pub const CRL_ENFORCE_EXPIRY: &str = "int2dds.tls.crl_enforce_expiry";
+}
+
+/// Revocation checking against externally supplied CRLs, applied to every
+/// certificate in a peer's chain.
+#[derive(Debug, Clone)]
+pub struct RevocationConfig {
+    /// Path to a PEM file holding one CRL per issuing CA.
+    pub crl_file: PathBuf,
+    /// Accept a certificate whose issuer has no CRL in `crl_file`. Off by
+    /// default, so a missing CRL rejects rather than skips the check.
+    pub allow_unknown_status: bool,
+    /// Reject a certificate when its issuer's CRL is past its next update.
+    pub enforce_expiry: bool,
+}
+
+impl RevocationConfig {
+    /// Reads every CRL in `crl_file`. An empty file is refused because no CRL
+    /// at all turns revocation checking off, and two CRLs from one issuer are
+    /// refused because only the first would ever be consulted.
+    pub(crate) fn load_crls(&self) -> io::Result<Vec<CertificateRevocationListDer<'static>>> {
+        let mut reader = BufReader::new(open_pem(&self.crl_file)?);
+        let mut crls = Vec::new();
+        let mut issuers = Vec::new();
+        for crl in rustls_pemfile::crls(&mut reader) {
+            let crl = crl.map_err(|e| pem_error(&self.crl_file, e))?;
+            let parsed = BorrowedCertRevocationList::from_der(crl.as_ref()).map_err(|e| {
+                transport_io_error(
+                    TransportErrorCode::TlsInvalidPem,
+                    format!(
+                        "CRL #{} in {:?} cannot be parsed: {e:?}",
+                        crls.len() + 1,
+                        self.crl_file
+                    ),
+                )
+            })?;
+            let issuer = CertRevocationList::from(parsed).issuer().to_vec();
+            if let Some(first) = issuers.iter().position(|seen| *seen == issuer) {
+                return Err(transport_io_error(
+                    TransportErrorCode::TlsConfigError,
+                    format!(
+                        "CRLs #{} and #{} in {:?} come from the same issuer",
+                        first + 1,
+                        crls.len() + 1,
+                        self.crl_file
+                    ),
+                ));
+            }
+            issuers.push(issuer);
+            crls.push(crl);
+        }
+        if crls.is_empty() {
+            return Err(transport_io_error(
+                TransportErrorCode::TlsInvalidPem,
+                format!("no CRLs found in {:?}", self.crl_file),
+            ));
+        }
+        Ok(crls)
+    }
 }
 
 /// High-level TLS settings.
@@ -52,6 +116,8 @@ pub struct TlsConfig {
     /// Require the remote peer to present a certificate (mutual TLS); on by
     /// default. The server certificate is verified either way.
     pub verify_peer: bool,
+    /// Revocation checking; none when no CRL file is configured.
+    pub revocation: Option<RevocationConfig>,
 }
 
 impl TlsConfig {
@@ -78,8 +144,13 @@ impl TlsConfig {
         // cannot silently accept unauthenticated peers.
         let verify_peer =
             property.find_property(keys::VERIFY_PEER).map(|v| v != "false").unwrap_or(true);
+        let revocation = property.find_property(keys::CRL_FILE).map(|crl_file| RevocationConfig {
+            crl_file: crl_file.into(),
+            allow_unknown_status: property.find_property(keys::CRL_UNKNOWN_STATUS) == Some("allow"),
+            enforce_expiry: property.find_property(keys::CRL_ENFORCE_EXPIRY) == Some("true"),
+        });
 
-        Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer }))
+        Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer, revocation }))
     }
 
     pub(crate) fn load_root_store(&self) -> io::Result<RootCertStore> {
@@ -124,11 +195,25 @@ impl TlsConfig {
         let cert_chain = self.load_cert_chain()?;
         let key = self.load_private_key()?;
 
+        let mut verifier = WebPkiServerVerifier::builder(Arc::new(roots));
+        if let Some(revocation) = &self.revocation {
+            verifier = verifier.with_crls(revocation.load_crls()?);
+            if revocation.allow_unknown_status {
+                verifier = verifier.allow_unknown_revocation_status();
+            }
+            if revocation.enforce_expiry {
+                verifier = verifier.enforce_revocation_expiration();
+            }
+        }
+        let verifier = verifier
+            .build()
+            .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
+
         let builder = match self.server_name {
-            Some(_) => ClientConfig::builder().with_root_certificates(roots),
+            Some(_) => ClientConfig::builder().with_webpki_verifier(verifier),
             None => ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(NameAgnosticServerVerifier::new(roots)?),
+                .with_custom_certificate_verifier(NameAgnosticServerVerifier::new(verifier)),
         };
         let cfg = builder.with_client_auth_cert(cert_chain, key).map_err(rustls_to_io)?;
         Ok(Arc::new(cfg))
@@ -142,10 +227,19 @@ impl TlsConfig {
 
         let builder = ServerConfig::builder();
         let cfg = if self.verify_peer {
-            let verifier =
-                rustls::server::WebPkiClientVerifier::builder(Arc::new(roots)).build().map_err(
-                    |e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()),
-                )?;
+            let mut verifier = WebPkiClientVerifier::builder(Arc::new(roots));
+            if let Some(revocation) = &self.revocation {
+                verifier = verifier.with_crls(revocation.load_crls()?);
+                if revocation.allow_unknown_status {
+                    verifier = verifier.allow_unknown_revocation_status();
+                }
+                if revocation.enforce_expiry {
+                    verifier = verifier.enforce_revocation_expiration();
+                }
+            }
+            let verifier = verifier.build().map_err(|e| {
+                transport_io_error(TransportErrorCode::TlsConfigError, e.to_string())
+            })?;
             builder
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(cert_chain, key)
@@ -249,5 +343,29 @@ mod tests {
         let cfg = TlsConfig::from_property(&p).unwrap().unwrap();
         assert_eq!(cfg.server_name, None);
         assert!(cfg.verify_peer);
+        assert!(cfg.revocation.is_none());
+    }
+
+    #[test]
+    fn a_crl_file_turns_on_strict_revocation_checking_by_default() {
+        let base = [(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")];
+        let p = pq(&[base.as_slice(), &[(keys::CRL_FILE, "/crl.pem")]].concat());
+        let revocation = TlsConfig::from_property(&p).unwrap().unwrap().revocation.unwrap();
+        assert_eq!(revocation.crl_file, PathBuf::from("/crl.pem"));
+        assert!(!revocation.allow_unknown_status);
+        assert!(!revocation.enforce_expiry);
+
+        let p = pq(&[
+            base.as_slice(),
+            &[
+                (keys::CRL_FILE, "/crl.pem"),
+                (keys::CRL_UNKNOWN_STATUS, "allow"),
+                (keys::CRL_ENFORCE_EXPIRY, "true"),
+            ],
+        ]
+        .concat());
+        let revocation = TlsConfig::from_property(&p).unwrap().unwrap().revocation.unwrap();
+        assert!(revocation.allow_unknown_status);
+        assert!(revocation.enforce_expiry);
     }
 }

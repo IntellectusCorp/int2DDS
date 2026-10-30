@@ -9,8 +9,8 @@ use std::{
 
 use rcgen::ExtendedKeyUsagePurpose;
 use rustls::{
-    pki_types::ServerName, CertificateError, ClientConfig, ClientConnection, Connection,
-    ServerConnection,
+    client::WebPkiServerVerifier, pki_types::ServerName, CertificateError, ClientConfig,
+    ClientConnection, Connection, ServerConnection,
 };
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
         tls::{
             config::keys,
             rejection::rejection_reason,
-            test_pki::{LeafSpec, TestCa},
+            test_pki::{with_crls, LeafSpec, TestCa},
             verifier::NameAgnosticServerVerifier,
             TlsConfig,
         },
@@ -315,7 +315,9 @@ fn a_key_that_does_not_match_its_certificate_fails_before_any_handshake() {
 
 /// A client that trusts the same CAs as `trusting` but presents no certificate.
 fn anonymous_client(trusting: &TlsConfig) -> ClientConnection {
-    let verifier = NameAgnosticServerVerifier::new(trusting.load_root_store().unwrap()).unwrap();
+    let roots = Arc::new(trusting.load_root_store().unwrap());
+    let verifier =
+        NameAgnosticServerVerifier::new(WebPkiServerVerifier::builder(roots).build().unwrap());
     let config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
@@ -439,4 +441,142 @@ fn failures_unrelated_to_certificates_have_no_rejection_reason() {
 
     assert_eq!(rejection_reason(&timeout), None);
     assert_eq!(rejection_reason(&protocol), None);
+}
+
+#[test]
+fn a_revoked_certificate_is_rejected_on_either_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let server = ca.issue(LeafSpec::named("server"));
+    let crl = ca.crl(&[server.serial], 2999);
+    let client_config = with_crls(client.config(dir.path(), &[&ca]), &[crl.clone()]);
+    let server_config = with_crls(server.config(dir.path(), &[&ca]), &[crl]);
+
+    let outcome = handshake(&client_config, &server_config).unwrap();
+    assert_rejected!(outcome.client, CertificateError::Revoked);
+    assert_eq!(reason_for(outcome.client), Some("certificate has been revoked"));
+
+    let outcome = handshake(&server_config, &client_config).unwrap();
+    assert_rejected!(outcome.server, CertificateError::Revoked);
+}
+
+#[test]
+fn certificates_missing_from_the_crl_still_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let revoked = ca.issue(LeafSpec::named("revoked"));
+    let crl = ca.crl(&[revoked.serial], 2999);
+    let client =
+        with_crls(ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]), &[crl.clone()]);
+    let server = with_crls(ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]), &[crl]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_revoked_intermediate_rejects_every_leaf_beneath_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TestCa::root("root");
+    let intermediate = root.intermediate("intermediate");
+    let crls = [root.crl(&[intermediate.serial], 2999), intermediate.crl(&[], 2999)];
+    let client =
+        with_crls(root.issue(LeafSpec::named("client")).config(dir.path(), &[&root]), &crls);
+    let server = with_crls(
+        intermediate.issue(LeafSpec::named("server")).config(dir.path(), &[&root]),
+        &crls,
+    );
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(outcome.client, CertificateError::Revoked);
+}
+
+#[test]
+fn a_missing_crl_rejects_unless_unknown_status_is_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TestCa::root("root");
+    let intermediate = root.intermediate("intermediate");
+    let only_root = [root.crl(&[], 2999)];
+    let mut client =
+        with_crls(root.issue(LeafSpec::named("client")).config(dir.path(), &[&root]), &only_root);
+    let server = with_crls(
+        intermediate.issue(LeafSpec::named("server")).config(dir.path(), &[&root]),
+        &only_root,
+    );
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(outcome.client, CertificateError::UnknownRevocationStatus);
+    assert_eq!(
+        reason_for(outcome.client),
+        Some("revocation status is unknown (no CRL from the issuer)")
+    );
+
+    client.revocation.as_mut().unwrap().allow_unknown_status = true;
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_stale_crl_is_used_unless_expiry_is_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stale = [ca.crl(&[], 2002)];
+    let mut client =
+        with_crls(ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]), &stale);
+    let server = with_crls(ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]), &stale);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    client.revocation.as_mut().unwrap().enforce_expiry = true;
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(
+        outcome.client,
+        CertificateError::ExpiredRevocationList
+            | CertificateError::ExpiredRevocationListContext { .. }
+    );
+    assert_eq!(reason_for(outcome.client), Some("issuer's CRL is past its next update"));
+}
+
+#[test]
+fn a_crl_signed_by_a_same_named_impostor_rejects_the_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let impostor = TestCa::root("ca");
+    let forged = [impostor.crl(&[], 2999)];
+    let client = with_crls(ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]), &forged);
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(
+        matches!(outcome.client, Err(rustls::Error::InvalidCertRevocationList(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        reason_for(outcome.client),
+        Some("issuer's CRL is invalid (bad signature or not issued by that CA)")
+    );
+}
+
+#[test]
+fn an_unusable_crl_file_fails_before_any_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let malformed = "-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n".to_string();
+    let cases = [
+        (vec![], "no CRLs found"),
+        (vec![ca.crl(&[], 2999), ca.crl(&[], 2999)], "CRLs #1 and #2"),
+        (vec![malformed], "CRL #1"),
+    ];
+
+    for (crls, expected) in cases {
+        let client = with_crls(client.clone(), &crls);
+        let error = handshake(&client, &server).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        let error = handshake(&server, &client).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
 }

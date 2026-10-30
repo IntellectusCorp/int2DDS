@@ -60,6 +60,7 @@ serde_json = "1.0"
 if-addrs = "0.15"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
 ring = "0.17"
 crossbeam-channel = "0.5.15"
 flume = "0.11"

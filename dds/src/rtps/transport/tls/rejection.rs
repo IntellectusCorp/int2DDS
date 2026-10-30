@@ -24,8 +24,19 @@ pub(crate) fn rejection_reason(error: &io::Error) -> Option<&'static str> {
             CertificateError::InvalidPurpose | CertificateError::InvalidPurposeContext { .. } => {
                 "certificate is not issued for this role"
             }
+            CertificateError::Revoked => "certificate has been revoked",
+            CertificateError::UnknownRevocationStatus => {
+                "revocation status is unknown (no CRL from the issuer)"
+            }
+            CertificateError::ExpiredRevocationList
+            | CertificateError::ExpiredRevocationListContext { .. } => {
+                "issuer's CRL is past its next update"
+            }
             _ => "certificate is invalid",
         }),
+        Error::InvalidCertRevocationList(_) => {
+            Some("issuer's CRL is invalid (bad signature or not issued by that CA)")
+        }
         Error::NoCertificatesPresented => Some("peer presented no certificate"),
         Error::AlertReceived(
             AlertDescription::BadCertificate
