@@ -21,7 +21,8 @@ following the Real-Time Publish-Subscribe (RTPS)
 - **Type Safety**: Compile-time type checking with `#[derive(DdsType)]` macro
 - **Transport Flexibility**: UDP multicast, and TCP transport support
 - **Data Fragmentation**: Automatic handling of large messages
-- **XCDR2 Serialization**: Support for extensible data representation
+- **XCDR Serialization**: XCDR1 and XCDR2 data representations
+- **DDS-XTypes**: TypeObject discovery, type assignability checking, and dynamic types
 - **Cross-Platform**: Works on Windows, Linux, and macOS
 - **Interoperability**: Interoperable with other RTPS/DDS implementations
 

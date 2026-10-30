@@ -1,9 +1,10 @@
-/// Minimal IDL preprocessor: resolves `#include` directives by loading and
-/// merging referenced files into a single translation unit.
-///
-/// ROS2 (rosidl) IDL files `#include` types from other packages
-/// (e.g. `std_msgs/msg/Header.idl`). The lexer otherwise skips `#include`
-/// lines, so without this pass those external types are unresolved.
+//! Minimal IDL preprocessor: resolves `#include` directives by loading and
+//! merging referenced files into a single translation unit.
+//!
+//! ROS2 (rosidl) IDL files `#include` types from other packages
+//! (e.g. `std_msgs/msg/Header.idl`). The lexer otherwise skips `#include`
+//! lines, so without this pass those external types are unresolved.
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 

@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 description = "IDL code generator for int2DDS - generates Rust, C, Python, C#, Java and XML type definitions from OMG IDL"
 readme = "README.md"
+keywords = ["dds", "idl", "omg", "codegen", "parser"]
+categories = ["command-line-utilities", "development-tools", "parser-implementations"]
+documentation = "https://docs.rs/int2dds-idl"
 
 [[bin]]
 name = "int2dds-idl"

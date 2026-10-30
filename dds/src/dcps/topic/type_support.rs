@@ -10,7 +10,7 @@
 //! # Key Concepts
 //!
 //! - **DdsType Trait**: Marker and functionality trait for DDS-compatible types
-//! - **Serialization**: Conversion between Rust types and wire format (CDR, PL_CDR)
+//! - **Serialization**: Conversion between Rust types and wire format (XCDR1 and XCDR2)
 //! - **Key Support**: Identification of key fields for instance management
 //! - **Type Registration**: Automatic registration of types with DomainParticipant
 //!

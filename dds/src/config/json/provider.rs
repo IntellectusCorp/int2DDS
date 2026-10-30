@@ -131,9 +131,9 @@ macro_rules! resolve_decl_qos {
     }};
 }
 
-/// A provider for loading and retrieving QoS configurations from JSON files.
+/// A provider for loading and retrieving QoS configurations from JSON or XML files.
 ///
-/// `QosProvider` allows loading QoS profiles from one or more JSON files and
+/// `QosProvider` allows loading QoS profiles from one or more JSON or XML files and
 /// retrieving QoS settings for various DDS entities. It supports:
 /// - Loading multiple files with cross-file library references
 /// - QoS inheritance via `base_name` attribute
@@ -244,7 +244,7 @@ impl QosProvider {
     /// [`load_file`](Self::load_file).
     ///
     /// # Arguments
-    /// * `path` - Path to the JSON file containing QoS configurations
+    /// * `path` - Path to the JSON or XML file containing QoS configurations
     ///
     /// # Errors
     /// Returns an error if the file cannot be read or parsed.
@@ -308,9 +308,8 @@ impl QosProvider {
         ))
     }
 
-    /// Returns the path (`"Library::Profile"`) of the first profile marked with
-    /// `is_default_profile = true` across all loaded libraries, or `None` if none is marked.
-    ///
+    /// Returns the path (`"Library::Profile"`) of the profile marked with
+    /// `is_default_profile = true`, or `None` if none is marked.
     pub fn default_profile_path(&self) -> Option<String> {
         for (lib_name, lib) in &self.libraries {
             if let Some(profiles) = &lib.qos_profiles {
@@ -349,7 +348,7 @@ impl QosProvider {
         "Retrieves a `DataWriterQos` from the provider.\n\n\
          # Arguments\n\
          * `path` - QoS path. Supported formats:\n\
-           - `\"\"` (empty string) - returns the first available QoS\n\
+           - `\"\"` (empty string) - returns an available QoS\n\
            - `\"Library\"` - library-level QoS\n\
            - `\"Library::Profile\"` - profile-level QoS\n\
            - `\"Library::Profile::QosName\"` - named QoS in a sequence\n\n\

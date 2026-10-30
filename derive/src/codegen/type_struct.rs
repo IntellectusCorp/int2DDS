@@ -407,9 +407,10 @@ fn generate_key_holder_impl(
 }
 
 /// One field's contribution to the enclosing key holder's maximum serialized size
-/// (max alignment 4). Bounded strings use their attribute bound; unbounded strings,
-/// sequences, arrays and maps have no finite maximum (`return None` => always MD5);
-/// primitives, enums and nested aggregated types delegate to their `KeyHolder` impl.
+/// (max alignment 4). Bounded strings use their attribute bound and a `#[dds(bound = N)]`
+/// sequence sums `N` element key holders; unbounded strings, unbounded sequences and maps
+/// have no finite maximum (`return None` => always MD5); primitives, enums, arrays and
+/// nested aggregated types delegate to their `KeyHolder` impl.
 fn generate_key_holder_field_max_size(
     field: &syn::Field,
     crate_path: &proc_macro2::TokenStream,
@@ -507,7 +508,7 @@ fn generate_key_holder_field_max_size(
                 }
             }
         }
-        // Sequences and arrays have no finite maximum key-holder size.
+        // Sequence and array methods are handled above.
         _ => quote! { return None; },
     }
 }

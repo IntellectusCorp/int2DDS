@@ -796,7 +796,7 @@ impl DomainParticipant {
     ///
     /// # Arguments
     ///
-    /// * `qos` - Quality of Service policies for the publisher. Use `PublisherQos::default()` for defaults.
+    /// * `qos` - Quality of Service policies for the publisher. Use `PUBLISHER_QOS_DEFAULT` for the configured default.
     /// * `listener` - Optional listener for status notifications. Pass `None` if not needed.
     /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
     ///
@@ -1021,7 +1021,7 @@ impl DomainParticipant {
     ///
     /// # Arguments
     ///
-    /// * `qos` - Quality of Service policies for the subscriber. Use `SubscriberQos::default()` for defaults.
+    /// * `qos` - Quality of Service policies for the subscriber. Use `SUBSCRIBER_QOS_DEFAULT` for the configured default.
     /// * `listener` - Optional listener for status notifications. Pass `None` if not needed.
     /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
     ///
@@ -1651,9 +1651,10 @@ impl DomainParticipant {
     ///
     /// # Arguments
     ///
-    /// * `topic_name` - The name of the topic. Must be unique within the domain.
+    /// * `topic_name` - The name of the topic. A name already used in this participant
+    ///   with a different type is rejected.
     /// * `type_name` - The name of the data type. Can be the same as the Rust type name.
-    /// * `qos` - Quality of Service policies for the topic. Use `TopicQos::default()` for defaults.
+    /// * `qos` - Quality of Service policies for the topic. Use `TOPIC_QOS_DEFAULT` for the configured default.
     /// * `listener` - Optional listener for status notifications. Pass `None` if not needed.
     /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
     ///
@@ -1668,27 +1669,6 @@ impl DomainParticipant {
     /// * The QoS policies are inconsistent
     /// * Type registration fails
     /// * A topic with the same name but different type already exists
-    /// Resolution chain for `QosKind::Default`: registered default → configured
-    /// default profile → spec default. `QosKind::Specific` is used as-is.
-    ///
-    /// Shared by `create_topic` and `create_topic_dynamic` so both entry points
-    /// resolve the default sentinel identically.
-    fn resolve_topic_qos(&self, qos: QosKind<TopicQos>) -> TopicQos {
-        match qos {
-            QosKind::Specific(q) => q,
-            QosKind::Default => {
-                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
-                {
-                    registered
-                } else {
-                    DomainParticipantFactory::get_instance()
-                        .get_topic_qos_from_profile("")
-                        .unwrap_or_default()
-                }
-            }
-        }
-    }
-
     pub fn create_topic<Foo>(
         &self,
         topic_name: &str,
@@ -1747,6 +1727,27 @@ impl DomainParticipant {
         }
 
         Ok(topic)
+    }
+
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_topic` and `create_topic_dynamic` so both entry points
+    /// resolve the default sentinel identically.
+    fn resolve_topic_qos(&self, qos: QosKind<TopicQos>) -> TopicQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else {
+                    DomainParticipantFactory::get_instance()
+                        .get_topic_qos_from_profile("")
+                        .unwrap_or_default()
+                }
+            }
+        }
     }
 
     /// Creates a new `Topic` using QoS settings from a loaded profile.

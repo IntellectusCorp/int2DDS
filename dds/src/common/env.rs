@@ -92,7 +92,7 @@ pub fn set_default_qos_profile(path: &str) {
     unsafe { std::env::set_var("DDS_DEFAULT_QOS_PROFILE", path) };
 }
 
-/// Get QoS profile JSON file paths to auto-load.
+/// Get QoS profile file paths (JSON or XML) to auto-load.
 /// Returns an empty vector if no profile files are configured/found.
 pub fn get_qos_profile_paths() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
@@ -279,27 +279,26 @@ pub fn set_shm_buffer_size(size: usize) {
 }
 
 /// Get initial peers from environment variable for SPDP unicast discovery.
-/// When set, SPDP messages are sent via unicast to these peers instead of multicast.
+/// When set, SPDP messages are sent via unicast to these peers in addition to multicast.
 ///
 /// Reads INT2DDS_INITIAL_PEERS environment variable.
-/// Format: "ip:port,ip:port,..." or "ip,ip,..." (port-less entries default to TCP physical port 7400)
+/// Format: "ip:port,ip:port,..." (entries without a port are ignored)
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use int2dds::common::env::get_initial_peers;
 ///
-/// // With explicit ports:
 /// // INT2DDS_INITIAL_PEERS="192.168.1.10:7400,192.168.1.11:7400"
-///
-/// // Without ports (defaults to 7400):
-/// // INT2DDS_INITIAL_PEERS="192.168.1.10,192.168.1.11"
 ///
 /// let peers = get_initial_peers();
 /// for peer in peers {
 ///     println!("Initial peer: {}", peer);
 /// }
 /// ```
+pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
+    std::env::var("INT2DDS_INITIAL_PEERS").ok().map(|s| parse_initial_peers(&s)).unwrap_or_default()
+}
 
 /// Parse a comma-separated initial peers string into `SocketAddr`s.
 pub fn parse_initial_peers(peers_str: &str) -> Vec<std::net::SocketAddr> {
@@ -318,10 +317,6 @@ pub fn parse_initial_peers(peers_str: &str) -> Vec<std::net::SocketAddr> {
         .collect()
 }
 
-pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
-    std::env::var("INT2DDS_INITIAL_PEERS").ok().map(|s| parse_initial_peers(&s)).unwrap_or_default()
-}
-
 /// Set initial peers via environment variable
 ///
 /// # Arguments
@@ -337,7 +332,7 @@ pub fn set_initial_peers(peers: &[std::net::SocketAddr]) {
 /// Read the IPv4 multicast TTL override from `INT2DDS_MULTICAST_TTL`.
 ///
 /// Returns `None` when the variable is unset, empty, or fails to parse as `u8`
-/// (0-255). Used as a fallback by `TransportConfig::from_property` when the
+/// (0-255). Used as a fallback by `UdpConfig::from_property` when the
 /// `PropertyQosPolicy` does not carry an explicit `int2dds.transport.UDPv4.multicast_ttl`
 /// entry, so explicit code- or profile-driven settings always win.
 pub fn get_multicast_ttl_override() -> Option<u8> {
@@ -356,8 +351,7 @@ pub fn get_multicast_ttl_override() -> Option<u8> {
 }
 
 /// Set the IPv4 multicast TTL fallback via the `INT2DDS_MULTICAST_TTL` environment
-/// variable. Must be called before the first `DomainParticipant` is created in
-/// order to take effect.
+/// variable. Read when each `DomainParticipant` is created.
 pub fn set_multicast_ttl(ttl: u8) {
     log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", ttl);
     unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", ttl.to_string()) };

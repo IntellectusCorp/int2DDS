@@ -1,4 +1,5 @@
-/// Recursive descent parser for OMG IDL subset.
+//! Recursive descent parser for OMG IDL subset.
+
 use super::ast::*;
 use super::lexer::{SpannedToken, Token};
 

@@ -14,6 +14,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NETWORK_IP`                 | Network IP address                         | auto                    |
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
+| `INT2DDS_DISABLE_SAME_HOST_LOOPBACK` | Send to every locator a same-host peer announced | false             |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP receive and send buffer size (bytes)   | OS default, see below   |
 | `INT2DDS_UDP_RECV_BUFFER`            | UDP receive buffer size (bytes)            | `INT2DDS_UDP_SOCKET_BUFFER` |
 | `INT2DDS_UDP_SEND_BUFFER`            | UDP send buffer size (bytes)               | `INT2DDS_UDP_SOCKET_BUFFER` |
@@ -263,6 +264,32 @@ cargo run --example hello_world_pub
 # Linux/macOS - Environment variable
 export INT2DDS_USE_LOOPBACK_INTERFACE=true
 export INT2DDS_FORCE_LOOPBACK_MULTICAST=true
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_DISABLE_SAME_HOST_LOOPBACK
+
+Turns off the same-host narrowing of a peer's unicast locators.
+
+By default, a remote participant running on the same host is reached at a single destination instead of one locator per interface.
+Its unicast locators that point at an address of this host are rewritten to that destination and the resulting duplicates are removed.
+Locators pointing at other hosts and multicast locators are left as announced.
+
+When set to `true`, packets are sent to every locator the peer announced, as with a peer on another host.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell - Environment variable
+$env:INT2DDS_DISABLE_SAME_HOST_LOOPBACK = "true"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS - Environment variable
+export INT2DDS_DISABLE_SAME_HOST_LOOPBACK=true
 
 cargo run --example hello_world_pub
 ```

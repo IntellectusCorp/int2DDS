@@ -1,18 +1,19 @@
-/// Type resolution pass: lowers AST to internal representation (IR).
-///
-/// - Resolves typedefs by substituting the underlying type
-/// - Validates all named type references exist
-/// - Auto-assigns enum discriminant values
-/// - Extracts annotations into structured fields (is_key, member_id, etc.)
-/// - Topologically sorts structs so nested types come first
+//! Type resolution pass: lowers AST to internal representation (IR).
+//!
+//! - Resolves typedefs by substituting the underlying type
+//! - Validates all named type references exist
+//! - Auto-assigns enum discriminant values
+//! - Extracts annotations into structured fields (is_key, member_id, etc.)
+//! - Topologically sorts structs so nested types come first
+
 use std::collections::{HashMap, HashSet};
 
 use crate::parser::ast::*;
 use crate::types::*;
 
 /// Compute member_id from a name using MD5 first 4 bytes (little-endian) masked to 28 bits.
-/// Must match `int2dds_derive::codegen::utils::compute_member_id_hash` bit-for-bit so that
-/// derive-macro output and IDL-generator output produce identical wire IDs.
+/// Matches the member IDs that `#[derive(DdsType)]` assigns, so derive-macro output and
+/// IDL-generator output produce identical wire IDs.
 pub fn compute_member_id_hash(name: &str) -> u32 {
     let digest = md5::compute(name.as_bytes());
     let bytes: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];

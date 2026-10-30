@@ -1,12 +1,13 @@
-/// Python code generation backend.
-///
-/// Generates Python dataclasses with CDR serialization methods
-/// that use the int2dds Python CDR library.
+//! Python code generation backend.
+//!
+//! Generates Python dataclasses with CDR serialization methods
+//! that use the int2dds Python CDR library.
+
 use crate::naming;
 use crate::types::*;
 
 /// Options for Python code generation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PythonOptions {
     /// Module path for the int2dds package (default: "int2dds")
     pub int2dds_module: String,
@@ -15,6 +16,12 @@ pub struct PythonOptions {
 impl PythonOptions {
     pub fn new() -> Self {
         Self { int2dds_module: "int2dds".to_string() }
+    }
+}
+
+impl Default for PythonOptions {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

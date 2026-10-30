@@ -1120,8 +1120,8 @@ fn read_common_enum_literal(r: &mut R) -> Result<CommonEnumeratedLiteral, String
 }
 
 fn write_minimal_enum(w: &mut W, e: &MinimalEnumeratedType) {
-    w.u16(0); // enum_flags unused
-              // MinimalEnumeratedHeader (APPENDABLE): CommonEnumeratedHeader (bit_bound).
+    w.u16(spec_type_flags(e.enum_flags));
+    // MinimalEnumeratedHeader (APPENDABLE): CommonEnumeratedHeader (bit_bound).
     let hdh = w.begin_dheader();
     w.u16(e.header.common.bit_bound);
     w.end_dheader(hdh);
@@ -1137,7 +1137,7 @@ fn write_minimal_enum(w: &mut W, e: &MinimalEnumeratedType) {
 }
 
 fn read_minimal_enum(r: &mut R) -> Result<MinimalEnumeratedType, String> {
-    let _ = r.u16()?;
+    let enum_flags = model_type_flags(r.u16()?);
     let hend = r.begin_dheader()?;
     let bit_bound = r.u16()?;
     r.set_pos(hend);
@@ -1153,14 +1153,14 @@ fn read_minimal_enum(r: &mut R) -> Result<MinimalEnumeratedType, String> {
     }
     r.set_pos(send);
     Ok(MinimalEnumeratedType {
-        enum_flags: TypeFlag::default(),
+        enum_flags,
         header: MinimalEnumeratedHeader { common: CommonEnumeratedHeader { bit_bound } },
         literal_seq,
     })
 }
 
 fn write_complete_enum(w: &mut W, e: &CompleteEnumeratedType) {
-    w.u16(0);
+    w.u16(spec_type_flags(e.enum_flags));
     // CompleteEnumeratedHeader (APPENDABLE): CommonEnumeratedHeader + CompleteTypeDetail.
     let hdh = w.begin_dheader();
     w.u16(e.header.common.bit_bound);
@@ -1178,7 +1178,7 @@ fn write_complete_enum(w: &mut W, e: &CompleteEnumeratedType) {
 }
 
 fn read_complete_enum(r: &mut R) -> Result<CompleteEnumeratedType, String> {
-    let _ = r.u16()?;
+    let enum_flags = model_type_flags(r.u16()?);
     let hend = r.begin_dheader()?;
     let bit_bound = r.u16()?;
     let detail = read_complete_type_detail(r)?;
@@ -1195,7 +1195,7 @@ fn read_complete_enum(r: &mut R) -> Result<CompleteEnumeratedType, String> {
     }
     r.set_pos(send);
     Ok(CompleteEnumeratedType {
-        enum_flags: TypeFlag::default(),
+        enum_flags,
         header: CompleteEnumeratedHeader { common: CommonEnumeratedHeader { bit_bound }, detail },
         literal_seq,
     })
