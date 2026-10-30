@@ -4,6 +4,8 @@ use std::io;
 
 use rustls::{AlertDescription, CertificateError, Error};
 
+use crate::rtps::transport::tls::peer_lists::ListRejection;
+
 /// The reason a handshake failed on certificate grounds, or `None` when the
 /// failure had nothing to do with certificates. Handshake errors arrive
 /// wrapped in an [`io::Error`], the way the TLS stream reports them.
@@ -32,6 +34,10 @@ pub(crate) fn rejection_reason(error: &io::Error) -> Option<&'static str> {
             | CertificateError::ExpiredRevocationListContext { .. } => {
                 "issuer's CRL is past its next update"
             }
+            CertificateError::Other(other) => other
+                .0
+                .downcast_ref::<ListRejection>()
+                .map_or("certificate is invalid", |rejection| rejection.as_str()),
             _ => "certificate is invalid",
         }),
         Error::InvalidCertRevocationList(_) => {
@@ -45,7 +51,9 @@ pub(crate) fn rejection_reason(error: &io::Error) -> Option<&'static str> {
             | AlertDescription::CertificateExpired
             | AlertDescription::CertificateUnknown
             | AlertDescription::UnknownCA
-            | AlertDescription::CertificateRequired,
+            | AlertDescription::CertificateRequired
+            | AlertDescription::DecryptError
+            | AlertDescription::AccessDenied,
         ) => Some("peer rejected this participant's certificate"),
         _ => None,
     }

@@ -29,7 +29,7 @@ use crate::rtps::transport::tcp::framing::{encode_frame, validate_payload_size, 
 use crate::rtps::transport::tcp::sync_connection::{
     OutboundConnection, SendOutcome, SEND_QUEUE_BYTE_BUDGET,
 };
-use crate::rtps::transport::tls::TlsConfig;
+use crate::rtps::transport::tls::client::TlsClient;
 use crate::rtps::transport::TcpConfig;
 
 #[derive(Default)]
@@ -94,7 +94,7 @@ pub(crate) struct TcpSender {
     tls_handshake_timeout: Duration,
 
     stats: Arc<SendStats>,
-    tls_config: Option<Arc<TlsConfig>>,
+    tls: Option<TlsClient>,
     shared: Arc<ConnectionRegistry>,
     slots: DashMap<ConnectionKey, Slot>,
     shutdown: Arc<AtomicBool>,
@@ -113,7 +113,7 @@ impl TcpSender {
         listener_port: u16,
         bind_ip: Option<IpAddr>,
         _local_guid_prefix: GuidPrefix,
-        tls_config: Option<Arc<TlsConfig>>,
+        tls: Option<TlsClient>,
         shared: Arc<ConnectionRegistry>,
         tcp_config: &TcpConfig,
         shutdown: Arc<AtomicBool>,
@@ -125,7 +125,7 @@ impl TcpSender {
             connect_timeout: tcp_config.connect_timeout,
             tls_handshake_timeout: tcp_config.tls_handshake_timeout,
             stats: Arc::new(SendStats::default()),
-            tls_config,
+            tls,
             shared,
             slots: DashMap::new(),
             shutdown,
@@ -414,6 +414,7 @@ mod tests {
     use super::*;
     use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
+    use crate::rtps::transport::tls::TlsConfig;
     use std::io::Read;
     use std::net::TcpStream;
 
@@ -817,7 +818,7 @@ mod tests {
             connect_timeout: Duration::from_secs(1),
             tls_handshake_timeout: Duration::from_secs(1),
             stats: Arc::new(SendStats::default()),
-            tls_config: None,
+            tls: None,
             shared: Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning)),
             slots: DashMap::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -863,7 +864,7 @@ mod tests {
                 connect_timeout: Duration::from_secs(1),
                 tls_handshake_timeout: Duration::from_secs(1),
                 stats: Arc::new(SendStats::default()),
-                tls_config: None,
+                tls: None,
                 shared: Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning)),
                 slots: DashMap::new(),
                 shutdown: Arc::new(AtomicBool::new(false)),
@@ -916,6 +917,8 @@ mod tests {
             server_name: Some("localhost".to_string()),
             verify_peer: false,
             revocation: None,
+            allow_file: None,
+            deny_file: None,
         };
         let server_config = tls.build_server_config().unwrap();
         let config = TcpConfig {
@@ -931,7 +934,7 @@ mod tests {
             0,
             None,
             [0; 12],
-            Some(Arc::new(tls)),
+            Some(TlsClient::new(&tls).unwrap()),
             registry,
             &config,
             Arc::new(AtomicBool::new(false)),
@@ -997,6 +1000,8 @@ mod tests {
             server_name: Some("localhost".to_string()),
             verify_peer: false,
             revocation: None,
+            allow_file: None,
+            deny_file: None,
         };
         let server_config = tls.build_server_config().unwrap();
 
@@ -1027,7 +1032,7 @@ mod tests {
             7400,
             None,
             [0; 12],
-            Some(Arc::new(tls)),
+            Some(TlsClient::new(&tls).unwrap()),
             registry,
             &config,
             Arc::new(AtomicBool::new(false)),

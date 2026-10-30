@@ -7,7 +7,6 @@
 //! budget, which bounds memory rather than answering congestion.
 
 use std::io::{self, Read, Write};
-use std::net::IpAddr;
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::net::TcpStream;
@@ -17,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
-use crate::rtps::transport::tls::TlsConfig;
+#[cfg(test)]
+use crate::rtps::transport::tls::{client::TlsClient, TlsConfig};
 
 /// How much a peer may owe the stream before frames are refused instead of
 /// queued. This is a bound on memory, not a congestion threshold, so it sits
@@ -315,24 +315,13 @@ fn retryable(error: &io::Error) -> bool {
     matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
-/// The client side of a TLS session to `peer` that has not started its handshake yet.
-pub(crate) fn tls_client(config: &TlsConfig, peer: IpAddr) -> io::Result<rustls::ClientConnection> {
-    let client_config = config.build_client_config().map_err(|error| {
-        transport_io_error(TransportErrorCode::TlsConfigError, error.to_string())
-    })?;
-    let server_name = config.server_name_for(peer)?;
-    rustls::ClientConnection::new(client_config, server_name).map_err(|error| {
-        transport_io_error(TransportErrorCode::TlsHandshakeFailed, error.to_string())
-    })
-}
-
 #[cfg(test)]
 fn handshake(
     socket: &TcpStream,
     config: &TlsConfig,
     wait: Duration,
 ) -> io::Result<rustls::ClientConnection> {
-    let mut tls = tls_client(config, socket.peer_addr()?.ip())?;
+    let mut tls = TlsClient::new(config)?.connect(socket.peer_addr()?.ip())?;
     socket.set_read_timeout(Some(wait))?;
     socket.set_write_timeout(Some(wait))?;
     let mut io = socket;
@@ -477,6 +466,8 @@ mod tests {
             server_name: Some("localhost".to_string()),
             verify_peer: false,
             revocation: None,
+            allow_file: None,
+            deny_file: None,
         };
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

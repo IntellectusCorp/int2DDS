@@ -9,11 +9,11 @@
 //! Errors are surfaced via [`io::Error`] using the shared
 //! [`TransportErrorCode`] catalogue (codes 780–789).
 
-use std::{fs::File, io, io::BufReader, net::IpAddr, path::PathBuf, sync::Arc};
+use std::{fs::File, io, io::BufReader, path::PathBuf, sync::Arc};
 
 use rustls::{
     client::WebPkiServerVerifier,
-    pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer, ServerName},
+    pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
     ClientConfig, RootCertStore, ServerConfig,
 };
@@ -23,7 +23,10 @@ use crate::{
     infrastructure::qos_policy::PropertyQosPolicy,
     rtps::transport::{
         error::{transport_io_error, TransportErrorCode},
-        tls::verifier::NameAgnosticServerVerifier,
+        tls::{
+            peer_lists::PeerLists,
+            verifier::{PeerClientVerifier, PeerServerVerifier},
+        },
     },
 };
 
@@ -37,6 +40,8 @@ pub mod keys {
     pub const CRL_FILE: &str = "int2dds.tls.crl_file";
     pub const CRL_UNKNOWN_STATUS: &str = "int2dds.tls.crl_unknown_status";
     pub const CRL_ENFORCE_EXPIRY: &str = "int2dds.tls.crl_enforce_expiry";
+    pub const ALLOW_FILE: &str = "int2dds.tls.allow_file";
+    pub const DENY_FILE: &str = "int2dds.tls.deny_file";
 }
 
 /// Revocation checking against externally supplied CRLs, applied to every
@@ -118,6 +123,10 @@ pub struct TlsConfig {
     pub verify_peer: bool,
     /// Revocation checking; none when no CRL file is configured.
     pub revocation: Option<RevocationConfig>,
+    /// Fingerprints of the only peer certificates allowed to connect.
+    pub allow_file: Option<PathBuf>,
+    /// Fingerprints of peer certificates refused even when allowed.
+    pub deny_file: Option<PathBuf>,
 }
 
 impl TlsConfig {
@@ -150,7 +159,32 @@ impl TlsConfig {
             enforce_expiry: property.find_property(keys::CRL_ENFORCE_EXPIRY) == Some("true"),
         });
 
-        Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer, revocation }))
+        let allow_file = property.find_property(keys::ALLOW_FILE).map(PathBuf::from);
+        let deny_file = property.find_property(keys::DENY_FILE).map(PathBuf::from);
+        // Without client certificates an accepted peer has nothing to match, so
+        // either list would restrict only the connections this side dials.
+        if (allow_file.is_some() || deny_file.is_some()) && !verify_peer {
+            return Err(transport_io_error(
+                TransportErrorCode::TlsConfigError,
+                format!(
+                    "'{}' and '{}' require '{}' to stay on",
+                    keys::ALLOW_FILE,
+                    keys::DENY_FILE,
+                    keys::VERIFY_PEER
+                ),
+            ));
+        }
+
+        Ok(Some(Self {
+            ca_file,
+            cert_file,
+            key_file,
+            server_name,
+            verify_peer,
+            revocation,
+            allow_file,
+            deny_file,
+        }))
     }
 
     pub(crate) fn load_root_store(&self) -> io::Result<RootCertStore> {
@@ -209,11 +243,13 @@ impl TlsConfig {
             .build()
             .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
 
-        let builder = match self.server_name {
-            Some(_) => ClientConfig::builder().with_webpki_verifier(verifier),
-            None => ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(NameAgnosticServerVerifier::new(verifier)),
+        let lists = PeerLists::load(self)?.map(Arc::new);
+        let builder = match (&self.server_name, lists) {
+            (Some(_), None) => ClientConfig::builder().with_webpki_verifier(verifier),
+            (server_name, lists) => {
+                let verifier = PeerServerVerifier::new(verifier, server_name.is_none(), lists);
+                ClientConfig::builder().dangerous().with_custom_certificate_verifier(verifier)
+            }
         };
         let cfg = builder.with_client_auth_cert(cert_chain, key).map_err(rustls_to_io)?;
         Ok(Arc::new(cfg))
@@ -237,9 +273,12 @@ impl TlsConfig {
                     verifier = verifier.enforce_revocation_expiration();
                 }
             }
-            let verifier = verifier.build().map_err(|e| {
+            let mut verifier = verifier.build().map_err(|e| {
                 transport_io_error(TransportErrorCode::TlsConfigError, e.to_string())
             })?;
+            if let Some(lists) = PeerLists::load(self)? {
+                verifier = PeerClientVerifier::new(verifier, Arc::new(lists));
+            }
             builder
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(cert_chain, key)
@@ -248,16 +287,6 @@ impl TlsConfig {
             builder.with_no_client_auth().with_single_cert(cert_chain, key).map_err(rustls_to_io)?
         };
         Ok(Arc::new(cfg))
-    }
-
-    /// The name handed to the handshake when dialing `peer`. Without a
-    /// configured name the peer's address stands in, which sends no SNI.
-    pub(crate) fn server_name_for(&self, peer: IpAddr) -> io::Result<ServerName<'static>> {
-        match &self.server_name {
-            Some(name) => ServerName::try_from(name.clone())
-                .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string())),
-            None => Ok(ServerName::from(peer)),
-        }
     }
 }
 
@@ -367,5 +396,22 @@ mod tests {
         let revocation = TlsConfig::from_property(&p).unwrap().unwrap().revocation.unwrap();
         assert!(revocation.allow_unknown_status);
         assert!(revocation.enforce_expiry);
+    }
+
+    #[test]
+    fn peer_lists_are_read_and_refused_without_mutual_tls() {
+        let base = [(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")];
+        let p = pq(&[base.as_slice(), &[(keys::ALLOW_FILE, "/allow"), (keys::DENY_FILE, "/deny")]]
+            .concat());
+        let cfg = TlsConfig::from_property(&p).unwrap().unwrap();
+        assert_eq!(cfg.allow_file, Some(PathBuf::from("/allow")));
+        assert_eq!(cfg.deny_file, Some(PathBuf::from("/deny")));
+
+        for list in [keys::ALLOW_FILE, keys::DENY_FILE] {
+            let p =
+                pq(&[base.as_slice(), &[(list, "/list"), (keys::VERIFY_PEER, "false")]].concat());
+            let err = TlsConfig::from_property(&p).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        }
     }
 }

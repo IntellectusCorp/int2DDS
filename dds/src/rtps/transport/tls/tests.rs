@@ -15,15 +15,13 @@ use rustls::{
 
 use crate::{
     infrastructure::qos_policy::PropertyQosPolicy,
-    rtps::transport::{
-        tcp::sync_connection::tls_client,
-        tls::{
-            config::keys,
-            rejection::rejection_reason,
-            test_pki::{with_crls, LeafSpec, TestCa},
-            verifier::NameAgnosticServerVerifier,
-            TlsConfig,
-        },
+    rtps::transport::tls::{
+        client::TlsClient,
+        config::keys,
+        rejection::rejection_reason,
+        test_pki::{with_crls, with_lists, LeafSpec, TestCa},
+        verifier::PeerServerVerifier,
+        TlsConfig,
     },
 };
 
@@ -41,7 +39,7 @@ pub(super) struct Outcome {
 /// Runs a handshake between the client and server sides that `client` and
 /// `server` build, with the client dialing [`PEER`].
 pub(super) fn handshake(client: &TlsConfig, server: &TlsConfig) -> io::Result<Outcome> {
-    let client = tls_client(client, PEER)?;
+    let client = TlsClient::new(client)?.connect(PEER)?;
     let server = ServerConnection::new(server.build_server_config()?).map_err(io::Error::other)?;
     Ok(drive(client, server))
 }
@@ -317,7 +315,7 @@ fn a_key_that_does_not_match_its_certificate_fails_before_any_handshake() {
 fn anonymous_client(trusting: &TlsConfig) -> ClientConnection {
     let roots = Arc::new(trusting.load_root_store().unwrap());
     let verifier =
-        NameAgnosticServerVerifier::new(WebPkiServerVerifier::builder(roots).build().unwrap());
+        PeerServerVerifier::new(WebPkiServerVerifier::builder(roots).build().unwrap(), true, None);
     let config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
@@ -579,4 +577,68 @@ fn an_unusable_crl_file_fails_before_any_handshake() {
         let error = handshake(&server, &client).unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+#[test]
+fn only_allowed_peers_connect_in_either_direction() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let server = ca.issue(LeafSpec::named("server"));
+    let stranger = ca.issue(LeafSpec::named("stranger"));
+    let client_config = with_lists(client.config(dir.path(), &[&ca]), &[&client, &server], &[]);
+    let server_config = with_lists(server.config(dir.path(), &[&ca]), &[&client, &server], &[]);
+    let stranger_config = stranger.config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client_config, &server_config).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    let outcome = handshake(&client_config, &stranger_config).unwrap();
+    assert_eq!(reason_for(outcome.client), Some("certificate is not on the allow list"));
+    assert_eq!(reason_for(outcome.server), Some("peer rejected this participant's certificate"));
+
+    let outcome = handshake(&stranger_config, &server_config).unwrap();
+    assert_eq!(reason_for(outcome.server), Some("certificate is not on the allow list"));
+}
+
+#[test]
+fn a_denied_peer_is_refused_even_when_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let server = ca.issue(LeafSpec::named("server"));
+    let other = ca.issue(LeafSpec::named("other"));
+    let deny_only = with_lists(client.config(dir.path(), &[&ca]), &[], &[&server]);
+    let both = with_lists(client.config(dir.path(), &[&ca]), &[&server], &[&server]);
+    let server_config = server.config(dir.path(), &[&ca]);
+    let other_config = other.config(dir.path(), &[&ca]);
+
+    for client_config in [&deny_only, &both] {
+        let outcome = handshake(client_config, &server_config).unwrap();
+        assert_eq!(reason_for(outcome.client), Some("certificate is on the deny list"));
+        let outcome = handshake(&server_config, client_config).unwrap();
+        assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+    }
+
+    let outcome = handshake(&deny_only, &other_config).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn lists_apply_only_after_the_chain_and_alongside_a_server_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stranger_ca = TestCa::root("stranger-ca");
+    let server = ca.issue(LeafSpec::named("server"));
+    let untrusted = stranger_ca.issue(LeafSpec::named("untrusted"));
+    let client = ca.issue(LeafSpec::named("client"));
+    let mut client_config =
+        with_lists(client.config(dir.path(), &[&ca]), &[&server, &untrusted], &[]);
+
+    let outcome = handshake(&client_config, &untrusted.config(dir.path(), &[&ca])).unwrap();
+    assert_rejected!(outcome.client, CertificateError::UnknownIssuer);
+
+    client_config.server_name = Some("server.int2dds.test".to_string());
+    let outcome = handshake(&client_config, &server.config(dir.path(), &[&ca])).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
 }

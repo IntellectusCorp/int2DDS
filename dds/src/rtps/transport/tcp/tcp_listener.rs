@@ -733,6 +733,8 @@ mod tests {
             server_name: Some("localhost".to_string()),
             verify_peer: false,
             revocation: None,
+            allow_file: None,
+            deny_file: None,
         }
     }
 

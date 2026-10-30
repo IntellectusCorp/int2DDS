@@ -28,7 +28,7 @@ use crate::rtps::transport::tcp::peer_candidates::{AnnounceTargets, PEER_PRUNE_D
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
-use crate::rtps::transport::tls::TlsConfig;
+use crate::rtps::transport::tls::{client::TlsClient, TlsConfig};
 use crate::rtps::transport::{TcpConfig, TransportType};
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
@@ -207,7 +207,7 @@ impl TcpTransportPlugin {
             listener_port,
             pinned,
             guid_prefix,
-            tls_config,
+            tls_config.as_deref().map(TlsClient::new).transpose()?,
             Arc::clone(&shared),
             &tcp_config,
             Arc::clone(&shutdown),
@@ -1598,6 +1598,8 @@ mod tests {
             server_name: Some("localhost".to_string()),
             verify_peer: true,
             revocation: None,
+            allow_file: None,
+            deny_file: None,
         })
     }
 

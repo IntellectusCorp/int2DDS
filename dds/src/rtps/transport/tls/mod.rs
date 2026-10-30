@@ -4,8 +4,10 @@
 //! SNI server name, and turns them into the client and server configurations
 //! that TCP and QUIC each hand to their own handshake.
 
+pub(crate) mod client;
 pub mod config;
 pub(crate) mod identity;
+pub(crate) mod peer_lists;
 pub(crate) mod rejection;
 pub(crate) mod verifier;
 

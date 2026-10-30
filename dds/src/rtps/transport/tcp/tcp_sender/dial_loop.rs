@@ -12,7 +12,7 @@ use mio::{Events, Interest, Poll, Token};
 use super::{ConnectionKey, Slot, TcpSender};
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::dial::start_dial;
-use crate::rtps::transport::tcp::sync_connection::{tls_client, OutboundConnection};
+use crate::rtps::transport::tcp::sync_connection::OutboundConnection;
 use crate::rtps::transport::tls::rejection::rejection_reason;
 
 /// How long the dial worker waits before checking whether it should still run.
@@ -145,10 +145,10 @@ impl DialLoop {
                 Err(error) => Err(error),
             },
         };
-        let tls = match (outcome, sender.tls_config.as_deref()) {
+        let tls = match (outcome, sender.tls.as_ref()) {
             (Err(error), _) => Err(error),
             (Ok(()), None) => Ok(None),
-            (Ok(()), Some(config)) => tls_client(config, dialing.key.0.ip()).map(Some),
+            (Ok(()), Some(client)) => client.connect(dialing.key.0.ip()).map(Some),
         };
         match tls {
             Ok(Some(tls)) => {

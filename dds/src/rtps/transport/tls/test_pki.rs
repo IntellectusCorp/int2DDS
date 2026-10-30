@@ -155,6 +155,8 @@ impl TestLeaf {
             server_name: None,
             verify_peer: true,
             revocation: None,
+            allow_file: None,
+            deny_file: None,
         }
     }
 }
@@ -166,5 +168,33 @@ pub(crate) fn with_crls(mut config: TlsConfig, crls: &[String]) -> TlsConfig {
     fs::write(&crl_file, crls.concat()).unwrap();
     config.revocation =
         Some(RevocationConfig { crl_file, allow_unknown_status: false, enforce_expiry: false });
+    config
+}
+
+/// Points `config` at allow and deny lists holding the given leaves; an empty
+/// slice leaves that list unset.
+pub(crate) fn with_lists(
+    mut config: TlsConfig,
+    allow: &[&TestLeaf],
+    deny: &[&TestLeaf],
+) -> TlsConfig {
+    let write = |suffix: &str, leaves: &[&TestLeaf]| {
+        (!leaves.is_empty()).then(|| {
+            let path = config.cert_file.with_extension(suffix);
+            let lines: String = leaves
+                .iter()
+                .map(|leaf| {
+                    let digest = ring::digest::digest(&ring::digest::SHA256, &leaf.der);
+                    let hex: Vec<String> =
+                        digest.as_ref().iter().map(|b| format!("{b:02X}")).collect();
+                    format!("{}\n", hex.join(":"))
+                })
+                .collect();
+            fs::write(&path, lines).unwrap();
+            path
+        })
+    };
+    config.allow_file = write("allow.txt", allow);
+    config.deny_file = write("deny.txt", deny);
     config
 }

@@ -45,6 +45,14 @@ pub struct TlsNodeConfig {
     /// Reject a certificate when its issuer's CRL is past its next update.
     #[serde(default)]
     pub crl_enforce_expiry: bool,
+    /// Path to a file of SHA-256 certificate fingerprints, one per line; when
+    /// set, only peers presenting one of them may connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_file: Option<String>,
+    /// Path to a file of SHA-256 certificate fingerprints refused even when
+    /// they are also allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_file: Option<String>,
 }
 
 fn default_verify_peer() -> bool {
@@ -111,6 +119,12 @@ impl NodeConfig {
                 if tls.crl_enforce_expiry {
                     property.add_property("int2dds.tls.crl_enforce_expiry", "true", false);
                 }
+            }
+            if let Some(allow_file) = &tls.allow_file {
+                property.add_property("int2dds.tls.allow_file", allow_file, false);
+            }
+            if let Some(deny_file) = &tls.deny_file {
+                property.add_property("int2dds.tls.deny_file", deny_file, false);
             }
         }
         DomainParticipantQos { property, ..Default::default() }
@@ -360,6 +374,8 @@ mod tests {
                 crl_file: None,
                 crl_unknown_status: None,
                 crl_enforce_expiry: false,
+                allow_file: None,
+                deny_file: None,
             }),
         };
         let qos = node.to_participant_qos();
@@ -470,6 +486,34 @@ mod tests {
         assert_eq!(property.find_property("int2dds.tls.crl_file"), Some("/crl.pem"));
         assert_eq!(property.find_property("int2dds.tls.crl_unknown_status"), Some("allow"));
         assert_eq!(property.find_property("int2dds.tls.crl_enforce_expiry"), Some("true"));
+    }
+
+    #[test]
+    fn peer_lists_reach_the_participant_when_set() {
+        let json = r#"{ "route_gateway": {
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": {
+                "domain_id": 1, "transport": "tcp",
+                "tls": { "ca_file": "/a", "cert_file": "/b", "key_file": "/c",
+                         "allow_file": "/allow.txt", "deny_file": "/deny.txt" }
+            }
+        }}"#;
+        let property =
+            RouteGatewayConfig::from_json(json).unwrap().remote.to_participant_qos().property;
+        assert_eq!(property.find_property("int2dds.tls.allow_file"), Some("/allow.txt"));
+        assert_eq!(property.find_property("int2dds.tls.deny_file"), Some("/deny.txt"));
+
+        let property = RouteGatewayConfig::from_json(&json.replace(
+            r#",
+                         "allow_file": "/allow.txt", "deny_file": "/deny.txt""#,
+            "",
+        ))
+        .unwrap()
+        .remote
+        .to_participant_qos()
+        .property;
+        assert!(property.find_property("int2dds.tls.allow_file").is_none());
+        assert!(property.find_property("int2dds.tls.deny_file").is_none());
     }
 
     #[test]
