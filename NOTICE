@@ -20,6 +20,8 @@ limitations under the License.
 Third-Party Software (if any)
 ==============================
 
-This product may include third-party open source components.
-For details, see Third_Party_Licenses.md in the source repository:
+Binary distributions of this product statically link third-party open source
+components. Their license texts and copyright notices are reproduced in
+LICENSE-THIRD-PARTY.md, shipped alongside this file. For the policy, see
+Third_Party_Licenses.md in the source repository:
 https://github.com/IntellectusCorp/int2DDS/blob/main/Third_Party_Licenses.md
