@@ -20,15 +20,14 @@
 //!
 //! ## Submodules
 //!
-//! - [`builtin`] - Built-in endpoints for discovery (SPDP, SEDP)
+//! - `builtin` - Built-in endpoints for discovery (SPDP, SEDP)
 //! - [`common`] - Common RTPS types and utilities
-//! - [`dcps_bridge`] - Bridge connecting DCPS entities to RTPS entities
-//! - [`entities`] - RTPS entities (RtpsParticipant, RtpsReader, RtpsWriter)
-//! - [`logic`] - Core RTPS protocol logic and state machines
-//! - [`messages`] - RTPS message structures and serialization
-//! - [`service`] - RTPS services and background tasks
-//! - [`task`] - Task management for RTPS operations
-//! - [`transport`] - Transport layer implementations (UDP, TCP, Hybrid, SHM)
+//! - `dcps_bridge` - Bridge connecting DCPS entities to RTPS entities
+//! - `entities` - RTPS entities (Participant, Reader, Writer)
+//! - `logic` - Core RTPS protocol logic and state machines
+//! - `messages` - RTPS message structures and serialization
+//! - `task` - Task management for RTPS operations
+//! - `transport` - Transport layer implementations (UDP, TCP, Hybrid, SHM)
 //!
 //! ## Key Concepts
 //!

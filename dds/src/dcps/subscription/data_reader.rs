@@ -2322,16 +2322,17 @@ impl<Foo: DdsType> DataReader<Foo> {
     ///
     /// This operation accesses data samples that match the specified state filters. Unlike `take()`,
     /// this operation does not remove samples from the reader's cache, allowing them to be read
-    /// multiple times. After reading, the sample state changes from `NotRead` to `Read`.
+    /// multiple times. After reading, the sample state changes from `NOT_READ_SAMPLE_STATE` to
+    /// `READ_SAMPLE_STATE`.
     ///
     /// # Arguments
     ///
     /// * `max_samples` - Maximum number of samples to return. Use `LENGTH_UNLIMITED` (-1) for all available samples.
-    /// * `sample_states` - Filter for sample read state (e.g., `&[SampleStateKind::NotRead]`).
+    /// * `sample_states` - Filter for sample read state (e.g., `&[SampleStateKind::NOT_READ_SAMPLE_STATE]`).
     ///   Use `&[SampleStateKind::ANY_SAMPLE_STATE]` for all states.
-    /// * `view_states` - Filter for instance view state (e.g., `&[ViewStateKind::New]`).
+    /// * `view_states` - Filter for instance view state (e.g., `&[ViewStateKind::NEW_VIEW_STATE]`).
     ///   Use `&[ViewStateKind::ANY_VIEW_STATE]` for all states.
-    /// * `instance_states` - Filter for instance lifecycle state (e.g., `&[InstanceStateKind::Alive]`).
+    /// * `instance_states` - Filter for instance lifecycle state (e.g., `&[InstanceStateKind::ALIVE_INSTANCE_STATE]`).
     ///   Use `&[InstanceStateKind::ANY_INSTANCE_STATE]` for all states.
     ///
     /// # Returns
@@ -2342,6 +2343,7 @@ impl<Foo: DdsType> DataReader<Foo> {
     /// # Errors
     ///
     /// Returns an error if:
+    /// * `NoData` - No sample matches the filters
     /// * The reader has been deleted
     /// * The reader is not enabled
     pub fn read(
@@ -2373,11 +2375,11 @@ impl<Foo: DdsType> DataReader<Foo> {
     /// # Arguments
     ///
     /// * `max_samples` - Maximum number of samples to return. Use `LENGTH_UNLIMITED` (-1) for all available samples.
-    /// * `sample_states` - Filter for sample read state (e.g., `&[SampleStateKind::NotRead]`).
+    /// * `sample_states` - Filter for sample read state (e.g., `&[SampleStateKind::NOT_READ_SAMPLE_STATE]`).
     ///   Use `&[SampleStateKind::ANY_SAMPLE_STATE]` for all states.
-    /// * `view_states` - Filter for instance view state (e.g., `&[ViewStateKind::New]`).
+    /// * `view_states` - Filter for instance view state (e.g., `&[ViewStateKind::NEW_VIEW_STATE]`).
     ///   Use `&[ViewStateKind::ANY_VIEW_STATE]` for all states.
-    /// * `instance_states` - Filter for instance lifecycle state (e.g., `&[InstanceStateKind::Alive]`).
+    /// * `instance_states` - Filter for instance lifecycle state (e.g., `&[InstanceStateKind::ALIVE_INSTANCE_STATE]`).
     ///   Use `&[InstanceStateKind::ANY_INSTANCE_STATE]` for all states.
     ///
     /// # Returns
@@ -2388,6 +2390,7 @@ impl<Foo: DdsType> DataReader<Foo> {
     /// # Errors
     ///
     /// Returns an error if:
+    /// * `NoData` - No sample matches the filters
     /// * The reader has been deleted
     /// * The reader is not enabled
     pub fn take(
@@ -2872,9 +2875,10 @@ impl<Foo: DdsType> DataReader<Foo> {
     ///
     /// Returns raw CDR bytes and SampleInfo for each matching sample.
     /// The samples are removed from the cache (take semantics).
+    /// Returns `NoData` when no sample matches.
     ///
-    /// Note: QueryCondition and ContentFilteredTopic filters are NOT applied,
-    /// as they require deserialized data.
+    /// ContentFilteredTopic filtering is already applied when samples are received;
+    /// no QueryCondition is applied.
     pub fn take_serialized(
         &self,
         max_samples: i32,
@@ -2896,7 +2900,7 @@ impl<Foo: DdsType> DataReader<Foo> {
     ///
     /// Like [`take_serialized`](Self::take_serialized) but restricted to the
     /// instance identified by `handle`. A nil handle returns `BadParameter`; an
-    /// unknown handle yields no samples (mirroring `take_instance`).
+    /// unknown handle returns `NoData` (mirroring `take_instance`).
     pub fn take_instance_serialized(
         &self,
         max_samples: i32,
@@ -2919,7 +2923,7 @@ impl<Foo: DdsType> DataReader<Foo> {
     ///
     /// Like [`read_serialized`](Self::read_serialized) but restricted to the
     /// instance identified by `handle`. A nil handle returns `BadParameter`; an
-    /// unknown handle yields no samples (mirroring `read_instance`).
+    /// unknown handle returns `NoData` (mirroring `read_instance`).
     pub fn read_instance_serialized(
         &self,
         max_samples: i32,
@@ -2942,9 +2946,10 @@ impl<Foo: DdsType> DataReader<Foo> {
     ///
     /// Returns raw CDR bytes and SampleInfo for each matching sample.
     /// The samples remain in the cache and are marked as read.
+    /// Returns `NoData` when no sample matches.
     ///
-    /// Note: QueryCondition and ContentFilteredTopic filters are NOT applied,
-    /// as they require deserialized data.
+    /// ContentFilteredTopic filtering is already applied when samples are received;
+    /// no QueryCondition is applied.
     pub fn read_serialized(
         &self,
         max_samples: i32,

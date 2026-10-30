@@ -148,8 +148,8 @@ impl Xcdr2Serializer {
     }
 
     /// Insert 4 zero bytes at the given position, shifting subsequent bytes right.
-    /// Used when an EMHEADER's payload length overflows 16 bits and the codegen
-    /// needs to retroactively switch from compact (LC=0..3) to LC=4 (NEXTINT) encoding.
+    /// Used by `write_member_with_lc` to add the NEXTINT slot after an EMHEADER
+    /// once the payload length selects LC=4.
     pub fn insert_nextint_slot_at(&mut self, position: usize) {
         self.buffer.splice(position..position, [0u8; 4]);
     }

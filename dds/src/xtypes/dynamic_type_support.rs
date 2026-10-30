@@ -25,7 +25,7 @@ use super::dynamic_type::DynamicType;
 
 /// TypeSupport implementation for DynamicData.
 ///
-/// This enables DynamicData to be used with DataReader<DynamicData> and DataWriter<DynamicData>.
+/// This enables DynamicData to be used with `DataReader<DynamicData>` and `DataWriter<DynamicData>`.
 /// Created from a TypeObject received during discovery.
 #[derive(Clone, Debug)]
 pub struct DynamicTypeSupport {

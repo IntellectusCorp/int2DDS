@@ -244,8 +244,8 @@ impl Publisher {
     /// you can use the writer's `write()` method to send data samples to subscribers that are
     /// listening to the same topic.
     ///
-    /// The data writer will be automatically enabled if the participant's QoS policy
-    /// `autoenable_created_entities` is set to true (which is the default).
+    /// The data writer will be automatically enabled if this publisher is enabled and its
+    /// `entity_factory.autoenable_created_entities` is set to true (which is the default).
     ///
     /// # Type Parameters
     ///
@@ -254,7 +254,7 @@ impl Publisher {
     /// # Arguments
     ///
     /// * `topic` - The topic to publish to. Must belong to the same `DomainParticipant` as this publisher.
-    /// * `qos` - Quality of Service policies for the data writer. Use `DataWriterQos::default()` for defaults.
+    /// * `qos` - Quality of Service policies for the data writer. Use `DATAWRITER_QOS_DEFAULT` for the configured default.
     /// * `listener` - Optional listener for status notifications (e.g., publication matched, deadline missed). Pass `None` if not needed.
     /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
     ///
@@ -265,33 +265,13 @@ impl Publisher {
     /// # Errors
     ///
     /// Returns an error if:
+    /// * `PreconditionNotMet` - This is a built-in publisher
+    /// * `PreconditionNotMet` - The access scope is GROUP and a coherent set is open
     /// * The publisher has been deleted
     /// * The topic does not belong to the same `DomainParticipant` as this publisher
     /// * Type support for the topic is not found
     /// * The QoS policies are inconsistent
     /// * The DCPS bridge is not initialized
-    /// Resolution chain for `QosKind::Default`: registered default → configured
-    /// default profile → spec default. `QosKind::Specific` is used as-is.
-    ///
-    /// Shared by `create_datawriter` and `create_datawriter_dynamic` so both entry
-    /// points resolve the default sentinel identically.
-    fn resolve_datawriter_qos(&self, qos: QosKind<DataWriterQos>) -> DataWriterQos {
-        match qos {
-            QosKind::Specific(q) => q,
-            QosKind::Default => {
-                if let Some(registered) =
-                    self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
-                {
-                    registered
-                } else {
-                    DomainParticipantFactory::get_instance()
-                        .get_datawriter_qos_from_profile("")
-                        .unwrap_or_default()
-                }
-            }
-        }
-    }
-
     pub fn create_datawriter<Foo: 'static + Clone>(
         &self,
         topic: &Topic,
@@ -421,6 +401,28 @@ impl Publisher {
         self.refresh_writer_set()?;
 
         Ok(datawriter)
+    }
+
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_datawriter` and `create_datawriter_dynamic` so both entry
+    /// points resolve the default sentinel identically.
+    fn resolve_datawriter_qos(&self, qos: QosKind<DataWriterQos>) -> DataWriterQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else {
+                    DomainParticipantFactory::get_instance()
+                        .get_datawriter_qos_from_profile("")
+                        .unwrap_or_default()
+                }
+            }
+        }
     }
 
     /// Creates a new `DataWriter` using QoS settings from a loaded profile.

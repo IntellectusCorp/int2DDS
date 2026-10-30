@@ -1,7 +1,7 @@
 //! Common traits shared by all RPC entities (Requester, Replier, Client, Service).
 //!
-//! Defines lifecycle operations (close, finalize) and service-discovery
-//! helpers (wait_for_service, wait_for_requests).
+//! Defines lifecycle operations (close, is_closed) and service-discovery
+//! helpers (bind_instance, wait_for_service).
 
 use crate::error::DdsRpcResult;
 use crate::types::InstanceName;

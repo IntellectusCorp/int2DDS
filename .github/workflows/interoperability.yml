@@ -3,8 +3,8 @@ run-name: "Interop test ${{ github.head_ref }}"
 on:
   workflow_dispatch:
     inputs:
-      enable_int2dds_logging:
-        description: "Enable int2DDS logging"
+      upload_int2dds_logs:
+        description: "Upload int2DDS logs"
         required: false
         type: boolean
         default: false
@@ -18,11 +18,10 @@ on:
         required: false
         type: choice
         options:
-          - opendds
-          - fastdds
           - connext
-          - dustdds
-          - intercom
+          - cyclone
+          - fastdds
+          - opendds
           - coredx
           - int2DDS
           - all
@@ -61,7 +60,7 @@ jobs:
           repository: IntellectusCorp/int2DDS-shapes-demo
           token: ${{ secrets.ORG_PAT }}
           path: shapes-demo
-          ref: ${{ inputs.enable_int2dds_logging && 'log' || 'main' }}
+          ref: main
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -170,7 +169,7 @@ jobs:
           executable-pattern: ${{ matrix.dds.pattern }}
           role: ${{ matrix.role }}
           dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
-          enable-int2dds-logging: ${{ inputs.enable_int2dds_logging }}
+          upload-int2dds-logs: ${{ inputs.upload_int2dds_logs }}
           range-start: ${{ inputs.range_start }}
           range-end: ${{ inputs.range_end }}
 
