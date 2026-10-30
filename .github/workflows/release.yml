@@ -564,6 +564,13 @@ jobs:
             echo "ERROR: expected 10 native RIDs in the nupkg, found $count" >&2
             exit 1
           fi
+          for f in LICENSE NOTICE; do
+            if ! grep -qE " $f\$" <<< "$listing"; then
+              echo "ERROR: nupkg missing $f at the package root" >&2
+              echo "$listing" >&2
+              exit 1
+            fi
+          done
           test -f "dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.snupkg"
 
       - name: Build dotnet-libs zip
@@ -575,6 +582,7 @@ jobs:
           dotnet build csharp/src/Int2Dds/Int2Dds.csproj -c Release
           stage="dist/dotnet-libs/Int2Dds-$VERSION-dotnet-libs"
           mkdir -p "$stage"
+          cp LICENSE NOTICE "$stage/"
           for tfm in net45 net48 netstandard2.0 netstandard2.1 net6.0 net8.0 net10.0; do
             src="csharp/src/Int2Dds/bin/Release/$tfm"
             if [[ ! -f "$src/Int2Dds.dll" ]]; then
@@ -641,7 +649,7 @@ jobs:
       - name: Build wheels
         run: ./.github/scripts/ci/repack-wheels.sh "${{ needs.prepare.outputs.version }}" native-root
 
-      - name: Verify wheel count
+      - name: Verify wheels
         shell: bash
         run: |
           set -euo pipefail
@@ -656,7 +664,26 @@ jobs:
           # The sdist filename uses base_version for the same reason as the nupkg:
           # python -m build names it from the static version in pyproject.toml,
           # which is always the base version without a suffix.
-          test -f "dist/wheels/int2dds-${{ needs.prepare.outputs.base_version }}.tar.gz"
+          sdist="dist/wheels/int2dds-${{ needs.prepare.outputs.base_version }}.tar.gz"
+          test -f "$sdist"
+          for whl in "${whls[@]}"; do
+            listing="$(unzip -l "$whl")"
+            for f in LICENSE NOTICE; do
+              if ! grep -qE "\.dist-info/licenses/$f\$" <<< "$listing"; then
+                echo "ERROR: $whl missing $f" >&2
+                echo "$listing" >&2
+                exit 1
+              fi
+            done
+          done
+          sdist_listing="$(tar -tzf "$sdist")"
+          for f in LICENSE NOTICE; do
+            if ! grep -qE "^int2dds-[^/]+/$f\$" <<< "$sdist_listing"; then
+              echo "ERROR: $sdist missing $f" >&2
+              echo "$sdist_listing" >&2
+              exit 1
+            fi
+          done
 
       - name: Smoke test the linux x86_64 wheel
         shell: bash
@@ -751,6 +778,8 @@ jobs:
           jar="java/api/build/libs/int2dds-api-${{ needs.prepare.outputs.base_version }}.jar"
           listing="$(unzip -l "$jar")"
           paths=(
+            "META-INF/LICENSE"
+            "META-INF/NOTICE"
             "META-INF/versions/22/kr/co/intellectus/int2dds/internal/NativeLoader.class"
             "native/windows-x86_64/int2dds_ffi.dll"
             "native/windows-x86_64/int2dds_java.dll"

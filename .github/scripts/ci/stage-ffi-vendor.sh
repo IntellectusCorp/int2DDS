@@ -12,6 +12,7 @@
 #   ├── int2dds-ffi.h
 #   ├── int2dds-ffi.manifest.yaml
 #   ├── LICENSE
+#   ├── NOTICE
 #   ├── linux-x86_64/       libint2dds_ffi.so -> .so.<major> -> .so.<version>
 #   ├── linux-aarch64/
 #   ├── linux-armhf/
@@ -121,9 +122,10 @@ for entry in $targets; do
   # has one so the tarball does not depend on which arch built last.
   [ -f "$stage/int2dds-ffi.h" ] || cp "$src/include/int2dds-ffi.h" "$stage/"
   [ -f "$stage/LICENSE" ]       || cp "$src/LICENSE"               "$stage/"
+  [ -f "$stage/NOTICE" ]        || cp "$src/NOTICE"                "$stage/"
 done
 
-for required in int2dds-ffi.h LICENSE int2dds-ffi.manifest.yaml; do
+for required in int2dds-ffi.h LICENSE NOTICE int2dds-ffi.manifest.yaml; do
   [ -f "$stage/$required" ] || { echo "ERROR: ${required} missing from the staged tree" >&2; exit 1; }
 done
 

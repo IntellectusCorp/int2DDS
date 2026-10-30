@@ -86,6 +86,12 @@
     <None Include="build/Int2Dds.Native.targets" Pack="true" PackagePath="build/" Visible="false" />
   </ItemGroup>
 
+  <!-- LICENSE and NOTICE at the package root; PackageLicenseExpression above only names the license. -->
+  <ItemGroup>
+    <None Include="../../../LICENSE" Pack="true" PackagePath="" Visible="false" />
+    <None Include="../../../NOTICE" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+
   <PropertyGroup>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>

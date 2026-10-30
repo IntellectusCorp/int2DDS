@@ -122,6 +122,9 @@ tasks.withType<Test>().configureEach {
 
 tasks.jar {
     archiveBaseName.set("int2dds-api")
+    into("META-INF") {
+        from(rootProject.file("../LICENSE"), rootProject.file("../NOTICE"))
+    }
     into("META-INF/versions/9") {
         from(java9.output)
     }
