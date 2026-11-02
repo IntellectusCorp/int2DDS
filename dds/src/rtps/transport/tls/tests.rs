@@ -10,7 +10,7 @@ use std::{
 use rcgen::ExtendedKeyUsagePurpose;
 use rustls::{
     client::WebPkiServerVerifier, pki_types::ServerName, CertificateError, ClientConfig,
-    ClientConnection, Connection, ServerConnection,
+    ClientConnection, Connection, HandshakeKind, ServerConnection,
 };
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
         config::keys,
         policy::TlsPolicyHandle,
         rejection::rejection_reason,
-        test_pki::{with_crls, with_lists, LeafSpec, TestCa},
+        test_pki::{with_crls, with_lists, LeafSpec, TestCa, TestLeaf},
         verifier::PeerServerVerifier,
         TlsConfig,
     },
@@ -796,4 +796,134 @@ fn a_reload_refuses_broken_lists_and_keeps_enforcing_the_old_ones() {
     assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
     let outcome = handshake_between(&denied_policy, &server_policy);
     assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+}
+
+/// Moves records both ways until neither side has more, leaving both connections
+/// open so what they agreed on can be inspected.
+fn exchange(
+    client: &mut ClientConnection,
+    server: &mut ServerConnection,
+) -> (Result<(), rustls::Error>, Result<(), rustls::Error>) {
+    let (mut client_result, mut server_result) = (Ok(()), Ok(()));
+    loop {
+        let mut records = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut records).unwrap();
+        }
+        let client_sent = !records.is_empty();
+        let mut unread = records.as_slice();
+        while !unread.is_empty() && server_result.is_ok() {
+            server.read_tls(&mut unread).unwrap();
+            server_result = server.process_new_packets().map(|_| ());
+        }
+
+        let mut records = Vec::new();
+        while server.wants_write() {
+            server.write_tls(&mut records).unwrap();
+        }
+        let server_sent = !records.is_empty();
+        let mut unread = records.as_slice();
+        while !unread.is_empty() && client_result.is_ok() {
+            client.read_tls(&mut unread).unwrap();
+            client_result = client.process_new_packets().map(|_| ());
+        }
+
+        if !client_sent && !server_sent {
+            return (client_result, server_result);
+        }
+    }
+}
+
+struct ResumablePair {
+    client: Arc<TlsPolicyHandle>,
+    server: Arc<TlsPolicyHandle>,
+    client_config: TlsConfig,
+    server_config: TlsConfig,
+}
+
+/// Mutual TLS peers that have completed one full handshake, so the client holds
+/// a ticket the server would honour.
+fn pair_holding_a_ticket(
+    ca: &TestCa,
+    dir: &std::path::Path,
+    client_leaf: &TestLeaf,
+    server_leaf: &TestLeaf,
+) -> ResumablePair {
+    let crl = [ca.crl(&[], 2999)];
+    let client_config = with_crls(client_leaf.config(dir, &[ca]), &crl);
+    let server_config = with_crls(server_leaf.config(dir, &[ca]), &crl);
+    let pair = ResumablePair {
+        client: Arc::new(TlsPolicyHandle::new(&client_config).unwrap()),
+        server: Arc::new(TlsPolicyHandle::new(&server_config).unwrap()),
+        client_config,
+        server_config,
+    };
+    let (mut client, mut server) = pair.connect();
+    let (client_result, server_result) = exchange(&mut client, &mut server);
+    assert!(client_result.is_ok() && server_result.is_ok());
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    pair
+}
+
+impl ResumablePair {
+    fn connect(&self) -> (ClientConnection, ServerConnection) {
+        let (client, _) = TlsClient::new(Arc::clone(&self.client)).unwrap().connect(PEER).unwrap();
+        let server = ServerConnection::new(Arc::clone(&self.server.current().server)).unwrap();
+        (client, server)
+    }
+}
+
+#[test]
+fn a_resumed_connection_still_knows_the_chain_a_reload_judges() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client_leaf = ca.issue(LeafSpec::named("client"));
+    let server_leaf = ca.issue(LeafSpec::named("server"));
+    let pair = pair_holding_a_ticket(&ca, dir.path(), &client_leaf, &server_leaf);
+
+    let (mut client, mut server) = pair.connect();
+    let (client_result, server_result) = exchange(&mut client, &mut server);
+
+    assert!(client_result.is_ok() && server_result.is_ok());
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+    let accepted = server.peer_certificates().expect("resumed server lost the client chain");
+    assert_eq!(accepted[0].as_ref(), client_leaf.der.as_slice());
+    let dialed = client.peer_certificates().expect("resumed client lost the server chain");
+    assert_eq!(dialed[0].as_ref(), server_leaf.der.as_slice());
+}
+
+#[test]
+fn a_ticket_does_not_get_a_revoked_client_past_a_reloaded_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client_leaf = ca.issue(LeafSpec::named("client"));
+    let server_leaf = ca.issue(LeafSpec::named("server"));
+    let pair = pair_holding_a_ticket(&ca, dir.path(), &client_leaf, &server_leaf);
+
+    let crl_file = &pair.server_config.revocation.as_ref().unwrap().crl_file;
+    std::fs::write(crl_file, ca.crl(&[client_leaf.serial], 2999)).unwrap();
+    pair.server.reload().unwrap();
+
+    let (mut client, mut server) = pair.connect();
+    let (_, server_result) = exchange(&mut client, &mut server);
+
+    assert_rejected!(server_result, CertificateError::Revoked);
+}
+
+#[test]
+fn a_ticket_does_not_get_a_revoked_server_past_a_reloaded_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client_leaf = ca.issue(LeafSpec::named("client"));
+    let server_leaf = ca.issue(LeafSpec::named("server"));
+    let pair = pair_holding_a_ticket(&ca, dir.path(), &client_leaf, &server_leaf);
+
+    let crl_file = &pair.client_config.revocation.as_ref().unwrap().crl_file;
+    std::fs::write(crl_file, ca.crl(&[server_leaf.serial], 2999)).unwrap();
+    pair.client.reload().unwrap();
+
+    let (mut client, mut server) = pair.connect();
+    let (client_result, _) = exchange(&mut client, &mut server);
+
+    assert_rejected!(client_result, CertificateError::Revoked);
 }
