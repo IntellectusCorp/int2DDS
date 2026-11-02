@@ -2,6 +2,7 @@ use bytes::Bytes;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::{udp_locator_kind, LOCATOR_KIND_SHM};
+use crate::rtps::common::rtps_error_code::RtpsErrorCode;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
@@ -11,6 +12,7 @@ use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tls::identity::IDENTITY_LEN;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::rtps::transport::tokens::ListenerToken;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Waker};
@@ -24,6 +26,7 @@ pub(crate) struct UserUnicastListeningTask {
     user_logic: Arc<Option<UserLogic>>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
     identity_required: bool,
+    tls_policy: Option<Arc<TlsPolicyHandle>>,
 }
 
 impl UserUnicastListeningTask {
@@ -31,12 +34,14 @@ impl UserUnicastListeningTask {
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
         let identity_required = participant.identity().is_some();
+        let tls_policy = participant.tls_policy();
         Self {
             guid_prefix,
             participant: Arc::downgrade(&participant),
             user_logic,
             shutdown_waker: Arc::new(OnceLock::new()),
             identity_required,
+            tls_policy,
         }
     }
 
@@ -200,10 +205,15 @@ impl UserUnicastListeningTask {
     ) {
         let mut message_receiver =
             MessageReceiver::new_with_locator_kind(self.guid_prefix, &from_addr, locator_kind);
-        message_receiver.authenticate(self.identity_required, peer_identity);
-        let rtps_message = message_receiver.init(&bytes);
-        if rtps_message.is_err() {
-            error!("Failed to parse RTPS message from {:?}", from_addr);
+        message_receiver.authenticate(
+            self.identity_required,
+            peer_identity,
+            self.tls_policy.clone(),
+        );
+        if let Err(error) = message_receiver.init(&bytes) {
+            if error.code != RtpsErrorCode::UnauthenticatedSource {
+                error!("Failed to parse RTPS message from {:?}: {}", from_addr, error);
+            }
             return;
         }
         let mut user_logic =

@@ -20,6 +20,7 @@ use dashmap::{DashMap, DashSet};
 use log::{debug, info};
 
 use crate::rtps::transport::tls::identity::IDENTITY_LEN;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::{
     common::{
         builtin::topic::{
@@ -127,6 +128,7 @@ pub struct Participant {
     remote_same_host: Arc<DashMap<GuidPrefix, bool>>,
     pinned_egress_ipv4: OnceLock<Ipv4Addr>,
     identity: OnceLock<[u8; IDENTITY_LEN]>,
+    tls_policy: OnceLock<Arc<TlsPolicyHandle>>,
     terminated: Arc<AtomicBool>,
     wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
@@ -247,6 +249,7 @@ impl Participant {
             remote_same_host: Arc::new(DashMap::new()),
             pinned_egress_ipv4: OnceLock::new(),
             identity: OnceLock::new(),
+            tls_policy: OnceLock::new(),
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
             wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
@@ -565,6 +568,14 @@ impl Participant {
 
     pub(crate) fn identity(&self) -> Option<[u8; IDENTITY_LEN]> {
         self.identity.get().copied()
+    }
+
+    pub(crate) fn set_tls_policy(&self, policy: Arc<TlsPolicyHandle>) {
+        let _ = self.tls_policy.set(policy);
+    }
+
+    pub(crate) fn tls_policy(&self) -> Option<Arc<TlsPolicyHandle>> {
+        self.tls_policy.get().cloned()
     }
 
     /// Record the IPv4 every send of this participant is bound to.

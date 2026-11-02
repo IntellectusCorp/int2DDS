@@ -6,8 +6,10 @@
 
 pub(crate) mod client;
 pub mod config;
+pub(crate) mod events;
 pub(crate) mod identity;
 pub(crate) mod peer_lists;
+pub(crate) mod peers;
 pub(crate) mod policy;
 pub(crate) mod rejection;
 pub(crate) mod verifier;

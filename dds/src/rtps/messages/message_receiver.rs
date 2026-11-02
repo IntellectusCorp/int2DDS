@@ -8,6 +8,7 @@ use super::{
     submessages::info::{InfoDestination, InfoReply, InfoSource, InfoTimestamp},
 };
 use crate::rtps::transport::tls::identity::IDENTITY_LEN;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::{
     infrastructure::qos_policy::UserDataQosPolicy,
     rtps::common::parameters::{ParameterValue, PlCdrParameter as Parameter},
@@ -86,6 +87,7 @@ pub(crate) struct MessageReceiver {
     // Identity of the certificate the message's connection authenticated with.
     peer_identity: Option<[u8; IDENTITY_LEN]>,
     identity_required: bool,
+    tls_policy: Option<Arc<TlsPolicyHandle>>,
 }
 
 #[allow(dead_code)]
@@ -128,6 +130,7 @@ impl MessageReceiver {
             sender_addr: *from_addr,
             peer_identity: None,
             identity_required: false,
+            tls_policy: None,
         }
     }
 
@@ -137,9 +140,11 @@ impl MessageReceiver {
         &mut self,
         required: bool,
         peer_identity: Option<[u8; IDENTITY_LEN]>,
+        tls_policy: Option<Arc<TlsPolicyHandle>>,
     ) {
         self.identity_required = required;
         self.peer_identity = peer_identity;
+        self.tls_policy = tls_policy;
     }
 
     fn owns_prefix(&self, prefix: GuidPrefix) -> bool {
@@ -157,7 +162,12 @@ impl MessageReceiver {
                 .is_some_and(|message| message.header.guid_prefix() == guid.prefix())
     }
 
+    /// Reports the refusal to the TLS policy as well as building the error:
+    /// every refusal passes here, and most callers discard the error.
     pub(crate) fn unauthenticated(&self, prefix: GuidPrefix) -> RtpsError {
+        if let Some(policy) = &self.tls_policy {
+            policy.report_identity_mismatch(self.sender_addr, self.peer_identity, prefix);
+        }
         RtpsError::new(
             RtpsErrorCode::UnauthenticatedSource,
             format!(
@@ -832,9 +842,63 @@ mod tests {
     use super::*;
     use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
     use crate::rtps::common::locator::{LOCATOR_KIND_SHM, LOCATOR_KIND_UDP_V4};
+    use crate::rtps::transport::tls::events::{TlsEvent, TlsEvents};
+    use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
 
     fn receiver() -> MessageReceiver {
         MessageReceiver::new(GUIDPREFIX_UNKNOWN, &"127.0.0.1:0".parse().unwrap())
+    }
+
+    fn tls_policy(dir: &std::path::Path) -> Arc<TlsPolicyHandle> {
+        let ca = TestCa::root("ca");
+        let config = ca.issue(LeafSpec::named("own")).config(dir, &[&ca]);
+        Arc::new(TlsPolicyHandle::new(&config).unwrap())
+    }
+
+    fn header_with_prefix(prefix: GuidPrefix) -> Bytes {
+        let mut datagram = Vec::new();
+        datagram.extend_from_slice(b"RTPS");
+        datagram.extend_from_slice(&[2, 4, 1, 3]);
+        datagram.extend_from_slice(&prefix);
+        Bytes::from(datagram)
+    }
+
+    #[test]
+    fn a_prefix_the_certificate_does_not_own_is_refused_and_reported() {
+        const IDENTITY: [u8; IDENTITY_LEN] = [1, 2, 3, 4, 5, 6];
+        let dir = tempfile::tempdir().unwrap();
+        let policy = tls_policy(dir.path());
+        let from_addr: SocketAddr = "127.0.0.1:7410".parse().unwrap();
+        let forged: GuidPrefix = [9; 12];
+
+        let mut receiver = MessageReceiver::new(GUIDPREFIX_UNKNOWN, &from_addr);
+        receiver.authenticate(true, Some(IDENTITY), Some(Arc::clone(&policy)));
+        let error = receiver.init(&header_with_prefix(forged)).unwrap_err();
+
+        assert_eq!(error.code, RtpsErrorCode::UnauthenticatedSource);
+        assert_eq!(
+            policy.events().take().events,
+            [TlsEvent::IdentityMismatch {
+                address: from_addr,
+                identity: Some(IDENTITY),
+                claimed_prefix: forged,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_prefix_the_certificate_owns_reports_nothing() {
+        const IDENTITY: [u8; IDENTITY_LEN] = [1, 2, 3, 4, 5, 6];
+        let dir = tempfile::tempdir().unwrap();
+        let policy = tls_policy(dir.path());
+        let mut owned: GuidPrefix = [9; 12];
+        owned[2..8].copy_from_slice(&IDENTITY);
+
+        let mut receiver = receiver();
+        receiver.authenticate(true, Some(IDENTITY), Some(Arc::clone(&policy)));
+        assert!(receiver.init(&header_with_prefix(owned)).is_ok());
+
+        assert_eq!(policy.events().take(), TlsEvents::default());
     }
 
     #[test]

@@ -3,12 +3,16 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
+use crate::rtps::transport::tls::events::TlsEvents;
+use crate::rtps::transport::tls::peers::TlsPeer;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use bytes::Bytes;
 
@@ -183,6 +187,24 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// Re-read the TLS trust files and apply them to new connections. Fails
     /// with `Unsupported` on a transport that carries no TLS policy.
     fn reload_tls_policy(&self) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this transport has no TLS policy"))
+    }
+
+    /// The policy this transport enforces, for the layers that judge what
+    /// an authenticated peer sends. `None` when it carries no TLS policy.
+    fn tls_policy(&self) -> Option<Arc<TlsPolicyHandle>> {
+        None
+    }
+
+    /// Hands over what TLS refused since the last call. Fails with
+    /// `Unsupported` on a transport that carries no TLS policy.
+    fn take_tls_events(&self) -> io::Result<TlsEvents> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this transport has no TLS policy"))
+    }
+
+    /// The peers TLS authenticated and holds a connection to now. Fails with
+    /// `Unsupported` on a transport that carries no TLS policy.
+    fn tls_peers(&self) -> io::Result<Vec<TlsPeer>> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "this transport has no TLS policy"))
     }
 }

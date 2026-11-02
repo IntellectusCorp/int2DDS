@@ -6,14 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use log::{error, warn};
+use log::warn;
 use mio::{Events, Interest, Poll, Token};
 
 use super::{ConnectionKey, Slot, TcpSender};
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::dial::start_dial;
 use crate::rtps::transport::tcp::sync_connection::OutboundConnection;
-use crate::rtps::transport::tls::rejection::rejection_reason;
+use crate::rtps::transport::tls::rejection::{rejection_reason, TlsRejectionReason};
 
 /// How long the dial worker waits before checking whether it should still run.
 const DIAL_WORKER_IDLE_TICK: Duration = Duration::from_millis(200);
@@ -204,7 +204,8 @@ impl DialLoop {
             Some(error) => {
                 if let Some(Dialing { key, cancelled, .. }) = self.remove_dial(token) {
                     if let Some(reason) = rejection_reason(&error) {
-                        error!("TLS handshake with {} rejected: {reason} ({error})", key.0);
+                        warn!("TLS handshake with {} rejected: {reason} ({error})", key.0);
+                        sender.record_rejected_dial(key.0, reason);
                     }
                     let error = transport_io_error(
                         TransportErrorCode::TlsHandshakeFailed,
@@ -236,12 +237,14 @@ impl DialLoop {
                     }
                     Err(error) => {
                         let error = io::Error::new(io::ErrorKind::InvalidData, error);
-                        let reason = rejection_reason(&error).unwrap_or("certificate is invalid");
-                        error!(
+                        let reason = rejection_reason(&error)
+                            .unwrap_or(TlsRejectionReason::InvalidCertificate);
+                        warn!(
                             "TLS handshake with {} rejected by the reloaded policy: {reason} \
                              ({error})",
                             key.0
                         );
+                        sender.record_rejected_dial(key.0, reason);
                         let error = transport_io_error(
                             TransportErrorCode::TlsHandshakeFailed,
                             format!("TLS handshake with {} failed: {error}", key.0),

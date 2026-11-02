@@ -31,7 +31,10 @@ use crate::rtps::transport::tcp::sync_connection::{
 };
 use crate::rtps::transport::tls::client::TlsClient;
 use crate::rtps::transport::tls::config::TlsPolicy;
-use crate::rtps::transport::tls::rejection::rejection_reason;
+use crate::rtps::transport::tls::events::{TlsDirection, TlsEvent};
+use crate::rtps::transport::tls::identity::identity_from_cert;
+use crate::rtps::transport::tls::peers::TlsPeer;
+use crate::rtps::transport::tls::rejection::{rejection_reason, TlsRejectionReason};
 use crate::rtps::transport::TcpConfig;
 
 #[derive(Default)]
@@ -392,18 +395,59 @@ impl TcpSender {
                 };
                 let chain = &connection.verified_peer()?.chain;
                 let server_name = client.server_name_for(entry.key().0.ip());
+                let identity = chain.first().map(identity_from_cert);
                 policy
                     .check_dialed_peer(chain, &server_name)
                     .err()
-                    .map(|error| (*entry.key(), Arc::clone(connection), error))
+                    .map(|error| (*entry.key(), Arc::clone(connection), identity, error))
             })
             .collect();
-        for (key, connection, error) in refused {
+        for (key, connection, identity, error) in refused {
             let error = io::Error::new(io::ErrorKind::InvalidData, error);
-            let reason = rejection_reason(&error).unwrap_or("certificate is invalid");
+            let reason = rejection_reason(&error).unwrap_or(TlsRejectionReason::InvalidCertificate);
             error!("TLS peer {} fails the reloaded policy: {reason} ({error})", key.0);
+            client.record(TlsEvent::ClosedByPolicy {
+                address: key.0,
+                direction: TlsDirection::Dialed,
+                identity,
+                reason,
+            });
             connection.close();
             self.evict_connection(key, &connection);
+        }
+    }
+
+    /// One peer is reached over a connection per frame kind, listed once. Only
+    /// a send would notice a peer that closed, so each connection is asked here.
+    pub(crate) fn tls_peers(&self) -> Vec<TlsPeer> {
+        let live: Vec<_> = self
+            .slots
+            .iter()
+            .filter_map(|entry| match entry.value() {
+                Slot::Live(connection) => Some((*entry.key(), Arc::clone(connection))),
+                Slot::Connecting { .. } => None,
+            })
+            .collect();
+        let mut peers = Vec::new();
+        for (key, connection) in live {
+            let Some(leaf) = connection.verified_peer().and_then(|peer| peer.chain.first()) else {
+                continue;
+            };
+            if connection.peer_is_gone() {
+                connection.close();
+                self.evict_connection(key, &connection);
+            } else {
+                peers.push(TlsPeer::new(key.0, TlsDirection::Dialed, leaf));
+            }
+        }
+        peers.sort_by_key(|peer| (peer.address, peer.identity));
+        peers.dedup_by_key(|peer| (peer.address, peer.identity));
+        peers
+    }
+
+    fn record_rejected_dial(&self, address: SocketAddr, reason: TlsRejectionReason) {
+        if let Some(client) = &self.tls {
+            client.record(TlsEvent::Rejected { address, direction: TlsDirection::Dialed, reason });
         }
     }
 
@@ -1148,8 +1192,9 @@ mod tests {
         );
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer_address = listener.local_addr().unwrap();
         let message = test_message(0x02, b"over tls");
-        sender.send_to(listener.local_addr().unwrap(), TcpFrameKind::UserData, &message).unwrap();
+        sender.send_to(peer_address, TcpFrameKind::UserData, &message).unwrap();
         let socket = accept_within(&listener, Duration::from_secs(3)).unwrap();
         // The ClientHello has gone out, so the session follows the policy before the reload.
         let mut hello = [0u8; 1];
@@ -1165,6 +1210,186 @@ mod tests {
         let mut received = vec![0u8; test_framed(&message).len()];
         assert!(stream.read_exact(&mut received).is_err());
         assert_eq!(sender.connection_count(), 0);
+        assert_eq!(
+            events_within(&policy, Duration::from_secs(3)).events,
+            [TlsEvent::Rejected {
+                address: peer_address,
+                direction: TlsDirection::Dialed,
+                reason: TlsRejectionReason::Revoked,
+            }]
+        );
+
+        sender.shutdown();
+    }
+
+    fn events_within(
+        policy: &crate::rtps::transport::tls::policy::TlsPolicyHandle,
+        timeout: Duration,
+    ) -> crate::rtps::transport::tls::events::TlsEvents {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let taken = policy.events().take();
+            if !taken.events.is_empty() {
+                return taken;
+            }
+            assert!(Instant::now() < deadline, "no TLS event was recorded");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_peer_reached_for_both_frame_kinds_is_listed_once() {
+        use crate::rtps::transport::tls::policy::TlsPolicyHandle;
+        use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let peer = ca.issue(LeafSpec::named("peer"));
+        let own = ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]);
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let config = TcpConfig { connect_timeout: Duration::from_secs(3), ..TcpConfig::default() };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()));
+        let sender = TcpSender::new(
+            0,
+            0,
+            vec![],
+            0,
+            None,
+            [0; 12],
+            Some(TlsClient::new(Arc::clone(&policy)).unwrap()),
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let message = test_message(0x02, b"over tls");
+        let mut streams = Vec::new();
+        for kind in [TcpFrameKind::UserData, TcpFrameKind::Discovery] {
+            sender.send_to(address, kind, &message).unwrap();
+            let socket = accept_within(&listener, Duration::from_secs(3)).unwrap();
+            let server_config = peer.config(dir.path(), &[&ca]).build_server_config().unwrap();
+            let mut stream = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(server_config).unwrap(),
+                socket,
+            );
+            let mut received = vec![0u8; test_framed(&message).len()];
+            stream.read_exact(&mut received).unwrap();
+            streams.push(stream);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while sender.connection_count() < 2 {
+            assert!(Instant::now() < deadline, "both connections should turn live");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let peers = sender.tls_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, address);
+        assert_eq!(peers[0].direction, TlsDirection::Dialed);
+        assert_eq!(peers[0].identity, identity_from_cert(&peer.der.clone().into()));
+
+        sender.shutdown();
+    }
+
+    #[test]
+    fn a_peer_that_hung_up_leaves_the_list_without_waiting_for_a_send() {
+        use crate::rtps::transport::tls::policy::TlsPolicyHandle;
+        use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let peer = ca.issue(LeafSpec::named("peer"));
+        let own = ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]);
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let config = TcpConfig { connect_timeout: Duration::from_secs(3), ..TcpConfig::default() };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()));
+        let sender = TcpSender::new(
+            0,
+            0,
+            vec![],
+            0,
+            None,
+            [0; 12],
+            Some(TlsClient::new(Arc::clone(&policy)).unwrap()),
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let message = test_message(0x02, b"over tls");
+        sender.send_to(listener.local_addr().unwrap(), TcpFrameKind::UserData, &message).unwrap();
+        let socket = accept_within(&listener, Duration::from_secs(3)).unwrap();
+        let server_config = peer.config(dir.path(), &[&ca]).build_server_config().unwrap();
+        let mut stream =
+            rustls::StreamOwned::new(rustls::ServerConnection::new(server_config).unwrap(), socket);
+        let mut received = vec![0u8; test_framed(&message).len()];
+        stream.read_exact(&mut received).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while sender.tls_peers().is_empty() {
+            assert!(Instant::now() < deadline, "the connection should turn live");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        drop(stream);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !sender.tls_peers().is_empty() {
+            assert!(Instant::now() < deadline, "a closed peer stayed on the list");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(sender.connection_count(), 0);
+
+        sender.shutdown();
+    }
+
+    #[test]
+    fn a_dial_refused_at_its_handshake_is_recorded() {
+        use crate::rtps::transport::tls::policy::TlsPolicyHandle;
+        use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let stranger_ca = TestCa::root("stranger");
+        let stranger = stranger_ca.issue(LeafSpec::named("stranger"));
+        let own = ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]);
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let config = TcpConfig { connect_timeout: Duration::from_secs(3), ..TcpConfig::default() };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()));
+        let sender = TcpSender::new(
+            0,
+            0,
+            vec![],
+            0,
+            None,
+            [0; 12],
+            Some(TlsClient::new(Arc::clone(&policy)).unwrap()),
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let message = test_message(0x02, b"over tls");
+        sender.send_to(address, TcpFrameKind::UserData, &message).unwrap();
+        let socket = accept_within(&listener, Duration::from_secs(3)).unwrap();
+        let server_config =
+            stranger.config(dir.path(), &[&stranger_ca]).build_server_config().unwrap();
+        let mut stream =
+            rustls::StreamOwned::new(rustls::ServerConnection::new(server_config).unwrap(), socket);
+        let mut received = [0u8; 1];
+        assert!(stream.read_exact(&mut received).is_err());
+
+        assert_eq!(
+            events_within(&policy, Duration::from_secs(3)).events,
+            [TlsEvent::Rejected {
+                address,
+                direction: TlsDirection::Dialed,
+                reason: TlsRejectionReason::UntrustedIssuer,
+            }]
+        );
 
         sender.shutdown();
     }
@@ -1226,6 +1451,15 @@ mod tests {
         sender.recheck_tls_peers(&policy.current());
 
         assert_eq!(sender.connection_count(), 1);
+        assert_eq!(
+            policy.events().take().events,
+            [TlsEvent::ClosedByPolicy {
+                address: peers[0].0,
+                direction: TlsDirection::Dialed,
+                identity: Some(identity_from_cert(&revoked.der.clone().into())),
+                reason: TlsRejectionReason::Revoked,
+            }]
+        );
         let mut rest = [0u8; 1];
         assert!(!matches!(peers[0].1.read(&mut rest), Ok(read) if read > 0));
         let (kept_address, kept_stream) = &mut peers[1];

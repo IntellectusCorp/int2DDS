@@ -11,9 +11,10 @@ use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
 use crate::rtps::transport::tcp::framing::{
     TcpBufferPool, TcpFrame, TcpFrameKind, TcpFrameReadState, TcpReadOutcome,
 };
+use crate::rtps::transport::tls::events::{TlsDirection, TlsEvent};
 use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
 use crate::rtps::transport::tls::policy::{TlsPolicyHandle, VerifiedPeer};
-use crate::rtps::transport::tls::rejection::rejection_reason;
+use crate::rtps::transport::tls::rejection::{rejection_reason, TlsRejectionReason};
 use crate::rtps::transport::tokens::ListenerToken;
 
 const FIRST_CONNECTION_TOKEN: usize = 100_000;
@@ -193,7 +194,7 @@ impl TcpListener {
                     match rustls::ServerConnection::new(Arc::clone(&policy.server)) {
                         Ok(session) => (Some(session), policy.generation),
                         Err(error) => {
-                            warn!("TCP TLS session setup for {source} failed: {error}");
+                            error!("TCP TLS session setup for {source} failed: {error}");
                             continue;
                         }
                     }
@@ -303,7 +304,16 @@ impl TcpListener {
                             }
                             None => {
                                 match registry.reregister(&mut connection.stream, token, interest) {
-                                    Ok(()) => result,
+                                    Ok(()) => {
+                                        let leaf = connection
+                                            .peer
+                                            .as_ref()
+                                            .and_then(|peer| peer.chain.first());
+                                        if let (Some(policy), Some(leaf)) = (tls_policy, leaf) {
+                                            policy.add_accepted_peer(source, leaf.clone());
+                                        }
+                                        result
+                                    }
                                     Err(error) => Err(error),
                                 }
                             }
@@ -325,7 +335,14 @@ impl TcpListener {
         }
         if let Err(error) = &read_result {
             if let Some(reason) = rejection_reason(error) {
-                error!("TLS handshake from {source} rejected: {reason} ({error})");
+                warn!("TLS handshake from {source} rejected: {reason} ({error})");
+                if let Some(policy) = tls_policy {
+                    policy.events().record(TlsEvent::Rejected {
+                        address: source,
+                        direction: TlsDirection::Accepted,
+                        reason,
+                    });
+                }
             }
         }
         let terminal = matches!(read_result, Ok(TcpReadOutcome::Closed) | Err(_));
@@ -338,7 +355,7 @@ impl TcpListener {
             });
         }
         if terminal {
-            if let Some(mut connection) = self.connections.remove(&token) {
+            if let Some(mut connection) = self.remove_connection(token) {
                 let _ = registry.deregister(&mut connection.stream);
             }
         }
@@ -350,6 +367,14 @@ impl TcpListener {
             Ok(TcpReadOutcome::WouldBlock | TcpReadOutcome::Closed) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn remove_connection(&mut self, token: Token) -> Option<TcpReadConnection> {
+        let connection = self.connections.remove(&token)?;
+        if let Some(policy) = &self.tls_policy {
+            policy.remove_accepted_peer(connection.source);
+        }
+        Some(connection)
     }
 
     pub(crate) fn expire_connections(&mut self, registry: &mio::Registry, now: Instant) -> usize {
@@ -365,17 +390,38 @@ impl TcpListener {
             .collect();
 
         for token in &expired_tokens {
-            if let Some(mut connection) = self.connections.remove(token) {
+            if let Some(mut connection) = self.remove_connection(*token) {
+                if connection.tls_handshake_deadline.is_some() {
+                    warn!("TLS handshake from {} timed out", connection.source);
+                }
                 let _ = registry.deregister(&mut connection.stream);
             }
         }
         expired_tokens.len()
     }
 
-    /// Closes every established TLS connection whose peer the policy in force
-    /// no longer accepts. Cheap to call on every poll, since the connections
-    /// are judged only once per reload.
+    fn close_forged_peers(&mut self, registry: &mio::Registry) {
+        let Some(policy) = &self.tls_policy else {
+            return;
+        };
+        for address in policy.take_forged_peers() {
+            let token = self
+                .connections
+                .iter()
+                .find_map(|(token, connection)| (connection.source == address).then_some(*token));
+            if let Some(mut connection) = token.and_then(|token| self.remove_connection(token)) {
+                let _ = registry.deregister(&mut connection.stream);
+                let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+            }
+            self.ready_messages.retain(|message| message.source != address);
+        }
+    }
+
+    /// Closes every established TLS connection caught forging its identity, or
+    /// whose peer the policy in force no longer accepts. Cheap to call on every
+    /// poll, since the connections are judged only once per reload.
     pub(crate) fn recheck_tls_peers(&mut self, registry: &mio::Registry) {
+        self.close_forged_peers(registry);
         let Some(handle) = &self.tls_policy else {
             return;
         };
@@ -384,6 +430,7 @@ impl TcpListener {
             return;
         }
         self.checked_generation = policy.generation;
+        let handle = Arc::clone(handle);
         let refused: Vec<_> = self
             .connections
             .iter()
@@ -393,12 +440,18 @@ impl TcpListener {
             })
             .collect();
         for (token, error) in refused {
-            let Some(mut connection) = self.connections.remove(&token) else {
+            let Some(mut connection) = self.remove_connection(token) else {
                 continue;
             };
             let error = io::Error::new(io::ErrorKind::InvalidData, error);
-            let reason = rejection_reason(&error).unwrap_or("certificate is invalid");
+            let reason = rejection_reason(&error).unwrap_or(TlsRejectionReason::InvalidCertificate);
             error!("TLS peer {} fails the reloaded policy: {reason} ({error})", connection.source);
+            handle.events().record(TlsEvent::ClosedByPolicy {
+                address: connection.source,
+                direction: TlsDirection::Accepted,
+                identity: connection.peer_identity,
+                reason,
+            });
             let _ = registry.deregister(&mut connection.stream);
             let _ = connection.stream.shutdown(std::net::Shutdown::Both);
         }
@@ -412,6 +465,9 @@ impl TcpListener {
                     first_error = Some(error);
                 }
             }
+        }
+        if let Some(policy) = &self.tls_policy {
+            policy.clear_accepted_peers();
         }
         if let Err(error) = registry.deregister(&mut self.socket) {
             if first_error.is_none() {
@@ -886,6 +942,18 @@ mod tests {
             }
         }
         assert_eq!(delivered, 0);
+        let taken = policy.events().take();
+        assert!(
+            matches!(
+                taken.events.as_slice(),
+                [TlsEvent::Rejected {
+                    direction: TlsDirection::Accepted,
+                    reason: TlsRejectionReason::Revoked,
+                    ..
+                }]
+            ),
+            "{taken:?}"
+        );
 
         let connection = client.join().unwrap();
         listener.deregister_all(poll.registry()).unwrap();
@@ -961,6 +1029,7 @@ mod tests {
         let connections: Vec<_> =
             clients.into_iter().map(|client| client.join().unwrap()).collect();
         assert_eq!(listener.connection_count(), 2);
+        assert_eq!(policy.accepted_peers().len(), 2);
 
         let crl_file = &own.revocation.as_ref().unwrap().crl_file;
         std::fs::write(crl_file, ca.crl(&[revoked.serial], 2999)).unwrap();
@@ -970,11 +1039,187 @@ mod tests {
         assert_eq!(listener.connection_count(), 1);
         let survivor = listener.connections.values().next().unwrap();
         assert_eq!(survivor.peer.as_ref().unwrap().chain[0].as_ref(), kept.der.as_slice());
+        let taken = policy.events().take();
+        let revoked_identity = identity_from_cert(&revoked.der.clone().into());
+        assert!(
+            matches!(
+                taken.events.as_slice(),
+                [TlsEvent::ClosedByPolicy {
+                    direction: TlsDirection::Accepted,
+                    identity: Some(identity),
+                    reason: TlsRejectionReason::Revoked,
+                    ..
+                }] if *identity == revoked_identity
+            ),
+            "{taken:?}"
+        );
+        let peers = policy.accepted_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].identity, identity_from_cert(&kept.der.clone().into()));
+        assert_eq!(peers[0].direction, TlsDirection::Accepted);
         let deadline = Instant::now() + Duration::from_secs(3);
         while connections[0].send(&frame).is_ok() {
             assert!(Instant::now() < deadline, "the refused peer should see its connection close");
             std::thread::sleep(Duration::from_millis(10));
         }
+
+        listener.deregister_all(poll.registry()).unwrap();
+        assert!(policy.accepted_peers().is_empty());
+        drop(connections);
+        drop(listener);
+        drop(poll);
+    }
+
+    #[test]
+    fn an_accepted_peer_leaves_the_list_when_it_hangs_up() {
+        use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let peer = ca.issue(LeafSpec::named("peer"));
+        let own = ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]);
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::clone(&policy)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-peer"));
+        let config = peer.config(dir.path(), &[&ca]);
+        let sent_frame = frame.clone();
+        let client = std::thread::spawn(move || {
+            let connection = OutboundConnection::connect(
+                address,
+                &TcpSocketTuning::default(),
+                Some(&config),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(connection.send(&sent_frame).unwrap(), SendOutcome::Sent);
+            connection
+        });
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut pump = |listener: &mut TcpListener, poll: &mut Poll| {
+            assert!(Instant::now() < deadline, "timed out driving the listener");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else {
+                    while let Ok(Some(_)) = listener.get_message(event.token(), poll.registry()) {}
+                }
+            }
+        };
+
+        while policy.accepted_peers().is_empty() {
+            pump(&mut listener, &mut poll);
+        }
+        let connection = client.join().unwrap();
+        let peers = policy.accepted_peers();
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].subject.as_ref().unwrap().contains("peer"));
+
+        drop(connection);
+        while !policy.accepted_peers().is_empty() {
+            pump(&mut listener, &mut poll);
+        }
+        assert_eq!(listener.connection_count(), 0);
+
+        listener.deregister_all(poll.registry()).unwrap();
+        drop(listener);
+        drop(poll);
+    }
+
+    #[test]
+    fn a_connection_that_forged_its_prefix_is_closed() {
+        use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let forger = ca.issue(LeafSpec::named("forger"));
+        let honest = ca.issue(LeafSpec::named("honest"));
+        let own = ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]);
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::clone(&policy)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-forged"));
+        let clients: Vec<_> = [&forger, &honest]
+            .into_iter()
+            .map(|leaf| {
+                let config = leaf.config(dir.path(), &[&ca]);
+                let frame = frame.clone();
+                std::thread::spawn(move || {
+                    let connection = OutboundConnection::connect(
+                        address,
+                        &TcpSocketTuning::default(),
+                        Some(&config),
+                        Duration::from_secs(5),
+                        Duration::from_secs(5),
+                    )
+                    .unwrap();
+                    assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+                    connection
+                })
+            })
+            .collect();
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received = 0;
+        while received < 2 {
+            assert!(Instant::now() < deadline, "timed out waiting for both TLS frames");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else {
+                    while let Ok(Some(_)) = listener.get_message(event.token(), poll.registry()) {
+                        received += 1;
+                    }
+                }
+            }
+        }
+        let connections: Vec<_> =
+            clients.into_iter().map(|client| client.join().unwrap()).collect();
+
+        let forged_identity = identity_from_cert(&forger.der.clone().into());
+        let forged_source = policy
+            .accepted_peers()
+            .into_iter()
+            .find(|peer| peer.identity == forged_identity)
+            .unwrap()
+            .address;
+        policy.report_identity_mismatch(forged_source, Some(forged_identity), [9; 12]);
+        listener.recheck_tls_peers(poll.registry());
+
+        assert_eq!(listener.connection_count(), 1);
+        let peers = policy.accepted_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].identity, identity_from_cert(&honest.der.clone().into()));
 
         listener.deregister_all(poll.registry()).unwrap();
         drop(connections);

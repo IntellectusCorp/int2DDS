@@ -3,7 +3,7 @@
 
 use std::{
     io,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
@@ -381,6 +381,7 @@ fn a_config_read_from_properties_requires_client_certificates_by_default() {
 /// stream hands it to the transport.
 fn reason_for(result: Result<(), rustls::Error>) -> Option<&'static str> {
     rejection_reason(&io::Error::new(io::ErrorKind::InvalidData, result.unwrap_err()))
+        .map(|reason| reason.as_str())
 }
 
 #[test]
@@ -926,4 +927,24 @@ fn a_ticket_does_not_get_a_revoked_server_past_a_reloaded_client() {
     let (client_result, _) = exchange(&mut client, &mut server);
 
     assert_rejected!(client_result, CertificateError::Revoked);
+}
+
+#[test]
+fn a_forging_connection_reports_once_until_it_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let leaf = ca.issue(LeafSpec::named("own"));
+    let policy = TlsPolicyHandle::new(&leaf.config(dir.path(), &[&ca])).unwrap();
+    let address: SocketAddr = "127.0.0.1:7410".parse().unwrap();
+    let report = || policy.report_identity_mismatch(address, None, [9; 12]);
+
+    policy.add_accepted_peer(address, leaf.der.clone().into());
+    report();
+    report();
+    assert_eq!(policy.events().take().events.len(), 1);
+
+    policy.remove_accepted_peer(address);
+    policy.add_accepted_peer(address, leaf.der.clone().into());
+    report();
+    assert_eq!(policy.events().take().events.len(), 1);
 }

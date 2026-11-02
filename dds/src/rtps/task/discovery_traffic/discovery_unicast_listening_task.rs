@@ -15,6 +15,7 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tls::identity::IDENTITY_LEN;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::rtps::transport::tokens::ListenerToken;
 use crate::serialize::pl_cdr::InlineQosParameters;
 use log::{debug, error, info, warn};
@@ -31,6 +32,7 @@ pub(crate) struct DiscoveryUnicastListeningTask {
     sedp_logic: Arc<Option<SedpLogic>>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
     identity_required: bool,
+    tls_policy: Option<Arc<TlsPolicyHandle>>,
 }
 
 impl DiscoveryUnicastListeningTask {
@@ -38,6 +40,7 @@ impl DiscoveryUnicastListeningTask {
         let (spdp_logic, sedp_logic, _) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
         let identity_required = participant.identity().is_some();
+        let tls_policy = participant.tls_policy();
         let domain_id = participant.domain_id();
         Self {
             guid_prefix,
@@ -47,6 +50,7 @@ impl DiscoveryUnicastListeningTask {
             sedp_logic,
             shutdown_waker: Arc::new(OnceLock::new()),
             identity_required,
+            tls_policy,
         }
     }
 
@@ -135,7 +139,11 @@ impl DiscoveryUnicastListeningTask {
     ) -> RtpsResult<()> {
         let mut message_receiver =
             MessageReceiver::new_with_locator_kind(self.guid_prefix, &from_addr, locator_kind);
-        message_receiver.authenticate(self.identity_required, peer_identity);
+        message_receiver.authenticate(
+            self.identity_required,
+            peer_identity,
+            self.tls_policy.clone(),
+        );
         let rtps_message = message_receiver.init(&bytes)?;
 
         // Ignore messages sent by myself

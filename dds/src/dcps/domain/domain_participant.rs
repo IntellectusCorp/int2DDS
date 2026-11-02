@@ -124,6 +124,7 @@ use crate::{
         type_support::{DdsType, TypeSupport},
     },
 };
+use crate::{TlsEvents, TlsPeer};
 
 #[derive(Clone)]
 pub struct DomainParticipant {
@@ -3211,6 +3212,34 @@ impl DomainParticipant {
         let bridge =
             bridge.as_ref().ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?;
         bridge.reload_tls_policy().map_err(|e| match e.kind() {
+            std::io::ErrorKind::Unsupported => DdsError::PreconditionNotMet,
+            _ => DdsError::Error(e.to_string()),
+        })
+    }
+
+    /// Takes the TLS refusals recorded since the last call: refused handshakes and connections
+    /// closed by a reloaded policy. Only the latest ones are kept, and `dropped` counts the rest.
+    /// `PreconditionNotMet` when TLS is off.
+    pub fn take_tls_events(&self) -> DdsResult<TlsEvents> {
+        let _operation = self.lifecycle.begin_operation()?;
+        let bridge = self.get_dcps_bridge()?;
+        let bridge =
+            bridge.as_ref().ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?;
+        bridge.take_tls_events().map_err(|e| match e.kind() {
+            std::io::ErrorKind::Unsupported => DdsError::PreconditionNotMet,
+            _ => DdsError::Error(e.to_string()),
+        })
+    }
+
+    /// The peers TLS authenticated and holds a connection to: a dialed peer once per address, an
+    /// accepted one once per connection. A peer that vanished without closing stays listed until
+    /// its connection fails. `PreconditionNotMet` when TLS is off.
+    pub fn get_tls_peers(&self) -> DdsResult<Vec<TlsPeer>> {
+        let _operation = self.lifecycle.begin_operation()?;
+        let bridge = self.get_dcps_bridge()?;
+        let bridge =
+            bridge.as_ref().ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?;
+        bridge.tls_peers().map_err(|e| match e.kind() {
             std::io::ErrorKind::Unsupported => DdsError::PreconditionNotMet,
             _ => DdsError::Error(e.to_string()),
         })
