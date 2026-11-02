@@ -733,3 +733,67 @@ fn only_a_successful_reload_starts_a_new_generation() {
     assert_eq!(policy.current().generation, 1);
     assert_eq!(client.connect(PEER).unwrap().1, 1);
 }
+
+#[test]
+fn a_reload_refuses_a_broken_ca_file_and_keeps_trusting_the_old_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let client_policy = Arc::new(TlsPolicyHandle::new(&client).unwrap());
+    let server_config = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+    let valid = ca.pem();
+
+    for (kind, broken) in
+        [("not PEM", "not a certificate"), ("empty", ""), ("truncated", &valid[..valid.len() / 2])]
+    {
+        std::fs::write(&server_config.ca_file, broken).unwrap();
+        assert!(server_policy.reload().is_err(), "{kind} CA file was accepted");
+        assert_eq!(server_policy.current().generation, 0, "{kind} CA file replaced the policy");
+    }
+    std::fs::remove_file(&server_config.ca_file).unwrap();
+    assert!(server_policy.reload().is_err(), "a missing CA file was accepted");
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_reload_refuses_broken_lists_and_keeps_enforcing_the_old_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let allowed = ca.issue(LeafSpec::named("allowed"));
+    let denied = ca.issue(LeafSpec::named("denied"));
+    let allowed_policy =
+        Arc::new(TlsPolicyHandle::new(&allowed.config(dir.path(), &[&ca])).unwrap());
+    let denied_policy = Arc::new(TlsPolicyHandle::new(&denied.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_lists(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[&allowed, &denied],
+        &[&denied],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    let lists =
+        [server_config.allow_file.clone().unwrap(), server_config.deny_file.clone().unwrap()];
+    for list in &lists {
+        let valid = std::fs::read(list).unwrap();
+        for (kind, broken) in [("malformed", "not a fingerprint"), ("empty", "")] {
+            std::fs::write(list, broken).unwrap();
+            assert!(server_policy.reload().is_err(), "{kind} {list:?} was accepted");
+            assert_eq!(
+                server_policy.current().generation,
+                0,
+                "{kind} {list:?} replaced the policy"
+            );
+        }
+        std::fs::remove_file(list).unwrap();
+        assert!(server_policy.reload().is_err(), "a missing {list:?} was accepted");
+        std::fs::write(list, valid).unwrap();
+    }
+
+    let outcome = handshake_between(&allowed_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+    let outcome = handshake_between(&denied_policy, &server_policy);
+    assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+}

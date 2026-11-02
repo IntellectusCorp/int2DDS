@@ -11,6 +11,7 @@
 
 use std::{fs::File, io, io::BufReader, path::PathBuf, sync::Arc};
 
+use log::error;
 use rustls::{
     client::{danger::ServerCertVerifier, WebPkiServerVerifier},
     pki_types::{
@@ -139,6 +140,12 @@ pub(crate) struct TlsPolicy {
     /// Absent without mutual TLS, where an accepted peer presents nothing.
     pub(crate) accepted_peer_verifier: Option<Arc<dyn ClientCertVerifier>>,
     pub(crate) generation: u64,
+}
+
+impl OwnCertificate {
+    pub(crate) fn leaf(&self) -> &CertificateDer<'static> {
+        &self.cert_chain[0]
+    }
 }
 
 impl TlsPolicy {
@@ -283,7 +290,14 @@ impl TlsConfig {
         Ok(TrustFiles {
             roots: Arc::new(self.load_root_store()?),
             crls: match &self.revocation {
-                Some(revocation) => revocation.load_crls()?,
+                Some(revocation) => {
+                    let crls = revocation.load_crls()?;
+                    let now = UnixTime::now().as_secs() as i64;
+                    for problem in crl_expiry_problems(&crls, now) {
+                        error!("{:?}: {problem}", revocation.crl_file);
+                    }
+                    crls
+                }
                 None => Vec::new(),
             },
             lists: PeerLists::load(self)?.map(Arc::new),
@@ -375,6 +389,25 @@ impl TlsConfig {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+/// CRLs past their next update at `now`, described for the log. The date comes
+/// from a file whose signature is checked only when a certificate is judged, so
+/// it must never decide a connection.
+fn crl_expiry_problems(crls: &[CertificateRevocationListDer<'_>], now: i64) -> Vec<String> {
+    crls.iter()
+        .enumerate()
+        .filter_map(|(index, crl)| {
+            let next_update = x509_parser::parse_x509_crl(crl.as_ref())
+                .ok()
+                .and_then(|(_, parsed)| parsed.next_update());
+            match next_update {
+                Some(time) if time.timestamp() > now => None,
+                Some(time) => Some(format!("CRL #{} is past its next update {time}", index + 1)),
+                None => Some(format!("CRL #{} has no readable next update", index + 1)),
+            }
+        })
+        .collect()
+}
+
 fn require_property<'a>(p: &'a PropertyQosPolicy, key: &'static str) -> io::Result<&'a str> {
     p.find_property(key).ok_or_else(|| {
         transport_io_error(
@@ -407,6 +440,7 @@ fn rustls_to_io(e: rustls::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::tls::test_pki::TestCa;
 
     fn pq(pairs: &[(&str, &str)]) -> PropertyQosPolicy {
         let mut p = PropertyQosPolicy::default();
@@ -414,6 +448,28 @@ mod tests {
             p.add_property(*k, *v, false);
         }
         p
+    }
+
+    #[test]
+    fn only_crls_past_their_next_update_are_reported() {
+        let ca = TestCa::root("ca");
+        let crl_der =
+            |pem: String| rustls_pemfile::crls(&mut pem.as_bytes()).next().unwrap().unwrap();
+        let crls = [crl_der(ca.crl(&[], 2999)), crl_der(ca.crl(&[], 2002))];
+
+        let problems = crl_expiry_problems(&crls, UnixTime::now().as_secs() as i64);
+
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].starts_with("CRL #2 is past its next update"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_crl_that_cannot_be_read_is_reported_rather_than_passed_over() {
+        let unreadable = CertificateRevocationListDer::from(vec![0xAAu8; 16]);
+
+        let problems = crl_expiry_problems(&[unreadable], 0);
+
+        assert_eq!(problems, ["CRL #1 has no readable next update"]);
     }
 
     #[test]

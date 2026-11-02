@@ -497,10 +497,21 @@ mod tests {
         let server_config = config.build_server_config().unwrap();
         let frame = b"before the close".to_vec();
         let frame_len = frame.len();
+        let (first_send_done, wait_for_first_send) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
+            let (mut socket, _) = listener.accept().unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut connection = rustls::ServerConnection::new(server_config).unwrap();
+            while !connection.wants_write() {
+                connection.read_tls(&mut socket).unwrap();
+                connection.process_new_packets().unwrap();
+            }
+            while connection.wants_write() {
+                connection.write_tls(&mut socket).unwrap();
+            }
+            // The tickets follow the client's Finished, so leaving it unread here
+            // keeps them from arriving before the first send has looked for a close.
+            wait_for_first_send.recv().unwrap();
             let mut tls = rustls::StreamOwned::new(connection, socket);
             let mut received = vec![0u8; frame_len];
             tls.read_exact(&mut received).unwrap();
@@ -519,6 +530,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+        first_send_done.send(()).unwrap();
         assert_eq!(server.join().unwrap(), frame);
 
         let mut probe = [0u8; 1];

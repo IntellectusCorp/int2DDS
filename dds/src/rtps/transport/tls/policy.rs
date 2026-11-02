@@ -45,6 +45,10 @@ impl TlsPolicyHandle {
         &self.tls
     }
 
+    pub(crate) fn own_leaf(&self) -> &CertificateDer<'static> {
+        self.own.leaf()
+    }
+
     pub(crate) fn current(&self) -> Arc<TlsPolicy> {
         self.current.load_full()
     }

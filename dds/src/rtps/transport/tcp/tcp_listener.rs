@@ -439,6 +439,7 @@ mod tests {
 
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
     use crate::rtps::transport::tcp::sync_connection::{OutboundConnection, SendOutcome};
+    use crate::rtps::transport::tls::client::TlsClient;
     use crate::rtps::transport::tls::TlsConfig;
 
     #[test]
@@ -837,17 +838,23 @@ mod tests {
         let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-in-flight"));
         let config = peer.config(dir.path(), &[&ca]);
         let client = std::thread::spawn(move || {
-            let connection = OutboundConnection::connect(
-                address,
-                &TcpSocketTuning::default(),
-                Some(&config),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-            );
-            if let Ok(connection) = &connection {
-                let _ = connection.send(&frame);
+            let policy = Arc::new(TlsPolicyHandle::new(&config).unwrap());
+            let (mut session, _) = TlsClient::new(policy).unwrap().connect(address.ip()).unwrap();
+            let mut socket = std::net::TcpStream::connect(address).unwrap();
+            while session.wants_write() {
+                session.write_tls(&mut socket).unwrap();
             }
-            connection
+            while session.is_handshaking() {
+                assert_ne!(session.read_tls(&mut socket).unwrap(), 0, "server hung up");
+                session.process_new_packets().unwrap();
+            }
+            // Queued together, so the frame reaches the listener in the same
+            // read as the last handshake message.
+            session.writer().write_all(&frame).unwrap();
+            while session.wants_write() {
+                session.write_tls(&mut socket).unwrap();
+            }
+            socket
         });
 
         let mut events = Events::with_capacity(8);

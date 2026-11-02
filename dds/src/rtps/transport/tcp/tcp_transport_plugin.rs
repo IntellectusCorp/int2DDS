@@ -174,16 +174,15 @@ impl TcpTransportPlugin {
             }),
         };
 
-        // Without verify_peer a client never presents a certificate, so a peer
-        // could not check the prefix and binding it would only refuse traffic.
-        let identity = match tls_config.as_ref() {
-            Some(tls) if tls.verify_peer => tls.load_cert_chain()?.first().map(identity_from_cert),
-            _ => None,
-        };
-
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let tls_policy = tls_config.as_deref().map(TlsPolicyHandle::new).transpose()?.map(Arc::new);
+        // Without verify_peer a client never presents a certificate, so a peer
+        // could not check the prefix and binding it would only refuse traffic.
+        let identity = tls_policy
+            .as_ref()
+            .filter(|policy| policy.config().verify_peer)
+            .map(|policy| identity_from_cert(policy.own_leaf()));
         let (listener, participant_id) = Self::bind_listener(
             domain_id,
             participant_id,
@@ -1642,6 +1641,62 @@ mod tests {
         second.close();
         plain.close();
         unverified.close();
+    }
+
+    #[test]
+    fn identity_matches_the_certificate_presented_while_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert_for = |name: &str| {
+            rcgen::CertificateParams::new(vec![name.to_string()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap()
+                .pem()
+        };
+        let cert_file = dir.path().join("cert.pem");
+        let key_file = dir.path().join("key.pem");
+        let (first, second) = (cert_for("first"), cert_for("second"));
+        std::fs::write(&cert_file, &first).unwrap();
+        std::fs::write(&key_file, key.serialize_pem()).unwrap();
+        let tls = Arc::new(TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file: cert_file.clone(),
+            key_file,
+            server_name: None,
+            verify_peer: true,
+            revocation: None,
+            allow_file: None,
+            deny_file: None,
+        });
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let rotation = {
+            let finished = Arc::clone(&finished);
+            let staged = dir.path().join("staged.pem");
+            std::thread::spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    for pem in [&first, &second] {
+                        std::fs::write(&staged, pem).unwrap();
+                        std::fs::rename(&staged, &cert_file).unwrap();
+                    }
+                }
+            })
+        };
+
+        let mut mismatches = 0;
+        for _ in 0..200 {
+            let plugin = make_tls_plugin(next_test_domain(), Some(Arc::clone(&tls)));
+            let presented = plugin.tls_policy.as_ref().unwrap().own_leaf();
+            if plugin.identity_bytes() != Some(identity_from_cert(presented)) {
+                mismatches += 1;
+            }
+            plugin.close();
+        }
+        finished.store(true, Ordering::Relaxed);
+        rotation.join().unwrap();
+
+        assert_eq!(mismatches, 0);
     }
 
     #[test]
