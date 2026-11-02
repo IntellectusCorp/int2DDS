@@ -247,10 +247,6 @@ impl OutboundConnection {
         }
     }
 
-    pub(crate) fn peer_is_gone(&self) -> bool {
-        self.lock().wire.peer_is_gone()
-    }
-
     /// Closes the connection at once instead of when the last holder lets go.
     pub(crate) fn close(&self) {
         self.failed.store(true, Ordering::Release);

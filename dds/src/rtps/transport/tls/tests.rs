@@ -930,7 +930,7 @@ fn a_ticket_does_not_get_a_revoked_server_past_a_reloaded_client() {
 }
 
 #[test]
-fn a_forging_connection_reports_once_until_it_is_gone() {
+fn a_forging_connection_is_marked_once_until_it_is_taken() {
     let dir = tempfile::tempdir().unwrap();
     let ca = TestCa::root("ca");
     let leaf = ca.issue(LeafSpec::named("own"));
@@ -938,13 +938,10 @@ fn a_forging_connection_reports_once_until_it_is_gone() {
     let address: SocketAddr = "127.0.0.1:7410".parse().unwrap();
     let report = || policy.report_identity_mismatch(address, None, [9; 12]);
 
-    policy.add_accepted_peer(address, leaf.der.clone().into());
     report();
     report();
-    assert_eq!(policy.events().take().events.len(), 1);
+    assert_eq!(policy.take_forged_peers(), [address]);
 
-    policy.remove_accepted_peer(address);
-    policy.add_accepted_peer(address, leaf.der.clone().into());
     report();
-    assert_eq!(policy.events().take().events.len(), 1);
+    assert_eq!(policy.take_forged_peers(), [address]);
 }

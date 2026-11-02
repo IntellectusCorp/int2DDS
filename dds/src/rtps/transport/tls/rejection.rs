@@ -7,9 +7,8 @@ use rustls::{AlertDescription, CertificateError, Error};
 use crate::rtps::transport::tls::peer_lists::ListRejection;
 
 /// Why a peer was refused on certificate grounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum TlsRejectionReason {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TlsRejectionReason {
     UntrustedIssuer,
     Expired,
     NotYetValid,
@@ -27,7 +26,7 @@ pub enum TlsRejectionReason {
 }
 
 impl TlsRejectionReason {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::UntrustedIssuer => "certificate is not signed by a trusted CA",
             Self::Expired => "certificate has expired",

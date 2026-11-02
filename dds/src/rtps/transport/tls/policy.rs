@@ -7,16 +7,13 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
 use log::error;
 use rustls::pki_types::CertificateDer;
 
 use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::transport::tls::{
     config::{OwnCertificate, TlsPolicy},
-    events::{TlsDirection, TlsEvent, TlsEventLog},
     identity::IDENTITY_LEN,
-    peers::TlsPeer,
     TlsConfig,
 };
 
@@ -26,15 +23,7 @@ pub(crate) struct TlsPolicyHandle {
     own: OwnCertificate,
     current: ArcSwap<TlsPolicy>,
     last_generation: Mutex<u64>,
-    events: TlsEventLog,
-    // The accepting thread owns its connections, so what callers may read is mirrored here.
-    accepted_peers: DashMap<SocketAddr, AcceptedPeer>,
     forged_peers: Mutex<Vec<SocketAddr>>,
-}
-
-struct AcceptedPeer {
-    leaf: CertificateDer<'static>,
-    mismatch_reported: bool,
 }
 
 /// The chain a peer presented and the generation of the policy that accepted
@@ -54,8 +43,6 @@ impl TlsPolicyHandle {
             own,
             current: ArcSwap::from_pointee(policy),
             last_generation: Mutex::new(0),
-            events: TlsEventLog::default(),
-            accepted_peers: DashMap::new(),
             forged_peers: Mutex::default(),
         })
     }
@@ -64,48 +51,25 @@ impl TlsPolicyHandle {
         &self.tls
     }
 
-    pub(crate) fn events(&self) -> &TlsEventLog {
-        &self.events
-    }
-
-    pub(crate) fn add_accepted_peer(&self, address: SocketAddr, leaf: CertificateDer<'static>) {
-        self.accepted_peers.insert(address, AcceptedPeer { leaf, mismatch_reported: false });
-    }
-
-    pub(crate) fn remove_accepted_peer(&self, address: SocketAddr) {
-        self.accepted_peers.remove(&address);
-    }
-
-    pub(crate) fn clear_accepted_peers(&self) {
-        self.accepted_peers.clear();
-    }
-
-    pub(crate) fn accepted_peers(&self) -> Vec<TlsPeer> {
-        self.accepted_peers
-            .iter()
-            .map(|entry| TlsPeer::new(*entry.key(), TlsDirection::Accepted, &entry.value().leaf))
-            .collect()
-    }
-
-    /// Every message of a forging peer fails alike, so its connection reports
-    /// once rather than flooding the log and pushing other events out.
+    /// Every message of a forging peer fails alike until its connection is
+    /// closed, so it logs once rather than flooding the log.
     pub(crate) fn report_identity_mismatch(
         &self,
         address: SocketAddr,
         identity: Option<[u8; IDENTITY_LEN]>,
         claimed_prefix: GuidPrefix,
     ) {
-        if let Some(mut peer) = self.accepted_peers.get_mut(&address) {
-            if std::mem::replace(&mut peer.mismatch_reported, true) {
-                return;
-            }
-            self.forged_peers.lock().unwrap_or_else(|e| e.into_inner()).push(address);
+        let mut forged = self.forged_peers.lock().unwrap_or_else(|e| e.into_inner());
+        if forged.contains(&address) {
+            return;
         }
+        forged.push(address);
+        drop(forged);
         error!(
-            "TLS peer {address} claims prefix {} its certificate does not own",
+            "TLS peer {address} with identity {identity:02x?} claims prefix {} its certificate \
+             does not own",
             Guid::guid_prefix_to_string(&claimed_prefix)
         );
-        self.events.record(TlsEvent::IdentityMismatch { address, identity, claimed_prefix });
     }
 
     /// The connections to close: a forgery is detected deep in message

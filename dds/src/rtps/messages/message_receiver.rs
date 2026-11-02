@@ -842,7 +842,6 @@ mod tests {
     use super::*;
     use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
     use crate::rtps::common::locator::{LOCATOR_KIND_SHM, LOCATOR_KIND_UDP_V4};
-    use crate::rtps::transport::tls::events::{TlsEvent, TlsEvents};
     use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
 
     fn receiver() -> MessageReceiver {
@@ -876,14 +875,7 @@ mod tests {
         let error = receiver.init(&header_with_prefix(forged)).unwrap_err();
 
         assert_eq!(error.code, RtpsErrorCode::UnauthenticatedSource);
-        assert_eq!(
-            policy.events().take().events,
-            [TlsEvent::IdentityMismatch {
-                address: from_addr,
-                identity: Some(IDENTITY),
-                claimed_prefix: forged,
-            }]
-        );
+        assert_eq!(policy.take_forged_peers(), [from_addr]);
     }
 
     #[test]
@@ -898,7 +890,7 @@ mod tests {
         receiver.authenticate(true, Some(IDENTITY), Some(Arc::clone(&policy)));
         assert!(receiver.init(&header_with_prefix(owned)).is_ok());
 
-        assert_eq!(policy.events().take(), TlsEvents::default());
+        assert!(policy.take_forged_peers().is_empty());
     }
 
     #[test]

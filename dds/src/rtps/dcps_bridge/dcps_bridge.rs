@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use log::debug;
 
-use crate::rtps::transport::tls::{events::TlsEvents, peers::TlsPeer};
 use crate::{
     common::{
         builtin::topic::{
@@ -376,14 +375,6 @@ impl DcpsBridge {
 
     pub(crate) fn reload_tls_policy(&self) -> std::io::Result<()> {
         self.socket.transport().reload_tls_policy()
-    }
-
-    pub(crate) fn take_tls_events(&self) -> std::io::Result<TlsEvents> {
-        self.socket.transport().take_tls_events()
-    }
-
-    pub(crate) fn tls_peers(&self) -> std::io::Result<Vec<TlsPeer>> {
-        self.socket.transport().tls_peers()
     }
 
     pub(crate) fn update_participant(&self, user_data: UserDataQosPolicy) -> RtpsResult<()> {

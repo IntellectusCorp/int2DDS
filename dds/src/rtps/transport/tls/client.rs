@@ -9,7 +9,7 @@ use rustls::{pki_types::ServerName, ClientConnection};
 
 use crate::rtps::transport::{
     error::{transport_io_error, TransportErrorCode},
-    tls::{config::TlsPolicy, events::TlsEvent, policy::TlsPolicyHandle},
+    tls::{config::TlsPolicy, policy::TlsPolicyHandle},
 };
 
 pub(crate) struct TlsClient {
@@ -34,10 +34,6 @@ impl TlsClient {
         ClientConnection::new(Arc::clone(&policy.client), self.server_name_for(peer))
             .map(|session| (session, policy.generation))
             .map_err(|e| transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string()))
-    }
-
-    pub(crate) fn record(&self, event: TlsEvent) {
-        self.policy.events().record(event);
     }
 
     pub(crate) fn current_policy(&self) -> Arc<TlsPolicy> {

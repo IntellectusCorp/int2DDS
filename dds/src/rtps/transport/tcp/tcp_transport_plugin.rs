@@ -27,9 +27,7 @@ use crate::rtps::transport::tcp::framing::TcpFrameKind;
 use crate::rtps::transport::tcp::peer_candidates::{AnnounceTargets, PEER_PRUNE_DELAY};
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
-use crate::rtps::transport::tls::events::TlsEvents;
 use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
-use crate::rtps::transport::tls::peers::TlsPeer;
 use crate::rtps::transport::tls::{client::TlsClient, policy::TlsPolicyHandle, TlsConfig};
 use crate::rtps::transport::{TcpConfig, TransportType};
 
@@ -607,24 +605,6 @@ impl TransportPlugin for TcpTransportPlugin {
                 })?;
                 self.sender.recheck_tls_peers(&policy.current());
                 Ok(())
-            }
-            None => Err(io::Error::new(io::ErrorKind::Unsupported, "TCP runs without TLS")),
-        }
-    }
-
-    fn take_tls_events(&self) -> io::Result<TlsEvents> {
-        match &self.tls_policy {
-            Some(policy) => Ok(policy.events().take()),
-            None => Err(io::Error::new(io::ErrorKind::Unsupported, "TCP runs without TLS")),
-        }
-    }
-
-    fn tls_peers(&self) -> io::Result<Vec<TlsPeer>> {
-        match &self.tls_policy {
-            Some(policy) => {
-                let mut peers = self.sender.tls_peers();
-                peers.extend(policy.accepted_peers());
-                Ok(peers)
             }
             None => Err(io::Error::new(io::ErrorKind::Unsupported, "TCP runs without TLS")),
         }
@@ -1733,24 +1713,6 @@ mod tests {
 
         assert!(tls.reload_tls_policy().is_ok());
         let error = plain.reload_tls_policy().unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-
-        tls.close();
-        plain.close();
-    }
-
-    #[test]
-    fn only_a_tls_participant_holds_tls_events() {
-        let dir = tempfile::tempdir().unwrap();
-        let tls = make_tls_plugin(next_test_domain(), Some(self_signed_tls(dir.path())));
-        let plain = make_tls_plugin(next_test_domain(), None);
-
-        assert_eq!(tls.take_tls_events().unwrap(), TlsEvents::default());
-        let error = plain.take_tls_events().unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-
-        assert_eq!(tls.tls_peers().unwrap(), Vec::new());
-        let error = plain.tls_peers().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
 
         tls.close();

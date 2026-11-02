@@ -28,7 +28,6 @@ use int2dds::{
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
         },
     },
-    TlsDirection, TlsEvent, TlsRejectionReason,
 };
 use rcgen::{
     date_time_ymd, BasicConstraints, Certificate, CertificateParams,
@@ -202,7 +201,6 @@ fn samples_stop_after_a_runtime_revocation(revoker: Revoker) {
 
     let wait = StdDuration::from_secs(30);
     let flowed_at_start = reaches_reader(&data_writer, &data_reader, 1, wait);
-    let peers_at_start = reloading.get_tls_peers().unwrap();
 
     fs::write(crl_file, "not a CRL").unwrap();
     let broken_update = reloading.reload_tls_policy();
@@ -216,8 +214,6 @@ fn samples_stop_after_a_runtime_revocation(revoker: Revoker) {
     take_values(&data_reader);
     let flowed_after_revocation =
         reaches_reader(&data_writer, &data_reader, 3, StdDuration::from_secs(3));
-    let tls_events = reloading.take_tls_events().unwrap();
-    let peers_after_revocation = reloading.get_tls_peers().unwrap();
 
     writer_participant.delete_contained_entities().unwrap();
     reader_participant.delete_contained_entities().unwrap();
@@ -225,34 +221,10 @@ fn samples_stop_after_a_runtime_revocation(revoker: Revoker) {
     factory.delete_participant(reader_participant).unwrap();
 
     assert!(flowed_at_start, "samples never flowed over mutual TLS");
-    assert!(
-        !peers_at_start.is_empty() && peers_at_start.iter().all(|peer| peer.subject.is_some()),
-        "the authenticated peer must be listed: {peers_at_start:?}"
-    );
-    assert!(
-        peers_after_revocation.is_empty(),
-        "a revoked peer must leave the list: {peers_after_revocation:?}"
-    );
     assert!(broken_update.is_err(), "a broken CRL must fail the reload");
     assert!(flowed_after_broken_update, "a failed reload must leave traffic alone");
     assert_eq!(revocation, Ok(()));
     assert!(!flowed_after_revocation, "a revoked peer must stop exchanging samples");
-    let closed_direction = match revoker {
-        Revoker::Writer => TlsDirection::Dialed,
-        Revoker::Reader => TlsDirection::Accepted,
-    };
-    assert!(
-        tls_events.events.iter().any(|event| matches!(
-            event,
-            TlsEvent::ClosedByPolicy {
-                direction,
-                identity: Some(_),
-                reason: TlsRejectionReason::Revoked,
-                ..
-            } if *direction == closed_direction
-        )),
-        "the reloading side must report the connection it closed: {tls_events:?}"
-    );
 }
 
 #[test]
@@ -276,12 +248,8 @@ fn reloading_without_tls_is_a_precondition_error() {
         factory.create_participant(next_domain_id(), qos, None, StatusMask::default()).unwrap();
 
     let result = participant.reload_tls_policy();
-    let events = participant.take_tls_events();
-    let peers = participant.get_tls_peers();
 
     participant.delete_contained_entities().unwrap();
     factory.delete_participant(participant).unwrap();
     assert_eq!(result, Err(DdsError::PreconditionNotMet));
-    assert_eq!(events, Err(DdsError::PreconditionNotMet));
-    assert_eq!(peers, Err(DdsError::PreconditionNotMet));
 }

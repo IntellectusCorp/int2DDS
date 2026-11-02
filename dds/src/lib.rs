@@ -21,9 +21,6 @@ pub mod rtps;
 // Re-export so the ffi crate can name the SEDP discovery event type
 // (rtps::entities::participant are pub(crate)).
 pub use crate::rtps::entities::participant::EndpointDiscoveryEvent;
-pub use crate::rtps::transport::tls::events::{TlsDirection, TlsEvent, TlsEvents};
-pub use crate::rtps::transport::tls::peers::TlsPeer;
-pub use crate::rtps::transport::tls::rejection::TlsRejectionReason;
 #[doc(hidden)]
 pub mod serialize;
 pub mod xtypes;
