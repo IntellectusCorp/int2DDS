@@ -105,7 +105,7 @@ int2dds-idl HelloWorld.idl --rpc hello_world_rpc.rs     # Rust types plus DDS-RP
 Or generate every target at once into a directory:
 
 ```bash
-int2dds-idl HelloWorld.idl --output-dir generated/
+int2dds-idl HelloWorld.idl --output-dir generated
 ```
 
 Running `int2dds-idl` with no arguments starts an [interactive wizard](#interactive-wizard)
@@ -121,7 +121,7 @@ The generator decides its outputs from three sources, in this order of precedenc
    after the IDL file.
 3. **Neither** falls back to writing `<name>.rs` and `<name>.h` into the current directory.
 
-Both forms combine: `--output-dir generated/ --rust src/types.rs` writes the Rust module to
+Both forms combine: `--output-dir generated --rust src/types.rs` writes the Rust module to
 `src/types.rs` and everything else under `generated/`.
 
 Auto-named files derive from the IDL file name converted to `snake_case`
@@ -158,20 +158,19 @@ Start `int2dds-idl` without arguments to be guided through the same choices inte
    pre-selected.
 3. **Output directory.** Defaults to `generated`.
 4. **Advanced options** (optional). ROS2 type naming with its package and interface kind,
-   the Rust crate path, the Python module path, the C# namespace, the Java package, the C
-   string mode and default size, and `#include` search paths. Only the questions relevant to
-   the selected languages are asked.
+   and `#include` search paths are always asked; the Rust crate path, the Python module
+   path, the C# namespace, the Java package, and the C string mode and default size are
+   asked only for the selected languages.
 
 The wizard always generates into the output directory with auto-named files, exactly like
-`--output-dir` restricted to the selected languages. Esc or Ctrl-C cancels without writing
-anything.
+`--output-dir` restricted to the selected languages.
 
 ## Command-line reference
 
 ```
 Usage: int2dds-idl [OPTIONS] <INPUT.idl>...
 
-Run without arguments to start the interactive wizard.
+Generates Rust, C, Python, C#, and Java code from OMG IDL files.
 
 OPTIONS:
     -r, --rust <PATH>         Generate Rust output to PATH
@@ -252,9 +251,9 @@ Use it when the dependency is renamed in `Cargo.toml` or re-exported from anothe
 ### `--python-module <PATH>`
 
 The module path the generated Python code imports the CDR support from (default `int2dds`).
-The output begins with `from <PATH>.cdr import CdrReader, CdrWriter, Extensibility, Float128`,
-so point this at the package that provides the int2DDS Python binding if it is vendored under
-another name.
+The output imports `CdrReader`, `CdrWriter`, `Extensibility`, and `Float128` from
+`<PATH>.cdr`, so point this at the package that provides the int2DDS Python binding if it is
+vendored under another name.
 
 ### `--csharp-namespace <NS>`
 
@@ -280,8 +279,9 @@ way as `uint16_t` arrays.
 
 With `--string-pointer`, `string` members become `char*` pointers that the deserializer
 allocates with `malloc`, which matches the OMG IDL-to-C mapping. The header then includes
-`<stdlib.h>` and emits `<Type>_init` and `<Type>_cleanup` helpers that zero and free the
-pointer members of a struct. `wstring` members stay fixed arrays in both modes.
+`<stdlib.h>` and emits a `<Type>_init` helper that zeroes a struct and, for structs that own
+heap members, a `<Type>_cleanup` helper that frees them. `wstring` members stay fixed arrays
+in both modes.
 
 ### `--rpc <PATH>`
 
@@ -341,12 +341,14 @@ serialization helpers:
 | `<Type>_serialize_for(writer, val, buf, capacity)` | Same, choosing the representation from the `DataWriter`'s QoS. |
 | `<Type>_deserialize_cdr(buf, len, out)` | Parse a received sample; returns `false` on malformed data. |
 | `<Type>_type_info()` | The type description registered when the topic is created. |
-| `<Type>_init` / `<Type>_cleanup` | Only with `--string-pointer`: zero and free the pointer members. |
+| `<Type>_create_topic(participant, topic_name, qos, topic_out)` | Create a topic for the type, registering `<Type>_type_info()` with it. |
+| `<Type>_init` / `<Type>_cleanup` | Only with `--string-pointer`: zero the struct, and free its heap members (`_cleanup` exists only for structs that have any). |
 
 The helpers are built on `int2dds_cdr.h`, the CDR utility library shipped under
-`ffi/include/` in the int2DDS repository, and `<Type>_serialize_for` refers to the DataWriter
-handle from `int2dds-ffi.h`. Include both before the generated header. The CDR library can be
-used header-only by defining `INT2DDS_CDR_STATIC` first, or compiled once from
+`ffi/include/` in the int2DDS repository, which the generated header includes itself.
+`<Type>_serialize_for` and `<Type>_create_topic` use handles from `int2dds-ffi.h`, so include
+that one before the generated header. The CDR library can be used header-only by defining
+`INT2DDS_CDR_STATIC` before the generated header, or compiled once from
 `ffi/src/cdr_utils.c` and linked:
 
 ```c
@@ -654,9 +656,9 @@ use std::path::{Path, PathBuf};
 let root = Path::new("sensor_msgs/msg/Imu.idl");
 let include_dirs = vec![PathBuf::from("ros2_idl")];
 let (unit, missing) = preprocess::load_with_includes(root, &include_dirs)?;
-let all = parser::parse_idl(&unit)?;
-let own = parser::parse_idl(&std::fs::read_to_string(root)?)?;
-let model = resolver::resolve_scoped(&own, all)?;
+let all = parser::parse_idl(&unit).map_err(|e| e.to_string())?;
+let own = parser::parse_idl(&std::fs::read_to_string(root)?).map_err(|e| e.to_string())?;
+let model = resolver::resolve_scoped(&own, all).map_err(|e| e.to_string())?;
 ```
 
 `naming` exposes the case conversions and keyword escaping the backends share, including the
