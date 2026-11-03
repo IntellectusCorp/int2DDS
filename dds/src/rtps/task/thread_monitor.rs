@@ -463,7 +463,7 @@ impl ThreadMonitor {
         // This is a heuristic - in a real implementation you might maintain
         // a registry of created threads
 
-        // Common patterns for int2dds threads
+        // Common patterns for int2DDS threads
         let patterns = [
             ("sending", "sending_task"),
             ("timer", "timer_handler"),

@@ -17,7 +17,7 @@ use int2dds::infrastructure::status::StatusMask;
 use super::{error::*, types::*};
 use crate::dynamic::Int2DdsDynamicDataReader;
 
-// Status mask constants matching int2dds Rust library (status.rs StatusKind)
+// Status mask constants matching int2DDS Rust library (status.rs StatusKind)
 pub const INT2DDS_STATUS_INCONSISTENT_TOPIC: u32 = 1 << 0;
 pub const INT2DDS_STATUS_OFFERED_DEADLINE_MISSED: u32 = 1 << 1;
 pub const INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED: u32 = 1 << 2;
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_status_mask_constants() {
-        // Verify status mask constants match int2dds Rust library
+        // Verify status mask constants match int2DDS Rust library
         assert_eq!(INT2DDS_STATUS_DATA_ON_READERS, 1 << 9);
         assert_eq!(INT2DDS_STATUS_DATA_AVAILABLE, 1 << 10);
         assert_eq!(INT2DDS_STATUS_SUBSCRIPTION_MATCHED, 1 << 14);

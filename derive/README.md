@@ -1,6 +1,6 @@
 # int2dds-derive
 
-Procedural macros for [int2dds](https://crates.io/crates/int2dds), a Rust implementation of the
+Procedural macros for [int2DDS](https://crates.io/crates/int2dds), a Rust implementation of the
 OMG Data Distribution Service (DDS) with RTPS protocol support.
 
 This crate provides `#[derive(DdsType)]`, which generates the type support a Rust type needs to be
@@ -35,7 +35,7 @@ The derive also implements `Debug`, `Clone`, `PartialEq`, `Default` and `speedy:
 Use `#[dds_type(no_default)]`, `#[dds_type(no_partialeq)]` or `#[dds_type(no_additional_derives)]`
 to opt out.
 
-For more examples and usage with int2dds, see the [int2DDS repository](https://github.com/IntellectusCorp/int2DDS).
+For more examples and usage with int2DDS, see the [int2DDS repository](https://github.com/IntellectusCorp/int2DDS).
 
 ## License
 

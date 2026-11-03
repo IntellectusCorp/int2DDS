@@ -1,6 +1,6 @@
 # Environment Variables
 
-This document describes the environment variables available in int2dds.
+This document describes the environment variables available in int2DDS.
 
 ## Environment Variables Summary
 

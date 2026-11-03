@@ -1,7 +1,7 @@
 /**
- * int2dds FFI Hello World Subscriber Example
+ * int2DDS FFI Hello World Subscriber Example
  *
- * This example demonstrates how to use the int2dds FFI with IDL-generated
+ * This example demonstrates how to use the int2DDS FFI with IDL-generated
  * code for CDR deserialization.
  */
 

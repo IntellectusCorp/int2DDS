@@ -1,7 +1,7 @@
 //! Environment variable configuration.
 //!
 //! This module provides initialization from environment variables for configuring
-//! int2dds behavior, including transport type, logging, network interface
+//! int2DDS behavior, including transport type, logging, network interface
 //! selection, and performance monitoring features.
 
 use crate::{

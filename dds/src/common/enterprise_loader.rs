@@ -327,10 +327,10 @@ fn refusal_message(code: i32) -> String {
 /// Grace is logged as an error so release builds, which keep only error, still show it.
 fn expiry_notice(days: i32) -> Option<(log::Level, String)> {
     match days {
-        d if d > 0 => Some((log::Level::Warn, format!("int2dds license expires in {d} day(s)"))),
+        d if d > 0 => Some((log::Level::Warn, format!("int2DDS license expires in {d} day(s)"))),
         d if d < 0 => Some((
             log::Level::Error,
-            format!("int2dds license EXPIRED {} day(s) ago (grace period)", -d),
+            format!("int2DDS license EXPIRED {} day(s) ago (grace period)", -d),
         )),
         _ => None,
     }

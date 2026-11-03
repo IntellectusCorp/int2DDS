@@ -1,5 +1,5 @@
 """
-DDS exception hierarchy for int2dds.
+DDS exception hierarchy for int2DDS.
 
 Maps FFI return codes to Python exceptions.
 """
