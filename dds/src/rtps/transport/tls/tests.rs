@@ -779,15 +779,13 @@ fn a_reload_refuses_broken_lists_and_keeps_enforcing_the_old_ones() {
         [server_config.allow_file.clone().unwrap(), server_config.deny_file.clone().unwrap()];
     for list in &lists {
         let valid = std::fs::read(list).unwrap();
-        for (kind, broken) in [("malformed", "not a fingerprint"), ("empty", "")] {
-            std::fs::write(list, broken).unwrap();
-            assert!(server_policy.reload().is_err(), "{kind} {list:?} was accepted");
-            assert_eq!(
-                server_policy.current().generation,
-                0,
-                "{kind} {list:?} replaced the policy"
-            );
-        }
+        std::fs::write(list, "not a fingerprint").unwrap();
+        assert!(server_policy.reload().is_err(), "a malformed {list:?} was accepted");
+        assert_eq!(
+            server_policy.current().generation,
+            0,
+            "a malformed {list:?} replaced the policy"
+        );
         std::fs::remove_file(list).unwrap();
         assert!(server_policy.reload().is_err(), "a missing {list:?} was accepted");
         std::fs::write(list, valid).unwrap();
@@ -797,6 +795,44 @@ fn a_reload_refuses_broken_lists_and_keeps_enforcing_the_old_ones() {
     assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
     let outcome = handshake_between(&denied_policy, &server_policy);
     assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+}
+
+#[test]
+fn an_emptied_list_is_no_longer_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let listed = ca.issue(LeafSpec::named("listed"));
+    let unlisted = ca.issue(LeafSpec::named("unlisted"));
+    let unlisted_policy =
+        Arc::new(TlsPolicyHandle::new(&unlisted.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_lists(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[&listed],
+        &[&unlisted],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+    let allow_file = server_config.allow_file.clone().unwrap();
+    let deny_file = server_config.deny_file.clone().unwrap();
+
+    let outcome = handshake_between(&unlisted_policy, &server_policy);
+    assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+
+    std::fs::write(&deny_file, "").unwrap();
+    let reloaded = server_policy.reload();
+    let outcome = handshake_between(&unlisted_policy, &server_policy);
+    assert_eq!(
+        reason_for(outcome.server),
+        Some("certificate is not on the allow list"),
+        "emptied deny list, reload {reloaded:?}"
+    );
+
+    std::fs::write(&allow_file, "# no allow list\n").unwrap();
+    let reloaded = server_policy.reload();
+    let outcome = handshake_between(&unlisted_policy, &server_policy);
+    assert!(
+        outcome.client.is_ok() && outcome.server.is_ok(),
+        "emptied allow list, reload {reloaded:?}, handshake {outcome:?}"
+    );
 }
 
 /// Moves records both ways until neither side has more, leaving both connections

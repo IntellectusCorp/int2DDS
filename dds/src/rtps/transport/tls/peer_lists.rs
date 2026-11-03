@@ -3,12 +3,9 @@
 //! Entries are SHA-256 fingerprints of a peer's leaf certificate, one per line,
 //! in the form `openssl x509 -fingerprint -sha256` prints them.
 
-use std::{
-    collections::HashSet,
-    fmt, fs, io,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, fmt, fs, io, path::Path};
 
+use log::warn;
 use ring::digest::{digest, SHA256};
 use rustls::pki_types::CertificateDer;
 
@@ -49,12 +46,23 @@ impl fmt::Display for ListRejection {
 impl std::error::Error for ListRejection {}
 
 impl PeerLists {
-    /// The lists `tls` points at, or `None` when it configures neither.
+    /// The lists `tls` points at, or `None` when it configures neither. An
+    /// empty list counts as no list, so emptying the allow list opens the
+    /// participant to every trusted peer rather than closing it to all.
     pub(crate) fn load(tls: &TlsConfig) -> io::Result<Option<Self>> {
         if tls.allow_file.is_none() && tls.deny_file.is_none() {
             return Ok(None);
         }
-        let allow = tls.allow_file.as_deref().map(read_fingerprints).transpose()?;
+        let allow = match tls.allow_file.as_deref() {
+            Some(path) => {
+                let fingerprints = read_fingerprints(path)?;
+                if fingerprints.is_empty() {
+                    warn!("{path:?} lists no fingerprints, so every trusted peer may connect");
+                }
+                (!fingerprints.is_empty()).then_some(fingerprints)
+            }
+            None => None,
+        };
         let deny = tls.deny_file.as_deref().map(read_fingerprints).transpose()?.unwrap_or_default();
         Ok(Some(Self { allow, deny }))
     }
@@ -73,7 +81,6 @@ impl PeerLists {
     }
 }
 
-/// An empty file is refused, since an empty allow list would refuse everyone.
 fn read_fingerprints(path: &Path) -> io::Result<HashSet<Fingerprint>> {
     let text = fs::read_to_string(path).map_err(|e| {
         transport_io_error(
@@ -96,12 +103,6 @@ fn read_fingerprints(path: &Path) -> io::Result<HashSet<Fingerprint>> {
         })?;
         fingerprints.insert(fingerprint);
     }
-    if fingerprints.is_empty() {
-        return Err(transport_io_error(
-            TransportErrorCode::TlsConfigError,
-            format!("no fingerprints found in {:?}", PathBuf::from(path)),
-        ));
-    }
     Ok(fingerprints)
 }
 
@@ -118,6 +119,8 @@ fn parse_hex(value: &str) -> Option<Fingerprint> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     fn fingerprint_line(cert: &CertificateDer<'_>, colons: bool) -> String {
@@ -177,14 +180,11 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_or_empty_list_is_refused() {
+    fn a_malformed_list_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let valid = fingerprint_line(&CertificateDer::from(vec![1u8; 32]), true);
-        let cases = [
-            (format!("{valid}\nAB:CD\n"), "line 2"),
-            (format!("G{}\n", &valid[1..]), "line 1"),
-            ("# only a comment\n\n".to_string(), "no fingerprints"),
-        ];
+        let cases =
+            [(format!("{valid}\nAB:CD\n"), "line 2"), (format!("G{}\n", &valid[1..]), "line 1")];
 
         for (text, expected) in cases {
             let error = PeerLists::load(&config(dir.path(), Some(&text), None)).err().unwrap();
