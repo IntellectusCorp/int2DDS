@@ -220,17 +220,19 @@ impl TlsConfig {
 
         let allow_file = property.find_property(keys::ALLOW_FILE).map(PathBuf::from);
         let deny_file = property.find_property(keys::DENY_FILE).map(PathBuf::from);
-        // Without client certificates an accepted peer has nothing to match, so
-        // either list would restrict only the connections this side dials.
-        if (allow_file.is_some() || deny_file.is_some()) && !verify_peer {
+        // Without client certificates an accepted peer has nothing to check, so
+        // a CRL or a list would restrict only the connections this side dials.
+        let one_sided = [
+            (keys::CRL_FILE, revocation.is_some()),
+            (keys::ALLOW_FILE, allow_file.is_some()),
+            (keys::DENY_FILE, deny_file.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(key, set)| set.then_some(key));
+        if let (Some(key), false) = (one_sided, verify_peer) {
             return Err(transport_io_error(
                 TransportErrorCode::TlsConfigError,
-                format!(
-                    "'{}' and '{}' require '{}' to stay on",
-                    keys::ALLOW_FILE,
-                    keys::DENY_FILE,
-                    keys::VERIFY_PEER
-                ),
+                format!("'{key}' requires '{}' to stay on", keys::VERIFY_PEER),
             ));
         }
 
@@ -552,5 +554,18 @@ mod tests {
             let err = TlsConfig::from_property(&p).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
         }
+    }
+
+    #[test]
+    fn a_crl_file_is_refused_without_mutual_tls() {
+        let base = [(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")];
+        let p =
+            pq(&[base.as_slice(), &[(keys::CRL_FILE, "/crl.pem"), (keys::VERIFY_PEER, "false")]]
+                .concat());
+
+        let err = TlsConfig::from_property(&p).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains(keys::CRL_FILE), "{err}");
     }
 }
