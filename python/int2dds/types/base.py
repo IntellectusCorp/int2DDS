@@ -1,7 +1,7 @@
 """
 Base protocol for DDS data types.
 
-IDL-generated types must implement this protocol to be usable with int2dds.
+IDL-generated types must implement this protocol to be usable with int2DDS.
 """
 
 from __future__ import annotations

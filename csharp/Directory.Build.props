@@ -23,7 +23,7 @@
   <!--
     Version single source of truth: the workspace version in the repo-root
     Cargo.toml ([workspace.package].version). We read it here so the C# binding
-    always matches int2dds without manual syncing. To bump the product version,
+    always matches int2DDS without manual syncing. To bump the product version,
     edit ONLY ../Cargo.toml.
   -->
   <PropertyGroup Condition="Exists('$(MSBuildThisFileDirectory)../Cargo.toml')">

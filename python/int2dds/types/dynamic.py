@@ -3,7 +3,7 @@ Runtime dynamic types: TypeObject introspection, a TypeInfo builder and
 DynamicData decoding of received samples by dotted/indexed field path.
 
 Mirrors the C FFI surface in ffi/src/dynamic.rs and ffi/src/type_info.rs,
-delegating all decoding to the core int2dds dynamic-type machinery.
+delegating all decoding to the core int2DDS dynamic-type machinery.
 """
 
 from __future__ import annotations

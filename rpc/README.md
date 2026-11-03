@@ -1,4 +1,4 @@
-# int2DDS-rpc
+# int2dds-rpc
 
 DDS-RPC (Remote Procedure Call over DDS) implementation for int2DDS, based on the [OMG DDS-RPC specification](https://www.omg.org/spec/DDS-RPC/).
 

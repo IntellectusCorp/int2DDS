@@ -1,7 +1,7 @@
 //! Logging configuration types and utilities.
 //!
 //! This module provides logging configuration types (`LogType`, `LogLevel`) and functions
-//! for setting up the logging infrastructure used throughout int2dds.
+//! for setting up the logging infrastructure used throughout int2DDS.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogType {

@@ -76,7 +76,7 @@ if(WIN32 AND EXISTS "${INT2DDS_FFI_DLL}")
 endif()
 
 message(STATUS "")
-message(STATUS "=== int2dds FFI Hello World examples ===")
+message(STATUS "=== int2DDS FFI Hello World examples ===")
 message(STATUS "  1. Build int2dds-ffi: cargo build --package int2dds-ffi")
 message(STATUS "  2. mkdir build && cd build && cmake .. && cmake --build .")
 message(STATUS "  Run: ./hello_world_pub / ./hello_world_sub")
