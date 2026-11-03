@@ -167,7 +167,7 @@ The wizard always generates into the output directory with auto-named files, exa
 
 ## Command-line reference
 
-```
+```text
 Usage: int2dds-idl [OPTIONS] <INPUT.idl>...
 
 Generates Rust, C, Python, C#, and Java code from OMG IDL files.
