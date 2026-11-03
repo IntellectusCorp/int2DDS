@@ -121,8 +121,10 @@ pub struct TlsConfig {
     /// Name every server certificate must carry. When unset, the server
     /// certificate is verified in full except for its name.
     pub server_name: Option<String>,
-    /// Require the remote peer to present a certificate (mutual TLS); on by
-    /// default. The server certificate is verified either way.
+    /// Require a connecting peer to present a certificate (mutual TLS) and
+    /// refuse its messages unless their GUID prefix belongs to that
+    /// certificate; on by default. The server certificate is verified, and
+    /// this participant's own prefix is bound to its certificate, either way.
     pub verify_peer: bool,
     /// Revocation checking; none when no CRL file is configured.
     pub revocation: Option<RevocationConfig>,

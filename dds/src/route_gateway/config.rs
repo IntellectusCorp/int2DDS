@@ -30,8 +30,9 @@ pub struct TlsNodeConfig {
     /// certificate is verified in full except for its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
-    /// Require the remote peer to present a certificate (mutual TLS).
-    /// Defaults to `true`.
+    /// Require a connecting peer to present a certificate (mutual TLS) and
+    /// refuse its messages unless their GUID prefix belongs to that
+    /// certificate. Defaults to `true`.
     #[serde(default = "default_verify_peer")]
     pub verify_peer: bool,
     /// Path to a PEM file holding one CRL per issuing CA. When omitted,

@@ -38,13 +38,13 @@ use rcgen::{
 const WRITER_SERIAL: u64 = 2;
 const READER_SERIAL: u64 = 3;
 
-struct Ca {
+pub(super) struct Ca {
     cert: Certificate,
     key: KeyPair,
 }
 
 impl Ca {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
         params.distinguished_name.push(DnType::CommonName, "reload-ca");
@@ -81,7 +81,7 @@ impl Ca {
 
 /// Writes one node's certificate, key, trust and CRL files and returns the QoS
 /// pointing at them with the path of its CRL.
-fn tls_node(
+pub(super) fn tls_node(
     dir: &Path,
     ca: &Ca,
     name: &str,
@@ -116,7 +116,7 @@ fn tls_node(
     (DomainParticipantQos { property, ..Default::default() }, crl_file)
 }
 
-fn free_tcp_ports() -> (u16, u16) {
+pub(super) fn free_tcp_ports() -> (u16, u16) {
     let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let second = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     (first.local_addr().unwrap().port(), second.local_addr().unwrap().port())
@@ -137,7 +137,7 @@ fn take_values(reader: &DataReader<KeyedDataType>) -> Vec<i16> {
 }
 
 /// Keeps writing `value` until the reader sees it or `wait` runs out.
-fn reaches_reader(
+pub(super) fn reaches_reader(
     writer: &DataWriter<KeyedDataType>,
     reader: &DataReader<KeyedDataType>,
     value: i16,

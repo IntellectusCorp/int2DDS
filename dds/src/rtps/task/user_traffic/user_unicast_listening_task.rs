@@ -33,8 +33,9 @@ impl UserUnicastListeningTask {
     pub(crate) fn new(participant: Arc<Participant>) -> Self {
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
-        let identity_required = participant.identity().is_some();
         let tls_policy = participant.tls_policy();
+        let identity_required =
+            tls_policy.as_ref().is_some_and(|policy| policy.config().verify_peer);
         Self {
             guid_prefix,
             participant: Arc::downgrade(&participant),

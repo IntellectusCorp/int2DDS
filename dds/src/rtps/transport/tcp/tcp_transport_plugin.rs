@@ -177,12 +177,9 @@ impl TcpTransportPlugin {
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let tls_policy = tls_config.as_deref().map(TlsPolicyHandle::new).transpose()?.map(Arc::new);
-        // Without verify_peer a client never presents a certificate, so a peer
-        // could not check the prefix and binding it would only refuse traffic.
-        let identity = tls_policy
-            .as_ref()
-            .filter(|policy| policy.config().verify_peer)
-            .map(|policy| identity_from_cert(policy.own_leaf()));
+        // The prefix is bound whatever this side's verify_peer says, since the
+        // certificate goes to any peer that asks for it and that peer checks it.
+        let identity = tls_policy.as_ref().map(|policy| identity_from_cert(policy.own_leaf()));
         let (listener, participant_id) = Self::bind_listener(
             domain_id,
             participant_id,
@@ -1635,13 +1632,14 @@ mod tests {
         let unverified_dir = tempfile::tempdir().unwrap();
         let mut unverified_tls = (*self_signed_tls(unverified_dir.path())).clone();
         unverified_tls.verify_peer = false;
+        let unverified_leaf = unverified_tls.load_cert_chain().unwrap().remove(0);
         let unverified = make_tls_plugin(next_test_domain(), Some(Arc::new(unverified_tls)));
 
         let leaf = first_tls.load_cert_chain().unwrap().remove(0);
         assert_eq!(first.identity_bytes(), Some(identity_from_cert(&leaf)));
         assert_ne!(first.identity_bytes(), second.identity_bytes());
         assert_eq!(plain.identity_bytes(), None);
-        assert_eq!(unverified.identity_bytes(), None);
+        assert_eq!(unverified.identity_bytes(), Some(identity_from_cert(&unverified_leaf)));
 
         first.close();
         second.close();
