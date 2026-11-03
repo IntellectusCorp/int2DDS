@@ -1,11 +1,11 @@
-//! # int2dds FFI (Foreign Function Interface)
+//! # int2DDS FFI (Foreign Function Interface)
 //!
-//! This crate provides C-compatible bindings for the int2dds DDS implementation.
+//! This crate provides C-compatible bindings for the int2DDS DDS implementation.
 //!
 //! ## Overview
 //!
 //! The FFI layer exposes a C API that can be used to:
-//! - Integrate int2dds with C/C++ applications
+//! - Integrate int2DDS with C/C++ applications
 //! - Use DDS functionality from any language with C FFI support
 //!
 //! ## Architecture

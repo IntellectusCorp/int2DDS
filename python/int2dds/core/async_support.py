@@ -1,5 +1,5 @@
 """
-Async support for int2dds - provides asyncio-compatible APIs.
+Async support for int2DDS - provides asyncio-compatible APIs.
 """
 
 from __future__ import annotations

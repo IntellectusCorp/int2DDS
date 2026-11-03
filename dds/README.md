@@ -3,7 +3,7 @@
 A Rust implementation of the OMG [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/)
 middleware standard with RTPS protocol support.
 
-int2dds provides real-time publish-subscribe communication for distributed systems in domains such as
+int2DDS provides real-time publish-subscribe communication for distributed systems in domains such as
 autonomous driving, robotics, industrial automation, and defense.
 
 ## Features
@@ -23,7 +23,7 @@ autonomous driving, robotics, industrial automation, and defense.
 
 ```toml
 [dependencies]
-int2dds = "1.0.0"
+int2dds = "1.0.1"
 speedy = "0.8"
 log = "0.4"
 ```

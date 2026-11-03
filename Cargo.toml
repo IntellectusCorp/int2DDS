@@ -7,7 +7,7 @@ resolver = "2"
 # Single source of truth for the product version. Every workspace crate inherits
 # this via `version.workspace = true`; the C# binding reads it from this file in
 # csharp/Directory.Build.props, and ffi/build.rs derives the .so SONAME from it.
-version = "1.0.0"
+version = "1.0.1"
 authors = ["Intellectus Corp"]
 license = "Apache-2.0"
 repository = "https://github.com/IntellectusCorp/int2DDS"
@@ -18,9 +18,9 @@ rust-version = "1.89.0"
 # Internal crates. crates.io drops `path` on publish, so each needs `version`;
 # keep it equal to workspace.package.version when bumping.
 [workspace.dependencies]
-int2dds = { path = "dds", version = "1.0.0" }
-int2dds-derive = { path = "derive", version = "1.0.0" }
-int2dds-ffi = { path = "ffi", version = "1.0.0" }
+int2dds = { path = "dds", version = "1.0.1" }
+int2dds-derive = { path = "derive", version = "1.0.1" }
+int2dds-ffi = { path = "ffi", version = "1.0.1" }
 
 [profile.dev]
 opt-level = 1

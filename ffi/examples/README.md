@@ -1,6 +1,6 @@
-# int2dds FFI Examples
+# int2DDS FFI Examples
 
-Minimal C hello_world examples for the int2dds FFI bindings. The full C example
+Minimal C hello_world examples for the int2DDS FFI bindings. The full C example
 suite (listener, waitset, keyed data, multiple participants, XTypes, QoS
 profiles) lives in the separate
 [int2DDS-examples](https://github.com/IntellectusCorp/int2DDS-examples) repository.
