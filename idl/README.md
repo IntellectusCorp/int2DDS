@@ -53,7 +53,7 @@ cargo run -p int2dds-idl -- <OPTIONS> <INPUT.idl>
 
 ```toml
 [dependencies]
-int2dds-idl = "1.0.0"
+int2dds-idl = "1.0.1"
 ```
 
 See [Library use](#library-use) for the API.
@@ -309,7 +309,7 @@ the same dependencies as a hand-written int2DDS type:
 
 ```toml
 [dependencies]
-int2dds = "1.0.0"
+int2dds = "1.0.1"
 speedy = "0.8"
 log = "0.4"
 ```
