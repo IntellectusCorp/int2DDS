@@ -1,0 +1,33 @@
+# Third-Party Licenses
+
+The crates listed below are the third-party dependencies of the int2DDS binary
+distributions. Most are statically linked into the binaries; procedural macros
+among them run only at build time and are listed for completeness. Where a crate
+offers a choice of licenses, the first match in the order of `accepted` in
+about.toml is the one used. The license text each crate ships is reproduced as
+is, including its copyright notice; a crate that ships none is represented by
+the standard text of its declared license.
+
+## Overview
+
+{{#each overview}}
+- {{name}}: {{count}} crate(s)
+{{/each}}
+
+## License texts
+
+{{#each licenses}}
+{{#if first_of_kind}}
+### {{name}}
+
+{{/if}}
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

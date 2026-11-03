@@ -2,7 +2,7 @@
 """
 HelloWorld Subscriber Example
 
-Subscribes to HelloWorld samples to demonstrate int2dds Python bindings.
+Subscribes to HelloWorld samples to demonstrate int2DDS Python bindings.
 
 Usage:
     python hello_world_sub.py [-d DOMAIN] [--reliable]

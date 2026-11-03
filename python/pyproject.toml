@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "int2dds"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python bindings for int2DDS - a high-performance DDS implementation"
 readme = "README.md"
 license = {text = "Apache-2.0"}

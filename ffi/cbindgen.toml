@@ -1,4 +1,4 @@
-# cbindgen configuration for int2dds FFI
+# cbindgen configuration for int2DDS FFI
 
 language = "C"
 cpp_compat = true

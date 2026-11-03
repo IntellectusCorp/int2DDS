@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-03
+
+Outbound TCP follows the pinned egress address, SEDP recovers a participant
+dropped on one side only, and the crates ship on crates.io with their licenses.
+
+### Added
+
+- Outbound TCP connections bind to the address pinned by `INT2DDS_NETWORK_IP`
+  or `INT2DDS_NETWORK_INTERFACE` before connecting, instead of leaving the
+  source address to the routing table
+- `LICENSE`, `NOTICE` and the third-party notices ship in every binary
+  artifact, and `LICENSE` and `NOTICE` in every crate package
+- Crate-specific READMEs and crates.io metadata for `int2dds`, `int2dds-derive`,
+  `int2dds-idl` and `int2dds-rpc`. `int2dds-ffi` and `int2dds-java` are not
+  published
+- `INT2DDS_DISABLE_SAME_HOST_LOOPBACK` is documented in the environment guide
+
+### Changed
+
+- Doc comments across `int2dds`, `int2dds-derive`, `int2dds-idl` and
+  `int2dds-rpc` describe what the code does, and the docs.rs pages render
+  without rustdoc warnings
+
+### Fixed
+
+- `DataWriter::wait_for_acknowledgments` returns `Timeout` when a reliable
+  writer's samples are not all acknowledged within `max_wait`
+- `#[dds_type(no_additional_derives)]` applies to tuple structs
+- `PythonOptions::default` uses the `int2dds` module path like `new()`
+- The FFI type builder defaults an enum to its first literal, and enum and
+  union TypeObject flags follow XTypes (#500)
+- The SEDP preemptive ACKNACK is sent with base 1 and no final flag, and the
+  endpoints of a participant dropped on one side only are rediscovered: a
+  settled SEDP heartbeat keeps a 10 s keepalive, and a preemptive ACKNACK from
+  a reader that had acked restarts the fast heartbeat (#487)
+- With a pinned address, an outbound TCP connection to loopback stays unbound
+  unless the pinned address is itself loopback, so loopback initial peers no
+  longer leave discovery silent on Windows
+- A same-host TCP peer named by the pinned egress address is admitted when
+  this host owns that address
+- The non-Linux silent peer probe uses the bind address
+- The `int2dds` crate docs build from the packaged crate, and the internal
+  crate dependencies carry versions so the crates publish
+
+### Removed
+
+- The unused `LengthCode` enum from the CDR serializer module
+
 ## [1.0.0] - 2026-10-30
 
 The first stable release. The network selection variables take effect in the
@@ -453,7 +501,8 @@ repository were migrated together.
 - Unused C code-generation output in `idl` and unused declarations in the
   `hello_world` FFI example header.
 
-[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v1.0.0...HEAD
+[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/IntellectusCorp/int2DDS/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.8...v1.0.0
 [0.1.8]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.6...v0.1.7

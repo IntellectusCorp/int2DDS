@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from int2dds.core.subscriber import DataReader
 
 
-# Status mask constants (matching int2dds Rust library StatusKind bit positions)
+# Status mask constants (matching int2DDS Rust library StatusKind bit positions)
 STATUS_INCONSISTENT_TOPIC = 1 << 0
 STATUS_OFFERED_DEADLINE_MISSED = 1 << 1
 STATUS_REQUESTED_DEADLINE_MISSED = 1 << 2
@@ -145,7 +145,7 @@ class StatusCondition:
                 pass  # Suppress errors during cleanup
 
 
-# Sample / view / instance state mask constants (matching int2dds Rust bitflags)
+# Sample / view / instance state mask constants (matching int2DDS Rust bitflags)
 READ_SAMPLE_STATE = 0x0001
 NOT_READ_SAMPLE_STATE = 0x0002
 ANY_SAMPLE_STATE = 0xFFFF

@@ -1,10 +1,10 @@
 # int2dds-ffi
 
-C/C++ FFI (Foreign Function Interface) bindings for the int2dds DDS implementation.
+C/C++ FFI (Foreign Function Interface) bindings for the int2DDS DDS implementation.
 
 ## Overview
 
-This crate provides a C-compatible API for the int2dds DDS middleware, enabling integration with:
+This crate provides a C-compatible API for the int2DDS DDS middleware, enabling integration with:
 - C/C++ applications
 - Other language bindings (Python, Java, etc.)
 
@@ -727,7 +727,7 @@ cargo test -p int2dds-ffi
 
 ## License
 
-Same as the main int2dds project.
+Same as the main int2DDS project.
 
 ## Contributing
 

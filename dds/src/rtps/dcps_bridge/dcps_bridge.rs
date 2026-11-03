@@ -973,7 +973,7 @@ mod tests {
 
     /// Two participants, one host: each must learn the other's advertised
     /// receive-buffer size over SPDP, and that value must match what a fresh
-    /// socket on this host is actually granted - not what int2dds requested.
+    /// socket on this host is actually granted - not what int2DDS requested.
     #[test]
     fn spdp_advertises_receive_buffer_size_between_peers() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

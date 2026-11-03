@@ -1,6 +1,6 @@
-# int2Dds C# Examples
+# int2DDS C# Examples
 
-Minimal C# hello_world pub/sub examples for the int2Dds .NET bindings.
+Minimal C# hello_world pub/sub examples for the int2DDS .NET bindings.
 
 ## Structure
 

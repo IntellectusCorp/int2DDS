@@ -49,7 +49,7 @@ if (Test-Path $pdb) {
 Copy-Item (Join-Path $RepoRoot 'ffi\include\int2dds-ffi.h') (Join-Path $Stage 'include\')
 Copy-Item (Join-Path $RepoRoot 'ffi\include\int2dds_cdr.h') (Join-Path $Stage 'include\')
 Copy-Item (Join-Path $RepoRoot 'ffi\src\cdr_utils.c')       (Join-Path $Stage 'src\')
-foreach ($f in 'LICENSE','NOTICE','Third_Party_Licenses.md') {
+foreach ($f in 'LICENSE','NOTICE','LICENSE-THIRD-PARTY.md') {
     Copy-Item (Join-Path $RepoRoot $f) $Stage
 }
 
