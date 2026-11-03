@@ -10,7 +10,7 @@ used as a DDS topic type: XCDR serialization, key handling, and the XTypes TypeO
 
 ```toml
 [dependencies]
-int2dds = "1.0.0"
+int2dds = "1.0.1"
 speedy = "0.8"
 log = "0.4"
 ```
