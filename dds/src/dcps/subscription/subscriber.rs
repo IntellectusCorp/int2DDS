@@ -97,12 +97,11 @@ pub struct Subscriber {
     lifecycle: Arc<EntityLifecycle>,
     #[allow(clippy::type_complexity)]
     readers_by_topic_name:
-        Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
+        Arc<Mutex<HashMap<String, Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
     #[allow(clippy::type_complexity)]
     readers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
     builtin_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
-    orphaned_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     default_datareader_qos: Arc<Mutex<Option<DataReaderQos>>>,
     participant: Option<Weak<DomainParticipant>>,
     // Present only under GROUP access scope. Shared with every reader of this Subscriber.
@@ -136,44 +135,15 @@ impl PartialEq for Subscriber {
 }
 impl Eq for Subscriber {}
 
-impl Drop for Subscriber {
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(ref self_arc) = self.self_ref {
-            if Arc::strong_count(self_arc) > 1 {
-                return; // This is a clone, skip orphan handling
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Some(ref participant_weak) = self.participant {
-                if let Some(participant) = participant_weak.upgrade() {
-                    let subscriber_handle = InstanceHandle::from_guid(&self.guid);
-                    participant.handle_subscriber_drop(&subscriber_handle);
-                }
-            }
-        }
-    }
-}
-
 impl_dds_entity!(Subscriber, SubscriberQos);
 impl EnableChild for Subscriber {
     fn enable_child_entities(&self) -> DdsResult<()> {
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_readers in readers_by_topic_name.values() {
-            for weak_reader in weak_readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    reader.enable()?; // Enable only live ones
-                }
+        for readers in readers_by_topic_name.values() {
+            for reader in readers.iter() {
+                reader.enable()?;
             }
         }
 
@@ -212,7 +182,6 @@ impl Subscriber {
             readers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             readers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             builtin_readers: Arc::new(Mutex::new(Vec::new())),
-            orphaned_readers: Arc::new(Mutex::new(Vec::new())),
             default_datareader_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
             subscriber_history_cache: Arc::new(OnceLock::new()),
@@ -335,7 +304,8 @@ impl Subscriber {
 
         drop(dcps_bridge);
 
-        let datareader = DataReader::new(
+        // reader_arc is the only owner until it is pushed into readers_by_topic_name.
+        let reader_arc = DataReader::new(
             false,
             guid,
             type_support,
@@ -346,6 +316,7 @@ impl Subscriber {
             self_ref,
             None, // Non-builtin: RTPS reader created in enable_rtps_entities()
         )?;
+        let datareader = (*reader_arc).clone();
 
         if let Ok(()) = self.is_enabled() {
             if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
@@ -353,13 +324,9 @@ impl Subscriber {
             }
         }
 
-        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
-            .self_ref
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .as_ref()
-            .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?
-            .clone();
+        // Push the Arc from DataReader::new, not Arc::new(datareader.clone()).
+        // Lookup maps hold Weak to this allocation; a separate Arc would not keep it alive.
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = reader_arc;
         let weak_reader: Weak<dyn DataReaderInternal<Qos = DataReaderQos>> =
             Arc::downgrade(&reader_ops);
         {
@@ -379,7 +346,7 @@ impl Subscriber {
             readers_by_topic_name
                 .entry(topic_name)
                 .or_insert_with(Vec::new)
-                .push(weak_reader.clone());
+                .push(reader_ops.clone());
             readers_by_topic_handle
                 .entry(topic_handle)
                 .or_insert_with(Vec::new)
@@ -550,7 +517,8 @@ impl Subscriber {
             .ok_or(DdsError::Error("Subscriber not initialized".to_string()))?;
         let guid = rtps_reader.guid();
 
-        let datareader = DataReader::new(
+        // reader_arc is the only owner until it is pushed into builtin_readers.
+        let reader_arc = DataReader::new(
             true,
             guid,
             type_support,
@@ -561,6 +529,7 @@ impl Subscriber {
             self_ref,
             Some(rtps_reader.clone()), // builtin endpoint(reader)
         )?;
+        let datareader = (*reader_arc).clone();
 
         // Enable if subscriber is enabled and autoenable is set (same as create_datareader)
         if let Ok(()) = self.is_enabled() {
@@ -570,13 +539,7 @@ impl Subscriber {
         }
 
         // Store builtin reader with strong reference (not in readers_by_topic_name/handle)
-        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
-            .self_ref
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .as_ref()
-            .ok_or(DdsError::Error("DataReader not initialized".to_string()))?
-            .clone();
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = reader_arc;
 
         self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?.push(reader_ops);
 
@@ -593,24 +556,7 @@ impl Subscriber {
         let _operation = self.lifecycle.begin_operation()?;
         let arc_reader: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> =
             Arc::new(datareader.clone());
-        match self.try_delete_datareader(&arc_reader) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let reader_ref: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
-                    .self_ref
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?
-                    .as_ref()
-                    .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?
-                    .clone();
-                let mut orphaned =
-                    self.orphaned_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                if !orphaned.iter().any(|c| Arc::ptr_eq(c, &reader_ref)) {
-                    orphaned.push(reader_ref);
-                }
-                Err(e)
-            }
-        }
+        self.try_delete_datareader(&arc_reader)
     }
 
     fn try_delete_datareader(
@@ -625,7 +571,6 @@ impl Subscriber {
             return Err(DdsError::IllegalOperation);
         }
 
-        self.remove_orphaned_reader(datareader);
         if datareader.get_subscriber()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
         }
@@ -648,38 +593,28 @@ impl Subscriber {
         let topic_description = datareader.get_topicdescription()?;
         let topic_name = effective_topic_name(topic_description.as_ref())?;
         let topic_handle = topic_description.topic_instance_handle()?;
+        let participant = self.get_participant()?;
 
-        let mut removed = false;
+        // Held until delete() returns, so in-flight calls can still upgrade self_ref during the drain.
+        let owned_reader = {
+            let mut readers_by_topic_name = self
+                .readers_by_topic_name
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock readers_by_topic_name".to_string()))?;
+            let readers = readers_by_topic_name
+                .get_mut(&topic_name)
+                .ok_or(DdsError::Error("DataReader not found".to_string()))?;
+            let position = readers
+                .iter()
+                .position(|reader| reader.get_instance_handle().is_ok_and(|h| h == handle))
+                .ok_or(DdsError::Error("DataReader not found".to_string()))?;
+            let owned_reader = readers.remove(position);
 
-        {
-            if let Ok(mut readers_by_topic_name) = self.readers_by_topic_name.lock() {
-                if let Some(weak_readers) = readers_by_topic_name.get_mut(&topic_name) {
-                    // Clean up dead references
-                    weak_readers.retain(|weak_reader| weak_reader.upgrade().is_some());
-
-                    // Find and remove target reader
-                    let original_len = weak_readers.len();
-                    weak_readers.retain(|weak_reader| {
-                        weak_reader
-                            .upgrade()
-                            .and_then(|reader| reader.get_instance_handle().ok())
-                            .is_some_and(|h| h != handle)
-                    });
-
-                    removed = weak_readers.len() < original_len;
-
-                    if weak_readers.is_empty() {
-                        readers_by_topic_name.remove(&topic_name);
-                    }
-                }
-            } else {
-                return Err(DdsError::Error("Failed to lock readers_by_topic_name".to_string()));
+            if readers.is_empty() {
+                readers_by_topic_name.remove(&topic_name);
             }
-        }
-
-        if !removed {
-            return Err(DdsError::Error("DataReader not found".to_string()));
-        }
+            owned_reader
+        };
 
         // Remove from the by-handle map as well
         if let Ok(mut readers_by_topic_handle) = self.readers_by_topic_handle.lock() {
@@ -701,89 +636,29 @@ impl Subscriber {
         // torn down, so no admitted read or take runs against a half-deleted reader.
         datareader.mark_deleted_and_await_operation_completion();
 
-        {
-            let participant = self.get_participant()?;
-            let mut bridge_guard = participant.get_dcps_bridge()?;
-            match bridge_guard.as_mut() {
+        // The reader is no longer owned by this subscriber, so delete() runs even if this fails.
+        let rtps_reader_removal_result = match participant.get_dcps_bridge() {
+            Ok(mut bridge_guard) => match bridge_guard.as_mut() {
                 Some(bridge) => bridge
-                    .delete_rtps_reader(topic_name.clone(), handle.to_guid().entity_id())
-                    .map_err(|e| DdsError::Error(e.message))?,
-                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-            };
-        }
+                    .delete_rtps_reader(topic_name, handle.to_guid().entity_id())
+                    .map_err(|e| DdsError::Error(e.message)),
+                None => Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            },
+            Err(e) => Err(e),
+        };
 
         datareader.delete();
+        drop(owned_reader);
 
-        Ok(())
-    }
-
-    fn remove_orphaned_reader(
-        &self,
-        target: &Arc<dyn DataReaderInternal<Qos = DataReaderQos>>,
-    ) -> bool {
-        let mut orphaned_readers = self.orphaned_readers.lock().unwrap();
-        if let Some(pos) = orphaned_readers
-            .iter()
-            .position(|t| t.get_instance_handle().unwrap() == target.get_instance_handle().unwrap())
-        {
-            orphaned_readers.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn handle_reader_drop(
-        &self,
-        topic_name: &str,
-        topic_handle: &InstanceHandle,
-        reader_handle: &InstanceHandle,
-    ) {
-        let mut found_reader: Option<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>> = None;
-
-        // First search in readers_by_topic_name
-        if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(strong_reader) = weak_reader.upgrade() {
-                        if let Ok(handle) = strong_reader.get_instance_handle() {
-                            if handle == *reader_handle {
-                                found_reader = Some(strong_reader);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+        if let Err(e) = &rtps_reader_removal_result {
+            log::debug!(
+                "[delete] reader {:?} removed but rtps reader removal failed: {}",
+                handle,
+                e
+            );
         }
 
-        // If not found, search in readers_by_topic_handle
-        if found_reader.is_none() {
-            if let Ok(readers_by_topic_handle) = self.readers_by_topic_handle.lock() {
-                if let Some(weak_readers) = readers_by_topic_handle.get(topic_handle) {
-                    for weak_reader in weak_readers.iter() {
-                        if let Some(strong_reader) = weak_reader.upgrade() {
-                            if let Ok(handle) = strong_reader.get_instance_handle() {
-                                if handle == *reader_handle {
-                                    found_reader = Some(strong_reader);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If found, add to orphaned_readers
-        if let Some(reader) = found_reader {
-            if let Ok(mut orphaned_readers) = self.orphaned_readers.lock() {
-                if !orphaned_readers.iter().any(|c| Arc::ptr_eq(c, &reader)) {
-                    orphaned_readers.push(reader);
-                }
-            }
-        }
-        // If not found, it was already properly deleted via delete_datareader, so do nothing
+        rtps_reader_removal_result
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {
@@ -888,11 +763,9 @@ impl Subscriber {
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_readers in readers_by_topic_name.values() {
-            for weak_reader in weak_readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    result.push(reader as Arc<dyn DataReaderBase<Qos = DataReaderQos>>);
-                }
+        for readers in readers_by_topic_name.values() {
+            for reader in readers.iter() {
+                result.push(reader.clone() as Arc<dyn DataReaderBase<Qos = DataReaderQos>>);
             }
         }
         Ok(result)
@@ -905,12 +778,8 @@ impl Subscriber {
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_readers in readers_by_topic_name.values() {
-            for weak_reader in weak_readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    result.push(reader as Arc<dyn DataReaderInternal<Qos = DataReaderQos>>);
-                }
-            }
+        for readers in readers_by_topic_name.values() {
+            result.extend(readers.iter().cloned());
         }
         Ok(result)
     }
@@ -924,7 +793,7 @@ impl Subscriber {
             .get(topic_name)
             .into_iter()
             .flatten()
-            .filter_map(|weak_reader| weak_reader.upgrade())
+            .cloned()
             .collect();
 
         Self::update_enabled_rtps_readers(readers)
@@ -973,14 +842,10 @@ impl Subscriber {
         {
             let readers_by_topic_name =
                 self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if let Some(typed_reader) =
-                            reader.as_any().downcast_ref::<DataReader<Foo>>()
-                        {
-                            return Ok(typed_reader.clone());
-                        }
+            if let Some(readers) = readers_by_topic_name.get(topic_name) {
+                for reader in readers {
+                    if let Some(typed_reader) = reader.as_any().downcast_ref::<DataReader<Foo>>() {
+                        return Ok(typed_reader.clone());
                     }
                 }
             }
@@ -993,19 +858,17 @@ impl Subscriber {
         let mut result = Vec::new();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for weak_readers in readers_by_topic_name.values() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            // Convert from DataReaderBase to Arc<DataReader<Foo>>
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                // Get Arc through self_ref
-                                if let Ok(guard) = &typed_reader.self_ref.lock() {
-                                    if let Some(arc_reader) = guard.as_ref() {
-                                        result.push(arc_reader.clone());
-                                    }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        // Convert from DataReaderBase to Arc<DataReader<Foo>>
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            // Get Arc through self_ref
+                            if let Ok(guard) = &typed_reader.self_ref.lock() {
+                                if let Some(arc_reader) = guard.as_ref().and_then(Weak::upgrade) {
+                                    result.push(arc_reader);
                                 }
                             }
                         }
@@ -1025,17 +888,15 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                if let Ok(guard) = &typed_reader.self_ref.lock() {
-                                    if let Some(arc_reader) = guard.as_ref() {
-                                        return Ok(Some(arc_reader.clone()));
-                                    }
+            if let Some(readers) = readers_by_topic_name.get(topic_name) {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            if let Ok(guard) = &typed_reader.self_ref.lock() {
+                                if let Some(arc_reader) = guard.as_ref().and_then(Weak::upgrade) {
+                                    return Ok(Some(arc_reader));
                                 }
                             }
                         }
@@ -1056,15 +917,13 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                return Ok(Some(f(typed_reader)));
-                            }
+            if let Some(readers) = readers_by_topic_name.get(topic_name) {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            return Ok(Some(f(typed_reader)));
                         }
                     }
                 }
@@ -1082,15 +941,13 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for (_topic_name, weak_readers) in readers_by_topic_name.iter() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                f(typed_reader);
-                            }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            f(typed_reader);
                         }
                     }
                 }
@@ -1108,13 +965,11 @@ impl Subscriber {
             HashMap::new();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for (_topic_name, weak_readers) in readers_by_topic_name.iter() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        let type_id = reader.get_type_id();
-                        let type_readers = type_map.entry(type_id).or_default();
-                        type_readers.push(reader.clone_boxed());
-                    }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    let type_id = reader.get_type_id();
+                    let type_readers = type_map.entry(type_id).or_default();
+                    type_readers.push(reader.clone_boxed());
                 }
             }
         }
@@ -1127,12 +982,10 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for (_topic_name, weak_readers) in readers_by_topic_name.iter() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            reader.notify_data_available();
-                        }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        reader.notify_data_available();
                     }
                 }
             }
@@ -1241,10 +1094,8 @@ impl Subscriber {
         };
 
         for readers in readers_by_topic_name.values() {
-            for weak_reader in readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    reader.notify_data_available();
-                }
+            for reader in readers.iter() {
+                reader.notify_data_available();
             }
         }
         Ok(())
@@ -1446,12 +1297,10 @@ impl Subscriber {
             match self.readers_by_topic_name.lock() {
                 Ok(readers) => {
                     // Check for non-builtin readers
-                    for weak_readers in readers.values() {
-                        for weak_reader in weak_readers {
-                            if let Some(reader) = weak_reader.upgrade() {
-                                if !reader.is_builtin() {
-                                    return Ok(true);
-                                }
+                    for topic_readers in readers.values() {
+                        for reader in topic_readers {
+                            if !reader.is_builtin() {
+                                return Ok(true);
                             }
                         }
                     }
@@ -1466,12 +1315,10 @@ impl Subscriber {
         let _operation = self.lifecycle.begin_operation()?;
         match self.readers_by_topic_name.lock() {
             Ok(guard) => {
-                for weak_readers in guard.values() {
-                    for weak_reader in weak_readers {
-                        if let Some(reader) = weak_reader.upgrade() {
-                            if reader.get_instance_handle()? == handle {
-                                return Ok(true);
-                            }
+                for readers in guard.values() {
+                    for reader in readers {
+                        if reader.get_instance_handle()? == handle {
+                            return Ok(true);
                         }
                     }
                 }
@@ -1523,10 +1370,8 @@ impl Subscriber {
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         for topic_readers in readers.values() {
-            for weak_reader in topic_readers {
-                if let Some(reader) = weak_reader.upgrade() {
-                    reader.disable()?;
-                }
+            for reader in topic_readers {
+                reader.disable()?;
             }
         }
 
@@ -1551,16 +1396,8 @@ impl Subscriber {
     }
 
     fn cleanup_dead_readers(&self) -> DdsResult<()> {
-        let mut readers_by_name =
-            self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let mut readers_by_handle =
             self.readers_by_topic_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        // Clean up both data structures
-        for weak_readers in readers_by_name.values_mut() {
-            weak_readers.retain(|weak_reader| weak_reader.upgrade().is_some());
-        }
-        readers_by_name.retain(|_, readers| !readers.is_empty());
 
         for weak_readers in readers_by_handle.values_mut() {
             weak_readers.retain(|weak_reader| weak_reader.upgrade().is_some());
@@ -2082,6 +1919,281 @@ mod tests {
         drop(subscriber);
         let contains_subscriber = domain_participant.contains_entity(subscriber_handle).unwrap();
         assert!(contains_subscriber, "Subscriber deleted!")
+    }
+
+    #[test]
+    fn subscriber_survives_last_drop_while_internal_strong_ref_is_held() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "subscriber_transient_ref_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Stands in for a receive thread holding the subscriber during a status update.
+        let transient_subscriber = reader.subscriber_arc().unwrap();
+        drop(subscriber);
+        drop(transient_subscriber);
+
+        assert!(reader.get_subscriber().is_ok(), "Subscriber freed while its reader is alive");
+
+        drop(reader);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn subscriber_stays_owned_by_participant_after_failed_delete() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "subscriber_failed_delete_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber_handle = subscriber.get_instance_handle().unwrap();
+
+        let delete_result = participant.delete_subscriber(subscriber);
+        assert!(matches!(delete_result, Err(DdsError::PreconditionNotMet)));
+
+        let subscriber = reader.get_subscriber().expect("Subscriber freed after a failed delete");
+        assert_eq!(subscriber.get_instance_handle().unwrap(), subscriber_handle);
+
+        subscriber.delete_datareader(reader).unwrap();
+        participant.delete_subscriber(subscriber).unwrap();
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn deleted_subscriber_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let subscriber_weak = Arc::downgrade(subscriber.self_ref.as_ref().unwrap());
+        let remaining_subscriber = subscriber.clone();
+
+        participant.delete_subscriber(subscriber).unwrap();
+
+        assert!(matches!(
+            remaining_subscriber.get_instance_handle(),
+            Err(DdsError::AlreadyDeleted)
+        ));
+
+        drop(remaining_subscriber);
+        assert!(subscriber_weak.upgrade().is_none(), "Deleted subscriber was not freed");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn deleted_reader_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "deleted_reader_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let owned_reader =
+            subscriber.get_datareader::<HelloWorld>("deleted_reader_topic").unwrap().unwrap();
+        let reader_weak = Arc::downgrade(&owned_reader);
+        drop(owned_reader);
+        let remaining_reader = reader.clone();
+
+        subscriber.delete_datareader(reader).unwrap();
+
+        assert!(matches!(remaining_reader.get_instance_handle(), Err(DdsError::AlreadyDeleted)));
+
+        drop(remaining_reader);
+        assert!(reader_weak.upgrade().is_none(), "Deleted reader was not freed");
+
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn reader_stays_owned_by_subscriber_after_failed_delete() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "reader_failed_delete_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let owner_subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let other_subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = owner_subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let reader_handle = reader.get_instance_handle().unwrap();
+
+        let delete_result = other_subscriber.delete_datareader(reader);
+        assert!(matches!(delete_result, Err(DdsError::PreconditionNotMet)));
+
+        assert!(
+            owner_subscriber.contains_entity(reader_handle).unwrap(),
+            "Reader removed from its subscriber after a failed delete"
+        );
+        let reader = owner_subscriber
+            .lookup_datareader::<HelloWorld>("reader_failed_delete_topic")
+            .expect("Reader freed after a failed delete");
+        assert_eq!(reader.get_instance_handle().unwrap(), reader_handle);
+
+        owner_subscriber.delete_datareader(reader).unwrap();
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn reader_stays_owned_by_subscriber_after_last_handle_drop() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "reader_last_drop_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let reader_handle = reader.get_instance_handle().unwrap();
+
+        drop(reader);
+
+        assert!(
+            subscriber.contains_entity(reader_handle).unwrap(),
+            "Reader removed from its subscriber after its last handle was dropped"
+        );
+        let reader = subscriber
+            .lookup_datareader::<HelloWorld>("reader_last_drop_topic")
+            .expect("Reader freed after its last handle was dropped");
+        assert_eq!(reader.get_instance_handle().unwrap(), reader_handle);
+
+        subscriber.delete_datareader(reader).unwrap();
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]

@@ -61,29 +61,6 @@ impl PartialEq for ContentFilteredTopic {
     }
 }
 impl Eq for ContentFilteredTopic {}
-impl Drop for ContentFilteredTopic {
-    fn drop(&mut self) {
-        // Only handle drop for the last reference (not clones)
-        if let Some(ref self_arc) = self.self_ref {
-            if Arc::strong_count(self_arc) > 1 {
-                return; // This is a clone, skip orphan handling
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Ok(ref participant) = self.get_participant() {
-                if let Ok(topic) = self.get_related_topic() {
-                    if let Ok(topic_handle) = topic.get_instance_handle() {
-                        let cft_handle = InstanceHandle::from_guid(&self.guid);
-                        participant.handle_contentfilteredtopic_drop(&topic_handle, &cft_handle);
-                    }
-                }
-            }
-        }
-    }
-}
 
 impl_topic_description!(ContentFilteredTopic);
 

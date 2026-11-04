@@ -149,17 +149,16 @@ pub struct DomainParticipant {
     dcps_bridge: Arc<Mutex<Option<DcpsBridge>>>,
     builtin_subscriber: Arc<Mutex<Option<Subscriber>>>,
     builtin_topics: Arc<Mutex<Vec<Topic>>>,
-    publishers: Arc<Mutex<Vec<Weak<Publisher>>>>,
+    publishers: Arc<Mutex<Vec<Arc<Publisher>>>>,
     publishers_by_handle: Arc<Mutex<HashMap<InstanceHandle, Weak<Publisher>>>>,
-    subscribers: Arc<Mutex<Vec<Weak<Subscriber>>>>,
+    subscribers: Arc<Mutex<Vec<Arc<Subscriber>>>>,
     subscribers_by_handle: Arc<Mutex<HashMap<InstanceHandle, Weak<Subscriber>>>>,
-    topics: Arc<Mutex<Vec<Weak<Topic>>>>,
+    topics: Arc<Mutex<Vec<Arc<Topic>>>>,
     topics_by_handle: Arc<Mutex<HashMap<InstanceHandle, Weak<Topic>>>>,
-    filtered_topics: Arc<Mutex<Vec<Weak<ContentFilteredTopic>>>>,
+    filtered_topics: Arc<Mutex<Vec<Arc<ContentFilteredTopic>>>>,
     filtered_topics_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<ContentFilteredTopic>>>>>,
     // multi_topics: Arc<Mutex<Vec<Weak<MultiTopic>>>>,
-    orphaned_entities: Arc<Mutex<OrphanedEntities>>,
     // Reference-counted type registry: each create_topic registers (+1) and each
     // delete_topic unregisters (-1); the entry is dropped only when the count reaches 0.
     // The count prevents a concurrent topic deletion from unregistering a type that a
@@ -184,46 +183,8 @@ impl Debug for DomainParticipant {
     }
 }
 
-impl Drop for DomainParticipant {
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(ref self_arc) = self.self_ref {
-            if Arc::strong_count(self_arc) > 1 {
-                return; // This is a clone, skip orphan handling
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            let factory = DomainParticipantFactory::get_instance();
-            factory.handle_participant_drop(
-                &self.domain_id,
-                &InstanceHandle::from_guid(&self.guid().unwrap()),
-            );
-        }
-    }
-}
-
-/// A borrowed participant handle that skips the 25-refcount deep clone `get_participant` performs.
-///
-/// Returned by [`Subscriber::participant_arc`](crate::subscription::subscriber::Subscriber) for
-/// internal hot paths. It exists rather than a bare `Arc<DomainParticipant>` because
-/// `get_participant` force-sets `self_ref` on the value it hands back, so its temporary takes part
-/// in the `Drop` guard above and performs the factory orphan handoff when it is the last reference
-/// standing. A bare `Arc` would instead let the count fall to zero and drop the interior value,
-/// whose `self_ref` is `None` -- the participant would be destroyed rather than orphaned, chosen
-/// nondeterministically by whichever thread released last. The guard here reproduces the original
-/// behaviour for two atomic loads, against the ~52 read-modify-writes the clone cost.
-///
-/// The value behind it has `self_ref: None` (see `DomainParticipant::new`, which builds the `Arc`
-/// from a clone taken before `self_ref` is assigned), so it must not be used to reach
-/// `create_*`/`delete_*`, which read that field.
+// Borrowed participant handle for internal paths. The value behind it has `self_ref: None`,
+// so it must not be used to reach `create_*`/`delete_*`, which read that field.
 pub(crate) struct ParticipantRef(Arc<DomainParticipant>);
 
 impl ParticipantRef {
@@ -237,96 +198,6 @@ impl std::ops::Deref for ParticipantRef {
 
     fn deref(&self) -> &DomainParticipant {
         &self.0
-    }
-}
-
-impl Drop for ParticipantRef {
-    fn drop(&mut self) {
-        if self.0.is_builtin {
-            return;
-        }
-        // Plain loads, not read-modify-writes: this is the whole cost of the parity guard.
-        if Arc::strong_count(&self.0) > 1 {
-            return;
-        }
-        if self.0.lifecycle.is_deleted() {
-            return;
-        }
-        if let Ok(guid) = self.0.guid() {
-            DomainParticipantFactory::get_instance()
-                .handle_participant_drop(&self.0.domain_id, &InstanceHandle::from_guid(&guid));
-        }
-    }
-}
-
-#[derive(Default, Clone)]
-struct OrphanedEntities {
-    topics: Vec<Arc<Topic>>,
-    publishers: Vec<Arc<Publisher>>,
-    subscribers: Vec<Arc<Subscriber>>,
-    content_filtered_topics: Vec<Arc<ContentFilteredTopic>>,
-}
-
-impl OrphanedEntities {
-    // Check if a specific entity is in orphaned and remove it
-    fn add_publisher(&mut self, target: Arc<Publisher>) {
-        if !self.publishers.iter().any(|c| Arc::ptr_eq(c, &target)) {
-            self.publishers.push(target);
-        }
-    }
-
-    fn add_subscriber(&mut self, target: Arc<Subscriber>) {
-        if !self.subscribers.iter().any(|c| Arc::ptr_eq(c, &target)) {
-            self.subscribers.push(target);
-        }
-    }
-
-    fn add_topic(&mut self, target: Arc<Topic>) {
-        if !self.topics.iter().any(|c| Arc::ptr_eq(c, &target)) {
-            self.topics.push(target);
-        }
-    }
-
-    fn add_content_filtered_topic(&mut self, target: Arc<ContentFilteredTopic>) {
-        if !self.content_filtered_topics.iter().any(|c| Arc::ptr_eq(c, &target)) {
-            self.content_filtered_topics.push(target);
-        }
-    }
-
-    fn remove_topic(&mut self, target: &Topic) -> bool {
-        if let Some(pos) = self.topics.iter().position(|t| &**t == target) {
-            self.topics.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn remove_content_filtered_topic(&mut self, target: &ContentFilteredTopic) -> bool {
-        if let Some(pos) = self.content_filtered_topics.iter().position(|t| &**t == target) {
-            self.content_filtered_topics.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn remove_publisher(&mut self, target: &Publisher) -> bool {
-        if let Some(pos) = self.publishers.iter().position(|p| &**p == target) {
-            self.publishers.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn remove_subscriber(&mut self, target: &Subscriber) -> bool {
-        if let Some(pos) = self.subscribers.iter().position(|s| &**s == target) {
-            self.subscribers.remove(pos);
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -376,7 +247,6 @@ impl EnableChild for DomainParticipant {
                     .lock()
                     .map_err(|e| DdsError::Error(e.to_string()))?
                     .iter()
-                    .filter_map(|entity| entity.upgrade())
                     .try_for_each(|entity| entity.enable())
                     .map_err(|e| {
                         log::error!("Failed to enable {}: {:?}", $entity_type, e);
@@ -463,7 +333,6 @@ impl DomainParticipant {
             filtered_topics: Arc::new(Mutex::new(Vec::new())),
             filtered_topics_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             // multi_topics: Arc::new(Mutex::new(Vec::new())),
-            orphaned_entities: Arc::new(Mutex::new(OrphanedEntities::default())),
             types: Arc::new(RwLock::new(HashMap::new())),
             default_subscriber_qos: Arc::new(Mutex::new(None)),
             default_publisher_qos: Arc::new(Mutex::new(None)),
@@ -854,6 +723,8 @@ impl DomainParticipant {
             }
         }
 
+        // Push this self_ref Arc, not Arc::new(publisher.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let publisher_ref = publisher
             .self_ref
             .as_ref()
@@ -863,7 +734,7 @@ impl DomainParticipant {
         {
             let mut publishers =
                 self.publishers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            publishers.push(weak_publisher.clone());
+            publishers.push(publisher_ref.clone());
         }
         {
             let mut publishers_by_handle =
@@ -905,21 +776,7 @@ impl DomainParticipant {
         }
         let _operation = self.lifecycle.begin_operation()?;
 
-        match self.try_delete_publisher(&mut publisher) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let pub_ref = publisher
-                    .self_ref
-                    .as_ref()
-                    .ok_or(DdsError::Error("Publisher is not properly initialized".to_string()))?
-                    .clone();
-                self.orphaned_entities
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?
-                    .add_publisher(pub_ref);
-                Err(e)
-            }
-        }
+        self.try_delete_publisher(&mut publisher)
     }
 
     fn try_delete_publisher(&self, publisher: &mut Publisher) -> DdsResult<()> {
@@ -927,11 +784,6 @@ impl DomainParticipant {
             log::debug!("[delete] refusing delete_publisher from inside a listener callback");
             return Err(DdsError::IllegalOperation);
         }
-
-        {
-            let mut orphaned = self.orphaned_entities.lock().unwrap();
-            orphaned.remove_publisher(publisher)
-        };
 
         if publisher.get_participant()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
@@ -958,12 +810,7 @@ impl DomainParticipant {
             }
 
             // Clean up dead references and remove the publisher
-            publishers.retain(|weak_publisher| {
-                match weak_publisher.upgrade() {
-                    Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
-                    None => false, // Remove dead references
-                }
-            });
+            publishers.retain(|p| p.get_instance_handle().is_ok_and(|h| h != handle));
 
             publishers_by_handle.remove(&handle);
         }
@@ -971,44 +818,6 @@ impl DomainParticipant {
         publisher.delete();
 
         Ok(())
-    }
-
-    pub(crate) fn handle_publisher_drop(&self, publisher_handle: &InstanceHandle) {
-        let mut found_publisher = None;
-        if let Ok(publishers) = self.publishers.lock() {
-            for weak_publisher in publishers.iter() {
-                if let Some(strong_publisher) = weak_publisher.upgrade() {
-                    if let Ok(handle) = strong_publisher.get_instance_handle() {
-                        if handle == *publisher_handle {
-                            found_publisher = Some(strong_publisher);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if found_publisher.is_none() {
-            if let Ok(publishers_by_topic_handle) = self.publishers_by_handle.lock() {
-                if let Some(weak_publisher) = publishers_by_topic_handle.get(publisher_handle) {
-                    if let Some(strong_publisher) = weak_publisher.upgrade() {
-                        if let Ok(handle) = strong_publisher.get_instance_handle() {
-                            if handle == *publisher_handle {
-                                found_publisher = Some(strong_publisher);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If found, add Publisher to orphaned_entities
-        if let Some(publisher) = found_publisher {
-            if let Ok(mut orphaned_entities) = self.orphaned_entities.lock() {
-                orphaned_entities.add_publisher(publisher);
-            }
-        }
-        // If not found, it has already been properly deleted via delete_publisher, so do nothing
     }
 
     /// Creates a new `Subscriber` for receiving data.
@@ -1077,6 +886,8 @@ impl DomainParticipant {
             }
         }
 
+        // Push this self_ref Arc, not Arc::new(subscriber.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let subscriber_ref = subscriber
             .self_ref
             .as_ref()
@@ -1086,7 +897,7 @@ impl DomainParticipant {
         {
             let mut subscribers =
                 self.subscribers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            subscribers.push(weak_subscriber.clone());
+            subscribers.push(subscriber_ref.clone());
         }
         {
             let mut subscribers_by_handle =
@@ -1128,21 +939,7 @@ impl DomainParticipant {
         }
         let _operation = self.lifecycle.begin_operation()?;
 
-        match self.try_delete_subscriber(&mut subscriber) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let subscriber_ref = subscriber
-                    .self_ref
-                    .as_ref()
-                    .ok_or(DdsError::Error("Subscriber is not properly initialized".to_string()))?
-                    .clone();
-                self.orphaned_entities
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?
-                    .add_subscriber(subscriber_ref);
-                Err(e)
-            }
-        }
+        self.try_delete_subscriber(&mut subscriber)
     }
 
     fn try_delete_subscriber(&self, subscriber: &mut Subscriber) -> DdsResult<()> {
@@ -1150,11 +947,6 @@ impl DomainParticipant {
             log::debug!("[delete] refusing delete_subscriber from inside a listener callback");
             return Err(DdsError::IllegalOperation);
         }
-
-        {
-            let mut orphaned = self.orphaned_entities.lock().unwrap();
-            orphaned.remove_subscriber(subscriber)
-        };
 
         if subscriber.get_participant()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
@@ -1182,12 +974,7 @@ impl DomainParticipant {
             }
 
             // Clean up dead references and remove the subscriber
-            subscribers.retain(|weak_subscriber| {
-                match weak_subscriber.upgrade() {
-                    Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
-                    None => false, // Remove dead references
-                }
-            });
+            subscribers.retain(|s| s.get_instance_handle().is_ok_and(|h| h != handle));
 
             subscribers_by_handle.remove(&handle);
         }
@@ -1195,44 +982,6 @@ impl DomainParticipant {
         subscriber.delete();
 
         Ok(())
-    }
-
-    pub(crate) fn handle_subscriber_drop(&self, subscriber_handle: &InstanceHandle) {
-        let mut found_subscriber = None;
-        if let Ok(subscribers) = self.subscribers.lock() {
-            for weak_subscriber in subscribers.iter() {
-                if let Some(strong_subscriber) = weak_subscriber.upgrade() {
-                    if let Ok(handle) = strong_subscriber.get_instance_handle() {
-                        if handle == *subscriber_handle {
-                            found_subscriber = Some(strong_subscriber);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if found_subscriber.is_none() {
-            if let Ok(subscribers_by_topic_handle) = self.subscribers_by_handle.lock() {
-                if let Some(weak_subscriber) = subscribers_by_topic_handle.get(subscriber_handle) {
-                    if let Some(strong_subscriber) = weak_subscriber.upgrade() {
-                        if let Ok(handle) = strong_subscriber.get_instance_handle() {
-                            if handle == *subscriber_handle {
-                                found_subscriber = Some(strong_subscriber);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If found, add Subscriber to orphaned_entities
-        if let Some(subscriber) = found_subscriber {
-            if let Ok(mut orphaned_entities) = self.orphaned_entities.lock() {
-                orphaned_entities.add_subscriber(subscriber);
-            }
-        }
-        // If not found, it has already been properly deleted via delete_subscriber, so do nothing
     }
 
     pub fn get_builtin_subscriber(&self) -> DdsResult<Subscriber> {
@@ -1354,6 +1103,8 @@ impl DomainParticipant {
             self_ref,
         )?;
 
+        // Push this self_ref Arc, not Arc::new(filtered_topic.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let filtered_topic_ref = filtered_topic
             .self_ref
             .as_ref()
@@ -1364,7 +1115,7 @@ impl DomainParticipant {
         {
             let mut filtered_topics =
                 self.filtered_topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            filtered_topics.push(weak_filtered_topic.clone());
+            filtered_topics.push(filtered_topic_ref.clone());
         }
 
         {
@@ -1387,22 +1138,7 @@ impl DomainParticipant {
     ) -> DdsResult<()> {
         let _operation = self.lifecycle.begin_operation()?;
 
-        match self.try_delete_contentfilteredtopic(&mut content_filtered_topic) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let content_filtered_topic_ref = content_filtered_topic
-                    .self_ref
-                    .as_ref()
-                    .ok_or(DdsError::Error("Topic is not properly initialized".to_string()))?
-                    .clone();
-                self.orphaned_entities
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?
-                    .content_filtered_topics
-                    .push(content_filtered_topic_ref);
-                Err(e)
-            }
-        }
+        self.try_delete_contentfilteredtopic(&mut content_filtered_topic)
     }
 
     fn try_delete_contentfilteredtopic(
@@ -1415,11 +1151,6 @@ impl DomainParticipant {
             );
             return Err(DdsError::IllegalOperation);
         }
-
-        {
-            let mut orphaned = self.orphaned_entities.lock().unwrap();
-            orphaned.remove_content_filtered_topic(content_filtered_topic)
-        };
 
         if content_filtered_topic.get_participant()?.get_instance_handle()?
             != self.get_instance_handle()?
@@ -1448,10 +1179,8 @@ impl DomainParticipant {
                 return Err(DdsError::Error("Topic not found".to_string()));
             }
 
-            content_filtered_topics.retain(|weak_cft| match weak_cft.upgrade() {
-                Some(cft) => cft.topic_instance_handle().is_ok_and(|h| h != handle),
-                None => false,
-            });
+            content_filtered_topics
+                .retain(|cft| cft.topic_instance_handle().is_ok_and(|h| h != handle));
 
             if let Some(cft_list) = filtered_topics_by_topic_handle.get_mut(&related_topic_handle) {
                 cft_list.retain(|weak_cft| match weak_cft.upgrade() {
@@ -1467,53 +1196,6 @@ impl DomainParticipant {
 
         content_filtered_topic.delete();
         Ok(())
-    }
-
-    pub(crate) fn handle_contentfilteredtopic_drop(
-        &self,
-        topic_handle: &InstanceHandle,
-        content_filtered_topic_handle: &InstanceHandle,
-    ) {
-        let mut found_topic = None;
-        if let Ok(filtered_topics) = self.filtered_topics.lock() {
-            for weak_filtered_topic in filtered_topics.iter() {
-                if let Some(strong_filtered_topic) = weak_filtered_topic.upgrade() {
-                    if let Ok(handle) = strong_filtered_topic.topic_instance_handle() {
-                        if handle == *content_filtered_topic_handle {
-                            found_topic = Some(strong_filtered_topic);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if found_topic.is_none() {
-            if let Ok(filtered_topics_by_topic_handle) = self.filtered_topics_by_topic_handle.lock()
-            {
-                if let Some(weak_filtered_topics) =
-                    filtered_topics_by_topic_handle.get(topic_handle)
-                {
-                    for weak_filtered_topic in weak_filtered_topics.iter() {
-                        {
-                            if let Some(strong_filtered_topic) = weak_filtered_topic.upgrade() {
-                                if let Ok(handle) = strong_filtered_topic.topic_instance_handle() {
-                                    if handle == *content_filtered_topic_handle {
-                                        found_topic = Some(strong_filtered_topic);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(topic) = found_topic {
-            if let Ok(mut orphaned_entities) = self.orphaned_entities.lock() {
-                orphaned_entities.add_content_filtered_topic(topic);
-            }
-        }
     }
 
     pub fn assert_liveliness(&self) -> DdsResult<()> {
@@ -1710,6 +1392,8 @@ impl DomainParticipant {
             }
         }
 
+        // Push this self_ref Arc, not Arc::new(topic.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let topic_ref = topic
             .self_ref
             .as_ref()
@@ -1718,7 +1402,7 @@ impl DomainParticipant {
         let weak_topic = Arc::downgrade(&topic_ref);
         {
             let mut topics = self.topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            topics.push(weak_topic.clone());
+            topics.push(topic_ref.clone());
         }
         {
             let mut topics_by_handle =
@@ -1855,7 +1539,8 @@ impl DomainParticipant {
             participant,
         );
 
-        // Add weak references to topics collection (for find_internal_topic lookup)
+        // Push this self_ref Arc, not Arc::new(topic.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let topic_ref = topic
             .self_ref
             .as_ref()
@@ -1865,7 +1550,7 @@ impl DomainParticipant {
         {
             let mut topics =
                 participant.topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            topics.push(weak_topic.clone());
+            topics.push(topic_ref.clone());
         }
         {
             let mut topics_by_handle =
@@ -1889,21 +1574,7 @@ impl DomainParticipant {
         }
         let _operation = self.lifecycle.begin_operation()?;
 
-        match self.try_delete_topic(&mut topic) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let topic_ref = topic
-                    .self_ref
-                    .as_ref()
-                    .ok_or(DdsError::Error("Topic is not properly initialized".to_string()))?
-                    .clone();
-                self.orphaned_entities
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?
-                    .add_topic(topic_ref);
-                Err(e)
-            }
-        }
+        self.try_delete_topic(&mut topic)
     }
 
     fn try_delete_topic(&self, topic: &mut Topic) -> DdsResult<()> {
@@ -1911,11 +1582,6 @@ impl DomainParticipant {
             log::debug!("[delete] refusing delete_topic from inside a listener callback");
             return Err(DdsError::IllegalOperation);
         }
-
-        {
-            let mut orphaned = self.orphaned_entities.lock().unwrap();
-            orphaned.remove_topic(topic)
-        };
 
         if topic.get_participant()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
@@ -1943,12 +1609,7 @@ impl DomainParticipant {
             }
 
             // Clean up dead references and remove topic
-            topics.retain(|weak_topic| {
-                match weak_topic.upgrade() {
-                    Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
-                    None => false, // Remove dead reference
-                }
-            });
+            topics.retain(|t| t.get_instance_handle().is_ok_and(|h| h != handle));
 
             topics_by_handle.remove(&handle);
         }
@@ -1962,44 +1623,6 @@ impl DomainParticipant {
 
         topic.delete();
         Ok(())
-    }
-
-    pub(crate) fn handle_topic_drop(&self, topic_handle: &InstanceHandle) {
-        let mut found_topic = None;
-        if let Ok(topics) = self.topics.lock() {
-            for weak_topic in topics.iter() {
-                if let Some(strong_topic) = weak_topic.upgrade() {
-                    if let Ok(handle) = strong_topic.get_instance_handle() {
-                        if handle == *topic_handle {
-                            found_topic = Some(strong_topic);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if found_topic.is_none() {
-            if let Ok(topics_by_topic_handle) = self.topics_by_handle.lock() {
-                if let Some(weak_topic) = topics_by_topic_handle.get(topic_handle) {
-                    if let Some(strong_topic) = weak_topic.upgrade() {
-                        if let Ok(handle) = strong_topic.get_instance_handle() {
-                            if handle == *topic_handle {
-                                found_topic = Some(strong_topic);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If found, add Publisher to orphaned_entities
-        if let Some(topic) = found_topic {
-            if let Ok(mut orphaned_entities) = self.orphaned_entities.lock() {
-                orphaned_entities.add_topic(topic);
-            }
-        }
-        // If not found, it has already been deleted by delete_topic, so do nothing
     }
 
     // Can be changed to support remote Topic propagation in the future
@@ -2475,72 +2098,28 @@ impl DomainParticipant {
 
     pub(crate) fn get_publishers(&self) -> DdsResult<Vec<Arc<Publisher>>> {
         match self.publishers.lock() {
-            Ok(mut publishers) => {
-                let mut valid_publishers = Vec::new();
-                publishers.retain(|weak| {
-                    if let Some(arc) = weak.upgrade() {
-                        valid_publishers.push(arc);
-                        true // Keep valid Weak in vector
-                    } else {
-                        false // Remove invalid Weak from vector
-                    }
-                });
-                Ok(valid_publishers)
-            }
+            Ok(publishers) => Ok(publishers.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
 
     pub(crate) fn get_subscribers(&self) -> DdsResult<Vec<Arc<Subscriber>>> {
         match self.subscribers.lock() {
-            Ok(mut subscribers) => {
-                let mut valid_subscribers = Vec::new();
-                subscribers.retain(|weak| {
-                    if let Some(arc) = weak.upgrade() {
-                        valid_subscribers.push(arc);
-                        true // Keep valid Weak in vector
-                    } else {
-                        false // Remove invalid Weak from vector
-                    }
-                });
-                Ok(valid_subscribers)
-            }
+            Ok(subscribers) => Ok(subscribers.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
 
     fn get_topics(&self) -> DdsResult<Vec<Arc<Topic>>> {
         match self.topics.lock() {
-            Ok(mut topics) => {
-                let mut valid_topics = Vec::new();
-                topics.retain(|weak| {
-                    if let Some(arc) = weak.upgrade() {
-                        valid_topics.push(arc);
-                        true // Keep valid Weak in vector
-                    } else {
-                        false // Remove invalid Weak from vector
-                    }
-                });
-                Ok(valid_topics)
-            }
+            Ok(topics) => Ok(topics.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
 
     fn get_filtered_topics(&self) -> DdsResult<Vec<Arc<ContentFilteredTopic>>> {
         match self.filtered_topics.lock() {
-            Ok(mut filtered_topics) => {
-                let mut valid_topics = Vec::new();
-                filtered_topics.retain(|weak| {
-                    if let Some(arc) = weak.upgrade() {
-                        valid_topics.push(arc);
-                        true // Keep valid Weak in vector
-                    } else {
-                        false // Remove invalid Weak from vector
-                    }
-                });
-                Ok(valid_topics)
-            }
+            Ok(filtered_topics) => Ok(filtered_topics.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
@@ -2775,7 +2354,8 @@ impl DomainParticipant {
             }
         }
 
-        // Store topic reference
+        // Push this self_ref Arc, not Arc::new(topic.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let topic_ref = topic
             .self_ref
             .as_ref()
@@ -2784,7 +2364,7 @@ impl DomainParticipant {
         let weak_topic = Arc::downgrade(&topic_ref);
         {
             let mut topics = self.topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            topics.push(weak_topic.clone());
+            topics.push(topic_ref.clone());
         }
         {
             let mut topics_by_handle =
@@ -3043,8 +2623,8 @@ impl DomainParticipant {
         let topic_arc = match self.topics.lock() {
             Ok(topics) => topics
                 .iter()
-                .filter_map(|weak_topic| weak_topic.upgrade())
-                .find(|topic| **topic == *external_topic)
+                .find(|topic| ***topic == *external_topic)
+                .cloned()
                 .ok_or(DdsError::BadParameter)?,
             Err(e) => return Err(DdsError::Error(e.to_string())),
         };
@@ -3059,8 +2639,8 @@ impl DomainParticipant {
         let topic_arc = match self.filtered_topics.lock() {
             Ok(filtered_topics) => filtered_topics
                 .iter()
-                .filter_map(|weak_topic| weak_topic.upgrade())
-                .find(|topic| **topic == *external_topic)
+                .find(|topic| ***topic == *external_topic)
+                .cloned()
                 .ok_or(DdsError::BadParameter)?,
             Err(e) => return Err(DdsError::Error(e.to_string())),
         };
@@ -3133,10 +2713,8 @@ impl DomainParticipant {
         {
             match self.publishers.lock() {
                 Ok(publishers) => {
-                    for weak_publisher in publishers.iter() {
-                        if let Some(publisher) = weak_publisher.upgrade() {
-                            publisher.disable()?;
-                        }
+                    for publisher in publishers.iter() {
+                        publisher.disable()?;
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),
@@ -3146,10 +2724,8 @@ impl DomainParticipant {
         {
             match self.subscribers.lock() {
                 Ok(subscribers) => {
-                    for weak_subscriber in subscribers.iter() {
-                        if let Some(subscriber) = weak_subscriber.upgrade() {
-                            subscriber.disable()?;
-                        }
+                    for subscriber in subscribers.iter() {
+                        subscriber.disable()?;
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),
@@ -4017,6 +3593,106 @@ mod domain_participant_tests {
     }
 
     #[test]
+    fn deleted_contentfilteredtopic_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "deleted_cft_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let cft = participant
+            .create_contentfilteredtopic::<HelloWorld>(
+                "deleted_cft_filtered",
+                &topic,
+                "index > %0",
+                vec!["10".to_string()],
+            )
+            .unwrap();
+        let cft_weak = Arc::downgrade(cft.self_ref.as_ref().unwrap());
+        let remaining_cft = cft.clone();
+
+        participant.delete_contentfilteredtopic(cft).unwrap();
+
+        assert!(matches!(remaining_cft.get_filter_expression(), Err(DdsError::AlreadyDeleted)));
+
+        drop(remaining_cft);
+        assert!(cft_weak.upgrade().is_none(), "Deleted ContentFilteredTopic was not freed");
+
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn contentfilteredtopic_stays_owned_by_participant_after_failed_delete() {
+        use crate::subscription::qos::{DataReaderQos, SubscriberQos};
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "cft_failed_delete_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let cft = participant
+            .create_contentfilteredtopic::<HelloWorld>(
+                "cft_failed_delete_filtered",
+                &topic,
+                "index > %0",
+                vec!["10".to_string()],
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &cft,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let delete_result = participant.delete_contentfilteredtopic(cft);
+        assert!(matches!(delete_result, Err(DdsError::PreconditionNotMet)));
+
+        subscriber.delete_datareader(reader).unwrap();
+
+        assert!(
+            participant.delete_topic(topic.clone()).is_err(),
+            "ContentFilteredTopic freed after a failed delete"
+        );
+
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
     fn test_topic_drop_without_explicit_delete() {
         let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
@@ -4044,6 +3720,35 @@ mod domain_participant_tests {
         // Topic should still exist in participant
         let found_topic = participant.find_topic("test_topic", Duration::from_millis(0));
         assert!(found_topic.is_ok(), "Topic should still exist after being dropped");
+    }
+
+    #[test]
+    fn participant_survives_last_drop_while_bare_strong_ref_is_held() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Stands in for an internal path that upgrades the participant without ParticipantRef.
+        let participant_weak = Arc::downgrade(participant.self_ref.as_ref().unwrap());
+        let bare_participant = participant_weak.upgrade().unwrap();
+        drop(participant);
+        drop(bare_participant);
+
+        assert!(
+            participant_weak.upgrade().is_some(),
+            "Participant freed without delete_participant"
+        );
+
+        let owned_participant = factory.lookup_participant(domain_id).unwrap().unwrap();
+        owned_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(owned_participant).unwrap();
     }
 
     #[test]

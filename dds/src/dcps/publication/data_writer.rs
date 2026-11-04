@@ -152,7 +152,7 @@ pub struct DataWriter<Foo> {
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<DataWriterQos>>>,
-    pub(crate) self_ref: Arc<Mutex<Option<Arc<DataWriter<Foo>>>>>,
+    pub(crate) self_ref: Arc<Mutex<Option<Weak<DataWriter<Foo>>>>>,
     enabled: Arc<AtomicBool>,
     lifecycle: Arc<EntityLifecycle>,
     topic: Option<Weak<Topic>>,
@@ -186,7 +186,7 @@ impl<Foo> Debug for DataWriter<Foo> {
             )
             .field("mask", &self.mask.read().unwrap())
             .field("status_condition", &self.status_condition.lock().unwrap())
-            .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataWriter>"))
+            .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Weak<DataWriter>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
             .field("deleted", &self.lifecycle.is_deleted())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
@@ -244,51 +244,6 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             datawriter_cache: self.datawriter_cache.clone(),
             wlp_logic: self.wlp_logic.clone(),
             current_coherent_start: self.current_coherent_start.clone(),
-        }
-    }
-}
-
-// When user doesn't call delete_datawriter and automatic drop occurs when going out of scope,
-// it must not be deleted from Publisher.
-impl<Foo> Drop for DataWriter<Foo> {
-    #[allow(clippy::match_result_ok)]
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(self_arc) = guard.as_ref() {
-                if Arc::strong_count(self_arc) > 1 {
-                    return;
-                }
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Some(ref publisher_weak) = self.publisher {
-                if let Some(publisher) = publisher_weak.upgrade() {
-                    if let Some(ref topic_weak) = self.topic {
-                        if let Some(topic) = topic_weak.upgrade() {
-                            match topic.get_instance_handle() {
-                                Ok(topic_handle) => {
-                                    let writer_handle = InstanceHandle::from_guid(&self.guid);
-                                    publisher.handle_writer_drop(
-                                        topic.get_name(),
-                                        &topic_handle,
-                                        &writer_handle,
-                                    );
-                                }
-                                Err(e) => log::error!("Failed to get topic handle: {:?}", e),
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -491,9 +446,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// Upgraded parent handle without the deep clone [`DataWriterBase::get_publisher`] performs.
     ///
     /// Same failure mode and message -- `Error` when the parent `Weak` has expired -- but two
-    /// atomic read-modify-writes instead of ~26. Needs no drop guard, unlike the participant
-    /// equivalent: the value inside the `Arc` has `self_ref: None`, so `Drop for Publisher`
-    /// early-returns either way.
+    /// atomic read-modify-writes instead of ~26. The value inside the `Arc` has `self_ref: None`.
     ///
     /// Only for internal call sites that never read `Publisher::self_ref`.
     pub(crate) fn publisher_arc(&self) -> DdsResult<Arc<Publisher>> {
@@ -516,7 +469,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         mask: StatusMask,
         publisher: &Arc<Publisher>,
         wlp_logic: Option<WlpLogic>,
-    ) -> DdsResult<Self> {
+    ) -> DdsResult<Arc<Self>> {
         let writer = Self {
             is_builtin,
             guid,
@@ -569,12 +522,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         {
             let mut datawriter_cache =
                 writer.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            datawriter_cache.set_datawriter(weak_ref);
+            datawriter_cache.set_datawriter(weak_ref.clone());
         }
         {
             let mut self_ref =
                 writer.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            *self_ref = Some(writer_arc);
+            *self_ref = Some(weak_ref);
         }
         let period = writer.get_qos_arc()?.deadline.period;
         if !period.is_infinite()
@@ -586,7 +539,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             *deadline_monitor = Some(DeadlineMonitor::new(period, status_callback, true));
         }
-        Ok(writer)
+        Ok(writer_arc)
     }
 
     fn resolve_serialization_format(
@@ -1608,11 +1561,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
-        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let self_ref = self_ref
-            .as_ref()
-            .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?;
-        let weak_self = Arc::downgrade(self_ref);
+        let weak_self =
+            self.self_ref
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?
+                .clone()
+                .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?;
         Ok(Arc::new(move |status, info| {
             if let Some(entity) = weak_self.upgrade() {
                 let _ = entity.update_status(status, info);
@@ -2679,22 +2633,10 @@ mod tests {
         id: u32,
     }
 
-    /// The write path reaches the participant through the writer's internal accessors, so
-    /// those accessors own the factory orphan handoff that `Publisher::get_participant`
-    /// performs today.
-    ///
-    /// `get_participant` force-sets `self_ref` on the value it returns, so when that value is
-    /// the last strong reference its `Drop` hands the participant to
-    /// `DomainParticipantFactory::orphaned_participants` instead of destroying it. An accessor
-    /// returning a bare `Arc<DomainParticipant>` drops an interior value whose `self_ref` is
-    /// `None`; `Drop` then early-returns as "never fully initialized", no handoff runs, and the
-    /// participant is torn down along with its RTPS threads.
-    ///
-    /// `test_participant_drop_without_delete` cannot catch that: it holds two clones before
-    /// dropping, so `strong_count` is 3 and `Drop` early-returns on the clone check. This test
-    /// drives the count to exactly 1 through the writer's own accessor chain.
+    // Releases the user handle first and the write path's participant handle last.
+    // The factory must still own the participant afterwards.
     #[test]
-    fn writer_participant_accessor_orphans_the_last_reference() {
+    fn participant_stays_owned_after_writer_accessor_releases_last_handle() {
         let domain_id = crate::test_utils::unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -2708,7 +2650,7 @@ mod tests {
 
         let topic = participant
             .create_topic::<TestData>(
-                "OrphanHandoffTopic",
+                "ParticipantOwnershipTopic",
                 "TestData",
                 TopicQos::default(),
                 None,
@@ -2737,17 +2679,139 @@ mod tests {
             "participant must stay alive while the write path still holds it"
         );
 
-        // Releasing the last reference must orphan the participant, not destroy it.
         drop(internal);
         assert!(
             factory.lookup_participant(domain_id).unwrap().is_some(),
-            "participant was destroyed instead of orphaned when the write path released the \
-             last reference; the internal accessor dropped the orphan handoff"
+            "participant was destroyed when the write path released the last user-side handle"
         );
 
         drop(writer);
         drop(publisher);
         drop(topic);
+        let participant = factory.lookup_participant(domain_id).unwrap().unwrap();
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn writer_without_an_owner_is_freed() {
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "UnownedWriterTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let topic_arc = participant.find_internal_topic(&topic).unwrap();
+        let publisher_arc = publisher.self_ref.clone().unwrap();
+        let type_support = participant.find_typesupport("TestData").unwrap();
+        let guid = participant
+            .get_dcps_bridge()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .next_entity_guid(EntityKind::USER_DEFINED_WRITER_WITH_KEY);
+
+        // Built without registering it in the publisher, so no parent owns it.
+        let writer_arc = DataWriter::<TestData>::new(
+            false,
+            guid,
+            type_support,
+            &topic_arc,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+            &publisher_arc,
+            None,
+        )
+        .unwrap();
+        let writer_weak = Arc::downgrade(&writer_arc);
+        drop(writer_arc);
+
+        assert!(writer_weak.upgrade().is_none(), "Writer that no parent owns was not freed");
+
+        drop(publisher_arc);
+        drop(topic_arc);
+        drop(publisher);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn writer_stays_reachable_while_delete_drains_in_flight_calls() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "DrainingWriterTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Stands in for an API call admitted before the delete starts.
+        let lifecycle = writer.lifecycle.clone();
+        let in_flight_call = lifecycle.begin_operation().unwrap();
+
+        let deleting_writer = writer.clone();
+        let deleting_publisher = publisher.clone();
+        let delete_thread =
+            std::thread::spawn(move || deleting_publisher.delete_datawriter(deleting_writer));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lifecycle.is_deleted() {
+            assert!(std::time::Instant::now() < deadline, "delete never reached the drain");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let upgraded_writer = writer.self_ref.lock().unwrap().as_ref().and_then(Weak::upgrade);
+        assert!(upgraded_writer.is_some(), "Writer freed before the drain finished");
+        drop(upgraded_writer);
+
+        drop(in_flight_call);
+        delete_thread.join().unwrap().unwrap();
+
+        drop(writer);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2774,12 +2838,11 @@ mod tests {
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
-        // Check initial state of orphaned_writers
         let initial_writers_count = {
             let writers = publisher.get_data_writers().unwrap();
             writers.len()
         };
-        println!("Initial orphaned writers count: {}", initial_writers_count);
+        println!("Initial writers count: {}", initial_writers_count);
 
         // Create DataWriter and verify HashMap registration
         {
@@ -2805,18 +2868,17 @@ mod tests {
             println!("Writer going out of scope without delete_writer...");
         }
 
-        // Verify added to orphaned_writers
         let writers;
         let final_writers_count = {
             writers = publisher.get_data_writers().unwrap();
             writers.len()
         };
-        println!("Final orphaned writers count: {}", final_writers_count);
+        println!("Final writers count: {}", final_writers_count);
 
         assert_eq!(
             final_writers_count,
             initial_writers_count + 1,
-            "Writer should be moved to orphaned_writers"
+            "Writer should stay in the publisher after its handle is dropped"
         );
 
         domain_participant.delete_contained_entities().unwrap();
@@ -2882,21 +2944,18 @@ mod tests {
             println!("Writer still registered after delete: {}", registered_after_delete);
             assert!(!registered_after_delete, "Writer should be removed from HashMap after delete");
 
-            // Here, writer goes out of scope and is dropped
-            // However, since it's already removed from HashMap, it should not be added to orphaned_writers
             println!("Writer going out of scope after delete...");
         }
 
-        // Should not be added to orphaned_writers
         let final_writers_count = {
             let writers = publisher.get_data_writers().unwrap();
             writers.len()
         };
-        println!("Final orphaned writers count: {}", final_writers_count);
+        println!("Final writers count: {}", final_writers_count);
 
         assert_eq!(
             final_writers_count, initial_writers_count,
-            "No writers should be added to orphaned_writers when properly deleted"
+            "A deleted writer should not stay in the publisher"
         );
 
         domain_participant.delete_contained_entities().unwrap();
@@ -3348,7 +3407,7 @@ mod tests {
 
         // Wait briefly then call delete (trigger shutdown)
         thread::sleep(std::time::Duration::from_millis(50));
-        writer.delete();
+        publisher.delete_datawriter(writer).unwrap();
         println!("Writer deleted (shutdown called)");
 
         let count_before_delete = deadline_miss_count.load(Ordering::SeqCst);
