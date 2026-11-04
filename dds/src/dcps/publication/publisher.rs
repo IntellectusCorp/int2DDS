@@ -532,6 +532,7 @@ impl Publisher {
         let handle = datawriter.get_instance_handle()?;
         let topic_name = datawriter.get_topic()?.get_name().to_string();
         let topic_handle = datawriter.get_topic()?.get_instance_handle()?;
+        let participant = self.get_participant()?;
 
         let mut removed = false;
 
@@ -572,26 +573,43 @@ impl Publisher {
                 }
             }
         }
-        self.refresh_writer_set()?;
+
+        // The writer is no longer owned by this publisher, so every remaining step runs and the
+        // first error is returned.
+        let writer_set_refresh_result = self.refresh_writer_set();
 
         // Close the writer to new API calls and drain in-flight ones before the rtps writer is
         // torn down, so no admitted write is aborted or loses its sample.
         datawriter.mark_deleted_and_await_operation_completion();
 
-        {
-            let participant = self.get_participant()?;
-            let mut bridge_guard = participant.get_dcps_bridge()?;
-            match bridge_guard.as_mut() {
+        let rtps_writer_removal_result = match participant.get_dcps_bridge() {
+            Ok(mut bridge_guard) => match bridge_guard.as_mut() {
                 Some(bridge) => bridge
-                    .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
-                    .map_err(|e| DdsError::Error(e.message))?,
-                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-            };
-        }
+                    .delete_rtps_writer(topic_name, handle.to_guid().entity_id())
+                    .map_err(|e| DdsError::Error(e.message)),
+                None => Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            },
+            Err(e) => Err(e),
+        };
 
         datawriter.delete();
 
-        Ok(())
+        if let Err(e) = &writer_set_refresh_result {
+            log::debug!(
+                "[delete] writer {:?} removed but refresh_writer_set failed: {}",
+                handle,
+                e
+            );
+        }
+        if let Err(e) = &rtps_writer_removal_result {
+            log::debug!(
+                "[delete] writer {:?} removed but rtps writer removal failed: {}",
+                handle,
+                e
+            );
+        }
+
+        writer_set_refresh_result.and(rtps_writer_removal_result)
     }
 
     pub fn get_data_writers(&self) -> DdsResult<Vec<Arc<dyn DataWriterBase<Qos = DataWriterQos>>>> {

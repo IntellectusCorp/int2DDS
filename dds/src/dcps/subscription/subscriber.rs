@@ -593,6 +593,7 @@ impl Subscriber {
         let topic_description = datareader.get_topicdescription()?;
         let topic_name = effective_topic_name(topic_description.as_ref())?;
         let topic_handle = topic_description.topic_instance_handle()?;
+        let participant = self.get_participant()?;
 
         let mut removed = false;
 
@@ -638,20 +639,28 @@ impl Subscriber {
         // torn down, so no admitted read or take runs against a half-deleted reader.
         datareader.mark_deleted_and_await_operation_completion();
 
-        {
-            let participant = self.get_participant()?;
-            let mut bridge_guard = participant.get_dcps_bridge()?;
-            match bridge_guard.as_mut() {
+        // The reader is no longer owned by this subscriber, so delete() runs even if this fails.
+        let rtps_reader_removal_result = match participant.get_dcps_bridge() {
+            Ok(mut bridge_guard) => match bridge_guard.as_mut() {
                 Some(bridge) => bridge
-                    .delete_rtps_reader(topic_name.clone(), handle.to_guid().entity_id())
-                    .map_err(|e| DdsError::Error(e.message))?,
-                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-            };
-        }
+                    .delete_rtps_reader(topic_name, handle.to_guid().entity_id())
+                    .map_err(|e| DdsError::Error(e.message)),
+                None => Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            },
+            Err(e) => Err(e),
+        };
 
         datareader.delete();
 
-        Ok(())
+        if let Err(e) = &rtps_reader_removal_result {
+            log::debug!(
+                "[delete] reader {:?} removed but rtps reader removal failed: {}",
+                handle,
+                e
+            );
+        }
+
+        rtps_reader_removal_result
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {

@@ -232,11 +232,14 @@ impl DomainParticipantFactory {
                     {
                         participant.disable()?;
                         p.disable()?;
+
+                        // Removed only after delete() succeeds, so a failed delete keeps the
+                        // factory's ownership.
+                        participant.delete()?;
                         domain_parts.remove(pos);
                         if domain_parts.is_empty() {
                             map_guard.remove(&domain_id);
                         }
-                        participant.delete()?;
                         Ok(())
                     } else {
                         Err(DdsError::Error("Participant not found".to_string()))
