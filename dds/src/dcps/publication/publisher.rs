@@ -90,7 +90,7 @@ pub struct Publisher {
     lifecycle: Arc<EntityLifecycle>,
     #[allow(clippy::type_complexity)]
     writers_by_topic_name:
-        Arc<Mutex<HashMap<String, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
+        Arc<Mutex<HashMap<String, Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
     #[allow(clippy::type_complexity)]
     writers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
@@ -172,11 +172,9 @@ impl EnableChild for Publisher {
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_writers in writers_by_topic_name.values() {
-            for weak_writer in weak_writers.iter() {
-                if let Some(writer) = weak_writer.upgrade() {
-                    writer.enable()?; // Enable only live ones
-                }
+        for writers in writers_by_topic_name.values() {
+            for writer in writers.iter() {
+                writer.enable()?;
             }
         }
 
@@ -367,6 +365,8 @@ impl Publisher {
             }
         }
 
+        // Push this self_ref Arc, not Arc::new(datawriter.clone()).
+        // Lookup maps hold Weak to this allocation; a separate Arc would not keep it alive.
         let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
             .self_ref
             .lock()
@@ -392,7 +392,7 @@ impl Publisher {
             writers_by_topic_name
                 .entry(topic_name)
                 .or_insert_with(Vec::new)
-                .push(weak_writer.clone());
+                .push(writer_ops.clone());
             writers_by_topic_handle
                 .entry(topic_handle)
                 .or_insert_with(Vec::new)
@@ -588,22 +588,14 @@ impl Publisher {
 
         {
             if let Ok(mut writers_by_topic_name) = self.writers_by_topic_name.lock() {
-                if let Some(weak_writers) = writers_by_topic_name.get_mut(&topic_name) {
-                    // Clean up dead references
-                    weak_writers.retain(|weak_writer| weak_writer.upgrade().is_some());
+                if let Some(writers) = writers_by_topic_name.get_mut(&topic_name) {
+                    let original_len = writers.len();
+                    writers
+                        .retain(|writer| writer.get_instance_handle().is_ok_and(|h| h != handle));
 
-                    // Find and remove target writer
-                    let original_len = weak_writers.len();
-                    weak_writers.retain(|weak_writer| {
-                        weak_writer
-                            .upgrade()
-                            .and_then(|writer| writer.get_instance_handle().ok())
-                            .is_some_and(|h| h != handle)
-                    });
+                    removed = writers.len() < original_len;
 
-                    removed = weak_writers.len() < original_len;
-
-                    if weak_writers.is_empty() {
+                    if writers.is_empty() {
                         writers_by_topic_name.remove(&topic_name);
                     }
                 }
@@ -679,14 +671,12 @@ impl Publisher {
 
         // First search in writers_by_topic_name
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
-            if let Some(weak_writers) = writers_by_topic_name.get(topic_name) {
-                for weak_writer in weak_writers.iter() {
-                    if let Some(strong_writer) = weak_writer.upgrade() {
-                        if let Ok(handle) = strong_writer.get_instance_handle() {
-                            if handle == *writer_handle {
-                                found_writer = Some(strong_writer);
-                                break;
-                            }
+            if let Some(writers) = writers_by_topic_name.get(topic_name) {
+                for strong_writer in writers.iter() {
+                    if let Ok(handle) = strong_writer.get_instance_handle() {
+                        if handle == *writer_handle {
+                            found_writer = Some(strong_writer.clone());
+                            break;
                         }
                     }
                 }
@@ -727,11 +717,9 @@ impl Publisher {
         let writers_guard =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_writers in writers_guard.values() {
-            for weak_writer in weak_writers.iter() {
-                if let Some(writer) = weak_writer.upgrade() {
-                    result.push(writer as Arc<dyn DataWriterBase<Qos = DataWriterQos>>);
-                }
+        for writers in writers_guard.values() {
+            for writer in writers.iter() {
+                result.push(writer.clone() as Arc<dyn DataWriterBase<Qos = DataWriterQos>>);
             }
         }
         Ok(result)
@@ -744,12 +732,8 @@ impl Publisher {
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_writers in writers_by_topic_name.values() {
-            for weak_writer in weak_writers.iter() {
-                if let Some(writer) = weak_writer.upgrade() {
-                    result.push(writer as Arc<dyn DataWriterInternal<Qos = DataWriterQos>>);
-                }
-            }
+        for writers in writers_by_topic_name.values() {
+            result.extend(writers.iter().cloned());
         }
         Ok(result)
     }
@@ -763,7 +747,7 @@ impl Publisher {
             .get(topic_name)
             .into_iter()
             .flatten()
-            .filter_map(|weak_writer| weak_writer.upgrade())
+            .cloned()
             .collect();
 
         Self::update_enabled_rtps_writers(writers)
@@ -794,14 +778,10 @@ impl Publisher {
             let writers_guard =
                 self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-            if let Some(weak_writers) = writers_guard.get(topic_name) {
-                for weak_writer in weak_writers {
-                    if let Some(writer) = weak_writer.upgrade() {
-                        if let Some(typed_writer) =
-                            writer.as_any().downcast_ref::<DataWriter<Foo>>()
-                        {
-                            return Ok(typed_writer.clone());
-                        }
+            if let Some(writers) = writers_guard.get(topic_name) {
+                for writer in writers {
+                    if let Some(typed_writer) = writer.as_any().downcast_ref::<DataWriter<Foo>>() {
+                        return Ok(typed_writer.clone());
                     }
                 }
             }
@@ -814,19 +794,17 @@ impl Publisher {
         let mut result = Vec::new();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
-            for weak_writers in writers_by_topic_name.values() {
-                for weak_writer in weak_writers.iter() {
-                    if let Some(writer) = weak_writer.upgrade() {
-                        if writer.get_type_id() == target_type_id {
-                            // Convert from DataWriterBase to Arc<DataWriter<Foo>>
-                            if let Some(typed_writer) =
-                                writer.as_any().downcast_ref::<DataWriter<Foo>>()
-                            {
-                                // Get Arc through self_ref
-                                if let Ok(guard) = &typed_writer.self_ref.lock() {
-                                    if let Some(arc_writer) = guard.as_ref() {
-                                        result.push(arc_writer.clone());
-                                    }
+            for writers in writers_by_topic_name.values() {
+                for writer in writers.iter() {
+                    if writer.get_type_id() == target_type_id {
+                        // Convert from DataWriterBase to Arc<DataWriter<Foo>>
+                        if let Some(typed_writer) =
+                            writer.as_any().downcast_ref::<DataWriter<Foo>>()
+                        {
+                            // Get Arc through self_ref
+                            if let Ok(guard) = &typed_writer.self_ref.lock() {
+                                if let Some(arc_writer) = guard.as_ref() {
+                                    result.push(arc_writer.clone());
                                 }
                             }
                         }
@@ -846,17 +824,15 @@ impl Publisher {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
-            if let Some(weak_writers) = writers_by_topic_name.get(topic_name) {
-                for weak_writer in weak_writers.iter() {
-                    if let Some(writer) = weak_writer.upgrade() {
-                        if writer.get_type_id() == target_type_id {
-                            if let Some(typed_writer) =
-                                writer.as_any().downcast_ref::<DataWriter<Foo>>()
-                            {
-                                if let Ok(guard) = &typed_writer.self_ref.lock() {
-                                    if let Some(arc_writer) = guard.as_ref() {
-                                        return Ok(Some(arc_writer.clone()));
-                                    }
+            if let Some(writers) = writers_by_topic_name.get(topic_name) {
+                for writer in writers.iter() {
+                    if writer.get_type_id() == target_type_id {
+                        if let Some(typed_writer) =
+                            writer.as_any().downcast_ref::<DataWriter<Foo>>()
+                        {
+                            if let Ok(guard) = &typed_writer.self_ref.lock() {
+                                if let Some(arc_writer) = guard.as_ref() {
+                                    return Ok(Some(arc_writer.clone()));
                                 }
                             }
                         }
@@ -877,15 +853,13 @@ impl Publisher {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
-            if let Some(weak_writers) = writers_by_topic_name.get(topic_name) {
-                for weak_writer in weak_writers.iter() {
-                    if let Some(writer) = weak_writer.upgrade() {
-                        if writer.get_type_id() == target_type_id {
-                            if let Some(typed_writer) =
-                                writer.as_any().downcast_ref::<DataWriter<Foo>>()
-                            {
-                                return Ok(Some(f(typed_writer)));
-                            }
+            if let Some(writers) = writers_by_topic_name.get(topic_name) {
+                for writer in writers.iter() {
+                    if writer.get_type_id() == target_type_id {
+                        if let Some(typed_writer) =
+                            writer.as_any().downcast_ref::<DataWriter<Foo>>()
+                        {
+                            return Ok(Some(f(typed_writer)));
                         }
                     }
                 }
@@ -903,15 +877,13 @@ impl Publisher {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
-            for weak_writers in writers_by_topic_name.values() {
-                for weak_writer in weak_writers.iter() {
-                    if let Some(writer) = weak_writer.upgrade() {
-                        if writer.get_type_id() == target_type_id {
-                            if let Some(typed_writer) =
-                                writer.as_any().downcast_ref::<DataWriter<Foo>>()
-                            {
-                                f(typed_writer);
-                            }
+            for writers in writers_by_topic_name.values() {
+                for writer in writers.iter() {
+                    if writer.get_type_id() == target_type_id {
+                        if let Some(typed_writer) =
+                            writer.as_any().downcast_ref::<DataWriter<Foo>>()
+                        {
+                            f(typed_writer);
                         }
                     }
                 }
@@ -929,13 +901,11 @@ impl Publisher {
             HashMap::new();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
-            for weak_writers in writers_by_topic_name.values() {
-                for weak_writer in weak_writers.iter() {
-                    if let Some(writer) = weak_writer.upgrade() {
-                        let type_id = writer.get_type_id();
-                        let type_writers = type_map.entry(type_id).or_default();
-                        type_writers.push(writer.clone_boxed());
-                    }
+            for writers in writers_by_topic_name.values() {
+                for writer in writers.iter() {
+                    let type_id = writer.get_type_id();
+                    let type_writers = type_map.entry(type_id).or_default();
+                    type_writers.push(writer.clone_boxed());
                 }
             }
         }
@@ -1091,13 +1061,11 @@ impl Publisher {
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let mut result = Ok(());
-        for weak_writers in writers_by_topic_name.values() {
-            for weak_writer in weak_writers.iter() {
-                if let Some(writer) = weak_writer.upgrade() {
-                    let end_result = writer.end_coherent_set(presentation_info.as_ref());
-                    if result.is_ok() {
-                        result = end_result;
-                    }
+        for writers in writers_by_topic_name.values() {
+            for writer in writers.iter() {
+                let end_result = writer.end_coherent_set(presentation_info.as_ref());
+                if result.is_ok() {
+                    result = end_result;
                 }
             }
         }
@@ -1269,17 +1237,15 @@ impl Publisher {
 
         let participant = self.get_participant()?;
 
-        for weak_writers in writers_by_topic_name.values() {
-            for weak_writer in weak_writers {
-                if let Some(writer) = weak_writer.upgrade() {
-                    let begin = participant.get_current_time()?;
-                    writer.wait_for_acknowledgments(current)?;
-                    let end = participant.get_current_time()?;
+        for writers in writers_by_topic_name.values() {
+            for writer in writers {
+                let begin = participant.get_current_time()?;
+                writer.wait_for_acknowledgments(current)?;
+                let end = participant.get_current_time()?;
 
-                    current = current - (end - begin);
-                    if current < Duration::zero() {
-                        return Err(DdsError::Timeout);
-                    }
+                current = current - (end - begin);
+                if current < Duration::zero() {
+                    return Err(DdsError::Timeout);
                 }
             }
         }
@@ -1331,12 +1297,10 @@ impl Publisher {
             match self.writers_by_topic_name.lock() {
                 Ok(writers) => {
                     // Check for non-builtin writers
-                    for weak_writers in writers.values() {
-                        for weak_writer in weak_writers {
-                            if let Some(writer) = weak_writer.upgrade() {
-                                if !writer.is_builtin() {
-                                    return Ok(true);
-                                }
+                    for topic_writers in writers.values() {
+                        for writer in topic_writers {
+                            if !writer.is_builtin() {
+                                return Ok(true);
                             }
                         }
                     }
@@ -1351,12 +1315,10 @@ impl Publisher {
         let _operation = self.lifecycle.begin_operation()?;
         match self.writers_by_topic_name.lock() {
             Ok(writers_by_topic_name) => {
-                for weak_writers in writers_by_topic_name.values() {
-                    for weak_writer in weak_writers {
-                        if let Some(writer) = weak_writer.upgrade() {
-                            if writer.get_instance_handle()? == handle {
-                                return Ok(true);
-                            }
+                for writers in writers_by_topic_name.values() {
+                    for writer in writers {
+                        if writer.get_instance_handle()? == handle {
+                            return Ok(true);
                         }
                     }
                 }
@@ -1408,10 +1370,8 @@ impl Publisher {
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         for topic_writers in writers.values() {
-            for weak_writer in topic_writers {
-                if let Some(writer) = weak_writer.upgrade() {
-                    writer.disable()?;
-                }
+            for writer in topic_writers {
+                writer.disable()?;
             }
         }
 
@@ -1436,16 +1396,8 @@ impl Publisher {
     }
 
     fn cleanup_dead_writers(&self) -> DdsResult<()> {
-        let mut writers_by_name =
-            self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let mut writers_by_handle =
             self.writers_by_topic_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        // Clean up both data structures
-        for weak_writers in writers_by_name.values_mut() {
-            weak_writers.retain(|weak_writer| weak_writer.upgrade().is_some());
-        }
-        writers_by_name.retain(|_, writers| !writers.is_empty());
 
         for weak_writers in writers_by_handle.values_mut() {
             weak_writers.retain(|weak_writer| weak_writer.upgrade().is_some());
@@ -1792,6 +1744,55 @@ mod tests {
         drop(publisher);
         let contains_publisher = domain_participant.contains_entity(publisher_handle).unwrap();
         assert!(contains_publisher, "Publisher deleted!")
+    }
+
+    #[test]
+    fn publisher_survives_last_drop_while_internal_strong_ref_is_held() {
+        use crate::{
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "publisher_transient_ref_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Stands in for a discovery thread holding the publisher during a status update.
+        let transient_publisher = writer.publisher_arc().unwrap();
+        drop(publisher);
+        drop(transient_publisher);
+
+        assert!(writer.get_publisher().is_ok(), "Publisher freed while its writer is alive");
+
+        drop(writer);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]

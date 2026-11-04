@@ -97,7 +97,7 @@ pub struct Subscriber {
     lifecycle: Arc<EntityLifecycle>,
     #[allow(clippy::type_complexity)]
     readers_by_topic_name:
-        Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
+        Arc<Mutex<HashMap<String, Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
     #[allow(clippy::type_complexity)]
     readers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
@@ -169,11 +169,9 @@ impl EnableChild for Subscriber {
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_readers in readers_by_topic_name.values() {
-            for weak_reader in weak_readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    reader.enable()?; // Enable only live ones
-                }
+        for readers in readers_by_topic_name.values() {
+            for reader in readers.iter() {
+                reader.enable()?;
             }
         }
 
@@ -353,6 +351,8 @@ impl Subscriber {
             }
         }
 
+        // Push this self_ref Arc, not Arc::new(datareader.clone()).
+        // Lookup maps hold Weak to this allocation; a separate Arc would not keep it alive.
         let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
             .self_ref
             .lock()
@@ -379,7 +379,7 @@ impl Subscriber {
             readers_by_topic_name
                 .entry(topic_name)
                 .or_insert_with(Vec::new)
-                .push(weak_reader.clone());
+                .push(reader_ops.clone());
             readers_by_topic_handle
                 .entry(topic_handle)
                 .or_insert_with(Vec::new)
@@ -653,22 +653,14 @@ impl Subscriber {
 
         {
             if let Ok(mut readers_by_topic_name) = self.readers_by_topic_name.lock() {
-                if let Some(weak_readers) = readers_by_topic_name.get_mut(&topic_name) {
-                    // Clean up dead references
-                    weak_readers.retain(|weak_reader| weak_reader.upgrade().is_some());
+                if let Some(readers) = readers_by_topic_name.get_mut(&topic_name) {
+                    let original_len = readers.len();
+                    readers
+                        .retain(|reader| reader.get_instance_handle().is_ok_and(|h| h != handle));
 
-                    // Find and remove target reader
-                    let original_len = weak_readers.len();
-                    weak_readers.retain(|weak_reader| {
-                        weak_reader
-                            .upgrade()
-                            .and_then(|reader| reader.get_instance_handle().ok())
-                            .is_some_and(|h| h != handle)
-                    });
+                    removed = readers.len() < original_len;
 
-                    removed = weak_readers.len() < original_len;
-
-                    if weak_readers.is_empty() {
+                    if readers.is_empty() {
                         readers_by_topic_name.remove(&topic_name);
                     }
                 }
@@ -743,14 +735,12 @@ impl Subscriber {
 
         // First search in readers_by_topic_name
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(strong_reader) = weak_reader.upgrade() {
-                        if let Ok(handle) = strong_reader.get_instance_handle() {
-                            if handle == *reader_handle {
-                                found_reader = Some(strong_reader);
-                                break;
-                            }
+            if let Some(readers) = readers_by_topic_name.get(topic_name) {
+                for strong_reader in readers.iter() {
+                    if let Ok(handle) = strong_reader.get_instance_handle() {
+                        if handle == *reader_handle {
+                            found_reader = Some(strong_reader.clone());
+                            break;
                         }
                     }
                 }
@@ -888,11 +878,9 @@ impl Subscriber {
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_readers in readers_by_topic_name.values() {
-            for weak_reader in weak_readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    result.push(reader as Arc<dyn DataReaderBase<Qos = DataReaderQos>>);
-                }
+        for readers in readers_by_topic_name.values() {
+            for reader in readers.iter() {
+                result.push(reader.clone() as Arc<dyn DataReaderBase<Qos = DataReaderQos>>);
             }
         }
         Ok(result)
@@ -905,12 +893,8 @@ impl Subscriber {
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for weak_readers in readers_by_topic_name.values() {
-            for weak_reader in weak_readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    result.push(reader as Arc<dyn DataReaderInternal<Qos = DataReaderQos>>);
-                }
-            }
+        for readers in readers_by_topic_name.values() {
+            result.extend(readers.iter().cloned());
         }
         Ok(result)
     }
@@ -924,7 +908,7 @@ impl Subscriber {
             .get(topic_name)
             .into_iter()
             .flatten()
-            .filter_map(|weak_reader| weak_reader.upgrade())
+            .cloned()
             .collect();
 
         Self::update_enabled_rtps_readers(readers)
@@ -973,14 +957,10 @@ impl Subscriber {
         {
             let readers_by_topic_name =
                 self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if let Some(typed_reader) =
-                            reader.as_any().downcast_ref::<DataReader<Foo>>()
-                        {
-                            return Ok(typed_reader.clone());
-                        }
+            if let Some(readers) = readers_by_topic_name.get(topic_name) {
+                for reader in readers {
+                    if let Some(typed_reader) = reader.as_any().downcast_ref::<DataReader<Foo>>() {
+                        return Ok(typed_reader.clone());
                     }
                 }
             }
@@ -993,19 +973,17 @@ impl Subscriber {
         let mut result = Vec::new();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for weak_readers in readers_by_topic_name.values() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            // Convert from DataReaderBase to Arc<DataReader<Foo>>
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                // Get Arc through self_ref
-                                if let Ok(guard) = &typed_reader.self_ref.lock() {
-                                    if let Some(arc_reader) = guard.as_ref() {
-                                        result.push(arc_reader.clone());
-                                    }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        // Convert from DataReaderBase to Arc<DataReader<Foo>>
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            // Get Arc through self_ref
+                            if let Ok(guard) = &typed_reader.self_ref.lock() {
+                                if let Some(arc_reader) = guard.as_ref() {
+                                    result.push(arc_reader.clone());
                                 }
                             }
                         }
@@ -1025,17 +1003,15 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                if let Ok(guard) = &typed_reader.self_ref.lock() {
-                                    if let Some(arc_reader) = guard.as_ref() {
-                                        return Ok(Some(arc_reader.clone()));
-                                    }
+            if let Some(readers) = readers_by_topic_name.get(topic_name) {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            if let Ok(guard) = &typed_reader.self_ref.lock() {
+                                if let Some(arc_reader) = guard.as_ref() {
+                                    return Ok(Some(arc_reader.clone()));
                                 }
                             }
                         }
@@ -1056,15 +1032,13 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            if let Some(weak_readers) = readers_by_topic_name.get(topic_name) {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                return Ok(Some(f(typed_reader)));
-                            }
+            if let Some(readers) = readers_by_topic_name.get(topic_name) {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            return Ok(Some(f(typed_reader)));
                         }
                     }
                 }
@@ -1082,15 +1056,13 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for (_topic_name, weak_readers) in readers_by_topic_name.iter() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            if let Some(typed_reader) =
-                                reader.as_any().downcast_ref::<DataReader<Foo>>()
-                            {
-                                f(typed_reader);
-                            }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            f(typed_reader);
                         }
                     }
                 }
@@ -1108,13 +1080,11 @@ impl Subscriber {
             HashMap::new();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for (_topic_name, weak_readers) in readers_by_topic_name.iter() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        let type_id = reader.get_type_id();
-                        let type_readers = type_map.entry(type_id).or_default();
-                        type_readers.push(reader.clone_boxed());
-                    }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    let type_id = reader.get_type_id();
+                    let type_readers = type_map.entry(type_id).or_default();
+                    type_readers.push(reader.clone_boxed());
                 }
             }
         }
@@ -1127,12 +1097,10 @@ impl Subscriber {
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
-            for (_topic_name, weak_readers) in readers_by_topic_name.iter() {
-                for weak_reader in weak_readers.iter() {
-                    if let Some(reader) = weak_reader.upgrade() {
-                        if reader.get_type_id() == target_type_id {
-                            reader.notify_data_available();
-                        }
+            for readers in readers_by_topic_name.values() {
+                for reader in readers.iter() {
+                    if reader.get_type_id() == target_type_id {
+                        reader.notify_data_available();
                     }
                 }
             }
@@ -1241,10 +1209,8 @@ impl Subscriber {
         };
 
         for readers in readers_by_topic_name.values() {
-            for weak_reader in readers.iter() {
-                if let Some(reader) = weak_reader.upgrade() {
-                    reader.notify_data_available();
-                }
+            for reader in readers.iter() {
+                reader.notify_data_available();
             }
         }
         Ok(())
@@ -1446,12 +1412,10 @@ impl Subscriber {
             match self.readers_by_topic_name.lock() {
                 Ok(readers) => {
                     // Check for non-builtin readers
-                    for weak_readers in readers.values() {
-                        for weak_reader in weak_readers {
-                            if let Some(reader) = weak_reader.upgrade() {
-                                if !reader.is_builtin() {
-                                    return Ok(true);
-                                }
+                    for topic_readers in readers.values() {
+                        for reader in topic_readers {
+                            if !reader.is_builtin() {
+                                return Ok(true);
                             }
                         }
                     }
@@ -1466,12 +1430,10 @@ impl Subscriber {
         let _operation = self.lifecycle.begin_operation()?;
         match self.readers_by_topic_name.lock() {
             Ok(guard) => {
-                for weak_readers in guard.values() {
-                    for weak_reader in weak_readers {
-                        if let Some(reader) = weak_reader.upgrade() {
-                            if reader.get_instance_handle()? == handle {
-                                return Ok(true);
-                            }
+                for readers in guard.values() {
+                    for reader in readers {
+                        if reader.get_instance_handle()? == handle {
+                            return Ok(true);
                         }
                     }
                 }
@@ -1523,10 +1485,8 @@ impl Subscriber {
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         for topic_readers in readers.values() {
-            for weak_reader in topic_readers {
-                if let Some(reader) = weak_reader.upgrade() {
-                    reader.disable()?;
-                }
+            for reader in topic_readers {
+                reader.disable()?;
             }
         }
 
@@ -1551,16 +1511,8 @@ impl Subscriber {
     }
 
     fn cleanup_dead_readers(&self) -> DdsResult<()> {
-        let mut readers_by_name =
-            self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let mut readers_by_handle =
             self.readers_by_topic_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        // Clean up both data structures
-        for weak_readers in readers_by_name.values_mut() {
-            weak_readers.retain(|weak_reader| weak_reader.upgrade().is_some());
-        }
-        readers_by_name.retain(|_, readers| !readers.is_empty());
 
         for weak_readers in readers_by_handle.values_mut() {
             weak_readers.retain(|weak_reader| weak_reader.upgrade().is_some());
@@ -2082,6 +2034,51 @@ mod tests {
         drop(subscriber);
         let contains_subscriber = domain_participant.contains_entity(subscriber_handle).unwrap();
         assert!(contains_subscriber, "Subscriber deleted!")
+    }
+
+    #[test]
+    fn subscriber_survives_last_drop_while_internal_strong_ref_is_held() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "subscriber_transient_ref_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Stands in for a receive thread holding the subscriber during a status update.
+        let transient_subscriber = reader.subscriber_arc().unwrap();
+        drop(subscriber);
+        drop(transient_subscriber);
+
+        assert!(reader.get_subscriber().is_ok(), "Subscriber freed while its reader is alive");
+
+        drop(reader);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]

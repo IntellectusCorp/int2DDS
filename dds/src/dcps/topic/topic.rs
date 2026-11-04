@@ -815,4 +815,50 @@ pub(crate) mod tests {
         dp2.delete_contained_entities().unwrap();
         dpf.delete_participant(dp2).unwrap();
     }
+
+    #[test]
+    fn topic_survives_last_drop_while_topic_description_is_held() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic_name = "topic_transient_ref_topic";
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                topic_name,
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let held_topic_description =
+            participant.lookup_topicdescription(topic_name).unwrap().unwrap();
+        drop(topic);
+        drop(held_topic_description);
+
+        assert!(writer.get_topic().is_ok(), "Topic freed while its writer is alive");
+
+        drop(writer);
+        drop(publisher);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
 }

@@ -45,7 +45,7 @@
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, LazyLock, Mutex, Weak},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use crate::{
@@ -84,7 +84,7 @@ use super::{
 
 #[derive(Default)]
 pub struct DomainParticipantFactory {
-    participants: Mutex<HashMap<DomainId, Vec<Weak<DomainParticipant>>>>,
+    participants: Mutex<HashMap<DomainId, Vec<Arc<DomainParticipant>>>>,
     orphaned_participants: Arc<Mutex<Vec<Arc<DomainParticipant>>>>,
     qos: Mutex<DomainParticipantFactoryQos>,
     default_participant_qos: Mutex<Option<DomainParticipantQos>>,
@@ -166,17 +166,19 @@ impl DomainParticipantFactory {
         if self.get_qos()?.entity_factory.autoenable_created_entities {
             participant.enable()?;
         }
+
+        // Push this self_ref Arc, not Arc::new(participant.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let participant_ref = participant
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("Participant is not properly initialized".to_string()))?
             .clone();
-        let weak_participant = Arc::downgrade(&participant_ref);
         {
             let mut map_guard =
                 self.participants.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             let domain_participants = map_guard.entry(domain_id).or_insert_with(Vec::new);
-            domain_participants.push(weak_participant);
+            domain_participants.push(participant_ref);
         }
 
         Ok(participant)
@@ -242,16 +244,11 @@ impl DomainParticipantFactory {
         match self.participants.lock() {
             Ok(mut map_guard) => {
                 if let Some(domain_parts) = map_guard.get_mut(&domain_id) {
-                    if let Some((pos, p)) =
-                        domain_parts.iter().enumerate().find_map(|(i, weak_p)| {
-                            weak_p.upgrade().and_then(|p| {
-                                if *p == *participant {
-                                    Some((i, p))
-                                } else {
-                                    None
-                                }
-                            })
-                        })
+                    if let Some((pos, p)) = domain_parts
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| ***p == *participant)
+                        .map(|(i, p)| (i, p.clone()))
                     {
                         participant.disable()?;
                         p.disable()?;
@@ -299,13 +296,11 @@ impl DomainParticipantFactory {
         let mut found_participant = None;
         if let Ok(participants) = self.participants.lock() {
             if let Some(participants) = participants.get(domain_id) {
-                for weak_participant in participants.iter() {
-                    if let Some(strong_participant) = weak_participant.upgrade() {
-                        if let Ok(handle) = strong_participant.get_instance_handle() {
-                            if handle == *participant_handle {
-                                found_participant = Some(strong_participant);
-                                break;
-                            }
+                for strong_participant in participants.iter() {
+                    if let Ok(handle) = strong_participant.get_instance_handle() {
+                        if handle == *participant_handle {
+                            found_participant = Some(strong_participant.clone());
+                            break;
                         }
                     }
                 }
@@ -328,8 +323,7 @@ impl DomainParticipantFactory {
         Ok(map_guard
             .get(&domain_id)
             .and_then(|participants| participants.first())
-            .and_then(|weak_p| weak_p.upgrade())
-            .map(|p| (*p).clone()))
+            .map(|p| (**p).clone()))
     }
 
     pub fn lookup_participants(
@@ -339,11 +333,7 @@ impl DomainParticipantFactory {
         let map_guard = self.participants.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         Ok(map_guard.get(&domain_id).map(|participants| {
-            participants
-                .iter()
-                .filter_map(|weak_p| weak_p.upgrade())
-                .map(|p| (*p).clone())
-                .collect::<Vec<DomainParticipant>>()
+            participants.iter().map(|p| (**p).clone()).collect::<Vec<DomainParticipant>>()
         }))
     }
 

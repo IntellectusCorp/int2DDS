@@ -3348,7 +3348,7 @@ mod tests {
 
         // Wait briefly then call delete (trigger shutdown)
         thread::sleep(std::time::Duration::from_millis(50));
-        writer.delete();
+        publisher.delete_datawriter(writer).unwrap();
         println!("Writer deleted (shutdown called)");
 
         let count_before_delete = deadline_miss_count.load(Ordering::SeqCst);
