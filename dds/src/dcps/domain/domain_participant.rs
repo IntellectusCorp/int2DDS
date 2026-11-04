@@ -3579,6 +3579,49 @@ mod domain_participant_tests {
     }
 
     #[test]
+    fn deleted_contentfilteredtopic_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "deleted_cft_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let cft = participant
+            .create_contentfilteredtopic::<HelloWorld>(
+                "deleted_cft_filtered",
+                &topic,
+                "index > %0",
+                vec!["10".to_string()],
+            )
+            .unwrap();
+        let cft_weak = Arc::downgrade(cft.self_ref.as_ref().unwrap());
+        let remaining_cft = cft.clone();
+
+        participant.delete_contentfilteredtopic(cft).unwrap();
+
+        assert!(matches!(remaining_cft.get_filter_expression(), Err(DdsError::AlreadyDeleted)));
+
+        drop(remaining_cft);
+        assert!(cft_weak.upgrade().is_none(), "Deleted ContentFilteredTopic was not freed");
+
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
     fn contentfilteredtopic_stays_owned_by_participant_after_failed_delete() {
         use crate::subscription::qos::{DataReaderQos, SubscriberQos};
 

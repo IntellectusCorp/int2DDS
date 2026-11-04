@@ -759,9 +759,15 @@ mod factory_test {
 
     #[test]
     fn test_participant_drop_without_delete() {
+        let domain_id = crate::test_utils::unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(20, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let domain_participant_cloned = domain_participant.clone();
         let domain_participant_cloned2 = domain_participant.clone();
@@ -769,13 +775,13 @@ mod factory_test {
         // DomainParticipant Entity should not be deleted even after being dropped
         drop(domain_participant);
         let contains_domain_participant =
-            domain_participant_factory.lookup_participant(20).unwrap();
+            domain_participant_factory.lookup_participant(domain_id).unwrap();
         assert!(contains_domain_participant.is_some(), "domain_participant deleted!");
 
         // DomainParticipant should be deleted when explicitly calling delete_participant
         domain_participant_factory.delete_participant(domain_participant_cloned).unwrap();
         let contains_domain_participant =
-            domain_participant_factory.lookup_participant(20).unwrap();
+            domain_participant_factory.lookup_participant(domain_id).unwrap();
         assert!(contains_domain_participant.is_none(), "domain_participant still exists!");
 
         // After participant deletion, operations on remaining clones should return AlreadyDeleted error
@@ -788,6 +794,31 @@ mod factory_test {
         } else {
             panic!("Expected DdsError::AlreadyDeleted");
         }
+    }
+
+    #[test]
+    fn deleted_participant_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let participant_weak = Arc::downgrade(participant.self_ref.as_ref().unwrap());
+        let remaining_participant = participant.clone();
+
+        factory.delete_participant(participant).unwrap();
+
+        assert!(matches!(
+            remaining_participant.get_instance_handle(),
+            Err(DdsError::AlreadyDeleted)
+        ));
+
+        drop(remaining_participant);
+        assert!(participant_weak.upgrade().is_none(), "Deleted participant was not freed");
     }
 
     #[test]

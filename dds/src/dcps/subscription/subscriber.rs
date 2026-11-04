@@ -2006,6 +2006,86 @@ mod tests {
     }
 
     #[test]
+    fn deleted_subscriber_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let subscriber_weak = Arc::downgrade(subscriber.self_ref.as_ref().unwrap());
+        let remaining_subscriber = subscriber.clone();
+
+        participant.delete_subscriber(subscriber).unwrap();
+
+        assert!(matches!(
+            remaining_subscriber.get_instance_handle(),
+            Err(DdsError::AlreadyDeleted)
+        ));
+
+        drop(remaining_subscriber);
+        assert!(subscriber_weak.upgrade().is_none(), "Deleted subscriber was not freed");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn deleted_reader_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "deleted_reader_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let owned_reader =
+            subscriber.get_datareader::<HelloWorld>("deleted_reader_topic").unwrap().unwrap();
+        let reader_weak = Arc::downgrade(&owned_reader);
+        drop(owned_reader);
+        let remaining_reader = reader.clone();
+
+        subscriber.delete_datareader(reader).unwrap();
+
+        assert!(matches!(remaining_reader.get_instance_handle(), Err(DdsError::AlreadyDeleted)));
+
+        drop(remaining_reader);
+        assert!(reader_weak.upgrade().is_none(), "Deleted reader was not freed");
+
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
     fn reader_stays_owned_by_subscriber_after_failed_delete() {
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory

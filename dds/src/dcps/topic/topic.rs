@@ -367,6 +367,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn deleted_topic_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "deleted_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic_weak = Arc::downgrade(topic.self_ref.as_ref().unwrap());
+        let remaining_topic = topic.clone();
+
+        participant.delete_topic(topic).unwrap();
+
+        assert_eq!(remaining_topic.get_instance_handle(), Err(DdsError::AlreadyDeleted));
+
+        drop(remaining_topic);
+        assert!(topic_weak.upgrade().is_none(), "Deleted topic was not freed");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
     fn test_topic_drop_without_delete() {
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory

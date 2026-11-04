@@ -1724,6 +1724,89 @@ mod tests {
     }
 
     #[test]
+    fn deleted_publisher_rejects_remaining_handles_and_is_freed() {
+        use crate::test_utils::unique_domain_id;
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let publisher_weak = Arc::downgrade(publisher.self_ref.as_ref().unwrap());
+        let remaining_publisher = publisher.clone();
+
+        participant.delete_publisher(publisher).unwrap();
+
+        assert!(matches!(remaining_publisher.get_instance_handle(), Err(DdsError::AlreadyDeleted)));
+
+        drop(remaining_publisher);
+        assert!(publisher_weak.upgrade().is_none(), "Deleted publisher was not freed");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn deleted_writer_rejects_remaining_handles_and_is_freed() {
+        use crate::{
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "deleted_writer_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let owned_writer =
+            publisher.get_datawriter::<HelloWorld>("deleted_writer_topic").unwrap().unwrap();
+        let writer_weak = Arc::downgrade(&owned_writer);
+        drop(owned_writer);
+        let remaining_writer = writer.clone();
+
+        publisher.delete_datawriter(writer).unwrap();
+
+        assert!(matches!(remaining_writer.get_instance_handle(), Err(DdsError::AlreadyDeleted)));
+
+        drop(remaining_writer);
+        assert!(writer_weak.upgrade().is_none(), "Deleted writer was not freed");
+
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
     fn writer_stays_owned_by_publisher_after_failed_delete() {
         use crate::{
             publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
