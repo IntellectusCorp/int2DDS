@@ -595,29 +595,26 @@ impl Subscriber {
         let topic_handle = topic_description.topic_instance_handle()?;
         let participant = self.get_participant()?;
 
-        let mut removed = false;
+        // Held until delete() returns, so in-flight calls can still upgrade self_ref during the drain.
+        let owned_reader = {
+            let mut readers_by_topic_name = self
+                .readers_by_topic_name
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock readers_by_topic_name".to_string()))?;
+            let readers = readers_by_topic_name
+                .get_mut(&topic_name)
+                .ok_or(DdsError::Error("DataReader not found".to_string()))?;
+            let position = readers
+                .iter()
+                .position(|reader| reader.get_instance_handle().is_ok_and(|h| h == handle))
+                .ok_or(DdsError::Error("DataReader not found".to_string()))?;
+            let owned_reader = readers.remove(position);
 
-        {
-            if let Ok(mut readers_by_topic_name) = self.readers_by_topic_name.lock() {
-                if let Some(readers) = readers_by_topic_name.get_mut(&topic_name) {
-                    let original_len = readers.len();
-                    readers
-                        .retain(|reader| reader.get_instance_handle().is_ok_and(|h| h != handle));
-
-                    removed = readers.len() < original_len;
-
-                    if readers.is_empty() {
-                        readers_by_topic_name.remove(&topic_name);
-                    }
-                }
-            } else {
-                return Err(DdsError::Error("Failed to lock readers_by_topic_name".to_string()));
+            if readers.is_empty() {
+                readers_by_topic_name.remove(&topic_name);
             }
-        }
-
-        if !removed {
-            return Err(DdsError::Error("DataReader not found".to_string()));
-        }
+            owned_reader
+        };
 
         // Remove from the by-handle map as well
         if let Ok(mut readers_by_topic_handle) = self.readers_by_topic_handle.lock() {
@@ -651,6 +648,7 @@ impl Subscriber {
         };
 
         datareader.delete();
+        drop(owned_reader);
 
         if let Err(e) = &rtps_reader_removal_result {
             log::debug!(

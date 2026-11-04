@@ -534,29 +534,26 @@ impl Publisher {
         let topic_handle = datawriter.get_topic()?.get_instance_handle()?;
         let participant = self.get_participant()?;
 
-        let mut removed = false;
+        // Held until delete() returns, so in-flight calls can still upgrade self_ref during the drain.
+        let owned_writer = {
+            let mut writers_by_topic_name = self
+                .writers_by_topic_name
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock writers_by_topic_name".to_string()))?;
+            let writers = writers_by_topic_name
+                .get_mut(&topic_name)
+                .ok_or(DdsError::Error("DataWriter not found".to_string()))?;
+            let position = writers
+                .iter()
+                .position(|writer| writer.get_instance_handle().is_ok_and(|h| h == handle))
+                .ok_or(DdsError::Error("DataWriter not found".to_string()))?;
+            let owned_writer = writers.remove(position);
 
-        {
-            if let Ok(mut writers_by_topic_name) = self.writers_by_topic_name.lock() {
-                if let Some(writers) = writers_by_topic_name.get_mut(&topic_name) {
-                    let original_len = writers.len();
-                    writers
-                        .retain(|writer| writer.get_instance_handle().is_ok_and(|h| h != handle));
-
-                    removed = writers.len() < original_len;
-
-                    if writers.is_empty() {
-                        writers_by_topic_name.remove(&topic_name);
-                    }
-                }
-            } else {
-                return Err(DdsError::Error("Failed to lock writers_by_topic_name".to_string()));
+            if writers.is_empty() {
+                writers_by_topic_name.remove(&topic_name);
             }
-        }
-
-        if !removed {
-            return Err(DdsError::Error("DataWriter not found".to_string()));
-        }
+            owned_writer
+        };
 
         // Remove from the by-handle map as well
         if let Ok(mut writers_by_topic_handle) = self.writers_by_topic_handle.lock() {
@@ -593,6 +590,7 @@ impl Publisher {
         };
 
         datawriter.delete();
+        drop(owned_writer);
 
         if let Err(e) = &writer_set_refresh_result {
             log::debug!(

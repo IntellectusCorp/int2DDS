@@ -2755,6 +2755,66 @@ mod tests {
     }
 
     #[test]
+    fn writer_stays_reachable_while_delete_drains_in_flight_calls() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "DrainingWriterTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Stands in for an API call admitted before the delete starts.
+        let lifecycle = writer.lifecycle.clone();
+        let in_flight_call = lifecycle.begin_operation().unwrap();
+
+        let deleting_writer = writer.clone();
+        let deleting_publisher = publisher.clone();
+        let delete_thread =
+            std::thread::spawn(move || deleting_publisher.delete_datawriter(deleting_writer));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lifecycle.is_deleted() {
+            assert!(std::time::Instant::now() < deadline, "delete never reached the drain");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let upgraded_writer = writer.self_ref.lock().unwrap().as_ref().and_then(Weak::upgrade);
+        assert!(upgraded_writer.is_some(), "Writer freed before the drain finished");
+        drop(upgraded_writer);
+
+        drop(in_flight_call);
+        delete_thread.join().unwrap().unwrap();
+
+        drop(writer);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
     fn test_writer_drop_without_delete() {
         println!("=== Test: Writer drop without delete_writer ===");
 
