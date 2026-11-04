@@ -119,11 +119,9 @@ const SELF_DELIVERY_BYTE_CAP: usize = 64 * 1024 * 1024;
 const SELF_DELIVERY_COUNT_BACKSTOP: usize = 65_536;
 
 pub(crate) const BACKOFF_BASE: Duration = Duration::from_millis(500);
-const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 struct BackoffState {
     next_attempt: Instant,
-    delay: Duration,
 }
 
 type BackoffKey = (SocketAddr, TcpFrameKind);
@@ -187,19 +185,8 @@ impl ConnectionRegistry {
         (entry.next_attempt > now).then(|| entry.next_attempt - now)
     }
 
-    pub(crate) fn note_connect_failure(&self, key: BackoffKey, err: &io::Error) {
-        let now = Instant::now();
-        let mut entry = self
-            .backoff
-            .entry(key)
-            .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
-        let delay = if err.kind() == io::ErrorKind::ConnectionRefused || entry.delay.is_zero() {
-            BACKOFF_BASE
-        } else {
-            (entry.delay * 2).min(BACKOFF_MAX)
-        };
-        entry.delay = delay;
-        entry.next_attempt = now + delay;
+    pub(crate) fn note_connect_failure(&self, key: BackoffKey, _err: &io::Error) {
+        self.backoff.insert(key, BackoffState { next_attempt: Instant::now() + BACKOFF_BASE });
     }
 
     pub(crate) fn clear_backoff(&self, key: BackoffKey) {
@@ -275,18 +262,20 @@ mod tests {
     }
 
     #[test]
-    fn backoff_is_exponential_and_success_clears_it() {
+    fn repeated_failures_keep_the_delay_flat_and_success_clears_it() {
         let registry = registry();
         let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-        let key = (peer, TcpFrameKind::Discovery);
-        let error = io::Error::from(io::ErrorKind::TimedOut);
-        registry.note_connect_failure(key, &error);
-        let first = registry.backoff_remaining(key).unwrap();
-        registry.note_connect_failure(key, &error);
-        let second = registry.backoff_remaining(key).unwrap();
-        assert!(second > first);
-        registry.clear_backoff(key);
-        assert!(registry.backoff_remaining(key).is_none());
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::InvalidData] {
+            let key = (peer, TcpFrameKind::UserData);
+            let error = io::Error::from(kind);
+            for _ in 0..6 {
+                registry.note_connect_failure(key, &error);
+            }
+            let remaining = registry.backoff_remaining(key).unwrap();
+            assert!(remaining <= BACKOFF_BASE, "{kind:?} left a {remaining:?} delay");
+            registry.clear_backoff(key);
+            assert!(registry.backoff_remaining(key).is_none());
+        }
     }
 
     /// A refusal means the peer is not up yet, so the delay stays flat instead
