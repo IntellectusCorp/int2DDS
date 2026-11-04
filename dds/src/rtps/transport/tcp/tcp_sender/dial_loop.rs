@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use log::{error, warn};
+use log::{log, warn};
 use mio::{Events, Interest, Poll, Token};
 
 use super::{ConnectionKey, Slot, TcpSender};
@@ -204,7 +204,11 @@ impl DialLoop {
             Some(error) => {
                 if let Some(Dialing { key, cancelled, .. }) = self.remove_dial(token) {
                     if let Some(reason) = rejection_reason(&error) {
-                        error!("TLS handshake with {} rejected: {reason} ({error})", key.0);
+                        log!(
+                            reason.level(),
+                            "TLS handshake with {} rejected: {reason} ({error})",
+                            key.0
+                        );
                     }
                     let error = transport_io_error(
                         TransportErrorCode::TlsHandshakeFailed,
@@ -238,7 +242,8 @@ impl DialLoop {
                         let error = io::Error::new(io::ErrorKind::InvalidData, error);
                         let reason = rejection_reason(&error)
                             .unwrap_or(TlsRejectionReason::InvalidCertificate);
-                        error!(
+                        log!(
+                            reason.level(),
                             "TLS handshake with {} rejected by the reloaded policy: {reason} \
                              ({error})",
                             key.0

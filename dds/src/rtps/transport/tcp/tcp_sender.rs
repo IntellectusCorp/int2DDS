@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use log::{debug, error, warn};
+use log::{debug, log, warn};
 use mio::{Poll, Waker};
 
 use self::dial_loop::{DialLoop, DIAL_WAKE_TOKEN};
@@ -401,7 +401,11 @@ impl TcpSender {
         for (key, connection, error) in refused {
             let error = io::Error::new(io::ErrorKind::InvalidData, error);
             let reason = rejection_reason(&error).unwrap_or(TlsRejectionReason::InvalidCertificate);
-            error!("TLS peer {} fails the reloaded policy: {reason} ({error})", key.0);
+            log!(
+                reason.level(),
+                "TLS peer {} fails the reloaded policy: {reason} ({error})",
+                key.0
+            );
             connection.close();
             self.evict_connection(key, &connection);
         }

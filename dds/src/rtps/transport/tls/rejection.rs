@@ -2,6 +2,7 @@
 
 use std::{fmt, io};
 
+use log::Level;
 use rustls::{AlertDescription, CertificateError, Error};
 
 use crate::rtps::transport::tls::peer_lists::ListRejection;
@@ -44,6 +45,25 @@ impl TlsRejectionReason {
             Self::NoCertificate => "peer presented no certificate",
             Self::RefusedByPeer => "peer rejected this participant's certificate",
             Self::InvalidCertificate => "certificate is invalid",
+        }
+    }
+
+    /// A peer refused by the CRL or the lists is the configured policy at
+    /// work; every other refusal points at something to fix.
+    pub(crate) fn level(self) -> Level {
+        match self {
+            Self::Revoked | Self::OnDenyList | Self::NotOnAllowList => Level::Warn,
+            _ => Level::Error,
+        }
+    }
+
+    /// An accepted connection can come from anyone, so refusing its peer is
+    /// routine; being refused by it is how this participant learns that its
+    /// own certificate no longer passes, which nothing else reports.
+    pub(crate) fn level_when_accepting(self) -> Level {
+        match self {
+            Self::RefusedByPeer => Level::Error,
+            _ => Level::Warn,
         }
     }
 }

@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{error, warn};
+use log::{error, log, warn};
 use mio::Token;
 
 use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
@@ -325,7 +325,10 @@ impl TcpListener {
         }
         if let Err(error) = &read_result {
             if let Some(reason) = rejection_reason(error) {
-                error!("TLS handshake from {source} rejected: {reason} ({error})");
+                log!(
+                    reason.level_when_accepting(),
+                    "TLS handshake from {source} rejected: {reason} ({error})"
+                );
             }
         }
         let terminal = matches!(read_result, Ok(TcpReadOutcome::Closed) | Err(_));
@@ -419,7 +422,11 @@ impl TcpListener {
             };
             let error = io::Error::new(io::ErrorKind::InvalidData, error);
             let reason = rejection_reason(&error).unwrap_or(TlsRejectionReason::InvalidCertificate);
-            error!("TLS peer {} fails the reloaded policy: {reason} ({error})", connection.source);
+            log!(
+                reason.level(),
+                "TLS peer {} fails the reloaded policy: {reason} ({error})",
+                connection.source
+            );
             let _ = registry.deregister(&mut connection.stream);
             let _ = connection.stream.shutdown(std::net::Shutdown::Both);
         }
