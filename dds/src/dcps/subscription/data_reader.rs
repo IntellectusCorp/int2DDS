@@ -308,51 +308,6 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
     }
 }
 
-// When the user goes out of scope and auto-drops without calling delete_datareader,
-// it should not be deleted from Subscriber.
-impl<Foo> Drop for DataReader<Foo> {
-    #[allow(clippy::match_result_ok)]
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(self_arc) = guard.as_ref() {
-                if Arc::strong_count(self_arc) > 1 {
-                    return;
-                }
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Some(ref subscriber_weak) = self.subscriber {
-                if let Some(subscriber) = subscriber_weak.upgrade() {
-                    if let Some(ref topic_weak) = self.topic {
-                        if let Some(topic) = topic_weak.upgrade() {
-                            match topic.get_instance_handle() {
-                                Ok(topic_handle) => {
-                                    let reader_handle = InstanceHandle::from_guid(&self.guid);
-                                    subscriber.handle_reader_drop(
-                                        topic.get_name(),
-                                        &topic_handle,
-                                        &reader_handle,
-                                    );
-                                }
-                                Err(e) => println!("Failed to get topic handle: {:?}", e),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl_dds_entity!(DataReader<Foo>, DataReaderQos, Foo: 'static + Clone + Debug);
 impl<Foo: 'static + Clone + Debug> DomainEntity for DataReader<Foo> {}
 impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {

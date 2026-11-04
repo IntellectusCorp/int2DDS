@@ -248,51 +248,6 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
     }
 }
 
-// When user doesn't call delete_datawriter and automatic drop occurs when going out of scope,
-// it must not be deleted from Publisher.
-impl<Foo> Drop for DataWriter<Foo> {
-    #[allow(clippy::match_result_ok)]
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(self_arc) = guard.as_ref() {
-                if Arc::strong_count(self_arc) > 1 {
-                    return;
-                }
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Some(ref publisher_weak) = self.publisher {
-                if let Some(publisher) = publisher_weak.upgrade() {
-                    if let Some(ref topic_weak) = self.topic {
-                        if let Some(topic) = topic_weak.upgrade() {
-                            match topic.get_instance_handle() {
-                                Ok(topic_handle) => {
-                                    let writer_handle = InstanceHandle::from_guid(&self.guid);
-                                    publisher.handle_writer_drop(
-                                        topic.get_name(),
-                                        &topic_handle,
-                                        &writer_handle,
-                                    );
-                                }
-                                Err(e) => log::error!("Failed to get topic handle: {:?}", e),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl_dds_entity!(DataWriter<Foo>, DataWriterQos, Foo: 'static + Clone);
 impl<Foo: 'static + Clone> DomainEntity for DataWriter<Foo> {}
 impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
@@ -2679,22 +2634,10 @@ mod tests {
         id: u32,
     }
 
-    /// The write path reaches the participant through the writer's internal accessors, so
-    /// those accessors own the factory orphan handoff that `Publisher::get_participant`
-    /// performs today.
-    ///
-    /// `get_participant` force-sets `self_ref` on the value it returns, so when that value is
-    /// the last strong reference its `Drop` hands the participant to
-    /// `DomainParticipantFactory::orphaned_participants` instead of destroying it. An accessor
-    /// returning a bare `Arc<DomainParticipant>` drops an interior value whose `self_ref` is
-    /// `None`; `Drop` then early-returns as "never fully initialized", no handoff runs, and the
-    /// participant is torn down along with its RTPS threads.
-    ///
-    /// `test_participant_drop_without_delete` cannot catch that: it holds two clones before
-    /// dropping, so `strong_count` is 3 and `Drop` early-returns on the clone check. This test
-    /// drives the count to exactly 1 through the writer's own accessor chain.
+    // Releases the user handle first and the write path's participant handle last.
+    // The factory must still own the participant afterwards.
     #[test]
-    fn writer_participant_accessor_orphans_the_last_reference() {
+    fn participant_stays_owned_after_writer_accessor_releases_last_handle() {
         let domain_id = crate::test_utils::unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -2708,7 +2651,7 @@ mod tests {
 
         let topic = participant
             .create_topic::<TestData>(
-                "OrphanHandoffTopic",
+                "ParticipantOwnershipTopic",
                 "TestData",
                 TopicQos::default(),
                 None,
@@ -2737,17 +2680,18 @@ mod tests {
             "participant must stay alive while the write path still holds it"
         );
 
-        // Releasing the last reference must orphan the participant, not destroy it.
         drop(internal);
         assert!(
             factory.lookup_participant(domain_id).unwrap().is_some(),
-            "participant was destroyed instead of orphaned when the write path released the \
-             last reference; the internal accessor dropped the orphan handoff"
+            "participant was destroyed when the write path released the last user-side handle"
         );
 
         drop(writer);
         drop(publisher);
         drop(topic);
+        let participant = factory.lookup_participant(domain_id).unwrap().unwrap();
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2774,12 +2718,11 @@ mod tests {
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
-        // Check initial state of orphaned_writers
         let initial_writers_count = {
             let writers = publisher.get_data_writers().unwrap();
             writers.len()
         };
-        println!("Initial orphaned writers count: {}", initial_writers_count);
+        println!("Initial writers count: {}", initial_writers_count);
 
         // Create DataWriter and verify HashMap registration
         {
@@ -2805,18 +2748,17 @@ mod tests {
             println!("Writer going out of scope without delete_writer...");
         }
 
-        // Verify added to orphaned_writers
         let writers;
         let final_writers_count = {
             writers = publisher.get_data_writers().unwrap();
             writers.len()
         };
-        println!("Final orphaned writers count: {}", final_writers_count);
+        println!("Final writers count: {}", final_writers_count);
 
         assert_eq!(
             final_writers_count,
             initial_writers_count + 1,
-            "Writer should be moved to orphaned_writers"
+            "Writer should stay in the publisher after its handle is dropped"
         );
 
         domain_participant.delete_contained_entities().unwrap();
@@ -2882,21 +2824,18 @@ mod tests {
             println!("Writer still registered after delete: {}", registered_after_delete);
             assert!(!registered_after_delete, "Writer should be removed from HashMap after delete");
 
-            // Here, writer goes out of scope and is dropped
-            // However, since it's already removed from HashMap, it should not be added to orphaned_writers
             println!("Writer going out of scope after delete...");
         }
 
-        // Should not be added to orphaned_writers
         let final_writers_count = {
             let writers = publisher.get_data_writers().unwrap();
             writers.len()
         };
-        println!("Final orphaned writers count: {}", final_writers_count);
+        println!("Final writers count: {}", final_writers_count);
 
         assert_eq!(
             final_writers_count, initial_writers_count,
-            "No writers should be added to orphaned_writers when properly deleted"
+            "A deleted writer should not stay in the publisher"
         );
 
         domain_participant.delete_contained_entities().unwrap();

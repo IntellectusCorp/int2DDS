@@ -94,7 +94,6 @@ pub struct Publisher {
     #[allow(clippy::type_complexity)]
     writers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
-    orphaned_writers: Arc<Mutex<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>>>,
     default_datawriter_qos: Arc<Mutex<Option<DataWriterQos>>>,
     participant: Option<Weak<DomainParticipant>>,
     // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
@@ -138,33 +137,6 @@ impl PartialEq for Publisher {
     }
 }
 impl Eq for Publisher {}
-
-impl Drop for Publisher {
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(ref self_arc) = self.self_ref {
-            if Arc::strong_count(self_arc) > 1 {
-                return; // This is a clone, skip orphan handling
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Some(ref participant_weak) = self.participant {
-                if let Some(participant) = participant_weak.upgrade() {
-                    let publisher_handle = InstanceHandle::from_guid(&self.guid);
-                    participant.handle_publisher_drop(&publisher_handle);
-                }
-            }
-        }
-    }
-}
 
 impl_dds_entity!(Publisher, PublisherQos);
 impl EnableChild for Publisher {
@@ -213,7 +185,6 @@ impl Publisher {
             lifecycle: Arc::new(EntityLifecycle::default()),
             writers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             writers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
-            orphaned_writers: Arc::new(Mutex::new(Vec::new())),
             default_datawriter_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
             coherent_depth: Arc::new(AtomicU32::new(0)),
@@ -540,24 +511,7 @@ impl Publisher {
         let _operation = self.lifecycle.begin_operation()?;
         let arc_writer: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> =
             Arc::new(datawriter.clone());
-        match self.try_delete_datawriter(&arc_writer) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let writer_ref: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
-                    .self_ref
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?
-                    .as_ref()
-                    .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?
-                    .clone();
-                let mut orphaned =
-                    self.orphaned_writers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                if !orphaned.iter().any(|c| Arc::ptr_eq(c, &writer_ref)) {
-                    orphaned.push(writer_ref);
-                }
-                Err(e)
-            }
-        }
+        self.try_delete_datawriter(&arc_writer)
     }
 
     fn try_delete_datawriter(
@@ -572,7 +526,6 @@ impl Publisher {
             return Err(DdsError::IllegalOperation);
         }
 
-        self.remove_orphaned_writer(datawriter);
         if datawriter.get_publisher()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
         }
@@ -643,73 +596,6 @@ impl Publisher {
         datawriter.delete();
 
         Ok(())
-    }
-
-    fn remove_orphaned_writer(
-        &self,
-        target: &Arc<dyn DataWriterInternal<Qos = DataWriterQos>>,
-    ) -> bool {
-        let mut orphaned_writers = self.orphaned_writers.lock().unwrap();
-        if let Some(pos) = orphaned_writers
-            .iter()
-            .position(|t| t.get_instance_handle().unwrap() == target.get_instance_handle().unwrap())
-        {
-            orphaned_writers.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn handle_writer_drop(
-        &self,
-        topic_name: &str,
-        topic_handle: &InstanceHandle,
-        writer_handle: &InstanceHandle,
-    ) {
-        let mut found_writer: Option<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>> = None;
-
-        // First search in writers_by_topic_name
-        if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
-            if let Some(writers) = writers_by_topic_name.get(topic_name) {
-                for strong_writer in writers.iter() {
-                    if let Ok(handle) = strong_writer.get_instance_handle() {
-                        if handle == *writer_handle {
-                            found_writer = Some(strong_writer.clone());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // If not found, search in writers_by_topic_handle
-        if found_writer.is_none() {
-            if let Ok(writers_by_topic_handle) = self.writers_by_topic_handle.lock() {
-                if let Some(weak_writers) = writers_by_topic_handle.get(topic_handle) {
-                    for weak_writer in weak_writers.iter() {
-                        if let Some(strong_writer) = weak_writer.upgrade() {
-                            if let Ok(handle) = strong_writer.get_instance_handle() {
-                                if handle == *writer_handle {
-                                    found_writer = Some(strong_writer);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If found, add to orphaned_writers
-        if let Some(writer) = found_writer {
-            if let Ok(mut orphaned_writers) = self.orphaned_writers.lock() {
-                if !orphaned_writers.iter().any(|c| Arc::ptr_eq(c, &writer)) {
-                    orphaned_writers.push(writer);
-                }
-            }
-        }
-        // If not found, it was already properly deleted via delete_writer, so do nothing
     }
 
     pub fn get_data_writers(&self) -> DdsResult<Vec<Arc<dyn DataWriterBase<Qos = DataWriterQos>>>> {
@@ -1274,10 +1160,6 @@ impl Publisher {
     /// atomic read-modify-writes instead of ~52. `get_participant` clones a struct of 25 `Arc`
     /// fields to call one method on it, and `write()` does that on every sample.
     ///
-    /// Returns [`ParticipantRef`], not a bare `Arc`: `get_participant` force-sets `self_ref` on
-    /// the value it hands back, so that value performs the factory orphan handoff when it is
-    /// the last reference standing. `ParticipantRef` reproduces it for two plain atomic loads.
-    ///
     /// Only for internal call sites that need `get_current_time`, `get_listener`,
     /// `set_communication_status` or the QoS accessors. The value behind the returned handle
     /// has `self_ref: None`, so it must not reach `create_*`/`delete_*`; use
@@ -1790,6 +1672,114 @@ mod tests {
         assert!(writer.get_publisher().is_ok(), "Publisher freed while its writer is alive");
 
         drop(writer);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn publisher_stays_owned_by_participant_after_failed_delete() {
+        use crate::{
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "publisher_failed_delete_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher_handle = publisher.get_instance_handle().unwrap();
+
+        let delete_result = participant.delete_publisher(publisher);
+        assert!(matches!(delete_result, Err(DdsError::PreconditionNotMet)));
+
+        let publisher = writer.get_publisher().expect("Publisher freed after a failed delete");
+        assert_eq!(publisher.get_instance_handle().unwrap(), publisher_handle);
+
+        publisher.delete_datawriter(writer).unwrap();
+        participant.delete_publisher(publisher).unwrap();
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn writer_stays_owned_by_publisher_after_failed_delete() {
+        use crate::{
+            publication::qos::DataWriterQos, test_utils::unique_domain_id, topic::qos::TopicQos,
+        };
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "writer_failed_delete_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let owner_publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let other_publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = owner_publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let writer_handle = writer.get_instance_handle().unwrap();
+
+        let delete_result = other_publisher.delete_datawriter(writer);
+        assert!(matches!(delete_result, Err(DdsError::PreconditionNotMet)));
+
+        assert!(
+            owner_publisher.contains_entity(writer_handle).unwrap(),
+            "Writer removed from its publisher after a failed delete"
+        );
+        let writer = owner_publisher
+            .lookup_datawriter::<HelloWorld>("writer_failed_delete_topic")
+            .expect("Writer freed after a failed delete");
+        assert_eq!(writer.get_instance_handle().unwrap(), writer_handle);
+
+        owner_publisher.delete_datawriter(writer).unwrap();
         drop(topic);
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();

@@ -49,9 +49,8 @@ use std::{
 };
 
 use crate::{
-    common::{
-        env::{get_default_qos_profile, get_qos_profile_paths, init_from_env, DEFAULT_DOMAIN_ID},
-        instance_handle::InstanceHandle,
+    common::env::{
+        get_default_qos_profile, get_qos_profile_paths, init_from_env, DEFAULT_DOMAIN_ID,
     },
     config::{
         json::{QosProvider, ResolvedDataReader, ResolvedDataWriter, ResolvedTopic},
@@ -85,7 +84,6 @@ use super::{
 #[derive(Default)]
 pub struct DomainParticipantFactory {
     participants: Mutex<HashMap<DomainId, Vec<Arc<DomainParticipant>>>>,
-    orphaned_participants: Arc<Mutex<Vec<Arc<DomainParticipant>>>>,
     qos: Mutex<DomainParticipantFactoryQos>,
     default_participant_qos: Mutex<Option<DomainParticipantQos>>,
     qos_provider: Mutex<QosProvider>,
@@ -206,24 +204,7 @@ impl DomainParticipantFactory {
     /// * The participant was not found in the factory's registry
     /// * Internal synchronization fails
     pub fn delete_participant(&self, mut participant: DomainParticipant) -> DdsResult<()> {
-        match self.try_delete_participant(&mut participant) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let participant_ref = participant
-                    .self_ref
-                    .as_ref()
-                    .ok_or(DdsError::Error("Participant is not properly initialized".to_string()))?
-                    .clone();
-                let mut orphaned = self
-                    .orphaned_participants
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?;
-                if !orphaned.iter().any(|p| Arc::ptr_eq(p, &participant_ref)) {
-                    orphaned.push(participant_ref);
-                }
-                Err(e)
-            }
-        }
+        self.try_delete_participant(&mut participant)
     }
 
     pub(crate) fn try_delete_participant(
@@ -235,7 +216,6 @@ impl DomainParticipantFactory {
             return Err(DdsError::IllegalOperation);
         }
 
-        self.remove_orphaned_participant(participant)?;
         if let Ok(true) = participant.has_active_entities() {
             return Err(DdsError::PreconditionNotMet);
         }
@@ -267,55 +247,6 @@ impl DomainParticipantFactory {
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
-    }
-
-    fn remove_orphaned_participant(&self, target: &DomainParticipant) -> DdsResult<bool> {
-        let mut orphaned_participants =
-            self.orphaned_participants.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        if let Some(pos) = orphaned_participants.iter().enumerate().find_map(|(i, t)| {
-            let handle = t.get_instance_handle().ok()?;
-            let target_handle = target.get_instance_handle().ok()?;
-            if handle == target_handle {
-                Some(i)
-            } else {
-                None
-            }
-        }) {
-            orphaned_participants.remove(pos);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub(crate) fn handle_participant_drop(
-        &self,
-        domain_id: &DomainId,
-        participant_handle: &InstanceHandle,
-    ) {
-        let mut found_participant = None;
-        if let Ok(participants) = self.participants.lock() {
-            if let Some(participants) = participants.get(domain_id) {
-                for strong_participant in participants.iter() {
-                    if let Ok(handle) = strong_participant.get_instance_handle() {
-                        if handle == *participant_handle {
-                            found_participant = Some(strong_participant.clone());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // If found, add DomainParticipant to orphaned_entities
-        if let Some(participant) = found_participant {
-            if let Ok(mut orphaned_participants) = self.orphaned_participants.lock() {
-                if !orphaned_participants.iter().any(|p| Arc::ptr_eq(p, &participant)) {
-                    orphaned_participants.push(participant);
-                }
-            }
-        }
-        // If not found, it has already been properly deleted via delete_participant, so do nothing
     }
 
     pub fn lookup_participant(&self, domain_id: DomainId) -> DdsResult<Option<DomainParticipant>> {
@@ -857,6 +788,39 @@ mod factory_test {
         } else {
             panic!("Expected DdsError::AlreadyDeleted");
         }
+    }
+
+    #[test]
+    fn participant_stays_owned_by_factory_after_failed_delete() {
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let participant_handle = participant.get_instance_handle().unwrap();
+
+        let delete_result = factory.delete_participant(participant);
+        assert!(matches!(delete_result, Err(DdsError::PreconditionNotMet)));
+
+        assert!(publisher.get_participant().is_ok(), "Participant freed after a failed delete");
+
+        drop(publisher);
+        let participant = factory
+            .lookup_participant(domain_id)
+            .unwrap()
+            .expect("Participant removed from the factory after a failed delete");
+        assert_eq!(participant.get_instance_handle().unwrap(), participant_handle);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     fn create_test_profile_file() -> NamedTempFile {

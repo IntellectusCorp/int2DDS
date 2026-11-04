@@ -105,31 +105,6 @@ impl PartialEq for Topic {
 }
 impl Eq for Topic {}
 
-impl Drop for Topic {
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(ref self_arc) = self.self_ref {
-            if Arc::strong_count(self_arc) > 1 {
-                return; // This is a clone, skip orphan handling
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Ok(ref participant) = self.get_participant() {
-                let topic_handle = InstanceHandle::from_guid(&self.guid);
-                participant.handle_topic_drop(&topic_handle);
-            }
-        }
-    }
-}
-
 impl_topic_description!(Topic);
 impl_dds_entity!(Topic, TopicQos);
 impl EnableChild for Topic {
