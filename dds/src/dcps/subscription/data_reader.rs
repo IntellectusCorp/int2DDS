@@ -1663,9 +1663,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// Upgraded parent handle without the deep clone [`DataReaderBase::get_subscriber`] performs.
     ///
     /// Same failure mode and message -- `Error` when the parent `Weak` has expired -- but two
-    /// atomic read-modify-writes instead of ~28. Needs no drop guard, unlike the participant
-    /// equivalent: the value inside the `Arc` has `self_ref: None`, so `Drop for Subscriber`
-    /// early-returns either way.
+    /// atomic read-modify-writes instead of ~28. The value inside the `Arc` has `self_ref: None`.
     ///
     /// Only for internal call sites that never read `Subscriber::self_ref`.
     pub(crate) fn subscriber_arc(&self) -> DdsResult<Arc<Subscriber>> {

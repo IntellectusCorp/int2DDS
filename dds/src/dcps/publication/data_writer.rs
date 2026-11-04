@@ -446,9 +446,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// Upgraded parent handle without the deep clone [`DataWriterBase::get_publisher`] performs.
     ///
     /// Same failure mode and message -- `Error` when the parent `Weak` has expired -- but two
-    /// atomic read-modify-writes instead of ~26. Needs no drop guard, unlike the participant
-    /// equivalent: the value inside the `Arc` has `self_ref: None`, so `Drop for Publisher`
-    /// early-returns either way.
+    /// atomic read-modify-writes instead of ~26. The value inside the `Arc` has `self_ref: None`.
     ///
     /// Only for internal call sites that never read `Publisher::self_ref`.
     pub(crate) fn publisher_arc(&self) -> DdsResult<Arc<Publisher>> {
