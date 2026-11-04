@@ -152,7 +152,7 @@ pub struct DataWriter<Foo> {
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<DataWriterQos>>>,
-    pub(crate) self_ref: Arc<Mutex<Option<Arc<DataWriter<Foo>>>>>,
+    pub(crate) self_ref: Arc<Mutex<Option<Weak<DataWriter<Foo>>>>>,
     enabled: Arc<AtomicBool>,
     lifecycle: Arc<EntityLifecycle>,
     topic: Option<Weak<Topic>>,
@@ -186,7 +186,7 @@ impl<Foo> Debug for DataWriter<Foo> {
             )
             .field("mask", &self.mask.read().unwrap())
             .field("status_condition", &self.status_condition.lock().unwrap())
-            .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataWriter>"))
+            .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Weak<DataWriter>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
             .field("deleted", &self.lifecycle.is_deleted())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
@@ -471,7 +471,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         mask: StatusMask,
         publisher: &Arc<Publisher>,
         wlp_logic: Option<WlpLogic>,
-    ) -> DdsResult<Self> {
+    ) -> DdsResult<Arc<Self>> {
         let writer = Self {
             is_builtin,
             guid,
@@ -524,12 +524,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         {
             let mut datawriter_cache =
                 writer.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            datawriter_cache.set_datawriter(weak_ref);
+            datawriter_cache.set_datawriter(weak_ref.clone());
         }
         {
             let mut self_ref =
                 writer.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            *self_ref = Some(writer_arc);
+            *self_ref = Some(weak_ref);
         }
         let period = writer.get_qos_arc()?.deadline.period;
         if !period.is_infinite()
@@ -541,7 +541,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             *deadline_monitor = Some(DeadlineMonitor::new(period, status_callback, true));
         }
-        Ok(writer)
+        Ok(writer_arc)
     }
 
     fn resolve_serialization_format(
@@ -1563,11 +1563,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
-        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let self_ref = self_ref
-            .as_ref()
-            .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?;
-        let weak_self = Arc::downgrade(self_ref);
+        let weak_self =
+            self.self_ref
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?
+                .clone()
+                .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?;
         Ok(Arc::new(move |status, info| {
             if let Some(entity) = weak_self.upgrade() {
                 let _ = entity.update_status(status, info);
@@ -2690,6 +2691,67 @@ mod tests {
         drop(publisher);
         drop(topic);
         let participant = factory.lookup_participant(domain_id).unwrap().unwrap();
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn writer_without_an_owner_is_freed() {
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "UnownedWriterTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let topic_arc = participant.find_internal_topic(&topic).unwrap();
+        let publisher_arc = publisher.self_ref.clone().unwrap();
+        let type_support = participant.find_typesupport("TestData").unwrap();
+        let guid = participant
+            .get_dcps_bridge()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .next_entity_guid(EntityKind::USER_DEFINED_WRITER_WITH_KEY);
+
+        // Built without registering it in the publisher, so no parent owns it.
+        let writer_arc = DataWriter::<TestData>::new(
+            false,
+            guid,
+            type_support,
+            &topic_arc,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+            &publisher_arc,
+            None,
+        )
+        .unwrap();
+        let writer_weak = Arc::downgrade(&writer_arc);
+        drop(writer_arc);
+
+        assert!(writer_weak.upgrade().is_none(), "Writer that no parent owns was not freed");
+
+        drop(publisher_arc);
+        drop(topic_arc);
+        drop(publisher);
+        drop(topic);
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
     }

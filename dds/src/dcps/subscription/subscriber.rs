@@ -304,7 +304,8 @@ impl Subscriber {
 
         drop(dcps_bridge);
 
-        let datareader = DataReader::new(
+        // reader_arc is the only owner until it is pushed into readers_by_topic_name.
+        let reader_arc = DataReader::new(
             false,
             guid,
             type_support,
@@ -315,6 +316,7 @@ impl Subscriber {
             self_ref,
             None, // Non-builtin: RTPS reader created in enable_rtps_entities()
         )?;
+        let datareader = (*reader_arc).clone();
 
         if let Ok(()) = self.is_enabled() {
             if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
@@ -322,15 +324,9 @@ impl Subscriber {
             }
         }
 
-        // Push this self_ref Arc, not Arc::new(datareader.clone()).
+        // Push the Arc from DataReader::new, not Arc::new(datareader.clone()).
         // Lookup maps hold Weak to this allocation; a separate Arc would not keep it alive.
-        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
-            .self_ref
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .as_ref()
-            .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?
-            .clone();
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = reader_arc;
         let weak_reader: Weak<dyn DataReaderInternal<Qos = DataReaderQos>> =
             Arc::downgrade(&reader_ops);
         {
@@ -521,7 +517,8 @@ impl Subscriber {
             .ok_or(DdsError::Error("Subscriber not initialized".to_string()))?;
         let guid = rtps_reader.guid();
 
-        let datareader = DataReader::new(
+        // reader_arc is the only owner until it is pushed into builtin_readers.
+        let reader_arc = DataReader::new(
             true,
             guid,
             type_support,
@@ -532,6 +529,7 @@ impl Subscriber {
             self_ref,
             Some(rtps_reader.clone()), // builtin endpoint(reader)
         )?;
+        let datareader = (*reader_arc).clone();
 
         // Enable if subscriber is enabled and autoenable is set (same as create_datareader)
         if let Ok(()) = self.is_enabled() {
@@ -541,13 +539,7 @@ impl Subscriber {
         }
 
         // Store builtin reader with strong reference (not in readers_by_topic_name/handle)
-        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
-            .self_ref
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .as_ref()
-            .ok_or(DdsError::Error("DataReader not initialized".to_string()))?
-            .clone();
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = reader_arc;
 
         self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?.push(reader_ops);
 
@@ -868,8 +860,8 @@ impl Subscriber {
                         {
                             // Get Arc through self_ref
                             if let Ok(guard) = &typed_reader.self_ref.lock() {
-                                if let Some(arc_reader) = guard.as_ref() {
-                                    result.push(arc_reader.clone());
+                                if let Some(arc_reader) = guard.as_ref().and_then(Weak::upgrade) {
+                                    result.push(arc_reader);
                                 }
                             }
                         }
@@ -896,8 +888,8 @@ impl Subscriber {
                             reader.as_any().downcast_ref::<DataReader<Foo>>()
                         {
                             if let Ok(guard) = &typed_reader.self_ref.lock() {
-                                if let Some(arc_reader) = guard.as_ref() {
-                                    return Ok(Some(arc_reader.clone()));
+                                if let Some(arc_reader) = guard.as_ref().and_then(Weak::upgrade) {
+                                    return Ok(Some(arc_reader));
                                 }
                             }
                         }

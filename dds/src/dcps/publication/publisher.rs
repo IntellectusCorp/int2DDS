@@ -318,7 +318,8 @@ impl Publisher {
 
         drop(dcps_bridge);
 
-        let datawriter = DataWriter::new(
+        // writer_arc is the only owner until it is pushed into writers_by_topic_name.
+        let writer_arc = DataWriter::new(
             false,
             guid,
             type_support,
@@ -329,6 +330,7 @@ impl Publisher {
             self_ref,
             wlp_logic,
         )?;
+        let datawriter = (*writer_arc).clone();
 
         if let Ok(()) = self.is_enabled() {
             if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
@@ -336,15 +338,9 @@ impl Publisher {
             }
         }
 
-        // Push this self_ref Arc, not Arc::new(datawriter.clone()).
+        // Push the Arc from DataWriter::new, not Arc::new(datawriter.clone()).
         // Lookup maps hold Weak to this allocation; a separate Arc would not keep it alive.
-        let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
-            .self_ref
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .as_ref()
-            .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?
-            .clone();
+        let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = writer_arc;
         let weak_writer = Arc::downgrade(&writer_ops);
         {
             let mut writers_by_topic_name = match self.writers_by_topic_name.lock() {
@@ -689,8 +685,8 @@ impl Publisher {
                         {
                             // Get Arc through self_ref
                             if let Ok(guard) = &typed_writer.self_ref.lock() {
-                                if let Some(arc_writer) = guard.as_ref() {
-                                    result.push(arc_writer.clone());
+                                if let Some(arc_writer) = guard.as_ref().and_then(Weak::upgrade) {
+                                    result.push(arc_writer);
                                 }
                             }
                         }
@@ -717,8 +713,8 @@ impl Publisher {
                             writer.as_any().downcast_ref::<DataWriter<Foo>>()
                         {
                             if let Ok(guard) = &typed_writer.self_ref.lock() {
-                                if let Some(arc_writer) = guard.as_ref() {
-                                    return Ok(Some(arc_writer.clone()));
+                                if let Some(arc_writer) = guard.as_ref().and_then(Weak::upgrade) {
+                                    return Ok(Some(arc_writer));
                                 }
                             }
                         }

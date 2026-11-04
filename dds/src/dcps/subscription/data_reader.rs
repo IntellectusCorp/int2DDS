@@ -203,7 +203,7 @@ pub struct DataReader<Foo> {
     mask: Arc<RwLock<StatusMask>>,
     pub status_condition: Arc<Mutex<StatusCondition<DataReaderQos>>>,
     read_conditions: Arc<Mutex<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>>,
-    pub(crate) self_ref: Arc<Mutex<Option<Arc<DataReader<Foo>>>>>,
+    pub(crate) self_ref: Arc<Mutex<Option<Weak<DataReader<Foo>>>>>,
     enabled: Arc<AtomicBool>,
     lifecycle: Arc<EntityLifecycle>,
     instance_infos: Arc<Mutex<HashMap<InstanceHandle, InstanceInfo>>>,
@@ -241,7 +241,7 @@ impl<Foo> Debug for DataReader<Foo> {
             )
             .field("mask", &self.mask.read().unwrap())
             .field("status_condition", &self.status_condition.lock().unwrap())
-            .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataReader>"))
+            .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Weak<DataReader>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
             .field("deleted", &self.lifecycle.is_deleted())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
@@ -1099,11 +1099,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
-        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let self_ref = self_ref
-            .as_ref()
-            .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?;
-        let weak_self = Arc::downgrade(self_ref);
+        let weak_self =
+            self.self_ref
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?
+                .clone()
+                .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?;
         Ok(Arc::new(move |status, info| {
             if let Some(entity) = weak_self.upgrade() {
                 let _ = entity.update_status(status, info);
@@ -2090,8 +2091,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         full_reclaim: bool,
     ) -> DdsResult<()> {
         // Get weak reference to self (DataReader)
-        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let weak_self = self_ref.as_ref().map(Arc::downgrade);
+        let weak_self = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone();
 
         // Get timer handler lock
         let timer_handler = TimerHandler::get_instance(self.guid.prefix());
@@ -2128,7 +2128,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         mask: StatusMask,
         subscriber: &Arc<Subscriber>,
         rtps_reader: Option<Arc<dyn RtpsReader + Send + Sync>>,
-    ) -> DdsResult<Self> {
+    ) -> DdsResult<Arc<Self>> {
         // Builtin entities must have rtps_reader, non-builtin must not
         if is_builtin != rtps_reader.is_some() {
             return Err(DdsError::PreconditionNotMet);
@@ -2206,11 +2206,10 @@ impl<Foo: DdsType> DataReader<Foo> {
             *status_condition = StatusCondition::new(Some(weak_ref.clone()));
         }
 
-        // Without the Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
         {
             let mut self_ref =
                 reader.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            *self_ref = Some(reader_arc);
+            *self_ref = Some(weak_ref.clone());
         }
 
         // The callbacks are shared with the copy held in self_ref.
@@ -2234,7 +2233,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             *reader.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))? =
                 Some(DeadlineMonitor::new(period, status_callback, false));
         }
-        Ok(reader)
+        Ok(reader_arc)
     }
 
     pub fn delete_readcondition<T: Into<Arc<dyn ReadConditionTrait + Send + Sync>>>(
@@ -3463,11 +3462,12 @@ impl<Foo: DdsType> DataReader<Foo> {
     pub(crate) fn create_change_received_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>> {
-        let self_ref = self.self_ref.as_ref().lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let self_ref = self_ref
-            .clone()
-            .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?;
-        let weak_self = Arc::downgrade(&self_ref);
+        let weak_self =
+            self.self_ref
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?
+                .clone()
+                .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?;
         Ok(Arc::new(move |change| {
             if let Some(entity) = weak_self.upgrade() {
                 let _ = entity.process_incoming_change(change);
@@ -4007,11 +4007,14 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             On failure, this operation returns a platform-defined 'nil' value.
         */
         let _operation = self.lifecycle.begin_operation()?;
-        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let self_ref = self_ref
+        let self_ref = self
+            .self_ref
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
             .as_ref()
+            .and_then(Weak::upgrade)
             .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?;
-        let self_ref: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = self_ref.clone();
+        let self_ref: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = self_ref;
         let read_condition =
             ReadCondition::new(view_states, instance_states, sample_states, &self_ref);
         let read_condition_arc = Arc::new(read_condition.clone());
@@ -4038,11 +4041,14 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             On failure, this operation returns a platform-defined 'nil' value.
         */
         let _operation = self.lifecycle.begin_operation()?;
-        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let self_ref = self_ref
+        let self_ref = self
+            .self_ref
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
             .as_ref()
+            .and_then(Weak::upgrade)
             .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?;
-        let self_ref: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = self_ref.clone();
+        let self_ref: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = self_ref;
         let query_condition = QueryCondition::new(
             view_states,
             instance_states,
@@ -4426,6 +4432,61 @@ pub(crate) mod tests {
         #[dds(key)]
         pub index: u32,
         pub message: String,
+    }
+
+    #[test]
+    fn reader_without_an_owner_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "UnownedReaderTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let subscriber_arc = subscriber.self_ref.clone().unwrap();
+        let type_support = participant.find_typesupport("TestData").unwrap();
+        let guid = participant.get_dcps_bridge().unwrap().as_ref().unwrap().next_entity_guid(
+            crate::rtps::common::entity_kind::EntityKind::USER_DEFINED_READER_WITH_KEY,
+        );
+
+        // Built without registering it in the subscriber, so no parent owns it.
+        let reader_arc = DataReader::<TestData>::new(
+            false,
+            guid,
+            type_support,
+            &topic,
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+            &subscriber_arc,
+            None,
+        )
+        .unwrap();
+        let reader_weak = Arc::downgrade(&reader_arc);
+        drop(reader_arc);
+
+        assert!(reader_weak.upgrade().is_none(), "Reader that no parent owns was not freed");
+
+        drop(subscriber_arc);
+        drop(subscriber);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
