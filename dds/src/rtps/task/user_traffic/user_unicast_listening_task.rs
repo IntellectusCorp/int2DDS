@@ -2,6 +2,7 @@ use bytes::Bytes;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::{udp_locator_kind, LOCATOR_KIND_SHM};
+use crate::rtps::common::rtps_error_code::RtpsErrorCode;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
@@ -10,6 +11,8 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
+use crate::rtps::transport::tls::identity::IDENTITY_LEN;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::rtps::transport::tokens::ListenerToken;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Waker};
@@ -22,17 +25,24 @@ pub(crate) struct UserUnicastListeningTask {
     participant: Weak<Participant>,
     user_logic: Arc<Option<UserLogic>>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
+    identity_required: bool,
+    tls_policy: Option<Arc<TlsPolicyHandle>>,
 }
 
 impl UserUnicastListeningTask {
     pub(crate) fn new(participant: Arc<Participant>) -> Self {
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
+        let tls_policy = participant.tls_policy();
+        let identity_required =
+            tls_policy.as_ref().is_some_and(|policy| policy.config().verify_peer);
         Self {
             guid_prefix,
             participant: Arc::downgrade(&participant),
             user_logic,
             shutdown_waker: Arc::new(OnceLock::new()),
+            identity_required,
+            tls_policy,
         }
     }
 
@@ -101,6 +111,7 @@ impl UserUnicastListeningTask {
                             buffer,
                             from_addr,
                             udp_locator_kind(&from_addr.ip()),
+                            None,
                         );
                     }
                 }
@@ -162,6 +173,7 @@ impl UserUnicastListeningTask {
                             buffer,
                             from_addr,
                             udp_locator_kind(&from_addr.ip()),
+                            None,
                         );
                     }
                 }
@@ -174,7 +186,7 @@ impl UserUnicastListeningTask {
                     let _ = poll.registry().deregister(listener.socket());
                     return Ok(());
                 }
-                self.process_rtps_message(buffer, from_addr, LOCATOR_KIND_SHM);
+                self.process_rtps_message(buffer, from_addr, LOCATOR_KIND_SHM, None);
                 shm_had_data = true;
             }
 
@@ -190,12 +202,19 @@ impl UserUnicastListeningTask {
         bytes: Bytes,
         from_addr: SocketAddr,
         locator_kind: i32,
+        peer_identity: Option<[u8; IDENTITY_LEN]>,
     ) {
         let mut message_receiver =
             MessageReceiver::new_with_locator_kind(self.guid_prefix, &from_addr, locator_kind);
-        let rtps_message = message_receiver.init(&bytes);
-        if rtps_message.is_err() {
-            error!("Failed to parse RTPS message from {:?}", from_addr);
+        message_receiver.authenticate(
+            self.identity_required,
+            peer_identity,
+            self.tls_policy.clone(),
+        );
+        if let Err(error) = message_receiver.init(&bytes) {
+            if error.code != RtpsErrorCode::UnauthenticatedSource {
+                error!("Failed to parse RTPS message from {:?}: {}", from_addr, error);
+            }
             return;
         }
         let mut user_logic =

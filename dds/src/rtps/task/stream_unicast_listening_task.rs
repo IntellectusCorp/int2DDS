@@ -76,6 +76,7 @@ impl StreamUnicastListeningTask {
             }
 
             listener.expire_connections(poll.registry(), Instant::now());
+            listener.recheck_tls_peers(poll.registry());
             while let Some(message) = shared.try_receive_self_delivery() {
                 if participant.is_terminated() {
                     shared.clear_self_delivery_waker();
@@ -86,6 +87,7 @@ impl StreamUnicastListeningTask {
                     message.data,
                     message.source,
                     tcp_locator_kind(&message.source.ip()),
+                    participant.identity(),
                 );
             }
             for event in &events {
@@ -117,6 +119,7 @@ impl StreamUnicastListeningTask {
                                         message.data,
                                         message.source,
                                         locator_kind,
+                                        message.peer_identity,
                                     );
                                 }
                                 TcpFrameKind::UserData => {
@@ -124,6 +127,7 @@ impl StreamUnicastListeningTask {
                                         message.data,
                                         message.source,
                                         locator_kind,
+                                        message.peer_identity,
                                     );
                                 }
                             }

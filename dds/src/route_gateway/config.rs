@@ -26,18 +26,38 @@ pub struct TlsNodeConfig {
     pub cert_file: String,
     /// Path to a PEM file containing this peer's private key.
     pub key_file: String,
-    /// SNI server name sent during TLS handshake (client side).
-    /// Defaults to `"localhost"` when omitted.
-    #[serde(default = "default_server_name")]
-    pub server_name: String,
-    /// Require the remote peer to present a certificate (mutual TLS).
-    /// Defaults to `false`.
-    #[serde(default)]
+    /// Name every server certificate must carry. When omitted, the server
+    /// certificate is verified in full except for its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    /// Require a connecting peer to present a certificate (mutual TLS) and
+    /// refuse its messages unless their GUID prefix belongs to that
+    /// certificate. Defaults to `true`.
+    #[serde(default = "default_verify_peer")]
     pub verify_peer: bool,
+    /// Path to a PEM file holding one CRL per issuing CA. When omitted,
+    /// certificates are not checked for revocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crl_file: Option<String>,
+    /// `"allow"` accepts a certificate whose issuer has no CRL in `crl_file`;
+    /// anything else, including omitting it, rejects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crl_unknown_status: Option<String>,
+    /// Reject a certificate when its issuer's CRL is past its next update.
+    #[serde(default)]
+    pub crl_enforce_expiry: bool,
+    /// Path to a file of SHA-256 certificate fingerprints, one per line; when
+    /// set, only peers presenting one of them may connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_file: Option<String>,
+    /// Path to a file of SHA-256 certificate fingerprints refused even when
+    /// they are also allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_file: Option<String>,
 }
 
-fn default_server_name() -> String {
-    "localhost".to_string()
+fn default_verify_peer() -> bool {
+    true
 }
 
 /// Configuration for one side of a Route Gateway.
@@ -84,12 +104,29 @@ impl NodeConfig {
             property.add_property("int2dds.tls.ca_file", &tls.ca_file, false);
             property.add_property("int2dds.tls.cert_file", &tls.cert_file, false);
             property.add_property("int2dds.tls.key_file", &tls.key_file, false);
-            property.add_property("int2dds.tls.server_name", &tls.server_name, false);
+            if let Some(server_name) = &tls.server_name {
+                property.add_property("int2dds.tls.server_name", server_name, false);
+            }
             property.add_property(
                 "int2dds.tls.verify_peer",
                 if tls.verify_peer { "true" } else { "false" },
                 false,
             );
+            if let Some(crl_file) = &tls.crl_file {
+                property.add_property("int2dds.tls.crl_file", crl_file, false);
+                if let Some(status) = &tls.crl_unknown_status {
+                    property.add_property("int2dds.tls.crl_unknown_status", status, false);
+                }
+                if tls.crl_enforce_expiry {
+                    property.add_property("int2dds.tls.crl_enforce_expiry", "true", false);
+                }
+            }
+            if let Some(allow_file) = &tls.allow_file {
+                property.add_property("int2dds.tls.allow_file", allow_file, false);
+            }
+            if let Some(deny_file) = &tls.deny_file {
+                property.add_property("int2dds.tls.deny_file", deny_file, false);
+            }
         }
         DomainParticipantQos { property, ..Default::default() }
     }
@@ -318,7 +355,7 @@ mod tests {
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         let tls = cfg.remote.tls.expect("tls present");
         assert_eq!(tls.ca_file, "/etc/ssl/ca.pem");
-        assert_eq!(tls.server_name, "gateway.example.com");
+        assert_eq!(tls.server_name.as_deref(), Some("gateway.example.com"));
         assert!(tls.verify_peer);
     }
 
@@ -333,8 +370,13 @@ mod tests {
                 ca_file: "/etc/ssl/ca.pem".to_string(),
                 cert_file: "/etc/ssl/cert.pem".to_string(),
                 key_file: "/etc/ssl/key.pem".to_string(),
-                server_name: "gw.example.com".to_string(),
+                server_name: Some("gw.example.com".to_string()),
                 verify_peer: true,
+                crl_file: None,
+                crl_unknown_status: None,
+                crl_enforce_expiry: false,
+                allow_file: None,
+                deny_file: None,
             }),
         };
         let qos = node.to_participant_qos();
@@ -419,7 +461,64 @@ mod tests {
     }
 
     #[test]
-    fn tls_server_name_defaults_to_localhost() {
+    fn crl_settings_reach_the_participant_only_with_a_crl_file() {
+        let parse = |tls: &str| {
+            let json = format!(
+                r#"{{ "route_gateway": {{
+                    "local":  {{ "domain_id": 0, "transport": "udp" }},
+                    "remote": {{ "domain_id": 1, "transport": "tcp", "tls": {tls} }}
+                }}}}"#
+            );
+            RouteGatewayConfig::from_json(&json).unwrap().remote.to_participant_qos().property
+        };
+
+        let property = parse(
+            r#"{ "ca_file": "/a", "cert_file": "/b", "key_file": "/c",
+                 "crl_unknown_status": "allow", "crl_enforce_expiry": true }"#,
+        );
+        assert!(property.find_property("int2dds.tls.crl_file").is_none());
+        assert!(property.find_property("int2dds.tls.crl_unknown_status").is_none());
+        assert!(property.find_property("int2dds.tls.crl_enforce_expiry").is_none());
+
+        let property = parse(
+            r#"{ "ca_file": "/a", "cert_file": "/b", "key_file": "/c", "crl_file": "/crl.pem",
+                 "crl_unknown_status": "allow", "crl_enforce_expiry": true }"#,
+        );
+        assert_eq!(property.find_property("int2dds.tls.crl_file"), Some("/crl.pem"));
+        assert_eq!(property.find_property("int2dds.tls.crl_unknown_status"), Some("allow"));
+        assert_eq!(property.find_property("int2dds.tls.crl_enforce_expiry"), Some("true"));
+    }
+
+    #[test]
+    fn peer_lists_reach_the_participant_when_set() {
+        let json = r#"{ "route_gateway": {
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": {
+                "domain_id": 1, "transport": "tcp",
+                "tls": { "ca_file": "/a", "cert_file": "/b", "key_file": "/c",
+                         "allow_file": "/allow.txt", "deny_file": "/deny.txt" }
+            }
+        }}"#;
+        let property =
+            RouteGatewayConfig::from_json(json).unwrap().remote.to_participant_qos().property;
+        assert_eq!(property.find_property("int2dds.tls.allow_file"), Some("/allow.txt"));
+        assert_eq!(property.find_property("int2dds.tls.deny_file"), Some("/deny.txt"));
+
+        let property = RouteGatewayConfig::from_json(&json.replace(
+            r#",
+                         "allow_file": "/allow.txt", "deny_file": "/deny.txt""#,
+            "",
+        ))
+        .unwrap()
+        .remote
+        .to_participant_qos()
+        .property;
+        assert!(property.find_property("int2dds.tls.allow_file").is_none());
+        assert!(property.find_property("int2dds.tls.deny_file").is_none());
+    }
+
+    #[test]
+    fn tls_defaults_to_mutual_tls_without_a_server_name() {
         let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": {
@@ -428,9 +527,13 @@ mod tests {
             }
         }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
-        let tls = cfg.remote.tls.unwrap();
-        assert_eq!(tls.server_name, "localhost");
-        assert!(!tls.verify_peer);
+        let tls = cfg.remote.tls.as_ref().unwrap();
+        assert_eq!(tls.server_name, None);
+        assert!(tls.verify_peer);
+
+        let qos = cfg.remote.to_participant_qos();
+        assert!(qos.property.find_property("int2dds.tls.server_name").is_none());
+        assert_eq!(qos.property.find_property("int2dds.tls.verify_peer"), Some("true"));
     }
 
     #[test]

@@ -27,7 +27,8 @@ use crate::rtps::transport::tcp::framing::TcpFrameKind;
 use crate::rtps::transport::tcp::peer_candidates::{AnnounceTargets, PEER_PRUNE_DELAY};
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
+use crate::rtps::transport::tls::{client::TlsClient, policy::TlsPolicyHandle, TlsConfig};
 use crate::rtps::transport::{TcpConfig, TransportType};
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
@@ -78,6 +79,12 @@ pub(crate) struct TcpTransportPlugin {
     /// Connection bookkeeping and the self-delivery queue, shared with the
     /// sender and with the stream listening task.
     shared: Arc<ConnectionRegistry>,
+
+    /// Derived from this participant's own certificate, so a peer can check the
+    /// GUID prefix against the TLS connection it arrives on.
+    identity: Option<[u8; IDENTITY_LEN]>,
+
+    tls_policy: Option<Arc<TlsPolicyHandle>>,
 }
 
 /// What TCP reports as the traffic it can absorb: the largest an SPDP
@@ -169,11 +176,15 @@ impl TcpTransportPlugin {
 
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let tls_policy = tls_config.as_deref().map(TlsPolicyHandle::new).transpose()?.map(Arc::new);
+        // The prefix is bound whatever this side's verify_peer says, since the
+        // certificate goes to any peer that asks for it and that peer checks it.
+        let identity = tls_policy.as_ref().map(|policy| identity_from_cert(policy.own_leaf()));
         let (listener, participant_id) = Self::bind_listener(
             domain_id,
             participant_id,
             tuning,
-            tls_config.clone(),
+            tls_policy.clone(),
             &tcp_config,
         )?;
         let listener_port = listener.port();
@@ -195,7 +206,7 @@ impl TcpTransportPlugin {
             listener_port,
             pinned,
             guid_prefix,
-            tls_config,
+            tls_policy.clone().map(TlsClient::new).transpose()?,
             Arc::clone(&shared),
             &tcp_config,
             Arc::clone(&shutdown),
@@ -222,6 +233,8 @@ impl TcpTransportPlugin {
             sender,
             listener: Mutex::new(Some(listener)),
             shared,
+            identity,
+            tls_policy,
         })
     }
 
@@ -239,14 +252,14 @@ impl TcpTransportPlugin {
         domain_id: u32,
         first_participant_id: u32,
         tuning: TcpSocketTuning,
-        tls_config: Option<Arc<TlsConfig>>,
+        tls_policy: Option<Arc<TlsPolicyHandle>>,
         tcp_config: &TcpConfig,
     ) -> io::Result<(TcpListener, u32)> {
-        let open = |port: u16, tls_config: Option<Arc<TlsConfig>>| {
+        let open = |port: u16, tls_policy: Option<Arc<TlsPolicyHandle>>| {
             TcpListener::new(
                 port,
                 tuning,
-                tls_config,
+                tls_policy,
                 tcp_config.tls_handshake_timeout,
                 tcp_config.first_frame_timeout,
             )
@@ -260,7 +273,7 @@ impl TcpTransportPlugin {
         };
 
         if let Some(port) = tcp_config.bind_port {
-            return open(port, tls_config)
+            return open(port, tls_policy)
                 .map(|listener| (listener, first_participant_id))
                 .map_err(|e| {
                     log::error!(
@@ -296,7 +309,7 @@ impl TcpTransportPlugin {
         let mut last_error = None;
         for participant_id in first_participant_id..=last_participant_id {
             let port = port_manager.calculate_tcp_physical_port(domain_id, participant_id)?;
-            match open(port, tls_config.clone()) {
+            match open(port, tls_policy.clone()) {
                 Ok(listener) => return Ok((listener, participant_id)),
                 Err(e)
                     if e.kind() == io::ErrorKind::AddrInUse
@@ -573,6 +586,27 @@ impl TcpTransportPlugin {
 }
 
 impl TransportPlugin for TcpTransportPlugin {
+    fn identity_bytes(&self) -> Option<[u8; IDENTITY_LEN]> {
+        self.identity
+    }
+
+    fn tls_policy(&self) -> Option<Arc<TlsPolicyHandle>> {
+        self.tls_policy.clone()
+    }
+
+    fn reload_tls_policy(&self) -> io::Result<()> {
+        match &self.tls_policy {
+            Some(policy) => {
+                policy.reload().inspect_err(|error| {
+                    log::error!("TLS policy reload failed, the policy in force is kept: {error}");
+                })?;
+                self.sender.recheck_tls_peers(&policy.current());
+                Ok(())
+            }
+            None => Err(io::Error::new(io::ErrorKind::Unsupported, "TCP runs without TLS")),
+        }
+    }
+
     /// A frame the socket will not take is queued rather than dropped, so no
     /// amount of traffic has to be held back to keep the peer from losing it.
     /// Reporting the largest value the announcement can carry is how that is
@@ -1548,5 +1582,138 @@ mod tests {
 
         sender.close();
         receiver.close();
+    }
+
+    fn make_tls_plugin(domain: u32, tls: Option<Arc<TlsConfig>>) -> TcpTransportPlugin {
+        let cfg = TcpConfig {
+            initial_peers: vec!["127.0.0.1:7400".parse().unwrap()],
+            bind_port: Some(0),
+            ..TcpConfig::default()
+        };
+        TcpTransportPlugin::new_with_tls(
+            domain,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            tls,
+            cfg,
+        )
+        .expect("plugin creation")
+    }
+
+    fn self_signed_tls(dir: &std::path::Path) -> Arc<TlsConfig> {
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_file = dir.join("cert.pem");
+        let key_file = dir.join("key.pem");
+        std::fs::write(&cert_file, generated.cert.pem()).unwrap();
+        std::fs::write(&key_file, generated.key_pair.serialize_pem()).unwrap();
+        Arc::new(TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file,
+            key_file,
+            server_name: Some("localhost".to_string()),
+            verify_peer: true,
+            revocation: None,
+            allow_file: None,
+            deny_file: None,
+        })
+    }
+
+    #[test]
+    fn identity_bytes_come_from_the_configured_leaf_certificate() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first_tls = self_signed_tls(first_dir.path());
+
+        let first = make_tls_plugin(next_test_domain(), Some(Arc::clone(&first_tls)));
+        let second = make_tls_plugin(next_test_domain(), Some(self_signed_tls(second_dir.path())));
+        let plain = make_tls_plugin(next_test_domain(), None);
+        let unverified_dir = tempfile::tempdir().unwrap();
+        let mut unverified_tls = (*self_signed_tls(unverified_dir.path())).clone();
+        unverified_tls.verify_peer = false;
+        let unverified_leaf = unverified_tls.load_cert_chain().unwrap().remove(0);
+        let unverified = make_tls_plugin(next_test_domain(), Some(Arc::new(unverified_tls)));
+
+        let leaf = first_tls.load_cert_chain().unwrap().remove(0);
+        assert_eq!(first.identity_bytes(), Some(identity_from_cert(&leaf)));
+        assert_ne!(first.identity_bytes(), second.identity_bytes());
+        assert_eq!(plain.identity_bytes(), None);
+        assert_eq!(unverified.identity_bytes(), Some(identity_from_cert(&unverified_leaf)));
+
+        first.close();
+        second.close();
+        plain.close();
+        unverified.close();
+    }
+
+    #[test]
+    fn identity_matches_the_certificate_presented_while_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert_for = |name: &str| {
+            rcgen::CertificateParams::new(vec![name.to_string()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap()
+                .pem()
+        };
+        let cert_file = dir.path().join("cert.pem");
+        let key_file = dir.path().join("key.pem");
+        let (first, second) = (cert_for("first"), cert_for("second"));
+        std::fs::write(&cert_file, &first).unwrap();
+        std::fs::write(&key_file, key.serialize_pem()).unwrap();
+        let tls = Arc::new(TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file: cert_file.clone(),
+            key_file,
+            server_name: None,
+            verify_peer: true,
+            revocation: None,
+            allow_file: None,
+            deny_file: None,
+        });
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let rotation = {
+            let finished = Arc::clone(&finished);
+            let staged = dir.path().join("staged.pem");
+            std::thread::spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    for pem in [&first, &second] {
+                        std::fs::write(&staged, pem).unwrap();
+                        std::fs::rename(&staged, &cert_file).unwrap();
+                    }
+                }
+            })
+        };
+
+        let mut mismatches = 0;
+        for _ in 0..200 {
+            let plugin = make_tls_plugin(next_test_domain(), Some(Arc::clone(&tls)));
+            let presented = plugin.tls_policy.as_ref().unwrap().own_leaf();
+            if plugin.identity_bytes() != Some(identity_from_cert(presented)) {
+                mismatches += 1;
+            }
+            plugin.close();
+        }
+        finished.store(true, Ordering::Relaxed);
+        rotation.join().unwrap();
+
+        assert_eq!(mismatches, 0);
+    }
+
+    #[test]
+    fn only_a_tls_participant_can_reload_its_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let tls = make_tls_plugin(next_test_domain(), Some(self_signed_tls(dir.path())));
+        let plain = make_tls_plugin(next_test_domain(), None);
+
+        assert!(tls.reload_tls_policy().is_ok());
+        let error = plain.reload_tls_policy().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+
+        tls.close();
+        plain.close();
     }
 }
