@@ -147,15 +147,14 @@ impl OwnedSegment {
         let total = pool_offset + pool_layout.total_size();
 
         // A leftover smaller than `total` fails the size check; it is still a leftover.
-        let shm = SharedMemory::new(&segment_name(domain, slot), total as usize, true).map_err(
-            |e| {
+        let shm =
+            SharedMemory::new(&segment_name(domain, slot), total as usize, true).map_err(|e| {
                 if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::InvalidData) {
                     io::Error::new(io::ErrorKind::AlreadyExists, "segment already exists")
                 } else {
                     e
                 }
-            },
-        )?;
+            })?;
         // A leftover segment may have live peers and its own size; never adopt
         // it. The caller unlinks and retries.
         if !shm.is_creator() {
@@ -319,14 +318,14 @@ impl PeerSegment {
 
 /// Best effort; Unix only. On Windows the object disappears with its last handle.
 pub(crate) fn unlink_segment(domain: u32, slot: u32) {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         use std::ffi::CString;
         if let Ok(name) = CString::new(format!("/{}", segment_name(domain, slot))) {
             unsafe { libc::shm_unlink(name.as_ptr()) };
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(any(not(unix), target_os = "android"))]
     {
         let _ = (domain, slot);
     }

@@ -33,6 +33,8 @@ mod unix {
         pub fn is_creator(&self) -> bool {
             false
         }
+
+        pub fn disown_creation(&mut self) {}
     }
 }
 

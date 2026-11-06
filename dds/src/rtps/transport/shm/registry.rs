@@ -392,14 +392,14 @@ impl RegistrySegment {
 
 /// Unix only; on Windows the mapping disappears with its last handle.
 pub(crate) fn unlink_registry(domain: u32) {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         use std::ffi::CString;
         if let Ok(name) = CString::new(format!("/{}", registry_name(domain))) {
             unsafe { libc::shm_unlink(name.as_ptr()) };
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(any(not(unix), target_os = "android"))]
     {
         let _ = domain;
     }
