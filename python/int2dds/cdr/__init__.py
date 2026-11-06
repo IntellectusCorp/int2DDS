@@ -1,5 +1,5 @@
 """
-CDR/XCDR2 Serialization Library for int2dds.
+CDR/XCDR2 Serialization Library for int2DDS.
 
 Provides pure Python CDR (Common Data Representation) serialization
 for DDS data types.

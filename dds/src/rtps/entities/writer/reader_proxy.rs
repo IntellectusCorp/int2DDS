@@ -126,6 +126,11 @@ impl ReaderProxy {
         }
     }
 
+    /// Void every acknowledgement of a reader that has lost what it acked.
+    pub(crate) fn reset_acked_changes(&mut self) {
+        self.max_acked_sn = SequenceNumber::new(0, 0);
+    }
+
     pub(crate) fn max_acked_sn(&self) -> SequenceNumber {
         self.max_acked_sn
     }

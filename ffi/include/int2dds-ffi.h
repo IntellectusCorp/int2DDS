@@ -3366,6 +3366,8 @@ Int2DdsRet int2dds_datawriter_write_serialized_w_timestamp(const struct Int2DdsD
  *
  * # Safety
  * - `writer` must be a valid datawriter
+ * - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+ *   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
  */
 Int2DdsRet int2dds_datawriter_wait_for_acknowledgments(const struct Int2DdsDataWriter *writer,
                                                        int64_t timeout_ms);
@@ -3376,6 +3378,8 @@ Int2DdsRet int2dds_datawriter_wait_for_acknowledgments(const struct Int2DdsDataW
  *
  * # Safety
  * - `publisher` must be a valid publisher
+ * - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+ *   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
  */
 Int2DdsRet int2dds_publisher_wait_for_acknowledgments(const struct Int2DdsPublisher *publisher,
                                                       int64_t timeout_ms);
@@ -5491,6 +5495,8 @@ Int2DdsRet int2dds_datareader_read_serialized_batch_w_states(const struct Int2Dd
  *
  * # Safety
  * - `reader` must be a valid datareader
+ * - `timeout_ms` is the maximum wait in milliseconds; a negative value has already expired,
+ *   and a value beyond the Duration range (e.g. `INT64_MAX`) waits forever
  */
 Int2DdsRet int2dds_datareader_wait_for_historical_data(const struct Int2DdsDataReader *reader,
                                                        int64_t timeout_ms);

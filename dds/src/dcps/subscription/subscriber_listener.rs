@@ -4,10 +4,13 @@
 //! about status changes related to a `Subscriber` and its child DataReaders. Listeners are
 //! registered when creating a Subscriber or by calling `Subscriber::set_listener()`.
 //!
-//! The subscriber listener receives the same callbacks as DataReaderListener, allowing it
-//! to handle events from all DataReaders created by this subscriber when they don't have
-//! their own listeners registered. It also provides the `on_data_on_readers` callback for
-//! coordinated reading across multiple readers.
+//! The subscriber listener receives the same callbacks as DataReaderListener for all
+//! DataReaders created by this subscriber. A DataReader status is delivered to the reader's,
+//! the subscriber's, and the participant's listener, each gated by the reader's status mask.
+//!
+//! Data arrival is the exception: `on_data_on_readers` on the subscriber is tried first, and
+//! only if it is not called does `on_data_available` go to the first of the reader, subscriber,
+//! and participant listeners whose own mask enables it.
 
 use crate::infrastructure::status::{
     LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,

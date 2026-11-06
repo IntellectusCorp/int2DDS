@@ -1,7 +1,8 @@
-/// Java code generation backend.
-///
-/// Emits one file per top-level type: Java forces a public top-level class per
-/// file, so this backend returns a Vec where the others return one String.
+//! Java code generation backend.
+//!
+//! Emits one file per top-level type: Java forces a public top-level class per
+//! file, so this backend returns a Vec where the others return one String.
+
 use crate::naming::{self, TargetLang};
 use crate::types::*;
 

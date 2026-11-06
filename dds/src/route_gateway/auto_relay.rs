@@ -81,8 +81,8 @@ impl Default for TopicFilter {
 /// Resolves the four QoS objects of a [`TopicRelay`] for a given topic name.
 ///
 /// Precedence (per endpoint, evaluated independently):
-///   1. The first [`TopicRelayRule`] whose pattern matches the topic and that
-///      specifies this endpoint's QoS profile.
+///   1. The first [`TopicRelayRule`] whose pattern matches the topic, if it
+///      specifies this endpoint's QoS profile. Later matching rules are not checked.
 ///   2. The corresponding `default_*_qos` from [`AutoRelayConfig`].
 ///   3. The built-in fallback ([`default_relay_reader_qos`] /
 ///      [`default_relay_writer_qos`]): `KEEP_ALL` history plus type defaults.
@@ -108,7 +108,6 @@ struct CompiledRule {
 
 impl QosResolver {
     /// Builds a resolver that always returns the built-in fallback QoS.
-    /// Equivalent to the pre-customization behavior.
     pub fn empty() -> Self {
         Self {
             provider: QosProvider::new(),

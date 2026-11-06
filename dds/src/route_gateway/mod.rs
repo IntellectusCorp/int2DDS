@@ -25,7 +25,7 @@
 //!   LocalNode and RemoteNode using DynamicData.
 //! - **AutoRelay**: Automatic discovery of topics and creation of TopicRelay
 //!   instances based on a topic-name filter.
-//! - **Config**: JSON configuration loader for the `route_gateway` binary.
+//! - **Config**: JSON configuration loader for a Route Gateway.
 //!
 //! ## Supported WAN transport
 //!

@@ -112,6 +112,10 @@ pub fn generate_additional_derives(
     name: &syn::Ident,
     config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
+    if config.no_additional_derives {
+        return quote! {};
+    }
+
     // Check if this is an enum
     if let Data::Enum(_) = &input.data {
         return generate_enum_additional_derives(input, name, config);
@@ -122,10 +126,6 @@ pub fn generate_additional_derives(
         if let Fields::Unnamed(_) = &data.fields {
             return generate_tuple_struct_additional_derives(input, name, config);
         }
-    }
-
-    if config.no_additional_derives {
-        return quote! {};
     }
 
     let debug_fields = generate_debug_fields(input);

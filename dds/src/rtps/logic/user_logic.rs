@@ -737,6 +737,7 @@ impl UserLogic {
                         Bytes::copy_from_slice(bytes),
                         from_addr,
                         LOCATOR_KIND_SHM,
+                        None,
                     )
             };
             let own = runtime.own_arc();

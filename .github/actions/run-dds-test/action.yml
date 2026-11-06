@@ -14,8 +14,8 @@ inputs:
     description: 'Enable tcpdump packet capture'
     required: false
     default: 'false'
-  enable-int2dds-logging:
-    description: 'Enable int2DDS logging'
+  upload-int2dds-logs:
+    description: 'Upload int2DDS logs'
     required: false
     default: 'false'
   range-start:
@@ -157,7 +157,7 @@ runs:
         name: junit_report_${{ inputs.dds-name }}_${{ inputs.role }}
         path: ./junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml
     - name: Upload logs
-      if: inputs.enable-int2dds-logging == 'true'
+      if: inputs.upload-int2dds-logs == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: logs_${{ inputs.dds-name }}_${{ inputs.role }}

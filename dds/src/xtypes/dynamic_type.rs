@@ -114,7 +114,7 @@ impl DynamicType {
         Self::from_type_object_arc(type_object, type_identifier)
     }
 
-    /// Create a DynamicType from an Arc<CompleteTypeObject>.
+    /// Create a DynamicType from an `Arc<CompleteTypeObject>`.
     pub fn from_type_object_arc(
         type_object: Arc<CompleteTypeObject>,
         type_identifier: TypeIdentifier,

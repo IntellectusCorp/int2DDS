@@ -2,7 +2,7 @@
 """
 HelloWorld Publisher Example
 
-Publishes HelloWorld samples to demonstrate int2dds Python bindings.
+Publishes HelloWorld samples to demonstrate int2DDS Python bindings.
 
 Usage:
     python hello_world_pub.py [-d DOMAIN] [--reliable]

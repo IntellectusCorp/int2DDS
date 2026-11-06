@@ -24,6 +24,43 @@ use int2dds::{core::time::Duration, infrastructure::wait_set::WaitSet};
 
 use super::{error::*, types::*};
 
+// Exact conversion; seconds beyond the Duration range saturate to infinite
+pub(crate) fn to_duration(value: i64, units_per_sec: i64) -> Duration {
+    let sec = value.div_euclid(units_per_sec);
+    if sec >= i32::MAX as i64 {
+        return Duration::infinite();
+    }
+    Duration {
+        sec: sec.max(i32::MIN as i64) as i32,
+        nanosec: (value.rem_euclid(units_per_sec) * (1_000_000_000 / units_per_sec)) as u32,
+    }
+}
+
+/// Converts a millisecond WaitSet timeout from the C API; a negative value means infinite.
+pub(crate) fn timeout_from_ms(timeout_ms: i64) -> Duration {
+    if timeout_ms < 0 {
+        Duration::infinite()
+    } else {
+        to_duration(timeout_ms, 1000)
+    }
+}
+
+/// Nanosecond counterpart of [`timeout_from_ms`].
+pub(crate) fn timeout_from_ns(timeout_ns: i64) -> Duration {
+    if timeout_ns < 0 {
+        Duration::infinite()
+    } else {
+        to_duration(timeout_ns, 1_000_000_000)
+    }
+}
+
+/// Converts the millisecond `max_wait` of the acknowledgment and historical-data waits.
+/// Unlike a WaitSet timeout, a negative value is passed through, so the wait has already
+/// expired as it has through the Rust API.
+pub(crate) fn max_wait_from_ms(max_wait_ms: i64) -> Duration {
+    to_duration(max_wait_ms, 1000)
+}
+
 /// Create a new WaitSet
 ///
 /// # Safety
@@ -66,14 +103,7 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex(
 
     let waitset_ref = &*waitset;
 
-    let duration = if timeout_ms < 0 {
-        Duration::infinite()
-    } else {
-        Duration {
-            sec: (timeout_ms / 1000) as i32,
-            nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-        }
-    };
+    let duration = timeout_from_ms(timeout_ms);
 
     match waitset_ref.inner.wait(duration) {
         Ok(conditions) => {
@@ -110,14 +140,7 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex_ns(
 
     let waitset_ref = &*waitset;
 
-    let duration = if timeout_ns < 0 {
-        Duration::infinite()
-    } else {
-        Duration {
-            sec: (timeout_ns / 1_000_000_000) as i32,
-            nanosec: (timeout_ns % 1_000_000_000) as u32,
-        }
-    };
+    let duration = timeout_from_ns(timeout_ns);
 
     match waitset_ref.inner.wait(duration) {
         Ok(conditions) => {
@@ -398,6 +421,26 @@ mod tests {
     use super::*;
     use crate::condition;
     use std::ptr;
+
+    #[test]
+    fn waitset_timeouts_treat_negative_and_out_of_range_as_infinite() {
+        for ms in [-1, i64::MIN, i64::MAX, i32::MAX as i64 * 1000] {
+            assert!(timeout_from_ms(ms).is_infinite(), "{ms} ms");
+        }
+        for ns in [-1, i64::MAX] {
+            assert!(timeout_from_ns(ns).is_infinite(), "{ns} ns");
+        }
+        assert_eq!(timeout_from_ms(1500), Duration { sec: 1, nanosec: 500_000_000 });
+        assert_eq!(timeout_from_ns(1_500_000_001), Duration { sec: 1, nanosec: 500_000_001 });
+    }
+
+    #[test]
+    fn max_wait_passes_negative_through_and_saturates_to_infinite() {
+        assert_eq!(max_wait_from_ms(-1500), Duration { sec: -2, nanosec: 500_000_000 });
+        assert!(max_wait_from_ms(i64::MIN).is_negative());
+        assert_eq!(max_wait_from_ms(1500), Duration { sec: 1, nanosec: 500_000_000 });
+        assert!(max_wait_from_ms(i64::MAX).is_infinite());
+    }
 
     #[test]
     fn test_waitset_basic() {

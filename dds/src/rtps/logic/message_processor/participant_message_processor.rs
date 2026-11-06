@@ -391,6 +391,8 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             // Queue the push behind our SPDP above: a peer drops announcements from a participant
             // it does not know yet.
             sending_handler.push_message_and_wake(MessageType::SedpHistoryPush(remote_prefix));
+            sending_handler
+                .push_message_and_wake(MessageType::SedpPreemptiveAcknack(remote_prefix));
 
             if sedp_logic.repeats_spdp_to_each_peer() {
                 let _ = sedp_logic.register_periodic_send_timer(

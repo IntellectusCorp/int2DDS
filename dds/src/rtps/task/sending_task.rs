@@ -108,6 +108,11 @@ impl SendingTask {
                 Ok(())
             }
 
+            MessageType::SedpPreemptiveAcknack(remote_prefix) => {
+                sedp_logic.send_sedp_preemptive_acknacks(remote_prefix)?;
+                Ok(())
+            }
+
             MessageType::P2pHeartbeat(target_guid_prefix) => {
                 if let Some(wlp_logic) = participant.wlp_logic() {
                     wlp_logic.send_liveliness_heartbeat(false, false, None, target_guid_prefix)?;

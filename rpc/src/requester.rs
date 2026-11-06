@@ -371,7 +371,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> ServiceProxy for Requester<TReq, TRep> 
 }
 
 /// Future-based reply reception.
-/// Wraps a WaitSet + QueryCondition to wait only for the correlated reply.
+/// Holds the reply DataReader and a QueryCondition to wait only for the correlated reply.
 pub struct Future<TRep: DdsRpcType> {
     reader: DataReader<crate::types::Reply<TRep>>,
     condition: QueryCondition,

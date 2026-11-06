@@ -1,4 +1,4 @@
-/// IDL lexer / tokenizer.
+//! IDL lexer / tokenizer.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {

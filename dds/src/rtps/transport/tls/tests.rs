@@ -1,0 +1,983 @@
+//! Certificate verification exercised through the configs that `TlsConfig`
+//! builds, over an in-memory handshake so that no socket timing is involved.
+
+use std::{
+    io,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+};
+
+use rcgen::ExtendedKeyUsagePurpose;
+use rustls::{
+    client::WebPkiServerVerifier, pki_types::ServerName, CertificateError, ClientConfig,
+    ClientConnection, Connection, HandshakeKind, ServerConnection,
+};
+
+use crate::{
+    infrastructure::qos_policy::PropertyQosPolicy,
+    rtps::transport::tls::{
+        client::TlsClient,
+        config::keys,
+        policy::TlsPolicyHandle,
+        rejection::rejection_reason,
+        test_pki::{with_crls, with_lists, LeafSpec, TestCa, TestLeaf},
+        verifier::PeerServerVerifier,
+        TlsConfig,
+    },
+};
+
+/// Address the client dials, standing in for a discovered locator.
+pub(super) const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
+/// How each side ended the handshake: the first error it raised, or the one
+/// it received as an alert from the other side.
+#[derive(Debug)]
+pub(super) struct Outcome {
+    pub(super) client: Result<(), rustls::Error>,
+    pub(super) server: Result<(), rustls::Error>,
+}
+
+/// Runs a handshake between the client and server sides that `client` and
+/// `server` build, with the client dialing [`PEER`].
+pub(super) fn handshake(client: &TlsConfig, server: &TlsConfig) -> io::Result<Outcome> {
+    let (client, _) = TlsClient::new(Arc::new(TlsPolicyHandle::new(client)?))?.connect(PEER)?;
+    let server = ServerConnection::new(server.build_server_config()?).map_err(io::Error::other)?;
+    Ok(drive(client, server))
+}
+
+/// Passes records between the two sides until neither has anything left to
+/// send, so an alert raised by one side is still delivered to the other.
+pub(super) fn drive(client: ClientConnection, server: ServerConnection) -> Outcome {
+    let mut sides = [(Connection::Client(client), Ok(())), (Connection::Server(server), Ok(()))];
+    loop {
+        let mut moved = false;
+        for from in 0..2 {
+            let mut records = Vec::new();
+            while sides[from].0.wants_write() {
+                sides[from].0.write_tls(&mut records).unwrap();
+            }
+            if records.is_empty() {
+                continue;
+            }
+            moved = true;
+            let (receiver, result) = &mut sides[1 - from];
+            let mut unread = records.as_slice();
+            while !unread.is_empty() && result.is_ok() {
+                receiver.read_tls(&mut unread).unwrap();
+                if let Err(error) = receiver.process_new_packets() {
+                    *result = Err(error);
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    let [client, server] = sides.map(|(connection, result)| match result {
+        Ok(()) if connection.is_handshaking() => {
+            Err(rustls::Error::General("handshake did not complete".to_string()))
+        }
+        other => other,
+    });
+    Outcome { client, server }
+}
+
+/// Matches by pattern because several rejections come in a plain form and a
+/// form with context, which do not compare equal.
+macro_rules! assert_rejected {
+    ($result:expr, $reason:pat) => {
+        match &$result {
+            Err(rustls::Error::InvalidCertificate($reason)) => {}
+            other => panic!("expected {}, got {other:?}", stringify!($reason)),
+        }
+    };
+}
+
+#[test]
+fn peers_under_one_ca_connect_with_and_without_mutual_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let mut client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let mut server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    client.verify_peer = false;
+    server.verify_peer = false;
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn peers_under_different_cas_connect_when_each_trusts_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_a = TestCa::root("ca-a");
+    let ca_b = TestCa::root("ca-b");
+    let client = ca_a.issue(LeafSpec::named("client")).config(dir.path(), &[&ca_a, &ca_b]);
+    let server = ca_b.issue(LeafSpec::named("server")).config(dir.path(), &[&ca_a, &ca_b]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_client_rejects_a_server_whose_ca_it_does_not_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_a = TestCa::root("ca-a");
+    let ca_b = TestCa::root("ca-b");
+    let client = ca_a.issue(LeafSpec::named("client")).config(dir.path(), &[&ca_a]);
+    let server = ca_b.issue(LeafSpec::named("server")).config(dir.path(), &[&ca_a, &ca_b]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(outcome.client, CertificateError::UnknownIssuer);
+    assert!(outcome.server.is_err(), "{outcome:?}");
+}
+
+#[test]
+fn a_server_rejects_a_client_whose_ca_it_does_not_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_a = TestCa::root("ca-a");
+    let ca_b = TestCa::root("ca-b");
+    let client = ca_a.issue(LeafSpec::named("client")).config(dir.path(), &[&ca_a, &ca_b]);
+    let server = ca_b.issue(LeafSpec::named("server")).config(dir.path(), &[&ca_b]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(outcome.server, CertificateError::UnknownIssuer);
+    assert!(outcome.client.is_err(), "{outcome:?}");
+}
+
+#[test]
+fn a_leaf_under_an_intermediate_chains_to_a_trusted_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TestCa::root("root");
+    let intermediate = root.intermediate("intermediate");
+    let client = root.issue(LeafSpec::named("client")).config(dir.path(), &[&root]);
+    let server = intermediate.issue(LeafSpec::named("server")).config(dir.path(), &[&root]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_leaf_that_leaves_out_its_intermediate_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TestCa::root("root");
+    let intermediate = root.intermediate("intermediate");
+    let client = root.issue(LeafSpec::named("client")).config(dir.path(), &[&root]);
+    let server = intermediate
+        .issue(LeafSpec { with_intermediates: false, ..LeafSpec::named("server") })
+        .config(dir.path(), &[&root]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(outcome.client, CertificateError::UnknownIssuer);
+}
+
+#[test]
+fn trusting_only_an_intermediate_accepts_the_leaves_it_signs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TestCa::root("root");
+    let intermediate = root.intermediate("intermediate");
+    let client = intermediate.issue(LeafSpec::named("client")).config(dir.path(), &[&intermediate]);
+    let server = intermediate.issue(LeafSpec::named("server")).config(dir.path(), &[&intermediate]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn an_expired_certificate_is_rejected_on_either_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let expired = || LeafSpec { valid_years: (2000, 2001), ..LeafSpec::named("expired") };
+    let valid_client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let valid_server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let expired = ca.issue(expired()).config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&valid_client, &expired).unwrap();
+    assert_rejected!(
+        outcome.client,
+        CertificateError::Expired | CertificateError::ExpiredContext { .. }
+    );
+
+    let outcome = handshake(&expired, &valid_server).unwrap();
+    assert_rejected!(
+        outcome.server,
+        CertificateError::Expired | CertificateError::ExpiredContext { .. }
+    );
+}
+
+#[test]
+fn a_certificate_that_is_not_valid_yet_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let server = ca
+        .issue(LeafSpec { valid_years: (2998, 2999), ..LeafSpec::named("server") })
+        .config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(
+        outcome.client,
+        CertificateError::NotValidYet | CertificateError::NotValidYetContext { .. }
+    );
+}
+
+#[test]
+fn without_a_server_name_any_name_on_a_trusted_certificate_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let server = ca
+        .issue(LeafSpec {
+            sans: vec!["unrelated.example".to_string()],
+            ..LeafSpec::named("server")
+        })
+        .config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_configured_server_name_must_be_carried_by_the_server_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let mut client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    client.server_name = Some("server.int2dds.test".to_string());
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    client.server_name = Some("other.int2dds.test".to_string());
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(
+        outcome.client,
+        CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. }
+    );
+}
+
+#[test]
+fn a_server_certificate_without_server_auth_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let server = ca
+        .issue(LeafSpec {
+            usages: vec![ExtendedKeyUsagePurpose::ClientAuth],
+            ..LeafSpec::named("server")
+        })
+        .config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(
+        outcome.client,
+        CertificateError::InvalidPurpose | CertificateError::InvalidPurposeContext { .. }
+    );
+}
+
+#[test]
+fn a_client_certificate_without_client_auth_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca
+        .issue(LeafSpec {
+            usages: vec![ExtendedKeyUsagePurpose::ServerAuth],
+            ..LeafSpec::named("client")
+        })
+        .config(dir.path(), &[&ca]);
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(
+        outcome.server,
+        CertificateError::InvalidPurpose | CertificateError::InvalidPurposeContext { .. }
+    );
+}
+
+#[test]
+fn a_key_that_does_not_match_its_certificate_fails_before_any_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let mut mismatched = ca.issue(LeafSpec::named("client"));
+    mismatched.key_pem = ca.issue(LeafSpec::named("other")).key_pem;
+    let client = mismatched.config(dir.path(), &[&ca]);
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    let client_error = handshake(&client, &server).unwrap_err();
+    assert!(client_error.to_string().contains("KeyMismatch"), "{client_error}");
+    let server_error = handshake(&server, &client).unwrap_err();
+    assert!(server_error.to_string().contains("KeyMismatch"), "{server_error}");
+}
+
+/// A client that trusts the same CAs as `trusting` but presents no certificate.
+fn anonymous_client(trusting: &TlsConfig) -> ClientConnection {
+    let roots = Arc::new(trusting.load_root_store().unwrap());
+    let verifier =
+        PeerServerVerifier::new(WebPkiServerVerifier::builder(roots).build().unwrap(), true, None);
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    ClientConnection::new(Arc::new(config), ServerName::from(PEER)).unwrap()
+}
+
+fn server_side(config: &TlsConfig) -> ServerConnection {
+    ServerConnection::new(config.build_server_config().unwrap()).unwrap()
+}
+
+#[test]
+fn a_client_without_a_certificate_is_rejected_under_mutual_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    let outcome = drive(anonymous_client(&server), server_side(&server));
+    assert!(matches!(outcome.server, Err(rustls::Error::NoCertificatesPresented)), "{outcome:?}");
+}
+
+#[test]
+fn a_client_without_a_certificate_is_accepted_when_mutual_tls_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let mut server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    server.verify_peer = false;
+
+    let outcome = drive(anonymous_client(&server), server_side(&server));
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn an_untrusted_client_certificate_is_not_checked_when_mutual_tls_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let trusted = TestCa::root("trusted");
+    let untrusted = TestCa::root("untrusted");
+    let client = untrusted.issue(LeafSpec::named("client")).config(dir.path(), &[&trusted]);
+    let mut server = trusted.issue(LeafSpec::named("server")).config(dir.path(), &[&trusted]);
+    server.verify_peer = false;
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_config_read_from_properties_requires_client_certificates_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let files = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let mut property = PropertyQosPolicy::default();
+    property.add_property(keys::CA_FILE, files.ca_file.to_str().unwrap(), false);
+    property.add_property(keys::CERT_FILE, files.cert_file.to_str().unwrap(), false);
+    property.add_property(keys::KEY_FILE, files.key_file.to_str().unwrap(), false);
+    let server = TlsConfig::from_property(&property).unwrap().unwrap();
+
+    let outcome = drive(anonymous_client(&server), server_side(&server));
+    assert!(matches!(outcome.server, Err(rustls::Error::NoCertificatesPresented)), "{outcome:?}");
+}
+
+/// The reason for a handshake result once it is wrapped the way the TLS
+/// stream hands it to the transport.
+fn reason_for(result: Result<(), rustls::Error>) -> Option<&'static str> {
+    rejection_reason(&io::Error::new(io::ErrorKind::InvalidData, result.unwrap_err()))
+        .map(|reason| reason.as_str())
+}
+
+#[test]
+fn rejection_reasons_name_what_the_rejecting_side_found_wrong() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stranger = TestCa::root("stranger");
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let mut named_client = client.clone();
+    named_client.server_name = Some("other.int2dds.test".to_string());
+    let issue = |spec: LeafSpec| ca.issue(spec).config(dir.path(), &[&ca]);
+
+    let untrusted = stranger.issue(LeafSpec::named("untrusted")).config(dir.path(), &[&ca]);
+    let expired = issue(LeafSpec { valid_years: (2000, 2001), ..LeafSpec::named("expired") });
+    let future = issue(LeafSpec { valid_years: (2998, 2999), ..LeafSpec::named("future") });
+    let client_only = issue(LeafSpec {
+        usages: vec![ExtendedKeyUsagePurpose::ClientAuth],
+        ..LeafSpec::named("client-only")
+    });
+    let server = issue(LeafSpec::named("server"));
+
+    let cases = [
+        (&client, &untrusted, "certificate is not signed by a trusted CA"),
+        (&client, &expired, "certificate has expired"),
+        (&client, &future, "certificate is not valid yet"),
+        (&named_client, &server, "certificate does not carry the configured server name"),
+        (&client, &client_only, "certificate is not issued for this role"),
+    ];
+    for (client, server, expected) in cases {
+        let outcome = handshake(client, server).unwrap();
+        assert_eq!(reason_for(outcome.client), Some(expected));
+    }
+
+    let outcome = drive(anonymous_client(&server), server_side(&server));
+    assert_eq!(reason_for(outcome.server), Some("peer presented no certificate"));
+}
+
+#[test]
+fn the_rejected_side_learns_that_its_certificate_was_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stranger = TestCa::root("stranger");
+    let client = stranger.issue(LeafSpec::named("client")).config(dir.path(), &[&ca, &stranger]);
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_eq!(reason_for(outcome.client), Some("peer rejected this participant's certificate"));
+}
+
+#[test]
+fn failures_unrelated_to_certificates_have_no_rejection_reason() {
+    let timeout = io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out");
+    let protocol = io::Error::new(
+        io::ErrorKind::InvalidData,
+        rustls::Error::General("unexpected message".to_string()),
+    );
+
+    assert_eq!(rejection_reason(&timeout), None);
+    assert_eq!(rejection_reason(&protocol), None);
+}
+
+#[test]
+fn a_revoked_certificate_is_rejected_on_either_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let server = ca.issue(LeafSpec::named("server"));
+    let crl = ca.crl(&[server.serial], 2999);
+    let client_config = with_crls(client.config(dir.path(), &[&ca]), &[crl.clone()]);
+    let server_config = with_crls(server.config(dir.path(), &[&ca]), &[crl]);
+
+    let outcome = handshake(&client_config, &server_config).unwrap();
+    assert_rejected!(outcome.client, CertificateError::Revoked);
+    assert_eq!(reason_for(outcome.client), Some("certificate has been revoked"));
+
+    let outcome = handshake(&server_config, &client_config).unwrap();
+    assert_rejected!(outcome.server, CertificateError::Revoked);
+}
+
+#[test]
+fn certificates_missing_from_the_crl_still_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let revoked = ca.issue(LeafSpec::named("revoked"));
+    let crl = ca.crl(&[revoked.serial], 2999);
+    let client =
+        with_crls(ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]), &[crl.clone()]);
+    let server = with_crls(ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]), &[crl]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_revoked_intermediate_rejects_every_leaf_beneath_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TestCa::root("root");
+    let intermediate = root.intermediate("intermediate");
+    let crls = [root.crl(&[intermediate.serial], 2999), intermediate.crl(&[], 2999)];
+    let client =
+        with_crls(root.issue(LeafSpec::named("client")).config(dir.path(), &[&root]), &crls);
+    let server = with_crls(
+        intermediate.issue(LeafSpec::named("server")).config(dir.path(), &[&root]),
+        &crls,
+    );
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(outcome.client, CertificateError::Revoked);
+}
+
+#[test]
+fn a_missing_crl_rejects_unless_unknown_status_is_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TestCa::root("root");
+    let intermediate = root.intermediate("intermediate");
+    let only_root = [root.crl(&[], 2999)];
+    let mut client =
+        with_crls(root.issue(LeafSpec::named("client")).config(dir.path(), &[&root]), &only_root);
+    let server = with_crls(
+        intermediate.issue(LeafSpec::named("server")).config(dir.path(), &[&root]),
+        &only_root,
+    );
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(outcome.client, CertificateError::UnknownRevocationStatus);
+    assert_eq!(
+        reason_for(outcome.client),
+        Some("revocation status is unknown (no CRL from the issuer)")
+    );
+
+    client.revocation.as_mut().unwrap().allow_unknown_status = true;
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_stale_crl_is_used_unless_expiry_is_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stale = [ca.crl(&[], 2002)];
+    let mut client =
+        with_crls(ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]), &stale);
+    let server = with_crls(ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]), &stale);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    client.revocation.as_mut().unwrap().enforce_expiry = true;
+    let outcome = handshake(&client, &server).unwrap();
+    assert_rejected!(
+        outcome.client,
+        CertificateError::ExpiredRevocationList
+            | CertificateError::ExpiredRevocationListContext { .. }
+    );
+    assert_eq!(reason_for(outcome.client), Some("issuer's CRL is past its next update"));
+}
+
+#[test]
+fn a_crl_signed_by_a_same_named_impostor_rejects_the_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let impostor = TestCa::root("ca");
+    let forged = [impostor.crl(&[], 2999)];
+    let client = with_crls(ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]), &forged);
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client, &server).unwrap();
+    assert!(
+        matches!(outcome.client, Err(rustls::Error::InvalidCertRevocationList(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        reason_for(outcome.client),
+        Some("issuer's CRL is invalid (bad signature or not issued by that CA)")
+    );
+}
+
+#[test]
+fn an_unusable_crl_file_fails_before_any_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let server = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let malformed = "-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n".to_string();
+    let cases = [
+        (vec![], "no CRLs found"),
+        (vec![ca.crl(&[], 2999), ca.crl(&[], 2999)], "CRLs #1 and #2"),
+        (vec![malformed], "CRL #1"),
+    ];
+
+    for (crls, expected) in cases {
+        let client = with_crls(client.clone(), &crls);
+        let error = handshake(&client, &server).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        let error = handshake(&server, &client).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn only_allowed_peers_connect_in_either_direction() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let server = ca.issue(LeafSpec::named("server"));
+    let stranger = ca.issue(LeafSpec::named("stranger"));
+    let client_config = with_lists(client.config(dir.path(), &[&ca]), &[&client, &server], &[]);
+    let server_config = with_lists(server.config(dir.path(), &[&ca]), &[&client, &server], &[]);
+    let stranger_config = stranger.config(dir.path(), &[&ca]);
+
+    let outcome = handshake(&client_config, &server_config).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    let outcome = handshake(&client_config, &stranger_config).unwrap();
+    assert_eq!(reason_for(outcome.client), Some("certificate is not on the allow list"));
+    assert_eq!(reason_for(outcome.server), Some("peer rejected this participant's certificate"));
+
+    let outcome = handshake(&stranger_config, &server_config).unwrap();
+    assert_eq!(reason_for(outcome.server), Some("certificate is not on the allow list"));
+}
+
+#[test]
+fn a_denied_peer_is_refused_even_when_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let server = ca.issue(LeafSpec::named("server"));
+    let other = ca.issue(LeafSpec::named("other"));
+    let deny_only = with_lists(client.config(dir.path(), &[&ca]), &[], &[&server]);
+    let both = with_lists(client.config(dir.path(), &[&ca]), &[&server], &[&server]);
+    let server_config = server.config(dir.path(), &[&ca]);
+    let other_config = other.config(dir.path(), &[&ca]);
+
+    for client_config in [&deny_only, &both] {
+        let outcome = handshake(client_config, &server_config).unwrap();
+        assert_eq!(reason_for(outcome.client), Some("certificate is on the deny list"));
+        let outcome = handshake(&server_config, client_config).unwrap();
+        assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+    }
+
+    let outcome = handshake(&deny_only, &other_config).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn lists_apply_only_after_the_chain_and_alongside_a_server_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stranger_ca = TestCa::root("stranger-ca");
+    let server = ca.issue(LeafSpec::named("server"));
+    let untrusted = stranger_ca.issue(LeafSpec::named("untrusted"));
+    let client = ca.issue(LeafSpec::named("client"));
+    let mut client_config =
+        with_lists(client.config(dir.path(), &[&ca]), &[&server, &untrusted], &[]);
+
+    let outcome = handshake(&client_config, &untrusted.config(dir.path(), &[&ca])).unwrap();
+    assert_rejected!(outcome.client, CertificateError::UnknownIssuer);
+
+    client_config.server_name = Some("server.int2dds.test".to_string());
+    let outcome = handshake(&client_config, &server.config(dir.path(), &[&ca])).unwrap();
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+fn handshake_between(client: &Arc<TlsPolicyHandle>, server: &TlsPolicyHandle) -> Outcome {
+    let (client, _) = TlsClient::new(Arc::clone(client)).unwrap().connect(PEER).unwrap();
+    let server = ServerConnection::new(Arc::clone(&server.current().server)).unwrap();
+    drive(client, server)
+}
+
+#[test]
+fn a_reload_applies_a_newly_published_crl_to_the_next_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let client_policy = Arc::new(TlsPolicyHandle::new(&client.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_crls(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[ca.crl(&[], 2999)],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+
+    let crl_file = &server_config.revocation.as_ref().unwrap().crl_file;
+    std::fs::write(crl_file, ca.crl(&[client.serial], 2999)).unwrap();
+    server_policy.reload().unwrap();
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert_rejected!(outcome.server, CertificateError::Revoked);
+}
+
+#[test]
+fn a_reload_that_cannot_read_a_file_keeps_the_policy_in_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client"));
+    let client_policy = Arc::new(TlsPolicyHandle::new(&client.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_crls(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[ca.crl(&[client.serial], 2999)],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    std::fs::write(&server_config.revocation.as_ref().unwrap().crl_file, "not a CRL").unwrap();
+    assert!(server_policy.reload().is_err());
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert_rejected!(outcome.server, CertificateError::Revoked);
+}
+
+#[test]
+fn a_reload_keeps_the_certificate_the_participant_started_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let stranger_ca = TestCa::root("stranger-ca");
+    let client_policy = Arc::new(
+        TlsPolicyHandle::new(&ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]))
+            .unwrap(),
+    );
+    let server_config = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    let replacement = stranger_ca.issue(LeafSpec::named("replacement"));
+    std::fs::write(&server_config.cert_file, &replacement.cert_pem).unwrap();
+    std::fs::write(&server_config.key_file, &replacement.key_pem).unwrap();
+    server_policy.reload().unwrap();
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn only_a_successful_reload_starts_a_new_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let config = with_crls(
+        ca.issue(LeafSpec::named("node")).config(dir.path(), &[&ca]),
+        &[ca.crl(&[], 2999)],
+    );
+    let policy = Arc::new(TlsPolicyHandle::new(&config).unwrap());
+    let client = TlsClient::new(Arc::clone(&policy)).unwrap();
+    assert_eq!(client.connect(PEER).unwrap().1, 0);
+
+    policy.reload().unwrap();
+    assert_eq!(policy.current().generation, 1);
+
+    std::fs::write(&config.revocation.as_ref().unwrap().crl_file, "not a CRL").unwrap();
+    assert!(policy.reload().is_err());
+    assert_eq!(policy.current().generation, 1);
+    assert_eq!(client.connect(PEER).unwrap().1, 1);
+}
+
+#[test]
+fn a_reload_refuses_a_broken_ca_file_and_keeps_trusting_the_old_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client = ca.issue(LeafSpec::named("client")).config(dir.path(), &[&ca]);
+    let client_policy = Arc::new(TlsPolicyHandle::new(&client).unwrap());
+    let server_config = ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]);
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+    let valid = ca.pem();
+
+    for (kind, broken) in
+        [("not PEM", "not a certificate"), ("empty", ""), ("truncated", &valid[..valid.len() / 2])]
+    {
+        std::fs::write(&server_config.ca_file, broken).unwrap();
+        assert!(server_policy.reload().is_err(), "{kind} CA file was accepted");
+        assert_eq!(server_policy.current().generation, 0, "{kind} CA file replaced the policy");
+    }
+    std::fs::remove_file(&server_config.ca_file).unwrap();
+    assert!(server_policy.reload().is_err(), "a missing CA file was accepted");
+
+    let outcome = handshake_between(&client_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_reload_refuses_broken_lists_and_keeps_enforcing_the_old_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let allowed = ca.issue(LeafSpec::named("allowed"));
+    let denied = ca.issue(LeafSpec::named("denied"));
+    let allowed_policy =
+        Arc::new(TlsPolicyHandle::new(&allowed.config(dir.path(), &[&ca])).unwrap());
+    let denied_policy = Arc::new(TlsPolicyHandle::new(&denied.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_lists(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[&allowed, &denied],
+        &[&denied],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+
+    let lists =
+        [server_config.allow_file.clone().unwrap(), server_config.deny_file.clone().unwrap()];
+    for list in &lists {
+        let valid = std::fs::read(list).unwrap();
+        std::fs::write(list, "not a fingerprint").unwrap();
+        assert!(server_policy.reload().is_err(), "a malformed {list:?} was accepted");
+        assert_eq!(
+            server_policy.current().generation,
+            0,
+            "a malformed {list:?} replaced the policy"
+        );
+        std::fs::remove_file(list).unwrap();
+        assert!(server_policy.reload().is_err(), "a missing {list:?} was accepted");
+        std::fs::write(list, valid).unwrap();
+    }
+
+    let outcome = handshake_between(&allowed_policy, &server_policy);
+    assert!(outcome.client.is_ok() && outcome.server.is_ok(), "{outcome:?}");
+    let outcome = handshake_between(&denied_policy, &server_policy);
+    assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+}
+
+#[test]
+fn an_emptied_list_is_no_longer_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let listed = ca.issue(LeafSpec::named("listed"));
+    let unlisted = ca.issue(LeafSpec::named("unlisted"));
+    let unlisted_policy =
+        Arc::new(TlsPolicyHandle::new(&unlisted.config(dir.path(), &[&ca])).unwrap());
+    let server_config = with_lists(
+        ca.issue(LeafSpec::named("server")).config(dir.path(), &[&ca]),
+        &[&listed],
+        &[&unlisted],
+    );
+    let server_policy = TlsPolicyHandle::new(&server_config).unwrap();
+    let allow_file = server_config.allow_file.clone().unwrap();
+    let deny_file = server_config.deny_file.clone().unwrap();
+
+    let outcome = handshake_between(&unlisted_policy, &server_policy);
+    assert_eq!(reason_for(outcome.server), Some("certificate is on the deny list"));
+
+    std::fs::write(&deny_file, "").unwrap();
+    let reloaded = server_policy.reload();
+    let outcome = handshake_between(&unlisted_policy, &server_policy);
+    assert_eq!(
+        reason_for(outcome.server),
+        Some("certificate is not on the allow list"),
+        "emptied deny list, reload {reloaded:?}"
+    );
+
+    std::fs::write(&allow_file, "# no allow list\n").unwrap();
+    let reloaded = server_policy.reload();
+    let outcome = handshake_between(&unlisted_policy, &server_policy);
+    assert!(
+        outcome.client.is_ok() && outcome.server.is_ok(),
+        "emptied allow list, reload {reloaded:?}, handshake {outcome:?}"
+    );
+}
+
+/// Moves records both ways until neither side has more, leaving both connections
+/// open so what they agreed on can be inspected.
+fn exchange(
+    client: &mut ClientConnection,
+    server: &mut ServerConnection,
+) -> (Result<(), rustls::Error>, Result<(), rustls::Error>) {
+    let (mut client_result, mut server_result) = (Ok(()), Ok(()));
+    loop {
+        let mut records = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut records).unwrap();
+        }
+        let client_sent = !records.is_empty();
+        let mut unread = records.as_slice();
+        while !unread.is_empty() && server_result.is_ok() {
+            server.read_tls(&mut unread).unwrap();
+            server_result = server.process_new_packets().map(|_| ());
+        }
+
+        let mut records = Vec::new();
+        while server.wants_write() {
+            server.write_tls(&mut records).unwrap();
+        }
+        let server_sent = !records.is_empty();
+        let mut unread = records.as_slice();
+        while !unread.is_empty() && client_result.is_ok() {
+            client.read_tls(&mut unread).unwrap();
+            client_result = client.process_new_packets().map(|_| ());
+        }
+
+        if !client_sent && !server_sent {
+            return (client_result, server_result);
+        }
+    }
+}
+
+struct ResumablePair {
+    client: Arc<TlsPolicyHandle>,
+    server: Arc<TlsPolicyHandle>,
+    client_config: TlsConfig,
+    server_config: TlsConfig,
+}
+
+/// Mutual TLS peers that have completed one full handshake, so the client holds
+/// a ticket the server would honour.
+fn pair_holding_a_ticket(
+    ca: &TestCa,
+    dir: &std::path::Path,
+    client_leaf: &TestLeaf,
+    server_leaf: &TestLeaf,
+) -> ResumablePair {
+    let crl = [ca.crl(&[], 2999)];
+    let client_config = with_crls(client_leaf.config(dir, &[ca]), &crl);
+    let server_config = with_crls(server_leaf.config(dir, &[ca]), &crl);
+    let pair = ResumablePair {
+        client: Arc::new(TlsPolicyHandle::new(&client_config).unwrap()),
+        server: Arc::new(TlsPolicyHandle::new(&server_config).unwrap()),
+        client_config,
+        server_config,
+    };
+    let (mut client, mut server) = pair.connect();
+    let (client_result, server_result) = exchange(&mut client, &mut server);
+    assert!(client_result.is_ok() && server_result.is_ok());
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    pair
+}
+
+impl ResumablePair {
+    fn connect(&self) -> (ClientConnection, ServerConnection) {
+        let (client, _) = TlsClient::new(Arc::clone(&self.client)).unwrap().connect(PEER).unwrap();
+        let server = ServerConnection::new(Arc::clone(&self.server.current().server)).unwrap();
+        (client, server)
+    }
+}
+
+#[test]
+fn a_resumed_connection_still_knows_the_chain_a_reload_judges() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client_leaf = ca.issue(LeafSpec::named("client"));
+    let server_leaf = ca.issue(LeafSpec::named("server"));
+    let pair = pair_holding_a_ticket(&ca, dir.path(), &client_leaf, &server_leaf);
+
+    let (mut client, mut server) = pair.connect();
+    let (client_result, server_result) = exchange(&mut client, &mut server);
+
+    assert!(client_result.is_ok() && server_result.is_ok());
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+    let accepted = server.peer_certificates().expect("resumed server lost the client chain");
+    assert_eq!(accepted[0].as_ref(), client_leaf.der.as_slice());
+    let dialed = client.peer_certificates().expect("resumed client lost the server chain");
+    assert_eq!(dialed[0].as_ref(), server_leaf.der.as_slice());
+}
+
+#[test]
+fn a_ticket_does_not_get_a_revoked_client_past_a_reloaded_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client_leaf = ca.issue(LeafSpec::named("client"));
+    let server_leaf = ca.issue(LeafSpec::named("server"));
+    let pair = pair_holding_a_ticket(&ca, dir.path(), &client_leaf, &server_leaf);
+
+    let crl_file = &pair.server_config.revocation.as_ref().unwrap().crl_file;
+    std::fs::write(crl_file, ca.crl(&[client_leaf.serial], 2999)).unwrap();
+    pair.server.reload().unwrap();
+
+    let (mut client, mut server) = pair.connect();
+    let (_, server_result) = exchange(&mut client, &mut server);
+
+    assert_rejected!(server_result, CertificateError::Revoked);
+}
+
+#[test]
+fn a_ticket_does_not_get_a_revoked_server_past_a_reloaded_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let client_leaf = ca.issue(LeafSpec::named("client"));
+    let server_leaf = ca.issue(LeafSpec::named("server"));
+    let pair = pair_holding_a_ticket(&ca, dir.path(), &client_leaf, &server_leaf);
+
+    let crl_file = &pair.client_config.revocation.as_ref().unwrap().crl_file;
+    std::fs::write(crl_file, ca.crl(&[server_leaf.serial], 2999)).unwrap();
+    pair.client.reload().unwrap();
+
+    let (mut client, mut server) = pair.connect();
+    let (client_result, _) = exchange(&mut client, &mut server);
+
+    assert_rejected!(client_result, CertificateError::Revoked);
+}
+
+#[test]
+fn a_forging_connection_is_marked_once_until_it_is_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::root("ca");
+    let leaf = ca.issue(LeafSpec::named("own"));
+    let policy = TlsPolicyHandle::new(&leaf.config(dir.path(), &[&ca])).unwrap();
+    let address: SocketAddr = "127.0.0.1:7410".parse().unwrap();
+    let report = || policy.report_identity_mismatch(address, None, [9; 12]);
+
+    report();
+    report();
+    assert_eq!(policy.take_forged_peers(), [address]);
+
+    report();
+    assert_eq!(policy.take_forged_peers(), [address]);
+}

@@ -7,7 +7,7 @@
 //!
 //! - [`error`] - Error types and result type aliases
 //! - [`time`] - Duration and timestamp types for QoS policies and timeouts
-//! - [`types`] - Basic type aliases and constants (DomainId, ParticipantId, etc.)
+//! - [`types`] - Basic type aliases and constants (DomainId, LENGTH_UNLIMITED)
 
 pub mod error;
 pub mod time;

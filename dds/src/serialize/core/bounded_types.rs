@@ -1,7 +1,7 @@
 /// Wide character type for DDS (UTF-16 encoded)
 ///
 /// WChar wraps a Rust `char` and serializes it as UTF-16 (2 bytes).
-/// Note: Characters outside BMP (> U+FFFF) will be truncated during serialization.
+/// Note: Characters outside BMP (> U+FFFF) fail serialization with `InvalidWideCharacter`.
 ///
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WChar {
@@ -25,7 +25,7 @@ impl WChar {
         self.inner
     }
 
-    /// Convert to UTF-16 code unit (truncates if > U+FFFF)
+    /// Convert to UTF-16 code unit (U+FFFD if > U+FFFF)
     pub fn to_utf16(&self) -> u16 {
         let code = self.inner as u32;
         if code > 0xFFFF {

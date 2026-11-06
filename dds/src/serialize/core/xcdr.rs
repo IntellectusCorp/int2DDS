@@ -1,6 +1,6 @@
 //! XCDR (Extended CDR) v2 module
 //!
-//! This module re-exports XCDR2 types from the cdr module for backward compatibility.
+//! This module re-exports XCDR2 types from the cdr module.
 
 // Re-export v2 types
 pub use crate::serialize::cdr::{

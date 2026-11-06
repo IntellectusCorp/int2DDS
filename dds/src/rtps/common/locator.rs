@@ -1,7 +1,7 @@
 //! Network locator types for RTPS endpoint addressing.
 //!
 //! This module defines `Locator` for identifying network endpoints in RTPS communication.
-//! Supports UDP and TCP transports with IPv4/IPv6 addressing. Locators specify both the
+//! Supports UDP and TCP transports with IPv4/IPv6 addressing, and shared memory. Locators specify both the
 //! transport type and network address for sending and receiving RTPS messages.
 use crate::dcps::topic::type_support::DdsType;
 

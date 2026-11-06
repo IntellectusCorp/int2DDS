@@ -5,7 +5,7 @@
 //!
 //! ## Submodules
 //!
-//! - [`checksum`] - CRC checksum calculation for message integrity
+//! - [`checksum`] - Checksum type definitions for message integrity
 //! - [`entity_id`] - Entity identifiers (EntityId_t)
 //! - [`entity_kind`] - Entity kind enumeration (reader, writer, participant)
 //! - [`guid`] - Globally Unique Identifiers (GUID_t)

@@ -11,13 +11,13 @@ description = "Rust implementation of the Data Distribution Service (DDS) middle
 keywords = ["dds", "rtps", "middleware", "pubsub", "realtime"]
 categories = ["network-programming", "embedded", "api-bindings"]
 documentation = "https://docs.rs/int2dds"
-readme = "../README.md"
+readme = "README.md"
 
 [features]
 default = []
 
 [dependencies]
-int2dds-derive = { path = "../derive" }
+int2dds-derive.workspace = true
 mio = { version = "1.0.2", features = ["net", "os-poll"] }
 network-interface = "2.0.0"
 const-default = { version = "1.0.0", features = ["derive", "std", "alloc"] }
@@ -60,6 +60,9 @@ serde_json = "1.0"
 if-addrs = "0.15"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
+x509-parser = "0.18"
+ring = "0.17"
 crossbeam-channel = "0.5.15"
 flume = "0.11"
 

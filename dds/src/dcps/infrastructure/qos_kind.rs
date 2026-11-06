@@ -3,9 +3,7 @@
 //! `QosKind<T>` is the type used by `create_*` and `set_default_*_qos` entry
 //! points to distinguish "use the default" (which is then resolved through
 //! the registered-default → profile → spec-default chain) from "use exactly
-//! this QoS value". This avoids the prior value-equality based detection,
-//! which could not tell `T::default()` apart from a deliberately constructed
-//! QoS that happened to equal the spec default.
+//! this QoS value", even when that value equals the spec default.
 //!
 //! Callers usually do not name this type directly:
 //! - Pass `PUBLISHER_QOS_DEFAULT` (and siblings) for the default sentinel.

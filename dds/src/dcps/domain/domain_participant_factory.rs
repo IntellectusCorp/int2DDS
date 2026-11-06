@@ -45,13 +45,12 @@
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, LazyLock, Mutex, Weak},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use crate::{
-    common::{
-        env::{get_default_qos_profile, get_qos_profile_paths, init_from_env, DEFAULT_DOMAIN_ID},
-        instance_handle::InstanceHandle,
+    common::env::{
+        get_default_qos_profile, get_qos_profile_paths, init_from_env, DEFAULT_DOMAIN_ID,
     },
     config::{
         json::{QosProvider, ResolvedDataReader, ResolvedDataWriter, ResolvedTopic},
@@ -84,8 +83,7 @@ use super::{
 
 #[derive(Default)]
 pub struct DomainParticipantFactory {
-    participants: Mutex<HashMap<DomainId, Vec<Weak<DomainParticipant>>>>,
-    orphaned_participants: Arc<Mutex<Vec<Arc<DomainParticipant>>>>,
+    participants: Mutex<HashMap<DomainId, Vec<Arc<DomainParticipant>>>>,
     qos: Mutex<DomainParticipantFactoryQos>,
     default_participant_qos: Mutex<Option<DomainParticipantQos>>,
     qos_provider: Mutex<QosProvider>,
@@ -105,9 +103,11 @@ impl DomainParticipantFactory {
     /// # Arguments
     ///
     /// * `domain_id` - The domain ID to join. Participants in different domains cannot communicate.
-    /// * `qos_list` - Quality of Service policies for the participant. Use `DomainParticipantQos::default()` for defaults.
+    ///   `DEFAULT_DOMAIN_ID` (-1) reads the domain from the `DDS_DOMAIN_ID` env var, or 0 if unset.
+    /// * `qos_list` - Quality of Service policies for the participant. Use `PARTICIPANT_QOS_DEFAULT` for the configured default.
     /// * `listener` - Optional listener for status notifications. Pass `None` if not needed.
-    /// * `mask` - Status mask indicating which status changes trigger listener callbacks. Use `StatusMask::default()` to disable all.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///   `StatusMask::default()` enables all statuses.
     ///
     /// # Returns
     ///
@@ -116,7 +116,7 @@ impl DomainParticipantFactory {
     /// # Errors
     ///
     /// Returns an error if:
-    /// * The QoS policies are inconsistent or unsupported
+    /// * `BadParameter` - `domain_id` is negative and not `DEFAULT_DOMAIN_ID`
     /// * System resources are insufficient
     /// * Network initialization fails
     pub fn create_participant(
@@ -164,17 +164,19 @@ impl DomainParticipantFactory {
         if self.get_qos()?.entity_factory.autoenable_created_entities {
             participant.enable()?;
         }
+
+        // Push this self_ref Arc, not Arc::new(participant.clone()).
+        // Children's Weak points to this allocation; a separate Arc would not keep it alive.
         let participant_ref = participant
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("Participant is not properly initialized".to_string()))?
             .clone();
-        let weak_participant = Arc::downgrade(&participant_ref);
         {
             let mut map_guard =
                 self.participants.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             let domain_participants = map_guard.entry(domain_id).or_insert_with(Vec::new);
-            domain_participants.push(weak_participant);
+            domain_participants.push(participant_ref);
         }
 
         Ok(participant)
@@ -202,24 +204,7 @@ impl DomainParticipantFactory {
     /// * The participant was not found in the factory's registry
     /// * Internal synchronization fails
     pub fn delete_participant(&self, mut participant: DomainParticipant) -> DdsResult<()> {
-        match self.try_delete_participant(&mut participant) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let participant_ref = participant
-                    .self_ref
-                    .as_ref()
-                    .ok_or(DdsError::Error("Participant is not properly initialized".to_string()))?
-                    .clone();
-                let mut orphaned = self
-                    .orphaned_participants
-                    .lock()
-                    .map_err(|e| DdsError::Error(e.to_string()))?;
-                if !orphaned.iter().any(|p| Arc::ptr_eq(p, &participant_ref)) {
-                    orphaned.push(participant_ref);
-                }
-                Err(e)
-            }
-        }
+        self.try_delete_participant(&mut participant)
     }
 
     pub(crate) fn try_delete_participant(
@@ -231,7 +216,6 @@ impl DomainParticipantFactory {
             return Err(DdsError::IllegalOperation);
         }
 
-        self.remove_orphaned_participant(participant)?;
         if let Ok(true) = participant.has_active_entities() {
             return Err(DdsError::PreconditionNotMet);
         }
@@ -240,24 +224,22 @@ impl DomainParticipantFactory {
         match self.participants.lock() {
             Ok(mut map_guard) => {
                 if let Some(domain_parts) = map_guard.get_mut(&domain_id) {
-                    if let Some((pos, p)) =
-                        domain_parts.iter().enumerate().find_map(|(i, weak_p)| {
-                            weak_p.upgrade().and_then(|p| {
-                                if *p == *participant {
-                                    Some((i, p))
-                                } else {
-                                    None
-                                }
-                            })
-                        })
+                    if let Some((pos, p)) = domain_parts
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| ***p == *participant)
+                        .map(|(i, p)| (i, p.clone()))
                     {
                         participant.disable()?;
                         p.disable()?;
+
+                        // Removed only after delete() succeeds, so a failed delete keeps the
+                        // factory's ownership.
+                        participant.delete()?;
                         domain_parts.remove(pos);
                         if domain_parts.is_empty() {
                             map_guard.remove(&domain_id);
                         }
-                        participant.delete()?;
                         Ok(())
                     } else {
                         Err(DdsError::Error("Participant not found".to_string()))
@@ -270,64 +252,12 @@ impl DomainParticipantFactory {
         }
     }
 
-    fn remove_orphaned_participant(&self, target: &DomainParticipant) -> DdsResult<bool> {
-        let mut orphaned_participants =
-            self.orphaned_participants.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        if let Some(pos) = orphaned_participants.iter().enumerate().find_map(|(i, t)| {
-            let handle = t.get_instance_handle().ok()?;
-            let target_handle = target.get_instance_handle().ok()?;
-            if handle == target_handle {
-                Some(i)
-            } else {
-                None
-            }
-        }) {
-            orphaned_participants.remove(pos);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub(crate) fn handle_participant_drop(
-        &self,
-        domain_id: &DomainId,
-        participant_handle: &InstanceHandle,
-    ) {
-        let mut found_participant = None;
-        if let Ok(participants) = self.participants.lock() {
-            if let Some(participants) = participants.get(domain_id) {
-                for weak_participant in participants.iter() {
-                    if let Some(strong_participant) = weak_participant.upgrade() {
-                        if let Ok(handle) = strong_participant.get_instance_handle() {
-                            if handle == *participant_handle {
-                                found_participant = Some(strong_participant);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If found, add DomainParticipant to orphaned_entities
-        if let Some(participant) = found_participant {
-            if let Ok(mut orphaned_participants) = self.orphaned_participants.lock() {
-                if !orphaned_participants.iter().any(|p| Arc::ptr_eq(p, &participant)) {
-                    orphaned_participants.push(participant);
-                }
-            }
-        }
-        // If not found, it has already been properly deleted via delete_participant, so do nothing
-    }
-
     pub fn lookup_participant(&self, domain_id: DomainId) -> DdsResult<Option<DomainParticipant>> {
         let map_guard = self.participants.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         Ok(map_guard
             .get(&domain_id)
             .and_then(|participants| participants.first())
-            .and_then(|weak_p| weak_p.upgrade())
-            .map(|p| (*p).clone()))
+            .map(|p| (**p).clone()))
     }
 
     pub fn lookup_participants(
@@ -337,11 +267,7 @@ impl DomainParticipantFactory {
         let map_guard = self.participants.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         Ok(map_guard.get(&domain_id).map(|participants| {
-            participants
-                .iter()
-                .filter_map(|weak_p| weak_p.upgrade())
-                .map(|p| (*p).clone())
-                .collect::<Vec<DomainParticipant>>()
+            participants.iter().map(|p| (**p).clone()).collect::<Vec<DomainParticipant>>()
         }))
     }
 
@@ -383,6 +309,7 @@ impl DomainParticipantFactory {
     }
 
     pub fn set_qos(&self, qos: DomainParticipantFactoryQos) -> DdsResult<()> {
+        qos.check_values()?;
         qos.check_unsupported_policies()?;
         qos.is_consistent()?;
 
@@ -417,6 +344,7 @@ impl DomainParticipantFactory {
                 Err(e) => Err(DdsError::Error(e.to_string())),
             },
             QosKind::Specific(qos) => {
+                qos.check_values()?;
                 qos.is_consistent()?;
                 match self.default_participant_qos.lock() {
                     Ok(mut default_qos) => {
@@ -440,13 +368,15 @@ impl DomainParticipantFactory {
 
     // ========== QoS Profile methods ==========
 
-    /// Loads QoS profiles from one or more JSON files.
+    /// Loads QoS profiles from one or more JSON or XML files.
     ///
     /// The loaded profiles can be used with `create_participant_with_profile` and
     /// `get_*_qos_from_profile` methods to create entities with predefined QoS settings.
     ///
     /// Multiple files can be loaded incrementally. If a library with the same name
     /// already exists, it will be replaced by the new one.
+    ///
+    /// Files with the `.xml` extension also load their `<types>` into the type registry.
     ///
     /// # Arguments
     /// * `paths` - Slice of file paths to load QoS profiles from
@@ -628,7 +558,7 @@ impl DomainParticipantFactory {
     /// Retrieves `DomainParticipantQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///   Pass `""` to use the default profile (resolved via `default_profile_path()`).
     ///
     /// # Errors
@@ -647,7 +577,7 @@ impl DomainParticipantFactory {
     /// Retrieves `PublisherQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -662,7 +592,7 @@ impl DomainParticipantFactory {
     /// Retrieves `SubscriberQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -677,7 +607,7 @@ impl DomainParticipantFactory {
     /// Retrieves `TopicQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -692,7 +622,7 @@ impl DomainParticipantFactory {
     /// Retrieves `DataWriterQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -707,7 +637,7 @@ impl DomainParticipantFactory {
     /// Retrieves `DataReaderQos` from a loaded profile.
     ///
     /// # Arguments
-    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    /// * `qos_path` - QoS path. See [`QosProvider`] for supported formats.
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -832,9 +762,15 @@ mod factory_test {
 
     #[test]
     fn test_participant_drop_without_delete() {
+        let domain_id = crate::test_utils::unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(20, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let domain_participant_cloned = domain_participant.clone();
         let domain_participant_cloned2 = domain_participant.clone();
@@ -842,13 +778,13 @@ mod factory_test {
         // DomainParticipant Entity should not be deleted even after being dropped
         drop(domain_participant);
         let contains_domain_participant =
-            domain_participant_factory.lookup_participant(20).unwrap();
+            domain_participant_factory.lookup_participant(domain_id).unwrap();
         assert!(contains_domain_participant.is_some(), "domain_participant deleted!");
 
         // DomainParticipant should be deleted when explicitly calling delete_participant
         domain_participant_factory.delete_participant(domain_participant_cloned).unwrap();
         let contains_domain_participant =
-            domain_participant_factory.lookup_participant(20).unwrap();
+            domain_participant_factory.lookup_participant(domain_id).unwrap();
         assert!(contains_domain_participant.is_none(), "domain_participant still exists!");
 
         // After participant deletion, operations on remaining clones should return AlreadyDeleted error
@@ -861,6 +797,64 @@ mod factory_test {
         } else {
             panic!("Expected DdsError::AlreadyDeleted");
         }
+    }
+
+    #[test]
+    fn deleted_participant_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let participant_weak = Arc::downgrade(participant.self_ref.as_ref().unwrap());
+        let remaining_participant = participant.clone();
+
+        factory.delete_participant(participant).unwrap();
+
+        assert!(matches!(
+            remaining_participant.get_instance_handle(),
+            Err(DdsError::AlreadyDeleted)
+        ));
+
+        drop(remaining_participant);
+        assert!(participant_weak.upgrade().is_none(), "Deleted participant was not freed");
+    }
+
+    #[test]
+    fn participant_stays_owned_by_factory_after_failed_delete() {
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let participant_handle = participant.get_instance_handle().unwrap();
+
+        let delete_result = factory.delete_participant(participant);
+        assert!(matches!(delete_result, Err(DdsError::PreconditionNotMet)));
+
+        assert!(publisher.get_participant().is_ok(), "Participant freed after a failed delete");
+
+        drop(publisher);
+        let participant = factory
+            .lookup_participant(domain_id)
+            .unwrap()
+            .expect("Participant removed from the factory after a failed delete");
+        assert_eq!(participant.get_instance_handle().unwrap(), participant_handle);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     fn create_test_profile_file() -> NamedTempFile {

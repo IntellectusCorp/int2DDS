@@ -197,6 +197,7 @@ macro_rules! impl_dds_entity_impl {
                 self.check_parent_enabled()?;
 
                 let qos = self.get_qos_arc()?;
+                qos.check_values()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
 
@@ -233,6 +234,7 @@ macro_rules! impl_dds_entity_impl {
                     return Err(DdsError::PreconditionNotMet);
                 }
                 let _operation = self.lifecycle.begin_operation()?;
+                qos.check_values()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
 

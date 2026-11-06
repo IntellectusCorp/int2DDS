@@ -6,6 +6,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dcps::topic::type_support::DdsType;
@@ -68,7 +69,40 @@ impl Guid {
         prefix[0] = 0x01;
         prefix[1] = 0x19;
 
-        // Generate 10 bytes by hashing time + PID + address
+        let (hash, now) = Self::local_hash();
+
+        // Hash → 64 bits + partial timestamp → total 10 bytes generated
+        for i in 0..8 {
+            prefix[i + 2] = ((hash >> (i * 8)) & 0xFF) as u8;
+        }
+
+        // Remaining 2 bytes use high bits of timestamp
+        let ts_high = (now >> 56) as u16;
+        prefix[10] = (ts_high & 0xFF) as u8;
+        prefix[11] = (ts_high >> 8) as u8;
+
+        prefix
+    }
+
+    /// Bytes 2..8 carry `identity` verbatim so a peer can check them against the
+    /// authenticated sender, and only the last 4 bytes separate participants
+    /// sharing one identity.
+    pub fn guid_prefix_from_identity(identity: [u8; 6]) -> GuidPrefix {
+        let mut prefix = [0u8; 12];
+
+        // Vendor ID (INT2)
+        prefix[0] = 0x01;
+        prefix[1] = 0x19;
+
+        prefix[2..8].copy_from_slice(&identity);
+        let (hash, _) = Self::local_hash();
+        prefix[8..12].copy_from_slice(&(hash as u32).to_le_bytes());
+
+        prefix
+    }
+
+    /// Hashes time + PID + address, and returns the time alongside the hash.
+    fn local_hash() -> (u64, u128) {
         let mut hasher = DefaultHasher::new();
 
         // Current time
@@ -82,18 +116,12 @@ impl Guid {
         let local = 0u8;
         (&local as *const u8 as usize).hash(&mut hasher);
 
-        // Hash → 64 bits + partial timestamp → total 10 bytes generated
-        let hash = hasher.finish();
-        for i in 0..8 {
-            prefix[i + 2] = ((hash >> (i * 8)) & 0xFF) as u8;
-        }
+        // Participants born in the same process within one clock tick would
+        // otherwise hash identically.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
 
-        // Remaining 2 bytes use high bits of timestamp
-        let ts_high = (now >> 56) as u16;
-        prefix[10] = (ts_high & 0xFF) as u8;
-        prefix[11] = (ts_high >> 8) as u8;
-
-        prefix
+        (hasher.finish(), now)
     }
 
     pub fn guid_prefix_to_string(prefix: &GuidPrefix) -> String {
@@ -370,5 +398,26 @@ mod tests {
         );
         let reconstructed = Guid::from_bytes(bytes);
         assert_eq!(alt_guid, reconstructed);
+    }
+
+    #[test]
+    fn identity_lands_in_prefix_bytes_2_to_8() {
+        let identity = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let first = Guid::guid_prefix_from_identity(identity);
+        let second = Guid::guid_prefix_from_identity(identity);
+
+        assert_eq!(&first[0..2], &[0x01, 0x19]);
+        assert_eq!(&first[2..8], &identity);
+        assert_eq!(&first[0..8], &second[0..8]);
+        assert_ne!(first[8..12], second[8..12]);
+    }
+
+    #[test]
+    fn prefix_without_identity_is_unique_past_the_vendor_id() {
+        let first = Guid::generate_unique_guid_prefix();
+        let second = Guid::generate_unique_guid_prefix();
+
+        assert_eq!(&first[0..2], &[0x01, 0x19]);
+        assert_ne!(first[2..12], second[2..12]);
     }
 }

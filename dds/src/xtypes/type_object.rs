@@ -64,7 +64,9 @@ pub mod type_kind {
     pub const EK_BOTH: u8 = 0xF3;
 }
 
-/// Member flags bit positions
+/// Member flag values of the in-memory model: `TRY_CONSTRUCT_*` are values of the two low
+/// bits, the others are bit masks. The DDS-XTypes wire encoding differs (TRY_CONSTRUCT is
+/// 1 to 3); `serialize_type_object` converts between the two.
 pub mod member_flag {
     pub const TRY_CONSTRUCT_DISCARD: u16 = 0;
     pub const TRY_CONSTRUCT_USE_DEFAULT: u16 = 1;
@@ -76,7 +78,10 @@ pub mod member_flag {
     pub const IS_DEFAULT: u16 = 1 << 6;
 }
 
-/// Type flags bit positions
+/// Type flag values of the in-memory model: `IS_FINAL`, `IS_APPENDABLE` and `IS_MUTABLE` are
+/// values of the two low bits, the others are bit masks. The DDS-XTypes wire encoding differs
+/// (IS_FINAL = 1, IS_APPENDABLE = 2, IS_MUTABLE = 4, IS_NESTED = 8, IS_AUTOID_HASH = 16);
+/// `serialize_type_object` converts between the two.
 pub mod type_flag {
     pub const IS_FINAL: u16 = 0;
     pub const IS_APPENDABLE: u16 = 1;
@@ -85,7 +90,8 @@ pub mod type_flag {
     pub const IS_AUTOID_HASH: u16 = 1 << 3;
 }
 
-/// 14-byte equivalence hash computed from serialized MinimalTypeObject.
+/// 14-byte equivalence hash of a minimal or complete TypeObject: the first 14 bytes of the MD5
+/// of its XCDR2 little-endian serialization, as computed by `spec_hash`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EquivalenceHash(pub [u8; 14]);
 
@@ -344,7 +350,11 @@ impl TypeIdentifier {
         }
     }
 
-    /// Serialize the TypeIdentifier to bytes (XCDR2 format).
+    /// Serialize in the packed little-endian form of the in-memory model: the discriminator
+    /// byte, then the fields with no alignment padding and model (not wire) flag values.
+    /// Hash-based identifiers and `None` are byte-identical to their XCDR2 form, which is what
+    /// the TypeLookup and TypeInformation codecs rely on; identifiers nested in a TypeObject
+    /// are written in the XCDR2 form by `serialize_type_object`.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);
@@ -352,6 +362,7 @@ impl TypeIdentifier {
     }
 
     /// Serialize as a PID_TYPE_IDV1 (0x0069) parameter payload: a CDR_LE (XCDRv1)
+    /// encapsulation header followed by the serialized TypeIdentifier.
     pub fn serialize_for_parameter_v1(&self) -> Vec<u8> {
         let mut buffer = vec![0x00, 0x01, 0x00, 0x00];
         self.serialize_into(&mut buffer);
@@ -456,7 +467,7 @@ impl TypeIdentifier {
         }
     }
 
-    /// Deserialize a TypeIdentifier from bytes (XCDR2 format).
+    /// Deserialize a TypeIdentifier from bytes produced by [`serialize`](Self::serialize).
     ///
     /// Returns the TypeIdentifier and the number of bytes consumed.
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -1477,7 +1488,7 @@ impl MinimalStructType {
         self.member_seq.push(member);
     }
 
-    /// Serialize to bytes for hash computation.
+    /// Serialize in the packed form of the in-memory model (see [`TypeObject::serialize`]).
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);
@@ -2320,6 +2331,11 @@ pub struct CommonDiscriminatorMember {
 }
 
 impl CommonDiscriminatorMember {
+    /// XTypes 7.2.2.4.4.4.6: the discriminator is always must-understand.
+    pub fn new(member_flags: MemberFlag, type_id: TypeIdentifier) -> Self {
+        Self { member_flags: MemberFlag(member_flags.0 | member_flag::IS_MUST_UNDERSTAND), type_id }
+    }
+
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         self.member_flags.serialize_into(buffer);
         self.type_id.serialize_into(buffer);
@@ -2352,10 +2368,7 @@ impl MinimalUnionType {
     pub fn new(flags: TypeFlag, disc_flags: MemberFlag, disc_type: TypeIdentifier) -> Self {
         Self {
             union_flags: flags,
-            discriminator: CommonDiscriminatorMember {
-                member_flags: disc_flags,
-                type_id: disc_type,
-            },
+            discriminator: CommonDiscriminatorMember::new(disc_flags, disc_type),
             member_seq: Vec::new(),
         }
     }
@@ -2425,10 +2438,7 @@ impl CompleteUnionType {
     ) -> Self {
         Self {
             union_flags: flags,
-            discriminator: CommonDiscriminatorMember {
-                member_flags: disc_flags,
-                type_id: disc_type,
-            },
+            discriminator: CommonDiscriminatorMember::new(disc_flags, disc_type),
             header: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
             member_seq: Vec::new(),
         }
@@ -3520,8 +3530,10 @@ impl TypeObject {
         crate::xtypes::type_object_xcdr::spec_hash(self)
     }
 
-    /// Serialize TypeObject to bytes.
-    /// Format: [EK_MINIMAL/EK_COMPLETE] [TypeObject data...]
+    /// Serialize in the packed little-endian form of the in-memory model: the EquivalenceKind
+    /// byte, then the body with no DHEADER, no alignment padding and model (not wire) flag
+    /// values. The XCDR2 wire form used by TypeLookup and the EquivalenceHash is
+    /// `serialize_type_object`.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);
@@ -3550,8 +3562,9 @@ impl TypeObject {
         }
     }
 
-    /// Deserialize TypeObject from bytes.
-    /// Returns the deserialized TypeObject and number of bytes consumed.
+    /// Deserialize a TypeObject from bytes produced by [`serialize`](Self::serialize).
+    ///
+    /// Returns the TypeObject and the number of bytes consumed.
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
         if data.is_empty() {
             return Err("Empty data for TypeObject".to_string());

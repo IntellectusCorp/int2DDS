@@ -6,8 +6,35 @@
 #[cfg(windows)]
 pub mod windows;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 pub mod unix;
+
+// Bionic has no shm_open, and Android apps cannot share segments across processes anyway.
+#[cfg(target_os = "android")]
+mod unix {
+    pub struct UnixSharedMemory;
+
+    impl UnixSharedMemory {
+        pub fn new(_name: &str, _size: usize, _create: bool) -> std::io::Result<Self> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Shared memory not supported on Android",
+            ))
+        }
+
+        pub fn as_ptr(&self) -> *mut u8 {
+            std::ptr::null_mut()
+        }
+
+        pub fn size(&self) -> usize {
+            0
+        }
+
+        pub fn is_creator(&self) -> bool {
+            false
+        }
+    }
+}
 
 use std::io;
 

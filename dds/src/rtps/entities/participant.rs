@@ -19,6 +19,8 @@ use dashmap::{DashMap, DashSet};
 
 use log::{debug, info};
 
+use crate::rtps::transport::tls::identity::IDENTITY_LEN;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::{
     common::{
         builtin::topic::{
@@ -125,6 +127,8 @@ pub struct Participant {
     working_ips: Vec<String>,
     remote_same_host: Arc<DashMap<GuidPrefix, bool>>,
     pinned_egress_ipv4: OnceLock<Ipv4Addr>,
+    identity: OnceLock<[u8; IDENTITY_LEN]>,
+    tls_policy: OnceLock<Arc<TlsPolicyHandle>>,
     terminated: Arc<AtomicBool>,
     wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
@@ -179,24 +183,24 @@ impl Participant {
         default_unicast_locators: Vec<Locator>,
     ) -> Self {
         Self::with_guid_prefix(
-            Guid::generate_unique_guid_prefix(),
             domain_id,
             participant_id,
             working_ips,
             metatraffic_unicast_locators,
             default_unicast_locators,
+            Guid::generate_unique_guid_prefix(),
         )
     }
 
-    /// As `new`, but adopting a prefix the caller has already handed to
-    /// something constructed before this participant.
+    /// Create a Participant under a GUID prefix the caller has already settled
+    /// (handed to the transport beforehand, or bound to its identity).
     pub(crate) fn with_guid_prefix(
-        guid_prefix: GuidPrefix,
         domain_id: DomainId,
         participant_id: ParticipantId,
         working_ips: Vec<String>,
         metatraffic_unicast_locators: Vec<Locator>,
         default_unicast_locators: Vec<Locator>,
+        guid_prefix: GuidPrefix,
     ) -> Self {
         let guid = Guid::new(guid_prefix, EntityId::PARTICIPANT);
 
@@ -244,6 +248,8 @@ impl Participant {
             working_ips,
             remote_same_host: Arc::new(DashMap::new()),
             pinned_egress_ipv4: OnceLock::new(),
+            identity: OnceLock::new(),
+            tls_policy: OnceLock::new(),
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
             wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
@@ -553,6 +559,23 @@ impl Participant {
                 .or_insert_with(|| is_same_host(from_addr)),
             None => self.remote_same_host.get(&remote_prefix).is_some_and(|held| *held),
         }
+    }
+
+    /// Record the certificate identity this participant's GUID prefix is bound to.
+    pub(crate) fn set_identity(&self, identity: [u8; IDENTITY_LEN]) {
+        let _ = self.identity.set(identity);
+    }
+
+    pub(crate) fn identity(&self) -> Option<[u8; IDENTITY_LEN]> {
+        self.identity.get().copied()
+    }
+
+    pub(crate) fn set_tls_policy(&self, policy: Arc<TlsPolicyHandle>) {
+        let _ = self.tls_policy.set(policy);
+    }
+
+    pub(crate) fn tls_policy(&self) -> Option<Arc<TlsPolicyHandle>> {
+        self.tls_policy.get().cloned()
     }
 
     /// Record the IPv4 every send of this participant is bound to.
@@ -1668,6 +1691,17 @@ mod tests {
     use super::*;
     use crate::infrastructure::qos_policy::ReliabilityQosPolicyKind;
     use crate::rtps::common::{entity_kind::EntityKind, types::TopicKind};
+
+    #[test]
+    fn participant_takes_the_prefix_it_is_given() {
+        let prefix: GuidPrefix = [0xAB; 12];
+        let participant =
+            Participant::with_guid_prefix(0, 0, Vec::new(), Vec::new(), Vec::new(), prefix);
+
+        assert_eq!(participant.guid().prefix(), prefix);
+        assert_eq!(participant.guid().entity_id(), EntityId::PARTICIPANT);
+        assert_eq!(participant.local_participant_proxy_data().guid_prefix(), prefix);
+    }
 
     fn participant_with_one_writer() -> (Arc<Participant>, EntityId) {
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));

@@ -1,4 +1,5 @@
-/// Internal representation (IR) for resolved IDL types.
+//! Internal representation (IR) for resolved IDL types.
+
 use std::collections::{HashMap, HashSet};
 
 /// Fully resolved type information.

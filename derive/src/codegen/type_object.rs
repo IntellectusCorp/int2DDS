@@ -601,8 +601,12 @@ pub fn generate_has_type_object_enum_impl(
     let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
     let bit_bound = disc_type.bit_bound();
 
-    let literal_flag_expr = |variant: &syn::Variant| {
-        if crate::codegen::utils::variant_is_default_literal(variant) {
+    // The first literal is the default unless one is annotated.
+    let has_default = variants.iter().any(crate::codegen::utils::variant_is_default_literal);
+    let literal_flag_expr = |index: usize, variant: &syn::Variant| {
+        if crate::codegen::utils::variant_is_default_literal(variant)
+            || (index == 0 && !has_default)
+        {
             quote! { #crate_path::xtypes::EnumeratedLiteralFlag::DEFAULT }
         } else {
             quote! { #crate_path::xtypes::EnumeratedLiteralFlag::default() }
@@ -618,7 +622,7 @@ pub fn generate_has_type_object_enum_impl(
             let variant_name = &variant.ident;
             let variant_name_str = variant_name.to_string();
             let value = sequence[index] as i32;
-            let flag = literal_flag_expr(variant);
+            let flag = literal_flag_expr(index, variant);
 
             quote! {
                 #crate_path::xtypes::MinimalEnumeratedLiteral::new(
@@ -638,7 +642,7 @@ pub fn generate_has_type_object_enum_impl(
             let variant_name = &variant.ident;
             let variant_name_str = variant_name.to_string();
             let value = sequence[index] as i32;
-            let flag = literal_flag_expr(variant);
+            let flag = literal_flag_expr(index, variant);
 
             quote! {
                 #crate_path::xtypes::CompleteEnumeratedLiteral::new(

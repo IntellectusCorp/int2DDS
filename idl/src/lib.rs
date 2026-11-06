@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod codegen;
 pub mod keywords;
 pub mod naming;

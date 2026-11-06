@@ -1,8 +1,9 @@
-/// XML type-representation backend (XTypes 7.3.2).
-///
-/// Emits the dialect consumed by `int2dds::config::xml::XmlTypeRegistry`, mirroring
-/// the resolved model 1:1 so the XML -> TypeObject path stays byte-identical to the
-/// IDL -> Rust -> derive path.
+//! XML type-representation backend (XTypes 7.3.2).
+//!
+//! Emits the dialect consumed by `int2dds::config::xml::XmlTypeRegistry`, mirroring
+//! the resolved model 1:1 so the XML -> TypeObject path stays byte-identical to the
+//! IDL -> Rust -> derive path.
+
 use std::collections::HashMap;
 
 use crate::naming;

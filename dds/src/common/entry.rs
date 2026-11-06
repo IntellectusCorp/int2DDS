@@ -1,7 +1,6 @@
 //! Generic key-value entry type.
 //!
-//! This module provides a simple `Entry` structure for storing key-value pairs,
-//! used in various internal data structures throughout int2dds.
+//! This module provides a simple `Entry` structure for storing key-value pairs.
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entry<K, V> {

@@ -395,7 +395,7 @@ impl Int2DdsTypeInfo {
 
     /// Build a CompleteEnumeratedType from the collected literals. Mirrors the derive macro:
     /// `TypeFlag::default()`, literals with `EnumeratedLiteralFlag::DEFAULT` on the `@default`
-    /// literal (else `default()`), so FFI-built and derived enum TypeObjects hash alike.
+    /// literal (else the first one), so FFI-built and derived enum TypeObjects hash alike.
     fn build_complete_enum_type(
         &self,
         bit_bound: u16,
@@ -403,8 +403,9 @@ impl Int2DdsTypeInfo {
     ) -> CompleteEnumeratedType {
         let mut enum_type =
             CompleteEnumeratedType::new(TypeFlag::default(), self.type_name.clone(), bit_bound);
-        for lit in literals {
-            let flag = if lit.is_default {
+        let has_default = literals.iter().any(|l| l.is_default);
+        for (index, lit) in literals.iter().enumerate() {
+            let flag = if lit.is_default || (index == 0 && !has_default) {
                 EnumeratedLiteralFlag::DEFAULT
             } else {
                 EnumeratedLiteralFlag::default()

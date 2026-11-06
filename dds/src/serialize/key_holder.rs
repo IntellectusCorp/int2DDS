@@ -6,9 +6,9 @@
 //! PLAIN_CDR2 big-endian with maximum alignment 4 and no member headers.
 //!
 //! This trait is the static (derive-generated) counterpart of the runtime
-//! projection in [`crate::xtypes::dynamic_serialization`]; the two must produce
+//! projection in `crate::xtypes::dynamic_serialization`; the two must produce
 //! byte-identical KeyHash streams. Derived structs/enums implement it via the
-//! proc-macro; primitive and string leaves implement it here.
+//! proc-macro; primitives, strings, arrays and `Vec` implement it here.
 
 use crate::serialize::cdr::{
     Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult, XcdrSerialize,
@@ -35,9 +35,11 @@ pub trait KeyHolder {
         Self: Sized;
 
     /// Maximum serialized size (max alignment 4) of this value's key-holder form,
-    /// or `None` when it has no finite maximum (unbounded string/sequence/map),
-    /// in which case the KeyHash is always the MD5 of the actual stream. Used for
-    /// the raw(≤16)/MD5 threshold of KeyHash step 5.
+    /// or `None` when no finite maximum is known: standalone strings and sequences
+    /// (their bound is a field attribute applied by the owning struct) and `@key`
+    /// members routed through [`KeyHolderFallback`]. `None` makes the KeyHash
+    /// always the MD5 of the actual stream. Used for the raw(≤16)/MD5 threshold of
+    /// KeyHash step 5.
     fn key_holder_max_size() -> Option<usize>
     where
         Self: Sized;
@@ -65,18 +67,17 @@ pub fn align_up(pos: usize, align: usize) -> usize {
 /// member through the right projection without knowing at macro-expansion time
 /// whether the member's type implements [`KeyHolder`].
 ///
-/// - Member types that implement `KeyHolder` (primitives, strings, keyed nested
-///   structs) resolve the inherent methods on `KeyHolderAccessor<T>` (the
-///   *specific* path): the member is projected.
-/// - Any other serializable member type (a no-key nested aggregate used as a
-///   whole key member, e.g. `Guid`) auto-refs to the [`KeyHolderFallback`] trait
-///   impl: the member is written/read whole via XCDR and reports no finite
-///   maximum size (=> the enclosing key holder always hashes, matching the
-///   dynamic path's `type_kind_max_size` for a whole no-key aggregate).
+/// - Member types that implement `KeyHolder` (primitives, strings, derived nested
+///   structs with or without keys) resolve the inherent methods on
+///   `KeyHolderAccessor<T>` (the *specific* path): the member is projected.
+/// - Any other serializable member type (one whose XCDR serialization is
+///   implemented without the derive) auto-refs to the [`KeyHolderFallback`] trait
+///   impl: the member is written/read whole via XCDR and reports no known
+///   maximum size (=> the enclosing key holder always hashes).
 pub struct KeyHolderAccessor<T>(pub core::marker::PhantomData<T>);
 
 /// Fallback for `@key` member types that do NOT implement [`KeyHolder`]: whole
-/// XCDR (PLAIN_CDR2) round-trip, no finite maximum size.
+/// XCDR (PLAIN_CDR2) round-trip, no known maximum size.
 pub trait KeyHolderFallback<T> {
     fn kh_serialize(&self, value: &T, serializer: &mut Xcdr2Serializer) -> XcdrResult<()>;
     fn kh_deserialize(&self, deserializer: &mut Xcdr2Deserializer) -> XcdrResult<T>;
@@ -213,10 +214,10 @@ impl KeyHolder for WString {
 }
 
 /// A fixed-size array `[T; N]` projects element-wise: each element is written as
-/// its own key holder (nested aggregates as FINAL), so a `[Point; 2]` of two `i32`
-/// fields is the 16 contiguous bytes and stays raw. Non-primitive elements keep the
+/// its own key holder (nested aggregates as FINAL). Non-primitive elements keep the
 /// collection DHEADER (DDS-XTypes 7.6.8 excludes only encapsulation, type and
-/// member headers from the key holder). Its maximum size is the packed
+/// member headers from the key holder), so a `[Point; 2]` of two `i32` fields is
+/// 4 + 16 = 20 bytes and is hashed. Its maximum size is the packed
 /// (max-align-4) sum of `N` element key holders plus that DHEADER.
 impl<T: KeyHolder, const N: usize> KeyHolder for [T; N] {
     #[inline]
@@ -271,7 +272,8 @@ impl<T: KeyHolder, const N: usize> KeyHolder for [T; N] {
 /// A sequence `Vec<T>` writes its `u32` length then each element as its own key
 /// holder (nested aggregates as FINAL), behind the collection DHEADER when the
 /// element is non-primitive, matching the dynamic path's key-holder sequence
-/// form. It has no finite maximum size, so a sequence key always hashes (MD5).
+/// form. A standalone sequence reports no finite maximum size; the owning struct
+/// supplies one for a `#[dds(bound = N)]` sequence key field.
 impl<T: KeyHolder> KeyHolder for Vec<T> {
     #[inline]
     fn serialize_key_holder(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {

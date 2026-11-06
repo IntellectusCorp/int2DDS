@@ -1,0 +1,573 @@
+//! High-level TLS configuration for connection-oriented transports.
+//!
+//! `TlsConfig` describes the certificates and verification policy used
+//! to wrap a TCP socket with TLS. It is built from
+//! [`PropertyQosPolicy`](crate::infrastructure::qos_policy::PropertyQosPolicy)
+//! values and produces the underlying `rustls::ClientConfig` /
+//! `rustls::ServerConfig` on demand.
+//!
+//! Errors are surfaced via [`io::Error`] using the shared
+//! [`TransportErrorCode`] catalogue (codes 780–789).
+
+use std::{fs::File, io, io::BufReader, path::PathBuf, sync::Arc};
+
+use log::error;
+use rustls::{
+    client::{danger::ServerCertVerifier, WebPkiServerVerifier},
+    pki_types::{
+        CertificateDer, CertificateRevocationListDer, PrivateKeyDer, ServerName, UnixTime,
+    },
+    server::{danger::ClientCertVerifier, WebPkiClientVerifier},
+    ClientConfig, RootCertStore, ServerConfig,
+};
+use webpki::{BorrowedCertRevocationList, CertRevocationList};
+
+use crate::{
+    infrastructure::qos_policy::PropertyQosPolicy,
+    rtps::transport::{
+        error::{transport_io_error, TransportErrorCode},
+        tls::{
+            peer_lists::PeerLists,
+            verifier::{PeerClientVerifier, PeerServerVerifier},
+        },
+    },
+};
+
+/// Property keys recognised by [`TlsConfig::from_property`].
+pub mod keys {
+    pub const CA_FILE: &str = "int2dds.tls.ca_file";
+    pub const CERT_FILE: &str = "int2dds.tls.cert_file";
+    pub const KEY_FILE: &str = "int2dds.tls.key_file";
+    pub const SERVER_NAME: &str = "int2dds.tls.server_name";
+    pub const VERIFY_PEER: &str = "int2dds.tls.verify_peer";
+    pub const CRL_FILE: &str = "int2dds.tls.crl_file";
+    pub const CRL_UNKNOWN_STATUS: &str = "int2dds.tls.crl_unknown_status";
+    pub const CRL_ENFORCE_EXPIRY: &str = "int2dds.tls.crl_enforce_expiry";
+    pub const ALLOW_FILE: &str = "int2dds.tls.allow_file";
+    pub const DENY_FILE: &str = "int2dds.tls.deny_file";
+}
+
+/// Revocation checking against externally supplied CRLs, applied to every
+/// certificate in a peer's chain.
+#[derive(Debug, Clone)]
+pub struct RevocationConfig {
+    /// Path to a PEM file holding one CRL per issuing CA.
+    pub crl_file: PathBuf,
+    /// Accept a certificate whose issuer has no CRL in `crl_file`. Off by
+    /// default, so a missing CRL rejects rather than skips the check.
+    pub allow_unknown_status: bool,
+    /// Reject a certificate when its issuer's CRL is past its next update.
+    pub enforce_expiry: bool,
+}
+
+impl RevocationConfig {
+    /// Reads every CRL in `crl_file`. An empty file is refused because no CRL
+    /// at all turns revocation checking off, and two CRLs from one issuer are
+    /// refused because only the first would ever be consulted.
+    pub(crate) fn load_crls(&self) -> io::Result<Vec<CertificateRevocationListDer<'static>>> {
+        let mut reader = BufReader::new(open_pem(&self.crl_file)?);
+        let mut crls = Vec::new();
+        let mut issuers = Vec::new();
+        for crl in rustls_pemfile::crls(&mut reader) {
+            let crl = crl.map_err(|e| pem_error(&self.crl_file, e))?;
+            let parsed = BorrowedCertRevocationList::from_der(crl.as_ref()).map_err(|e| {
+                transport_io_error(
+                    TransportErrorCode::TlsInvalidPem,
+                    format!(
+                        "CRL #{} in {:?} cannot be parsed: {e:?}",
+                        crls.len() + 1,
+                        self.crl_file
+                    ),
+                )
+            })?;
+            let issuer = CertRevocationList::from(parsed).issuer().to_vec();
+            if let Some(first) = issuers.iter().position(|seen| *seen == issuer) {
+                return Err(transport_io_error(
+                    TransportErrorCode::TlsConfigError,
+                    format!(
+                        "CRLs #{} and #{} in {:?} come from the same issuer",
+                        first + 1,
+                        crls.len() + 1,
+                        self.crl_file
+                    ),
+                ));
+            }
+            issuers.push(issuer);
+            crls.push(crl);
+        }
+        if crls.is_empty() {
+            return Err(transport_io_error(
+                TransportErrorCode::TlsInvalidPem,
+                format!("no CRLs found in {:?}", self.crl_file),
+            ));
+        }
+        Ok(crls)
+    }
+}
+
+/// High-level TLS settings.
+///
+/// The same struct is used for both client (outgoing TCP connections) and
+/// server (incoming TCP listener) sides; the active side is chosen when
+/// building the corresponding `rustls` config.
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// Path to a PEM file containing one or more trusted CA certificates.
+    pub ca_file: PathBuf,
+    /// Path to a PEM file containing this peer's certificate chain.
+    pub cert_file: PathBuf,
+    /// Path to a PEM file containing this peer's private key.
+    pub key_file: PathBuf,
+    /// Name every server certificate must carry. When unset, the server
+    /// certificate is verified in full except for its name.
+    pub server_name: Option<String>,
+    /// Require a connecting peer to present a certificate (mutual TLS) and
+    /// refuse its messages unless their GUID prefix belongs to that
+    /// certificate; on by default. The server certificate is verified, and
+    /// this participant's own prefix is bound to its certificate, either way.
+    pub verify_peer: bool,
+    /// Revocation checking; none when no CRL file is configured.
+    pub revocation: Option<RevocationConfig>,
+    /// Fingerprints of the only peer certificates allowed to connect.
+    pub allow_file: Option<PathBuf>,
+    /// Fingerprints of peer certificates refused even when allowed.
+    pub deny_file: Option<PathBuf>,
+}
+
+/// The dialing and accepting configurations of one participant.
+pub(crate) struct TlsPolicy {
+    pub(crate) client: Arc<ClientConfig>,
+    pub(crate) server: Arc<ServerConfig>,
+    pub(crate) dialed_peer_verifier: Arc<dyn ServerCertVerifier>,
+    /// Absent without mutual TLS, where an accepted peer presents nothing.
+    pub(crate) accepted_peer_verifier: Option<Arc<dyn ClientCertVerifier>>,
+    pub(crate) generation: u64,
+}
+
+impl OwnCertificate {
+    pub(crate) fn leaf(&self) -> &CertificateDer<'static> {
+        &self.cert_chain[0]
+    }
+}
+
+impl TlsPolicy {
+    /// Judges, under this policy, the chain a dialed peer presented.
+    pub(crate) fn check_dialed_peer(
+        &self,
+        chain: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+    ) -> Result<(), rustls::Error> {
+        let (end_entity, intermediates) =
+            chain.split_first().ok_or(rustls::Error::NoCertificatesPresented)?;
+        self.dialed_peer_verifier
+            .verify_server_cert(end_entity, intermediates, server_name, &[], UnixTime::now())
+            .map(|_| ())
+    }
+
+    /// Judges, under this policy, the chain an accepted peer presented.
+    /// Without mutual TLS there is nothing to judge.
+    pub(crate) fn check_accepted_peer(
+        &self,
+        chain: &[CertificateDer<'_>],
+    ) -> Result<(), rustls::Error> {
+        let Some(verifier) = &self.accepted_peer_verifier else {
+            return Ok(());
+        };
+        let (end_entity, intermediates) =
+            chain.split_first().ok_or(rustls::Error::NoCertificatesPresented)?;
+        verifier.verify_client_cert(end_entity, intermediates, UnixTime::now()).map(|_| ())
+    }
+}
+
+pub(crate) struct OwnCertificate {
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+}
+
+pub(crate) struct TrustFiles {
+    roots: Arc<RootCertStore>,
+    crls: Vec<CertificateRevocationListDer<'static>>,
+    lists: Option<Arc<PeerLists>>,
+}
+
+impl TlsConfig {
+    /// Try to read a TLS config from a [`PropertyQosPolicy`].
+    ///
+    /// * `Ok(None)` — no TLS-related property is present, caller should
+    ///   fall back to plain TCP.
+    /// * `Ok(Some(_))` — a complete config was assembled.
+    /// * `Err(_)` — at least one TLS property exists but a required one is
+    ///   missing.
+    pub fn from_property(property: &PropertyQosPolicy) -> io::Result<Option<Self>> {
+        let any_tls_key = [keys::CA_FILE, keys::CERT_FILE, keys::KEY_FILE]
+            .iter()
+            .any(|k| property.find_property(k).is_some());
+        if !any_tls_key {
+            return Ok(None);
+        }
+
+        let ca_file = require_property(property, keys::CA_FILE)?.into();
+        let cert_file = require_property(property, keys::CERT_FILE)?.into();
+        let key_file = require_property(property, keys::KEY_FILE)?.into();
+        let server_name = property.find_property(keys::SERVER_NAME).map(str::to_string);
+        // Only an explicit "false" turns mutual TLS off, so a mistyped value
+        // cannot silently accept unauthenticated peers.
+        let verify_peer =
+            property.find_property(keys::VERIFY_PEER).map(|v| v != "false").unwrap_or(true);
+        let revocation = property.find_property(keys::CRL_FILE).map(|crl_file| RevocationConfig {
+            crl_file: crl_file.into(),
+            allow_unknown_status: property.find_property(keys::CRL_UNKNOWN_STATUS) == Some("allow"),
+            enforce_expiry: property.find_property(keys::CRL_ENFORCE_EXPIRY) == Some("true"),
+        });
+
+        let allow_file = property.find_property(keys::ALLOW_FILE).map(PathBuf::from);
+        let deny_file = property.find_property(keys::DENY_FILE).map(PathBuf::from);
+        // Without client certificates an accepted peer has nothing to check, so
+        // a CRL or a list would restrict only the connections this side dials.
+        let one_sided = [
+            (keys::CRL_FILE, revocation.is_some()),
+            (keys::ALLOW_FILE, allow_file.is_some()),
+            (keys::DENY_FILE, deny_file.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(key, set)| set.then_some(key));
+        if let (Some(key), false) = (one_sided, verify_peer) {
+            return Err(transport_io_error(
+                TransportErrorCode::TlsConfigError,
+                format!("'{key}' requires '{}' to stay on", keys::VERIFY_PEER),
+            ));
+        }
+
+        Ok(Some(Self {
+            ca_file,
+            cert_file,
+            key_file,
+            server_name,
+            verify_peer,
+            revocation,
+            allow_file,
+            deny_file,
+        }))
+    }
+
+    pub(crate) fn load_root_store(&self) -> io::Result<RootCertStore> {
+        let mut reader = BufReader::new(open_pem(&self.ca_file)?);
+        let mut store = RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut reader) {
+            let cert = cert.map_err(|e| pem_error(&self.ca_file, e))?;
+            store.add(cert).map_err(rustls_to_io)?;
+        }
+        Ok(store)
+    }
+
+    pub(crate) fn load_cert_chain(&self) -> io::Result<Vec<CertificateDer<'static>>> {
+        let mut reader = BufReader::new(open_pem(&self.cert_file)?);
+        let mut chain = Vec::new();
+        for cert in rustls_pemfile::certs(&mut reader) {
+            chain.push(cert.map_err(|e| pem_error(&self.cert_file, e))?);
+        }
+        if chain.is_empty() {
+            return Err(transport_io_error(
+                TransportErrorCode::TlsInvalidPem,
+                format!("no certificates found in {:?}", self.cert_file),
+            ));
+        }
+        Ok(chain)
+    }
+
+    pub(crate) fn load_private_key(&self) -> io::Result<PrivateKeyDer<'static>> {
+        let mut reader = BufReader::new(open_pem(&self.key_file)?);
+        match rustls_pemfile::private_key(&mut reader).map_err(|e| pem_error(&self.key_file, e))? {
+            Some(key) => Ok(key),
+            None => Err(transport_io_error(
+                TransportErrorCode::TlsInvalidPem,
+                format!("no private key found in {:?}", self.key_file),
+            )),
+        }
+    }
+
+    pub(crate) fn load_own_certificate(&self) -> io::Result<OwnCertificate> {
+        Ok(OwnCertificate { cert_chain: self.load_cert_chain()?, key: self.load_private_key()? })
+    }
+
+    pub(crate) fn load_trust(&self) -> io::Result<TrustFiles> {
+        Ok(TrustFiles {
+            roots: Arc::new(self.load_root_store()?),
+            crls: match &self.revocation {
+                Some(revocation) => {
+                    let crls = revocation.load_crls()?;
+                    let now = UnixTime::now().as_secs() as i64;
+                    for problem in crl_expiry_problems(&crls, now) {
+                        error!("{:?}: {problem}", revocation.crl_file);
+                    }
+                    crls
+                }
+                None => Vec::new(),
+            },
+            lists: PeerLists::load(self)?.map(Arc::new),
+        })
+    }
+
+    /// Both sides of the policy from the same files, so a dialed peer and an
+    /// accepted peer are judged by the same CAs, CRLs and lists.
+    pub(crate) fn build_policy(
+        &self,
+        own: &OwnCertificate,
+        trust: &TrustFiles,
+    ) -> io::Result<TlsPolicy> {
+        let dialed_peer_verifier = self.dialed_peer_verifier(trust)?;
+        let accepted_peer_verifier = self.accepted_peer_verifier(trust)?;
+        let client = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::clone(&dialed_peer_verifier))
+            .with_client_auth_cert(own.cert_chain.clone(), own.key.clone_key())
+            .map_err(rustls_to_io)?;
+        let server = match &accepted_peer_verifier {
+            Some(verifier) => {
+                ServerConfig::builder().with_client_cert_verifier(Arc::clone(verifier))
+            }
+            None => ServerConfig::builder().with_no_client_auth(),
+        }
+        .with_single_cert(own.cert_chain.clone(), own.key.clone_key())
+        .map_err(rustls_to_io)?;
+        Ok(TlsPolicy {
+            client: Arc::new(client),
+            server: Arc::new(server),
+            dialed_peer_verifier,
+            accepted_peer_verifier,
+            generation: 0,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_server_config(&self) -> io::Result<Arc<ServerConfig>> {
+        Ok(self.build_policy(&self.load_own_certificate()?, &self.load_trust()?)?.server)
+    }
+
+    fn dialed_peer_verifier(&self, trust: &TrustFiles) -> io::Result<Arc<dyn ServerCertVerifier>> {
+        let mut verifier = WebPkiServerVerifier::builder(Arc::clone(&trust.roots));
+        if let Some(revocation) = &self.revocation {
+            verifier = verifier.with_crls(trust.crls.clone());
+            if revocation.allow_unknown_status {
+                verifier = verifier.allow_unknown_revocation_status();
+            }
+            if revocation.enforce_expiry {
+                verifier = verifier.enforce_revocation_expiration();
+            }
+        }
+        let verifier = verifier
+            .build()
+            .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
+        Ok(match (&self.server_name, trust.lists.clone()) {
+            (Some(_), None) => verifier,
+            (server_name, lists) => PeerServerVerifier::new(verifier, server_name.is_none(), lists),
+        })
+    }
+
+    fn accepted_peer_verifier(
+        &self,
+        trust: &TrustFiles,
+    ) -> io::Result<Option<Arc<dyn ClientCertVerifier>>> {
+        if !self.verify_peer {
+            return Ok(None);
+        }
+        let mut verifier = WebPkiClientVerifier::builder(Arc::clone(&trust.roots));
+        if let Some(revocation) = &self.revocation {
+            verifier = verifier.with_crls(trust.crls.clone());
+            if revocation.allow_unknown_status {
+                verifier = verifier.allow_unknown_revocation_status();
+            }
+            if revocation.enforce_expiry {
+                verifier = verifier.enforce_revocation_expiration();
+            }
+        }
+        let verifier = verifier
+            .build()
+            .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
+        Ok(Some(match trust.lists.clone() {
+            Some(lists) => PeerClientVerifier::new(verifier, lists),
+            None => verifier,
+        }))
+    }
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+/// CRLs past their next update at `now`, described for the log. The date comes
+/// from a file whose signature is checked only when a certificate is judged, so
+/// it must never decide a connection.
+fn crl_expiry_problems(crls: &[CertificateRevocationListDer<'_>], now: i64) -> Vec<String> {
+    crls.iter()
+        .enumerate()
+        .filter_map(|(index, crl)| {
+            let next_update = x509_parser::parse_x509_crl(crl.as_ref())
+                .ok()
+                .and_then(|(_, parsed)| parsed.next_update());
+            match next_update {
+                Some(time) if time.timestamp() > now => None,
+                Some(time) => Some(format!("CRL #{} is past its next update {time}", index + 1)),
+                None => Some(format!("CRL #{} has no readable next update", index + 1)),
+            }
+        })
+        .collect()
+}
+
+fn require_property<'a>(p: &'a PropertyQosPolicy, key: &'static str) -> io::Result<&'a str> {
+    p.find_property(key).ok_or_else(|| {
+        transport_io_error(
+            TransportErrorCode::TlsMissingProperty,
+            format!("TLS property '{}' is required", key),
+        )
+    })
+}
+
+fn open_pem(path: &PathBuf) -> io::Result<File> {
+    File::open(path).map_err(|e| {
+        transport_io_error(
+            TransportErrorCode::TlsFileIoError,
+            format!("failed to open {:?}: {}", path, e),
+        )
+    })
+}
+
+fn pem_error(path: &PathBuf, e: impl std::fmt::Display) -> io::Error {
+    transport_io_error(
+        TransportErrorCode::TlsInvalidPem,
+        format!("invalid PEM in {:?}: {}", path, e),
+    )
+}
+
+fn rustls_to_io(e: rustls::Error) -> io::Error {
+    transport_io_error(TransportErrorCode::TlsConfigError, e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtps::transport::tls::test_pki::TestCa;
+
+    fn pq(pairs: &[(&str, &str)]) -> PropertyQosPolicy {
+        let mut p = PropertyQosPolicy::default();
+        for (k, v) in pairs {
+            p.add_property(*k, *v, false);
+        }
+        p
+    }
+
+    #[test]
+    fn only_crls_past_their_next_update_are_reported() {
+        let ca = TestCa::root("ca");
+        let crl_der =
+            |pem: String| rustls_pemfile::crls(&mut pem.as_bytes()).next().unwrap().unwrap();
+        let crls = [crl_der(ca.crl(&[], 2999)), crl_der(ca.crl(&[], 2002))];
+
+        let problems = crl_expiry_problems(&crls, UnixTime::now().as_secs() as i64);
+
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].starts_with("CRL #2 is past its next update"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_crl_that_cannot_be_read_is_reported_rather_than_passed_over() {
+        let unreadable = CertificateRevocationListDer::from(vec![0xAAu8; 16]);
+
+        let problems = crl_expiry_problems(&[unreadable], 0);
+
+        assert_eq!(problems, ["CRL #1 has no readable next update"]);
+    }
+
+    #[test]
+    fn no_tls_keys_returns_none() {
+        let p = pq(&[("int2dds.transport", "tcp")]);
+        assert!(TlsConfig::from_property(&p).unwrap().is_none());
+    }
+
+    #[test]
+    fn partial_tls_keys_is_error() {
+        // ca_file present, others missing.
+        let p = pq(&[(keys::CA_FILE, "/etc/ssl/ca.pem")]);
+        let err = TlsConfig::from_property(&p).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let msg = format!("{err}");
+        assert!(msg.contains(keys::CERT_FILE), "expected mention of cert_file in {msg}");
+    }
+
+    #[test]
+    fn full_tls_keys_parsed() {
+        let p = pq(&[
+            (keys::CA_FILE, "/etc/ssl/ca.pem"),
+            (keys::CERT_FILE, "/etc/ssl/cert.pem"),
+            (keys::KEY_FILE, "/etc/ssl/key.pem"),
+            (keys::SERVER_NAME, "gateway.example.com"),
+            (keys::VERIFY_PEER, "true"),
+        ]);
+        let cfg = TlsConfig::from_property(&p).unwrap().unwrap();
+        assert_eq!(cfg.ca_file, PathBuf::from("/etc/ssl/ca.pem"));
+        assert_eq!(cfg.cert_file, PathBuf::from("/etc/ssl/cert.pem"));
+        assert_eq!(cfg.key_file, PathBuf::from("/etc/ssl/key.pem"));
+        assert_eq!(cfg.server_name.as_deref(), Some("gateway.example.com"));
+        assert!(cfg.verify_peer);
+    }
+
+    #[test]
+    fn defaults_to_mutual_tls_without_a_server_name() {
+        let p = pq(&[(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")]);
+        let cfg = TlsConfig::from_property(&p).unwrap().unwrap();
+        assert_eq!(cfg.server_name, None);
+        assert!(cfg.verify_peer);
+        assert!(cfg.revocation.is_none());
+    }
+
+    #[test]
+    fn a_crl_file_turns_on_strict_revocation_checking_by_default() {
+        let base = [(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")];
+        let p = pq(&[base.as_slice(), &[(keys::CRL_FILE, "/crl.pem")]].concat());
+        let revocation = TlsConfig::from_property(&p).unwrap().unwrap().revocation.unwrap();
+        assert_eq!(revocation.crl_file, PathBuf::from("/crl.pem"));
+        assert!(!revocation.allow_unknown_status);
+        assert!(!revocation.enforce_expiry);
+
+        let p = pq(&[
+            base.as_slice(),
+            &[
+                (keys::CRL_FILE, "/crl.pem"),
+                (keys::CRL_UNKNOWN_STATUS, "allow"),
+                (keys::CRL_ENFORCE_EXPIRY, "true"),
+            ],
+        ]
+        .concat());
+        let revocation = TlsConfig::from_property(&p).unwrap().unwrap().revocation.unwrap();
+        assert!(revocation.allow_unknown_status);
+        assert!(revocation.enforce_expiry);
+    }
+
+    #[test]
+    fn peer_lists_are_read_and_refused_without_mutual_tls() {
+        let base = [(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")];
+        let p = pq(&[base.as_slice(), &[(keys::ALLOW_FILE, "/allow"), (keys::DENY_FILE, "/deny")]]
+            .concat());
+        let cfg = TlsConfig::from_property(&p).unwrap().unwrap();
+        assert_eq!(cfg.allow_file, Some(PathBuf::from("/allow")));
+        assert_eq!(cfg.deny_file, Some(PathBuf::from("/deny")));
+
+        for list in [keys::ALLOW_FILE, keys::DENY_FILE] {
+            let p =
+                pq(&[base.as_slice(), &[(list, "/list"), (keys::VERIFY_PEER, "false")]].concat());
+            let err = TlsConfig::from_property(&p).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        }
+    }
+
+    #[test]
+    fn a_crl_file_is_refused_without_mutual_tls() {
+        let base = [(keys::CA_FILE, "/a"), (keys::CERT_FILE, "/b"), (keys::KEY_FILE, "/c")];
+        let p =
+            pq(&[base.as_slice(), &[(keys::CRL_FILE, "/crl.pem"), (keys::VERIFY_PEER, "false")]]
+                .concat());
+
+        let err = TlsConfig::from_property(&p).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains(keys::CRL_FILE), "{err}");
+    }
+}

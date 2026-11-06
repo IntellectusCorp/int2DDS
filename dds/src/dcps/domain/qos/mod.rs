@@ -7,8 +7,10 @@
 //!
 //! - **UserData**: Application-specific data attached to the participant
 //! - **EntityFactory**: Controls whether created entities are automatically enabled
+//! - **Property**: Name-value pairs for implementation settings such as transport selection
 //!
-//! The default QoS can be accessed via `PARTICIPANT_QOS_DEFAULT` or `DomainParticipantQos::default()`.
+//! `PARTICIPANT_QOS_DEFAULT` selects the configured default QoS; `DomainParticipantQos::default()`
+//! is the spec default value.
 
 use const_default::ConstDefault;
 

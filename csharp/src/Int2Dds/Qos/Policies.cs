@@ -1,7 +1,21 @@
 using System;
+using System.Threading;
 
 namespace Int2Dds.Qos
 {
+    internal static class Nanoseconds
+    {
+        // Timeout.InfiniteTimeSpan and spans beyond the native range map to the native infinite.
+        internal static long From(TimeSpan value)
+        {
+            if (value == Timeout.InfiniteTimeSpan || value.Ticks >= long.MaxValue / 100)
+                return long.MaxValue;
+            if (value.Ticks <= long.MinValue / 100)
+                return long.MinValue;
+            return value.Ticks * 100;
+        }
+    }
+
     public class Reliability
     {
         public ReliabilityKind Kind { get; set; } = ReliabilityKind.Reliable;
@@ -15,7 +29,7 @@ namespace Int2Dds.Qos
         }
 
         internal long MaxBlockingTimeNs => MaxBlockingTime.HasValue
-            ? (long)(MaxBlockingTime.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(MaxBlockingTime.Value)
             : 100_000_000L; // 100ms default
     }
 
@@ -91,7 +105,7 @@ namespace Int2Dds.Qos
         }
 
         internal long DurationNs => Duration.HasValue
-            ? (long)(Duration.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(Duration.Value)
             : long.MaxValue;
     }
 
@@ -128,7 +142,7 @@ namespace Int2Dds.Qos
         }
 
         internal long DurationNs => Duration.HasValue
-            ? (long)(Duration.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(Duration.Value)
             : 0;
     }
 
@@ -200,11 +214,11 @@ namespace Int2Dds.Qos
         }
 
         internal long AutopurgeNowriterNs => AutopurgeNowriterSamplesDelay.HasValue
-            ? (long)(AutopurgeNowriterSamplesDelay.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(AutopurgeNowriterSamplesDelay.Value)
             : long.MaxValue;
 
         internal long AutopurgeDisposedNs => AutopurgeDisposedSamplesDelay.HasValue
-            ? (long)(AutopurgeDisposedSamplesDelay.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(AutopurgeDisposedSamplesDelay.Value)
             : long.MaxValue;
     }
 
@@ -230,7 +244,7 @@ namespace Int2Dds.Qos
         }
 
         internal long MinimumSeparationNs => MinimumSeparation.HasValue
-            ? (long)(MinimumSeparation.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(MinimumSeparation.Value)
             : 0;
     }
 
@@ -245,7 +259,7 @@ namespace Int2Dds.Qos
         }
 
         internal long PeriodNs => Period.HasValue
-            ? (long)(Period.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(Period.Value)
             : long.MaxValue;
     }
 
@@ -262,7 +276,7 @@ namespace Int2Dds.Qos
         }
 
         internal long LeaseDurationNs => LeaseDuration.HasValue
-            ? (long)(LeaseDuration.Value.TotalMilliseconds * 1_000_000)
+            ? Nanoseconds.From(LeaseDuration.Value)
             : long.MaxValue;
     }
 

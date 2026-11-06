@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use rustls::pki_types::ServerName;
-
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tls::policy::VerifiedPeer;
+#[cfg(test)]
+use crate::rtps::transport::tls::{client::TlsClient, TlsConfig};
 
 /// How much a peer may owe the stream before frames are refused instead of
 /// queued. This is a bound on memory, not a congestion threshold, so it sits
@@ -111,6 +111,7 @@ pub(crate) enum SendOutcome {
 pub(crate) struct OutboundConnection {
     state: Mutex<ConnectionState>,
     failed: AtomicBool,
+    peer: Option<VerifiedPeer>,
 }
 
 struct ConnectionState {
@@ -140,8 +141,8 @@ impl OutboundConnection {
         match tls_config {
             None => Self::plain(socket, tuning),
             Some(config) => {
-                let tls = handshake(&socket, config, tls_handshake_timeout)?;
-                Self::over_tls(socket, tls, tuning)
+                let (tls, generation) = handshake(&socket, config, tls_handshake_timeout)?;
+                Self::over_tls(socket, tls, generation, tuning)
             }
         }
     }
@@ -157,11 +158,21 @@ impl OutboundConnection {
     pub(crate) fn over_tls(
         socket: TcpStream,
         tls: rustls::ClientConnection,
+        generation: u64,
         tuning: &TcpSocketTuning,
     ) -> io::Result<Self> {
         apply_socket_tuning(&socket, tuning);
         socket.set_nonblocking(true)?;
-        Ok(Self::over(Wire::Tls(Box::new(rustls::StreamOwned::new(tls, socket)))))
+        let peer =
+            tls.peer_certificates().map(|chain| VerifiedPeer { chain: chain.to_vec(), generation });
+        let mut connection = Self::over(Wire::Tls(Box::new(rustls::StreamOwned::new(tls, socket))));
+        connection.peer = peer;
+        Ok(connection)
+    }
+
+    /// What the peer proved during the handshake; absent on a plain connection.
+    pub(crate) fn verified_peer(&self) -> Option<&VerifiedPeer> {
+        self.peer.as_ref()
     }
 
     fn over(wire: Wire) -> Self {
@@ -173,6 +184,7 @@ impl OutboundConnection {
                 last_progress: Instant::now(),
             }),
             failed: AtomicBool::new(false),
+            peer: None,
         }
     }
 
@@ -233,6 +245,12 @@ impl OutboundConnection {
             Err(error) if retryable(&error) => Ok(SendOutcome::Sent),
             Err(error) => Err(self.fail(error)),
         }
+    }
+
+    /// Closes the connection at once instead of when the last holder lets go.
+    pub(crate) fn close(&self) {
+        self.failed.store(true, Ordering::Release);
+        let _ = self.lock().wire.socket().shutdown(std::net::Shutdown::Both);
     }
 
     fn fail(&self, error: io::Error) -> io::Error {
@@ -316,26 +334,16 @@ fn retryable(error: &io::Error) -> bool {
     matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
-/// The client side of a TLS session that has not started its handshake yet.
-pub(crate) fn tls_client(config: &TlsConfig) -> io::Result<rustls::ClientConnection> {
-    let client_config = config.build_client_config().map_err(|error| {
-        transport_io_error(TransportErrorCode::TlsConfigError, error.to_string())
-    })?;
-    let server_name = ServerName::try_from(config.server_name().to_string()).map_err(|error| {
-        transport_io_error(TransportErrorCode::TlsConfigError, error.to_string())
-    })?;
-    rustls::ClientConnection::new(client_config, server_name).map_err(|error| {
-        transport_io_error(TransportErrorCode::TlsHandshakeFailed, error.to_string())
-    })
-}
-
 #[cfg(test)]
 fn handshake(
     socket: &TcpStream,
     config: &TlsConfig,
     wait: Duration,
-) -> io::Result<rustls::ClientConnection> {
-    let mut tls = tls_client(config)?;
+) -> io::Result<(rustls::ClientConnection, u64)> {
+    let (mut tls, generation) = TlsClient::new(std::sync::Arc::new(
+        crate::rtps::transport::tls::policy::TlsPolicyHandle::new(config)?,
+    ))?
+    .connect(socket.peer_addr()?.ip())?;
     socket.set_read_timeout(Some(wait))?;
     socket.set_write_timeout(Some(wait))?;
     let mut io = socket;
@@ -349,7 +357,7 @@ fn handshake(
     }
     socket.set_read_timeout(None)?;
     socket.set_write_timeout(None)?;
-    Ok(tls)
+    Ok((tls, generation))
 }
 
 #[cfg(test)]
@@ -477,8 +485,11 @@ mod tests {
             ca_file: cert_file.clone(),
             cert_file,
             key_file,
-            server_name: "localhost".to_string(),
+            server_name: Some("localhost".to_string()),
             verify_peer: false,
+            revocation: None,
+            allow_file: None,
+            deny_file: None,
         };
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -486,10 +497,21 @@ mod tests {
         let server_config = config.build_server_config().unwrap();
         let frame = b"before the close".to_vec();
         let frame_len = frame.len();
+        let (first_send_done, wait_for_first_send) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
+            let (mut socket, _) = listener.accept().unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut connection = rustls::ServerConnection::new(server_config).unwrap();
+            while !connection.wants_write() {
+                connection.read_tls(&mut socket).unwrap();
+                connection.process_new_packets().unwrap();
+            }
+            while connection.wants_write() {
+                connection.write_tls(&mut socket).unwrap();
+            }
+            // The tickets follow the client's Finished, so leaving it unread here
+            // keeps them from arriving before the first send has looked for a close.
+            wait_for_first_send.recv().unwrap();
             let mut tls = rustls::StreamOwned::new(connection, socket);
             let mut received = vec![0u8; frame_len];
             tls.read_exact(&mut received).unwrap();
@@ -508,6 +530,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+        first_send_done.send(()).unwrap();
         assert_eq!(server.join().unwrap(), frame);
 
         let mut probe = [0u8; 1];
@@ -536,10 +559,41 @@ mod tests {
         drop(listener);
 
         let wait = crate::rtps::transport::TcpConfig::default().connect_timeout;
-        let error = start_dial(closed, wait)
+        let error = start_dial(closed, None, wait)
             .and_then(|stream| wait_for_dial(&stream, wait))
             .expect_err("nothing listens on a closed port");
 
         assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    /// Only Linux routes all of 127.0.0.0/8 to loopback, so a second local
+    /// address is available there without any setup.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dial_leaves_from_the_given_bind_ip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_ip: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+        let wait = Duration::from_secs(1);
+
+        let stream = start_dial(listener.local_addr().unwrap(), Some(bind_ip), wait).unwrap();
+        wait_for_dial(&stream, wait).unwrap();
+        let (_accepted, peer) = listener.accept().unwrap();
+
+        assert_eq!(peer.ip(), bind_ip);
+    }
+
+    /// The bind IP is no address of this host, so the dial gets through only
+    /// if a loopback peer skips the bind.
+    #[test]
+    fn a_dial_to_loopback_ignores_a_non_loopback_bind_ip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let wait = Duration::from_secs(1);
+
+        let stream = start_dial(listener.local_addr().unwrap(), Some(bind_ip), wait).unwrap();
+        wait_for_dial(&stream, wait).unwrap();
+        let (_accepted, peer) = listener.accept().unwrap();
+
+        assert!(peer.ip().is_loopback());
     }
 }

@@ -1,5 +1,5 @@
 """
-pytest configuration and fixtures for int2dds tests.
+pytest configuration and fixtures for int2DDS tests.
 """
 
 import pytest

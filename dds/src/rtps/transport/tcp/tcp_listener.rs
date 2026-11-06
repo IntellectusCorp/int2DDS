@@ -4,14 +4,16 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::warn;
+use log::{error, log, warn};
 use mio::Token;
 
 use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
 use crate::rtps::transport::tcp::framing::{
     TcpBufferPool, TcpFrame, TcpFrameKind, TcpFrameReadState, TcpReadOutcome,
 };
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tls::identity::{identity_from_cert, IDENTITY_LEN};
+use crate::rtps::transport::tls::policy::{TlsPolicyHandle, VerifiedPeer};
+use crate::rtps::transport::tls::rejection::{rejection_reason, TlsRejectionReason};
 use crate::rtps::transport::tokens::ListenerToken;
 
 const FIRST_CONNECTION_TOKEN: usize = 100_000;
@@ -20,6 +22,7 @@ pub(crate) struct IncomingTcpMessage {
     pub(crate) data: bytes::Bytes,
     pub(crate) source: SocketAddr,
     pub(crate) kind: TcpFrameKind,
+    pub(crate) peer_identity: Option<[u8; IDENTITY_LEN]>,
 }
 
 struct TcpReadConnection {
@@ -27,8 +30,12 @@ struct TcpReadConnection {
     source: SocketAddr,
     frame_state: TcpFrameReadState,
     tls: Option<rustls::ServerConnection>,
+    /// Generation of the policy the handshake follows.
+    tls_generation: u64,
     tls_handshake_deadline: Option<Instant>,
     first_frame_deadline: Option<Instant>,
+    peer_identity: Option<[u8; IDENTITY_LEN]>,
+    peer: Option<VerifiedPeer>,
 }
 
 pub(crate) struct TcpListener {
@@ -40,7 +47,9 @@ pub(crate) struct TcpListener {
     ready_frames: Vec<TcpFrame>,
     ready_messages: VecDeque<IncomingTcpMessage>,
     tuning: TcpSocketTuning,
-    tls_server_config: Option<Arc<rustls::ServerConfig>>,
+    tls_policy: Option<Arc<TlsPolicyHandle>>,
+    /// The policy generation the established connections were last judged by.
+    checked_generation: u64,
     tls_handshake_timeout: Duration,
     first_frame_timeout: Duration,
 }
@@ -50,12 +59,10 @@ impl TcpListener {
     pub(crate) fn new(
         port: u16,
         tuning: TcpSocketTuning,
-        tls_config: Option<Arc<TlsConfig>>,
+        tls_policy: Option<Arc<TlsPolicyHandle>>,
         tls_handshake_timeout: Duration,
         first_frame_timeout: Duration,
     ) -> io::Result<Self> {
-        let tls_server_config =
-            tls_config.as_ref().map(|config| config.build_server_config()).transpose()?;
         let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
         #[cfg(unix)]
@@ -80,7 +87,8 @@ impl TcpListener {
             ready_frames: Vec::new(),
             ready_messages: VecDeque::new(),
             tuning,
-            tls_server_config,
+            tls_policy,
+            checked_generation: 0,
             tls_handshake_timeout,
             first_frame_timeout,
         })
@@ -179,15 +187,18 @@ impl TcpListener {
             }
 
             let now = Instant::now();
-            let tls = match &self.tls_server_config {
-                Some(config) => match rustls::ServerConnection::new(Arc::clone(config)) {
-                    Ok(session) => Some(session),
-                    Err(error) => {
-                        warn!("TCP TLS session setup for {source} failed: {error}");
-                        continue;
+            let (tls, tls_generation) = match &self.tls_policy {
+                Some(policy) => {
+                    let policy = policy.current();
+                    match rustls::ServerConnection::new(Arc::clone(&policy.server)) {
+                        Ok(session) => (Some(session), policy.generation),
+                        Err(error) => {
+                            error!("TCP TLS session setup for {source} failed: {error}");
+                            continue;
+                        }
                     }
-                },
-                None => None,
+                }
+                None => (None, 0),
             };
             let interest = if tls.is_some() {
                 mio::Interest::READABLE.add(mio::Interest::WRITABLE)
@@ -210,8 +221,11 @@ impl TcpListener {
                     source,
                     frame_state: TcpFrameReadState::default(),
                     tls,
+                    tls_generation,
                     tls_handshake_deadline,
                     first_frame_deadline,
+                    peer_identity: None,
+                    peer: None,
                 },
             );
             accepted_count += 1;
@@ -231,54 +245,91 @@ impl TcpListener {
         let now = Instant::now();
         let pool = Arc::clone(&self.buffer_pool);
         let first_frame_timeout = self.first_frame_timeout;
+        let tls_policy = self.tls_policy.as_deref();
         let Some(connection) = self.connections.get_mut(&token) else {
             return Ok(None);
         };
         let source = connection.source;
 
-        let read_result =
-            if connection.tls_handshake_deadline.is_some_and(|deadline| deadline <= now) {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
-            } else if connection.first_frame_deadline.is_some_and(|deadline| deadline <= now) {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "first TCP frame timed out"))
-            } else {
-                match connection.tls.as_mut() {
-                    Some(tls) => {
-                        let was_handshaking = tls.is_handshaking();
-                        let result = {
-                            let mut stream = rustls::Stream::new(tls, &mut connection.stream);
-                            connection.frame_state.read_available(
-                                &mut stream,
-                                &pool,
-                                &mut self.ready_frames,
-                            )
-                        };
-                        if was_handshaking && !tls.is_handshaking() {
-                            connection.tls_handshake_deadline = None;
-                            connection.first_frame_deadline = Some(now + first_frame_timeout);
-                            let interest = if tls.wants_write() {
-                                mio::Interest::READABLE.add(mio::Interest::WRITABLE)
-                            } else {
-                                mio::Interest::READABLE
-                            };
-                            match registry.reregister(&mut connection.stream, token, interest) {
-                                Ok(()) => result,
-                                Err(error) => Err(error),
-                            }
+        let read_result = if connection
+            .tls_handshake_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
+        } else if connection.first_frame_deadline.is_some_and(|deadline| deadline <= now) {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "first TCP frame timed out"))
+        } else {
+            match connection.tls.as_mut() {
+                Some(tls) => {
+                    let was_handshaking = tls.is_handshaking();
+                    let result = {
+                        let mut stream = rustls::Stream::new(tls, &mut connection.stream);
+                        connection.frame_state.read_available(
+                            &mut stream,
+                            &pool,
+                            &mut self.ready_frames,
+                        )
+                    };
+                    if was_handshaking && !tls.is_handshaking() {
+                        connection.peer_identity = tls
+                            .peer_certificates()
+                            .and_then(|chain| chain.first())
+                            .map(identity_from_cert);
+                        connection.peer = tls.peer_certificates().map(|chain| VerifiedPeer {
+                            chain: chain.to_vec(),
+                            generation: connection.tls_generation,
+                        });
+                        connection.tls_handshake_deadline = None;
+                        connection.first_frame_deadline = Some(now + first_frame_timeout);
+                        let interest = if tls.wants_write() {
+                            mio::Interest::READABLE.add(mio::Interest::WRITABLE)
                         } else {
-                            result
+                            mio::Interest::READABLE
+                        };
+                        // A reload while the handshake ran was judged without this peer.
+                        let refused = tls_policy
+                            .map(|handle| handle.current())
+                            .filter(|policy| policy.generation != connection.tls_generation)
+                            .and_then(|policy| {
+                                let chain = connection.peer.as_ref().map(|peer| &peer.chain[..]);
+                                policy.check_accepted_peer(chain.unwrap_or_default()).err()
+                            });
+                        match refused {
+                            Some(error) => {
+                                // Frames decrypted alongside the last handshake
+                                // message come from a peer that is now refused.
+                                self.ready_frames.clear();
+                                Err(io::Error::new(io::ErrorKind::InvalidData, error))
+                            }
+                            None => {
+                                match registry.reregister(&mut connection.stream, token, interest) {
+                                    Ok(()) => result,
+                                    Err(error) => Err(error),
+                                }
+                            }
                         }
+                    } else {
+                        result
                     }
-                    None => connection.frame_state.read_available(
-                        &mut connection.stream,
-                        &pool,
-                        &mut self.ready_frames,
-                    ),
                 }
-            };
+                None => connection.frame_state.read_available(
+                    &mut connection.stream,
+                    &pool,
+                    &mut self.ready_frames,
+                ),
+            }
+        };
 
         if !self.ready_frames.is_empty() {
             connection.first_frame_deadline = None;
+        }
+        if let Err(error) = &read_result {
+            if let Some(reason) = rejection_reason(error) {
+                log!(
+                    reason.level_when_accepting(),
+                    "TLS handshake from {source} rejected: {reason} ({error})"
+                );
+            }
         }
         let terminal = matches!(read_result, Ok(TcpReadOutcome::Closed) | Err(_));
         for frame in self.ready_frames.drain(..) {
@@ -286,6 +337,7 @@ impl TcpListener {
                 data: frame.payload,
                 source,
                 kind: frame.kind,
+                peer_identity: connection.peer_identity,
             });
         }
         if terminal {
@@ -317,10 +369,67 @@ impl TcpListener {
 
         for token in &expired_tokens {
             if let Some(mut connection) = self.connections.remove(token) {
+                if connection.tls_handshake_deadline.is_some() {
+                    warn!("TLS handshake from {} timed out", connection.source);
+                }
                 let _ = registry.deregister(&mut connection.stream);
             }
         }
         expired_tokens.len()
+    }
+
+    fn close_forged_peers(&mut self, registry: &mio::Registry) {
+        let Some(policy) = &self.tls_policy else {
+            return;
+        };
+        for address in policy.take_forged_peers() {
+            let token = self
+                .connections
+                .iter()
+                .find_map(|(token, connection)| (connection.source == address).then_some(*token));
+            if let Some(mut connection) = token.and_then(|token| self.connections.remove(&token)) {
+                let _ = registry.deregister(&mut connection.stream);
+                let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+            }
+            self.ready_messages.retain(|message| message.source != address);
+        }
+    }
+
+    /// Closes every established TLS connection caught forging its identity, or
+    /// whose peer the policy in force no longer accepts. Cheap to call on every
+    /// poll, since the connections are judged only once per reload.
+    pub(crate) fn recheck_tls_peers(&mut self, registry: &mio::Registry) {
+        self.close_forged_peers(registry);
+        let Some(handle) = &self.tls_policy else {
+            return;
+        };
+        let policy = handle.current();
+        if policy.generation == self.checked_generation {
+            return;
+        }
+        self.checked_generation = policy.generation;
+        let refused: Vec<_> = self
+            .connections
+            .iter()
+            .filter_map(|(token, connection)| {
+                let chain = &connection.peer.as_ref()?.chain;
+                policy.check_accepted_peer(chain).err().map(|error| (*token, error))
+            })
+            .collect();
+        for (token, error) in refused {
+            let Some(mut connection) = self.connections.remove(&token) else {
+                continue;
+            };
+            let error = io::Error::new(io::ErrorKind::InvalidData, error);
+            let reason = rejection_reason(&error).unwrap_or(TlsRejectionReason::InvalidCertificate);
+            log!(
+                reason.level(),
+                "TLS peer {} fails the reloaded policy: {reason} ({error})",
+                connection.source
+            );
+            let _ = registry.deregister(&mut connection.stream);
+            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     pub(crate) fn deregister_all(&mut self, registry: &mio::Registry) -> io::Result<()> {
@@ -358,6 +467,8 @@ mod tests {
 
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
     use crate::rtps::transport::tcp::sync_connection::{OutboundConnection, SendOutcome};
+    use crate::rtps::transport::tls::client::TlsClient;
+    use crate::rtps::transport::tls::TlsConfig;
 
     #[test]
     fn bind_creates_a_pollable_nonblocking_listener() {
@@ -577,7 +688,7 @@ mod tests {
         let mut listener = TcpListener::new(
             0,
             TcpSocketTuning::default(),
-            Some(Arc::clone(&tls_config)),
+            Some(Arc::new(TlsPolicyHandle::new(&tls_config).unwrap())),
             Duration::from_secs(5),
             Duration::from_secs(5),
         )
@@ -637,6 +748,77 @@ mod tests {
         drop(poll);
     }
 
+    #[test]
+    fn a_tls_frame_carries_the_identity_of_the_client_certificate() {
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let pem_dir = tempfile::tempdir().unwrap();
+        let mut config = self_signed_tls_config(pem_dir.path());
+        config.verify_peer = true;
+        let tls_config = Arc::new(config);
+
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::new(TlsPolicyHandle::new(&tls_config).unwrap())),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-identity"));
+        let client_config = Arc::clone(&tls_config);
+        let client = std::thread::spawn(move || {
+            let connection = OutboundConnection::connect(
+                address,
+                &TcpSocketTuning::default(),
+                Some(client_config.as_ref()),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+            connection
+        });
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let received = loop {
+            assert!(Instant::now() < deadline, "timed out waiting for the TLS frame");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            let mut message = None;
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else if let Some(ready) =
+                    listener.get_message(event.token(), poll.registry()).unwrap()
+                {
+                    message = Some(ready);
+                }
+            }
+            if let Some(message) = message {
+                break message;
+            }
+        };
+
+        let leaf = tls_config.load_cert_chain().unwrap().remove(0);
+        assert_eq!(received.peer_identity, Some(identity_from_cert(&leaf)));
+        let accepted = listener.connections.values().find_map(|c| c.peer.clone()).unwrap();
+        assert_eq!(accepted.chain.first(), Some(&leaf));
+        assert_eq!(accepted.generation, 0);
+
+        let connection = client.join().unwrap();
+        assert_eq!(connection.verified_peer().unwrap().chain.first(), Some(&leaf));
+        listener.deregister_all(poll.registry()).unwrap();
+        drop(connection);
+        drop(listener);
+        drop(poll);
+    }
+
     /// A self-signed identity written to `dir`, trusting only itself.
     fn self_signed_tls_config(dir: &std::path::Path) -> TlsConfig {
         let cert_file = dir.join("cert.pem");
@@ -648,9 +830,268 @@ mod tests {
             ca_file: cert_file.clone(),
             cert_file,
             key_file,
-            server_name: "localhost".to_string(),
+            server_name: Some("localhost".to_string()),
             verify_peer: false,
+            revocation: None,
+            allow_file: None,
+            deny_file: None,
         }
+    }
+
+    #[test]
+    fn a_handshake_accepted_before_a_reload_is_judged_by_the_new_policy() {
+        use crate::rtps::transport::tls::test_pki::{with_crls, LeafSpec, TestCa};
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let peer = ca.issue(LeafSpec::named("peer"));
+        let own = with_crls(
+            ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]),
+            &[ca.crl(&[], 2999)],
+        );
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::clone(&policy)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-in-flight"));
+        let config = peer.config(dir.path(), &[&ca]);
+        let client = std::thread::spawn(move || {
+            let policy = Arc::new(TlsPolicyHandle::new(&config).unwrap());
+            let (mut session, _) = TlsClient::new(policy).unwrap().connect(address.ip()).unwrap();
+            let mut socket = std::net::TcpStream::connect(address).unwrap();
+            while session.wants_write() {
+                session.write_tls(&mut socket).unwrap();
+            }
+            while session.is_handshaking() {
+                assert_ne!(session.read_tls(&mut socket).unwrap(), 0, "server hung up");
+                session.process_new_packets().unwrap();
+            }
+            // Queued together, so the frame reaches the listener in the same
+            // read as the last handshake message.
+            session.writer().write_all(&frame).unwrap();
+            while session.wants_write() {
+                session.write_tls(&mut socket).unwrap();
+            }
+            socket
+        });
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while listener.connection_count() == 0 {
+            assert!(Instant::now() < deadline, "timed out waiting for the connection");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            if events.iter().any(|event| event.token() == listener_token) {
+                listener.accept_ready(poll.registry()).unwrap();
+            }
+        }
+
+        let crl_file = &own.revocation.as_ref().unwrap().crl_file;
+        std::fs::write(crl_file, ca.crl(&[peer.serial], 2999)).unwrap();
+        policy.reload().unwrap();
+
+        let mut delivered = 0;
+        while listener.connection_count() > 0 {
+            assert!(Instant::now() < deadline, "the refused handshake should end the connection");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            for event in &events {
+                if event.token() != listener_token {
+                    while let Ok(Some(_)) = listener.get_message(event.token(), poll.registry()) {
+                        delivered += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(delivered, 0);
+
+        let connection = client.join().unwrap();
+        listener.deregister_all(poll.registry()).unwrap();
+        drop(connection);
+        drop(listener);
+        drop(poll);
+    }
+
+    #[test]
+    fn a_reload_closes_only_the_accepted_connections_the_new_policy_refuses() {
+        use crate::rtps::transport::tls::test_pki::{with_crls, LeafSpec, TestCa};
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let revoked = ca.issue(LeafSpec::named("revoked"));
+        let kept = ca.issue(LeafSpec::named("kept"));
+        let own = with_crls(
+            ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]),
+            &[ca.crl(&[], 2999)],
+        );
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::clone(&policy)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-recheck"));
+        let clients: Vec<_> = [&revoked, &kept]
+            .into_iter()
+            .map(|leaf| {
+                let config = leaf.config(dir.path(), &[&ca]);
+                let frame = frame.clone();
+                std::thread::spawn(move || {
+                    let connection = OutboundConnection::connect(
+                        address,
+                        &TcpSocketTuning::default(),
+                        Some(&config),
+                        Duration::from_secs(5),
+                        Duration::from_secs(5),
+                    )
+                    .unwrap();
+                    assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+                    connection
+                })
+            })
+            .collect();
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received = 0;
+        while received < 2 {
+            assert!(Instant::now() < deadline, "timed out waiting for both TLS frames");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else {
+                    while let Ok(Some(_)) = listener.get_message(event.token(), poll.registry()) {
+                        received += 1;
+                    }
+                }
+            }
+        }
+        let connections: Vec<_> =
+            clients.into_iter().map(|client| client.join().unwrap()).collect();
+        assert_eq!(listener.connection_count(), 2);
+
+        let crl_file = &own.revocation.as_ref().unwrap().crl_file;
+        std::fs::write(crl_file, ca.crl(&[revoked.serial], 2999)).unwrap();
+        policy.reload().unwrap();
+        listener.recheck_tls_peers(poll.registry());
+
+        assert_eq!(listener.connection_count(), 1);
+        let survivor = listener.connections.values().next().unwrap();
+        assert_eq!(survivor.peer.as_ref().unwrap().chain[0].as_ref(), kept.der.as_slice());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while connections[0].send(&frame).is_ok() {
+            assert!(Instant::now() < deadline, "the refused peer should see its connection close");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        listener.deregister_all(poll.registry()).unwrap();
+        drop(connections);
+        drop(listener);
+        drop(poll);
+    }
+
+    #[test]
+    fn a_connection_that_forged_its_prefix_is_closed() {
+        use crate::rtps::transport::tls::test_pki::{LeafSpec, TestCa};
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = TestCa::root("ca");
+        let forger = ca.issue(LeafSpec::named("forger"));
+        let honest = ca.issue(LeafSpec::named("honest"));
+        let own = ca.issue(LeafSpec::named("own")).config(dir.path(), &[&ca]);
+        let policy = Arc::new(TlsPolicyHandle::new(&own).unwrap());
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::clone(&policy)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-forged"));
+        let clients: Vec<_> = [&forger, &honest]
+            .into_iter()
+            .map(|leaf| {
+                let config = leaf.config(dir.path(), &[&ca]);
+                let frame = frame.clone();
+                std::thread::spawn(move || {
+                    let connection = OutboundConnection::connect(
+                        address,
+                        &TcpSocketTuning::default(),
+                        Some(&config),
+                        Duration::from_secs(5),
+                        Duration::from_secs(5),
+                    )
+                    .unwrap();
+                    assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+                    connection
+                })
+            })
+            .collect();
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received = 0;
+        while received < 2 {
+            assert!(Instant::now() < deadline, "timed out waiting for both TLS frames");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else {
+                    while let Ok(Some(_)) = listener.get_message(event.token(), poll.registry()) {
+                        received += 1;
+                    }
+                }
+            }
+        }
+        let connections: Vec<_> =
+            clients.into_iter().map(|client| client.join().unwrap()).collect();
+
+        let forged_identity = identity_from_cert(&forger.der.clone().into());
+        let forged_source = listener
+            .connections
+            .values()
+            .find(|connection| connection.peer_identity == Some(forged_identity))
+            .unwrap()
+            .source;
+        policy.report_identity_mismatch(forged_source, Some(forged_identity), [9; 12]);
+        listener.recheck_tls_peers(poll.registry());
+
+        assert_eq!(listener.connection_count(), 1);
+        let survivor = listener.connections.values().next().unwrap();
+        assert_eq!(survivor.peer.as_ref().unwrap().chain[0].as_ref(), honest.der.as_slice());
+
+        listener.deregister_all(poll.registry()).unwrap();
+        drop(connections);
+        drop(listener);
+        drop(poll);
     }
 
     #[test]
@@ -665,7 +1106,7 @@ mod tests {
         let mut listener = TcpListener::new(
             0,
             TcpSocketTuning::default(),
-            Some(server_config),
+            Some(Arc::new(TlsPolicyHandle::new(&server_config).unwrap())),
             Duration::from_secs(5),
             Duration::from_secs(5),
         )

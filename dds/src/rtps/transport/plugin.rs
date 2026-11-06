@@ -3,12 +3,14 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::runtime::ShmRuntime;
 use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
+use crate::rtps::transport::tls::policy::TlsPolicyHandle;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use bytes::Bytes;
 
@@ -122,6 +124,15 @@ pub(crate) trait TransportPlugin: Send + Sync {
         None
     }
 
+    /// Bytes derived from the transport's own cryptographic identity, to be
+    /// embedded in the participant's GUID prefix. A peer that can recover the
+    /// same identity from an authenticated connection can then reject messages
+    /// whose self-written prefix does not match the sender. `None` when the
+    /// transport authenticates nothing, which leaves the prefix random.
+    fn identity_bytes(&self) -> Option<[u8; 6]> {
+        None
+    }
+
     /// Whether the periodic SPDP announcement already goes, one by one, to every participant
     /// discovered so far. A transport that broadcasts instead cannot tell who heard it, so the
     /// discovery layer repeats the announcement to each known peer on top.
@@ -185,6 +196,18 @@ pub(crate) trait TransportPlugin: Send + Sync {
     fn shm_runtime(&self) -> Option<std::sync::Arc<ShmRuntime>> {
         None
     }
+
+    /// Re-read the TLS trust files and apply them to new connections. Fails
+    /// with `Unsupported` on a transport that carries no TLS policy.
+    fn reload_tls_policy(&self) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this transport has no TLS policy"))
+    }
+
+    /// The policy this transport enforces, for the layers that judge what
+    /// an authenticated peer sends. `None` when it carries no TLS policy.
+    fn tls_policy(&self) -> Option<Arc<TlsPolicyHandle>> {
+        None
+    }
 }
 
 /// Factory for creating transport plugin instances.
@@ -204,7 +227,7 @@ impl TransportPluginFactory {
         multicast_if_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
-        tls_config: Option<std::sync::Arc<crate::rtps::transport::tcp::tls::TlsConfig>>,
+        tls_config: Option<std::sync::Arc<crate::rtps::transport::tls::TlsConfig>>,
         property: &PropertyQosPolicy,
     ) -> io::Result<Box<dyn TransportPlugin>> {
         match transport_type {

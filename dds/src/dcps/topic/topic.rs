@@ -105,31 +105,6 @@ impl PartialEq for Topic {
 }
 impl Eq for Topic {}
 
-impl Drop for Topic {
-    fn drop(&mut self) {
-        // Builtin entities are managed separately, skip orphan handling
-        if self.is_builtin {
-            return;
-        }
-
-        // Only handle drop for the last reference (not clones)
-        if let Some(ref self_arc) = self.self_ref {
-            if Arc::strong_count(self_arc) > 1 {
-                return; // This is a clone, skip orphan handling
-            }
-        } else {
-            return; // Never fully initialized
-        }
-
-        if !self.lifecycle.is_deleted() {
-            if let Ok(ref participant) = self.get_participant() {
-                let topic_handle = InstanceHandle::from_guid(&self.guid);
-                participant.handle_topic_drop(&topic_handle);
-            }
-        }
-    }
-}
-
 impl_topic_description!(Topic);
 impl_dds_entity!(Topic, TopicQos);
 impl EnableChild for Topic {
@@ -389,6 +364,40 @@ pub(crate) mod tests {
 
         domain_participant.delete_contained_entities().unwrap();
         domain_participant_factory.delete_participant(domain_participant).unwrap();
+    }
+
+    #[test]
+    fn deleted_topic_rejects_remaining_handles_and_is_freed() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "deleted_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic_weak = Arc::downgrade(topic.self_ref.as_ref().unwrap());
+        let remaining_topic = topic.clone();
+
+        participant.delete_topic(topic).unwrap();
+
+        assert_eq!(remaining_topic.get_instance_handle(), Err(DdsError::AlreadyDeleted));
+
+        drop(remaining_topic);
+        assert!(topic_weak.upgrade().is_none(), "Deleted topic was not freed");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -814,5 +823,51 @@ pub(crate) mod tests {
         dpf.delete_participant(dp1).unwrap();
         dp2.delete_contained_entities().unwrap();
         dpf.delete_participant(dp2).unwrap();
+    }
+
+    #[test]
+    fn topic_survives_last_drop_while_topic_description_is_held() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic_name = "topic_transient_ref_topic";
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                topic_name,
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let held_topic_description =
+            participant.lookup_topicdescription(topic_name).unwrap().unwrap();
+        drop(topic);
+        drop(held_topic_description);
+
+        assert!(writer.get_topic().is_ok(), "Topic freed while its writer is alive");
+
+        drop(writer);
+        drop(publisher);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

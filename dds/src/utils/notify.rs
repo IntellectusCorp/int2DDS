@@ -10,7 +10,7 @@
 //!   `std::sync::Mutex` is not reentrant, so a listener that reaches an API touching the same
 //!   slot hangs, and an unwind through the call leaves the mutex poisoned for good.
 //!
-//! [`callback_handle`] answers the second by lifting the callback out before the call, and
+//! `callback_handle` answers the second by lifting the callback out before the call, and
 //! [`notify_user`] answers the first. `ffi/src/listener.rs` already draws this boundary for C
 //! callbacks; these are the same boundary for Rust ones.
 

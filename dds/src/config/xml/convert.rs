@@ -292,8 +292,10 @@ fn enum_to_type_object(e: &XmlEnum) -> DdsResult<CompleteTypeObject> {
     let flags = e.extensibility.map_or_else(TypeFlag::default, |k| TypeFlag::new(k, false, false));
     let mut enum_type = CompleteEnumeratedType::new(flags, e.name.clone(), e.bit_bound);
     let values = enum_literal_values(e)?;
-    for (lit, value) in e.literals.iter().zip(values) {
-        let flags = if lit.is_default {
+    // The first literal is the default unless one is annotated.
+    let has_default = e.literals.iter().any(|l| l.is_default);
+    for (index, (lit, value)) in e.literals.iter().zip(values).enumerate() {
+        let flags = if lit.is_default || (index == 0 && !has_default) {
             EnumeratedLiteralFlag::DEFAULT
         } else {
             EnumeratedLiteralFlag::default()

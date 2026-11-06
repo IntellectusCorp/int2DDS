@@ -62,7 +62,7 @@ cp "$repo_root/ffi/include/int2dds-ffi.h" "$stage/include/"
 cp "$repo_root/ffi/include/int2dds_cdr.h" "$stage/include/"
 cp "$repo_root/ffi/src/cdr_utils.c"       "$stage/src/"
 
-cp "$repo_root/LICENSE" "$repo_root/NOTICE" "$repo_root/Third_Party_Licenses.md" "$stage/"
+cp "$repo_root/LICENSE" "$repo_root/NOTICE" "$repo_root/LICENSE-THIRD-PARTY.md" "$stage/"
 
 # Generate the manifest.
 manifest="$stage/manifest.txt"
