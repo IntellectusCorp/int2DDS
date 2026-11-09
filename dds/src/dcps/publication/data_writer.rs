@@ -95,7 +95,32 @@ use crate::{
 /// write()-time fallback rule passes, the heap otherwise.
 enum LoanBacking {
     Heap,
-    Slot { runtime: Arc<ShmRuntime>, lease: SlotLease },
+    Slot(SlotBacking),
+}
+
+/// A loan's slot. Dropped without `commit` taking the lease, it aborts it: a lease
+/// dropped as is comes back only once the pool runs dry and a second has passed.
+struct SlotBacking {
+    runtime: Arc<ShmRuntime>,
+    lease: Option<SlotLease>,
+}
+
+impl SlotBacking {
+    fn new(runtime: Arc<ShmRuntime>, lease: SlotLease) -> Self {
+        Self { runtime, lease: Some(lease) }
+    }
+
+    fn lease_mut(&mut self) -> &mut SlotLease {
+        self.lease.as_mut().expect("held until commit takes it")
+    }
+}
+
+impl Drop for SlotBacking {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            self.runtime.abort(lease);
+        }
+    }
 }
 
 /// A matched reader's SHM reachability, as the participant's registry answers
@@ -136,14 +161,14 @@ impl SerializedWriteLoan {
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match &mut self.backing {
             LoanBacking::Heap => self.change.data_mut().as_mut_ptr(),
-            LoanBacking::Slot { lease, .. } => lease.bytes_mut().as_mut_ptr(),
+            LoanBacking::Slot(slot) => slot.lease_mut().bytes_mut().as_mut_ptr(),
         }
     }
 
     pub fn capacity(&mut self) -> usize {
         match &mut self.backing {
             LoanBacking::Heap => self.change.data_mut().capacity(),
-            LoanBacking::Slot { lease, .. } => lease.bytes_mut().len(),
+            LoanBacking::Slot(slot) => slot.lease_mut().bytes_mut().len(),
         }
     }
 }
@@ -1011,7 +1036,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         };
 
         let backing = match self.try_borrow_shm_slot(capacity) {
-            Some((runtime, lease)) => LoanBacking::Slot { runtime, lease },
+            Some((runtime, lease)) => LoanBacking::Slot(SlotBacking::new(runtime, lease)),
             None => {
                 let data = change.data_mut();
                 data.clear();
@@ -1143,15 +1168,14 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 }
                 self.serialized_key_info(loan.change.data_mut())?
             }
-            LoanBacking::Slot { runtime, mut lease } => {
-                let key_info = match self.serialized_key_info(&lease.bytes_mut()[..actual_size]) {
-                    Ok(key_info) => key_info,
-                    Err(e) => {
-                        runtime.abort(lease);
-                        return Err(e);
-                    }
+            LoanBacking::Slot(mut slot) => {
+                // On an error `slot` aborts the lease as it drops.
+                let key_info =
+                    self.serialized_key_info(&slot.lease_mut().bytes_mut()[..actual_size])?;
+                let Some(lease) = slot.lease.take() else {
+                    return Err(DdsError::Error("shm slot loan holds no lease".into()));
                 };
-                let Some(handle) = runtime.commit(lease, actual_size as u32) else {
+                let Some(handle) = slot.runtime.commit(lease, actual_size as u32) else {
                     return Err(DdsError::Error("shm slot failed owner-side validation".into()));
                 };
                 slot_payload = Some(handle);
@@ -3974,7 +3998,7 @@ mod tests {
 
         let mut loan = writer.prepare_serialized_write(size).unwrap();
         let lease = rt.own().owner_mut().acquire(size).unwrap();
-        loan.backing = LoanBacking::Slot { runtime: rt.clone(), lease };
+        loan.backing = LoanBacking::Slot(SlotBacking::new(rt.clone(), lease));
         let ptr = loan.as_mut_ptr();
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, size);
@@ -4016,6 +4040,67 @@ mod tests {
             "dropping the change must give the slot back"
         );
 
+        drop(rt);
+        unlink_registry(DOMAIN);
+        unlink_segment(DOMAIN, own_slot);
+    }
+
+    /// A dropped slot-backed loan must hand its slot straight back: a dropped lease is
+    /// otherwise recovered only once the pool runs dry and a second passes.
+    #[test]
+    fn a_dropped_slot_backed_loan_gives_its_slot_back_at_once() {
+        use crate::rtps::transport::shm::registry::unlink_registry;
+        use crate::rtps::transport::shm::segment::unlink_segment;
+
+        const DOMAIN: u32 = 250;
+        unlink_registry(DOMAIN);
+        let rt = ShmRuntime::start(DOMAIN, [42; 12]).expect("shm runtime");
+        let own_slot = rt.slot();
+
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<SlotLoanSample>(
+                "SlotAbortTopic",
+                "SlotLoanSample",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<SlotLoanSample>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let size = SlotLoanSample { id: 1, value: 2 }.serialize().unwrap().len();
+        let free_before = free_slots_for(&rt, size);
+        let mut loan = writer.prepare_serialized_write(size).unwrap();
+        let lease = rt.own().owner_mut().acquire(size).unwrap();
+        loan.backing = LoanBacking::Slot(SlotBacking::new(rt.clone(), lease));
+        drop(loan);
+        assert_eq!(free_slots_for(&rt, size), free_before, "a dropped loan kept its slot");
+
+        drop(writer);
+        drop(publisher);
+        drop(topic);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
         drop(rt);
         unlink_registry(DOMAIN);
         unlink_segment(DOMAIN, own_slot);
