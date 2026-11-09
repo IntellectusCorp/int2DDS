@@ -5530,6 +5530,8 @@ mod tests {
 
     #[test]
     fn a_multi_window_sample_completes_one_bounded_round_at_a_time() {
+        // The round bound below assumes the default INT2DDS_MAX_MESSAGE_SIZE.
+        let _env = crate::test_utils::lock_env();
         let (_participant, user_logic, recorder, writer, remote_prefix) =
             windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
         let sample_size = 1024 * 1024;

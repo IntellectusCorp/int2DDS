@@ -35,6 +35,7 @@ extern crate md5;
 #[cfg(test)]
 pub mod test_utils {
     use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::{Mutex, MutexGuard};
 
     // The last domain whose whole port block stays below 32768, where the ephemeral
     // port range of every supported OS starts at the earliest: 7400 + 250 * 100 + 249 = 32649.
@@ -46,5 +47,13 @@ pub mod test_utils {
     /// Consecutive calls differ, so tests that overlap in time never share a domain.
     pub fn unique_domain_id() -> i32 {
         TEST_DOMAIN_ID_COUNTER.fetch_add(1, Ordering::SeqCst) % (LAST_DOMAIN_ID + 1)
+    }
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Env is process-global. A test that sets an `INT2DDS_*` override and a test that depends
+    /// on its value are kept apart only when both take this.
+    pub fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }

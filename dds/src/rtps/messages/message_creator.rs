@@ -40,8 +40,6 @@ use crate::serialize::pl_cdr::InlineQosParameters;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use bytes::Bytes;
 
     use super::*;
@@ -191,17 +189,10 @@ mod tests {
         assert_eq!(second, None, "repeating the inline QoS on later fragments is redundant");
     }
 
-    // Env is process-global: serialize every INT2DDS_MAX_MESSAGE_SIZE mutation.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     // get_max_message_size resolves the env var, clamps to 1..=65000, and defaults to 65000.
     #[test]
     fn max_message_size_resolves_and_clamps() {
-        let _guard = lock_env();
+        let _guard = crate::test_utils::lock_env();
         let key = "INT2DDS_MAX_MESSAGE_SIZE";
 
         unsafe { std::env::remove_var(key) };
@@ -226,7 +217,7 @@ mod tests {
     // headers included, once the batch is large enough to span several datagrams.
     #[test]
     fn batched_datagrams_stay_within_max_message_size() {
-        let _guard = lock_env();
+        let _guard = crate::test_utils::lock_env();
         let key = "INT2DDS_MAX_MESSAGE_SIZE";
         let max: usize = 400;
         unsafe { std::env::set_var(key, max.to_string()) };
@@ -348,7 +339,7 @@ mod tests {
     // Bound for shm a sample is a 24-byte descriptor, so nothing is left to fragment.
     #[test]
     fn a_sample_past_the_message_size_budget_still_fits_one_shm_datagram() {
-        let _guard = lock_env();
+        let _guard = crate::test_utils::lock_env();
         let max_message_size = crate::common::env::get_max_message_size();
 
         const DOMAIN: u32 = 255;

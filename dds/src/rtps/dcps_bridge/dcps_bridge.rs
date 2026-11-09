@@ -979,16 +979,12 @@ mod tests {
         }
     }
 
-    // Env is process-global: serialize the frag-size/message-size overrides
-    // against any other test mutating them concurrently.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Two participants, one host: each must learn the other's advertised
     /// receive-buffer size over SPDP, and that value must match what a fresh
     /// socket on this host is actually granted - not what int2DDS requested.
     #[test]
     fn spdp_advertises_receive_buffer_size_between_peers() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env_guard = crate::test_utils::lock_env();
         unsafe {
             std::env::set_var("INT2DDS_DATA_FRAG_SIZE", "1344");
             std::env::set_var("INT2DDS_MAX_MESSAGE_SIZE", "13440");
@@ -1092,7 +1088,7 @@ mod tests {
     /// by the host, so a co-located peer has to be reached at the pinned address.
     #[test]
     fn same_host_peer_is_reached_at_the_pinned_address() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env_guard = crate::test_utils::lock_env();
         let Some(pinned) = pin_a_host_address() else {
             return;
         };
@@ -1134,7 +1130,7 @@ mod tests {
 
     #[test]
     fn same_host_endpoints_are_reached_at_the_pinned_address() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env_guard = crate::test_utils::lock_env();
         let Some(pinned) = pin_a_host_address() else {
             return;
         };
