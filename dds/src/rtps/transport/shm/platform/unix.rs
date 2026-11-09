@@ -46,7 +46,16 @@ impl UnixSharedMemory {
             }
         }
 
-        let ptr = Self::map_memory(fd, size)?;
+        let ptr = match Self::map_memory(fd, size) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                unsafe { close(fd) };
+                if is_creator {
+                    unsafe { shm_unlink(name_cstr.as_ptr()) };
+                }
+                return Err(e);
+            }
+        };
 
         Ok(Self { fd, ptr, size, name: shm_name, is_creator })
     }
@@ -57,13 +66,22 @@ impl UnixSharedMemory {
         let fd = unsafe { shm_open(name.as_ptr(), O_CREAT | O_EXCL | O_RDWR, 0o666) };
 
         if fd >= 0 {
-            // We created it, set the size
-            // `off_t` is i64 on 64-bit targets but i32 on 32-bit (e.g. armhf),
-            // so cast to off_t rather than a fixed i64 to stay portable.
-            let ret = unsafe { ftruncate(fd, size as libc::off_t) };
-            if ret < 0 {
-                unsafe { close(fd) };
-                return Err(io::Error::last_os_error());
+            // `off_t` is i32 on 32-bit targets (e.g. armhf); refuse a size it cannot hold.
+            let sized = match libc::off_t::try_from(size) {
+                Ok(len) if unsafe { ftruncate(fd, len) } == 0 => Ok(()),
+                Ok(_) => Err(io::Error::last_os_error()),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "shared memory size exceeds off_t",
+                )),
+            };
+            if let Err(e) = sized {
+                // Left unsized, the object would make every later opener wait on it.
+                unsafe {
+                    close(fd);
+                    shm_unlink(name.as_ptr());
+                }
+                return Err(e);
             }
             return Ok((fd, true));
         }
@@ -185,5 +203,37 @@ impl Drop for UnixSharedMemory {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name_exists(name: &str) -> bool {
+        let name = CString::new(format!("/{name}")).unwrap();
+        let fd = unsafe { shm_open(name.as_ptr(), O_RDWR, 0) };
+        if fd >= 0 {
+            unsafe { close(fd) };
+        }
+        fd >= 0
+    }
+
+    /// A creator that cannot map what it made must not leave the name behind: a later
+    /// opener would wait on an object nobody is going to initialize.
+    #[test]
+    fn a_creator_that_fails_to_map_leaves_no_object_behind() {
+        let name = format!("int2dds_test_map_fail_{}", std::process::id());
+        // mmap rejects a zero-length mapping, after the object was created and sized.
+        assert!(UnixSharedMemory::new(&name, 0, true).is_err());
+        assert!(!name_exists(&name));
+    }
+
+    /// The same for a size the object cannot be given.
+    #[test]
+    fn a_creator_that_fails_to_size_leaves_no_object_behind() {
+        let name = format!("int2dds_test_size_fail_{}", std::process::id());
+        assert!(UnixSharedMemory::new(&name, usize::MAX, true).is_err());
+        assert!(!name_exists(&name));
     }
 }
