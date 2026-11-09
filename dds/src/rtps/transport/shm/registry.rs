@@ -633,15 +633,38 @@ mod tests {
     fn a_smaller_registry_from_another_build_is_refused_not_replaced() {
         const D: u32 = 240;
         unlink_registry(D);
+        const LEN: usize = 64;
+        const MARK: u8 = 0xA5;
         let name = std::ffi::CString::new(format!("/{}", registry_name(D))).unwrap();
+        // Maps the object's first LEN bytes; there is no /dev/shm to inspect on macOS.
+        let map = |fd: libc::c_int, prot: libc::c_int| {
+            let ptr =
+                unsafe { libc::mmap(std::ptr::null_mut(), LEN, prot, libc::MAP_SHARED, fd, 0) };
+            assert_ne!(ptr, libc::MAP_FAILED);
+            ptr as *mut u8
+        };
+
         let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o666) };
         assert!(fd >= 0);
-        assert_eq!(unsafe { libc::ftruncate(fd, 64) }, 0);
-        unsafe { libc::close(fd) };
+        assert_eq!(unsafe { libc::ftruncate(fd, LEN as libc::off_t) }, 0);
+        let ptr = map(fd, libc::PROT_READ | libc::PROT_WRITE);
+        unsafe {
+            ptr.add(LEN - 1).write(MARK);
+            libc::munmap(ptr.cast(), LEN);
+            libc::close(fd);
+        }
 
         assert!(RegistrySegment::open(D).is_err());
-        let path = format!("/dev/shm/{}", registry_name(D));
-        assert_eq!(std::fs::metadata(&path).map(|m| m.len()).ok(), Some(64), "{path} was replaced");
+
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+        assert!(fd >= 0, "the registry was unlinked");
+        let ptr = map(fd, libc::PROT_READ);
+        let mark = unsafe { ptr.add(LEN - 1).read() };
+        unsafe {
+            libc::munmap(ptr.cast(), LEN);
+            libc::close(fd);
+        }
+        assert_eq!(mark, MARK, "the registry was replaced");
         unlink_registry(D);
     }
 

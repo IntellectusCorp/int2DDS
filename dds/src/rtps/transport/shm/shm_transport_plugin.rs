@@ -348,11 +348,19 @@ mod tests {
         unlink_registry(D);
         let plugin = plugin(D, [78; 12]);
         let rt = plugin.shm_runtime().expect("the zero-copy runtime must be up");
-        let path = format!("/dev/shm/{}", segment_name(D, rt.slot()));
-        assert!(std::path::Path::new(&path).exists());
+        let name = std::ffi::CString::new(format!("/{}", segment_name(D, rt.slot()))).unwrap();
+        // There is no /dev/shm to look in on macOS; opening the name works everywhere.
+        let exists = || {
+            let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+            if fd >= 0 {
+                unsafe { libc::close(fd) };
+            }
+            fd >= 0
+        };
+        assert!(exists());
 
         plugin.close();
-        assert!(!std::path::Path::new(&path).exists(), "{path} outlived close");
+        assert!(!exists(), "{name:?} outlived close");
         drop(rt);
         drop(plugin);
         unlink_registry(D);
