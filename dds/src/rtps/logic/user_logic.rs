@@ -587,46 +587,18 @@ where
         .unwrap_or(locators)
 }
 
-/// Which `ReaderLocator` entries a stateless writer sends to: one kind per remote
-/// reader. A peer advertising SHM and UDP appears as two entries for the same reader
-/// GUID, and a per-entry pick would send both.
-fn stateless_send_mask(
-    readers: &[(GuidPrefix, EntityId, Locator)],
-    can_handle: impl Fn(&Locator) -> bool,
-) -> Vec<bool> {
-    let mut mask = vec![false; readers.len()];
-    let mut seen: Vec<(GuidPrefix, EntityId)> = Vec::new();
-    for (prefix, entity, _) in readers.iter() {
-        let key = (*prefix, *entity);
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
-        let group: Vec<Locator> =
-            readers.iter().filter(|(p, e, _)| (*p, *e) == key).map(|(_, _, l)| l.clone()).collect();
-        let picked = pick_locators(&group, &can_handle);
-        for (slot, (p, e, l)) in mask.iter_mut().zip(readers.iter()) {
-            if (*p, *e) == key && picked.contains(&l) {
-                *slot = true;
-            }
+/// A stateless writer's `ReaderLocator` entries grouped by remote reader, as entry
+/// indices in first-seen order. A reader appears once per advertised locator, so a
+/// send per entry would reach it once per entry; each group is sent once instead.
+fn stateless_reader_groups(readers: &[(GuidPrefix, EntityId, Locator)]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, (prefix, entity, _)) in readers.iter().enumerate() {
+        match groups.iter_mut().find(|g| (readers[g[0]].0, readers[g[0]].1) == (*prefix, *entity)) {
+            Some(group) => group.push(i),
+            None => groups.push(vec![i]),
         }
     }
-    mask
-}
-
-/// Where a stateless writer's send-time fallback puts the copy: the same reader's
-/// non-SHM entries, which `stateless_send_mask` turned off. Empty when the reader
-/// advertises SHM only.
-fn stateless_fallback_locators(
-    readers: &[(GuidPrefix, EntityId, Locator)],
-    prefix: GuidPrefix,
-    entity: EntityId,
-) -> Vec<Locator> {
-    readers
-        .iter()
-        .filter(|(p, e, l)| (*p, *e) == (prefix, entity) && !l.is_shm())
-        .map(|(_, _, l)| l.clone())
-        .collect()
+    groups
 }
 
 #[allow(dead_code)]
@@ -1825,20 +1797,16 @@ impl UserLogic {
             .iter()
             .map(|(rl, _)| (rl.guid_prefix(), rl.remote_entity_id(), rl.locator()))
             .collect();
-        let send_mask = stateless_send_mask(&readers, |l| self.transport.can_handle(l));
-
-        for ((reader_locator, changes), send) in reader_tasks.iter().zip(send_mask.iter()) {
-            if !send {
+        for group in stateless_reader_groups(&readers) {
+            // Every entry's unsent list is a suffix of the same history; the longest covers all.
+            let Some(&lead) = group.iter().max_by_key(|&&i| reader_tasks[i].1.len()) else {
                 continue;
-            }
-            let target = [reader_locator.locator()];
-            let selected = self.locators_to_send_to(&target);
-            // A refused ring falls back to this reader's masked-off non-SHM entries.
-            let fallback = stateless_fallback_locators(
-                &readers,
-                reader_locator.guid_prefix(),
-                reader_locator.remote_entity_id(),
-            );
+            };
+            let (reader_locator, changes) = &reader_tasks[lead];
+            let locators: Vec<Locator> = group.iter().map(|&i| readers[i].2.clone()).collect();
+            let selected = self.locators_to_send_to(&locators);
+            // Without a delivered descriptor the bytes go to this reader's non-SHM locators.
+            let fallback = &locators;
 
             for change in changes.iter() {
                 let mut send_buffer = participant
@@ -7619,37 +7587,90 @@ mod tests {
     }
 
     #[test]
-    fn a_stateless_writer_sends_one_copy_per_reader_over_the_kind_it_can_reach() {
+    fn a_stateless_writer_groups_its_entries_by_remote_reader() {
         let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
         let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
         let readers = vec![
             ([0xA0; 12], reader_id(0x10), shm.clone()),
+            ([0xB0; 12], reader_id(0x20), udp.clone()),
             ([0xA0; 12], reader_id(0x10), udp.clone()),
+            ([0xA0; 12], reader_id(0x11), udp),
         ];
-        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false]);
-        // An SHM locator the transport cannot reach does not shadow the UDP one.
-        assert_eq!(stateless_send_mask(&readers, |l| !l.is_shm()), vec![false, true]);
-        assert_eq!(stateless_send_mask(&readers[1..], |_| true), vec![true]);
+        assert_eq!(stateless_reader_groups(&readers), vec![vec![0, 2], vec![1], vec![3]]);
+        assert!(stateless_reader_groups(&[]).is_empty());
+    }
+
+    /// Sends one unsent, non-slot-backed sample from a stateless writer whose single remote
+    /// reader advertises `locators`, and returns where it went, sorted.
+    fn stateless_send_to_one_reader(locators: &[Locator]) -> Vec<Locator> {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let recorder = Arc::new(DatagramRecorder::default());
+        let transport: Arc<dyn TransportPlugin> = recorder.clone();
+        let user_logic = UserLogic::new(participant.clone(), transport);
+
+        let writer_entity_id =
+            EntityId::new([0x11, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        let topic_data = PublicationBuiltinTopicData::new(
+            &crate::publication::qos::DataWriterQos::default(),
+            &crate::publication::qos::PublisherQos::default(),
+            &crate::topic::qos::TopicQos::default(),
+        );
+        let writer = StatelessWriter::new(
+            Guid::new(participant.guid().prefix(), writer_entity_id),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::BestEffort,
+            TopicKind::NoKey,
+            writer_entity_id,
+            true,
+            crate::rtps::common::time::RtpsDuration::new(2, 0),
+            -1,
+            None,
+            topic_data,
+            Weak::new(),
+        );
+        for locator in locators {
+            writer.reader_locator_add(ReaderLocator::new(
+                locator.clone(),
+                None,
+                false,
+                [0xA0; 12],
+                reader_id(0x10),
+                SubscriptionBuiltinTopicData::builtin_reliable(),
+            ));
+        }
+
+        let change = Arc::new(CacheChange::new(
+            ChangeKind::Alive,
+            writer.guid(),
+            InstanceHandle::NIL,
+            SequenceNumber::new(0, 1),
+            vec![0xA5; 64],
+            None,
+        ));
+        let cache_lock = writer.writer_cache();
+        let mut cache = cache_lock.lock().unwrap();
+        cache.add_change(change, &writer).unwrap();
+        user_logic.send_unsent_changes(&writer, &cache).unwrap();
+        drop(cache);
+
+        let mut sent: Vec<Locator> = recorder.take().into_iter().map(|d| d.locator).collect();
+        sent.sort_by_key(|l| format!("{l:?}"));
+        sent
     }
 
     #[test]
-    fn a_refused_ring_falls_back_to_the_masked_off_udp_sibling() {
+    fn a_stateless_writer_sends_each_locator_of_a_multi_homed_reader_one_copy() {
+        let udp1 = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp2 = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 2), 7411);
+        assert_eq!(stateless_send_to_one_reader(&[udp1.clone(), udp2.clone()]), vec![udp1, udp2]);
+    }
+
+    #[test]
+    fn a_stateless_writer_copies_a_sample_without_a_slot_to_the_udp_sibling_only() {
         let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
         let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
-        let readers = vec![
-            ([0xA0; 12], reader_id(0x10), shm.clone()),
-            ([0xA0; 12], reader_id(0x10), udp.clone()),
-            ([0xB0; 12], reader_id(0x20), udp.clone()),
-        ];
-
-        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false, true]);
-        assert_eq!(
-            stateless_fallback_locators(&readers, [0xA0; 12], reader_id(0x10)),
-            vec![udp.clone()]
-        );
-
-        assert_eq!(stateless_fallback_locators(&readers, [0xB0; 12], reader_id(0x20)), vec![udp]);
-        assert!(stateless_fallback_locators(&readers[..1], [0xA0; 12], reader_id(0x10)).is_empty());
+        assert_eq!(stateless_send_to_one_reader(&[shm, udp.clone()]), vec![udp]);
     }
 
     /// `INT2DDS_ENABLE_SEND_WINDOW=false`. The field is set directly rather than through the env,

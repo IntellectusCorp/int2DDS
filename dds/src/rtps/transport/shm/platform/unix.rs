@@ -99,7 +99,10 @@ impl UnixSharedMemory {
         }
         let actual = st.st_size as u64;
         if actual == 0 && size > 0 {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "shared memory object not sized"));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "shared memory object not sized",
+            ));
         }
         if actual < size as u64 {
             return Err(io::Error::new(
