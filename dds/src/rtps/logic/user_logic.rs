@@ -3488,8 +3488,7 @@ impl UserLogic {
             return Ok(());
         };
 
-        let mut pending_delivery: Vec<CacheChange> = Vec::new();
-        {
+        let pending_delivery = {
             let writer_proxies = stateful_reader.writer_proxies();
             let mut matched_writers = writer_proxies
                 .lock()
@@ -3501,12 +3500,10 @@ impl UserLogic {
                 return Ok(());
             };
 
-            if seq_num >= writer_proxy.expected_sn() {
-                writer_proxy.set_expected_sn(seq_num.add(1));
-                pending_delivery = writer_proxy.flush_buffered_changes();
-            }
+            // Only this number is settled; any before it may still arrive.
             writer_proxy.irrelevant_change_set(seq_num);
-        }
+            writer_proxy.flush_buffered_changes()
+        };
 
         if !pending_delivery.is_empty() {
             self.add_change_to_reader_cache_and_notify(reader, pending_delivery)?;
@@ -7100,6 +7097,39 @@ mod tests {
         let cache = reader.reader_cache();
         let guard = cache.lock().expect("reader cache lock");
         assert_eq!(guard.get_seq_num_max(), Some(SequenceNumber::from_i64(sn.to_i64() + 4)));
+    }
+
+    /// A slot claim that fails drops that one sample. The samples before it that are still on
+    /// their way must not be skipped, and the ones after it must not wait for it.
+    #[test]
+    fn a_dropped_shm_sample_ahead_of_the_cursor_skips_only_itself() {
+        let (_participant, user_logic, reader, writer_guid, sn, _, _) =
+            reader_recording_nack_frags(ReaderReliabilityExtensionQosPolicy::DEFAULT);
+        let at = |step: i64| SequenceNumber::from_i64(sn.to_i64() + step);
+        let deliver = |seq_num: SequenceNumber| {
+            let change = CacheChange::new(
+                ChangeKind::Alive,
+                writer_guid,
+                InstanceHandle::NIL,
+                seq_num,
+                vec![0u8; 8],
+                None,
+            );
+            user_logic
+                .deliver_change_to_reader(change, reader.as_ref(), seq_num, writer_guid, None)
+                .expect("delivery must not error");
+        };
+
+        user_logic
+            .drop_shm_sample_and_advance_ledger(reader.as_ref(), writer_guid, at(1))
+            .expect("drop must not error");
+        deliver(at(2));
+        deliver(at(0));
+
+        let cache = reader.reader_cache();
+        let guard = cache.lock().expect("reader cache lock");
+        assert_eq!(guard.get_seq_num_min(), Some(at(0)));
+        assert_eq!(guard.get_seq_num_max(), Some(at(2)));
     }
 
     /// The writer sequence number of every NACK_FRAG in `payloads`, in send order.

@@ -194,11 +194,18 @@ impl WriterProxy {
     pub(crate) fn flush_buffered_changes(&mut self) -> Vec<CacheChange> {
         let mut flushed_changes = Vec::new();
 
-        while let Some(change) = self.buffered_change.first() {
-            if change.sequence_number <= self.expected_sn {
-                let change = self.buffered_change.pop_first().unwrap();
-                self.buffered_bytes -= change.data_value().len();
-                flushed_changes.push(change);
+        loop {
+            if let Some(change) = self.buffered_change.first() {
+                if change.sequence_number <= self.expected_sn {
+                    let change = self.buffered_change.pop_first().unwrap();
+                    self.buffered_bytes -= change.data_value().len();
+                    flushed_changes.push(change);
+                    self.increment_expected_sn();
+                    continue;
+                }
+            }
+            // A number that will never carry data must not hold back the ones after it.
+            if self.is_irrelevant(self.expected_sn) {
                 self.increment_expected_sn();
             } else {
                 break;
@@ -549,6 +556,12 @@ impl WriterProxy {
             ChangeFromWriterStatusKind::NotAvailable(NotAvailable::Removed) => true,
             _ => false,
         }
+    }
+
+    fn is_irrelevant(&self, seq_num: SequenceNumber) -> bool {
+        self.changes_from_writer.get(&seq_num).is_some_and(|change| {
+            change.status == ChangeFromWriterStatusKind::Received && !change.is_relevant
+        })
     }
 
     /// The first sequence number at or after `start` that is not settled. A sequence number the
