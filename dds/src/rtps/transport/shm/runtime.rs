@@ -48,13 +48,13 @@ fn parse_size(raw: &str) -> Option<u64> {
 
 /// Why a sample took the copy path. `NoLocalReader` through
 /// `DurabilityTooStrong` are decided at `write()`, `RingFull` through
-/// `DescriptorTooLarge` at send time. Two cases have no variant because no counter can hold them: a
-/// participant whose runtime never started is reported by `ShmRuntime::start`
-/// instead, and a platform without a kernel wakeup polls and keeps using slots.
+/// `DescriptorTooLarge` at send time. Two cases have no variant because no
+/// counter can hold them: a participant whose runtime never started is reported
+/// by `ShmRuntime::start` instead, and a platform without a kernel wakeup polls
+/// and keeps using slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FallbackReason {
     NoLocalReader,
-    PeerNotRegistered,
     SampleTooLarge,
     PoolExhausted,
     DurabilityTooStrong,
@@ -68,18 +68,17 @@ impl FallbackReason {
     fn index(self) -> usize {
         match self {
             FallbackReason::NoLocalReader => 0,
-            FallbackReason::PeerNotRegistered => 1,
-            FallbackReason::SampleTooLarge => 2,
-            FallbackReason::PoolExhausted => 3,
-            FallbackReason::DurabilityTooStrong => 4,
-            FallbackReason::RingFull => 5,
-            FallbackReason::PeerGone => 6,
-            FallbackReason::DescriptorTooLarge => 7,
+            FallbackReason::SampleTooLarge => 1,
+            FallbackReason::PoolExhausted => 2,
+            FallbackReason::DurabilityTooStrong => 3,
+            FallbackReason::RingFull => 4,
+            FallbackReason::PeerGone => 5,
+            FallbackReason::DescriptorTooLarge => 6,
         }
     }
 }
 
-pub(crate) const FALLBACK_REASONS: usize = 8;
+pub(crate) const FALLBACK_REASONS: usize = 7;
 
 #[derive(Default)]
 pub(crate) struct FallbackCounters {
