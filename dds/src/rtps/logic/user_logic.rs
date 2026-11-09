@@ -3557,7 +3557,12 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         let serialized_data = data.serialized_data();
-        let shm_ref = shm_descriptor(&serialized_data);
+        // Only the own ring carries descriptors; the same bytes off the network are a payload.
+        let shm_ref = if message_receiver.received_over_shm() {
+            shm_descriptor(&serialized_data)
+        } else {
+            None
+        };
 
         // Detach from the receive arena before retaining. A `Bytes` slice keeps its
         // whole arena chunk resident, so copy once here and let every matched reader
@@ -6417,12 +6422,15 @@ mod tests {
         );
     }
 
-    /// Advancing past it made the reader ACK a sample the writer still held, so it was
-    /// never repaired. `NullTransport` has no runtime, so the peer cannot be resolved.
-    #[test]
-    fn a_descriptor_whose_peer_cannot_be_resolved_stays_missing() {
-        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
-            two_readers_matched_to_one_fragmented_writer();
+    /// Feeds reader A one DATA whose payload is a slot descriptor, received on `locator_kind`.
+    fn feed_descriptor(
+        participant: &Participant,
+        user_logic: &mut UserLogic,
+        reader_a: &StatefulReader,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+        locator_kind: i32,
+    ) -> Vec<u8> {
         let slot_ref = crate::rtps::transport::shm::slot::SlotRef {
             owner_slot: 1,
             owner_epoch_low: 1,
@@ -6431,12 +6439,15 @@ mod tests {
             generation: 1,
             len: 16,
         };
+        let payload = slot_ref.to_payload().to_vec();
         let mut data = Data::new(reader_a.guid().entity_id(), writer_guid.entity_id(), sn);
-        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::copy_from_slice(
-            &slot_ref.to_payload(),
-        )));
+        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::copy_from_slice(&payload)));
         let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let mut message_receiver = MessageReceiver::new(participant.guid().prefix(), &from_addr);
+        let mut message_receiver = MessageReceiver::new_with_locator_kind(
+            participant.guid().prefix(),
+            &from_addr,
+            locator_kind,
+        );
         let ts_header = SubmessageHeader::new(SubmessageId::INFO_TS, 0, 0);
         message_receiver.from_timestamp(&ts_header, &InfoTimestamp::new(Utc::now()));
 
@@ -6448,11 +6459,49 @@ mod tests {
                 &message_receiver,
             )
             .unwrap();
+        payload
+    }
+
+    /// Advancing past it made the reader ACK a sample the writer still held, so it was
+    /// never repaired. `NullTransport` has no runtime, so the peer cannot be resolved.
+    #[test]
+    fn a_descriptor_whose_peer_cannot_be_resolved_stays_missing() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        feed_descriptor(
+            &participant,
+            &mut user_logic,
+            &reader_a,
+            writer_guid,
+            sn,
+            LOCATOR_KIND_SHM,
+        );
 
         let proxies = reader_a.writer_proxies();
         let guard = proxies.lock().unwrap();
         let proxy = guard.iter().find(|p| p.remote_writer_guid() == writer_guid).unwrap();
         assert_eq!(proxy.expected_sn(), sn, "the reader must still be waiting for the sample");
+    }
+
+    /// Only this participant's own ring carries descriptors. The same bytes from the network
+    /// name nothing here, so they are an ordinary payload, not a slot to claim.
+    #[test]
+    fn a_descriptor_shaped_payload_over_udp_is_delivered_as_bytes() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let payload = feed_descriptor(
+            &participant,
+            &mut user_logic,
+            &reader_a,
+            writer_guid,
+            sn,
+            crate::rtps::common::locator::LOCATOR_KIND_UDP_V4,
+        );
+
+        let cache = reader_a.reader_cache();
+        let guard = cache.lock().unwrap();
+        let change = guard.get_change(sn, writer_guid).expect("the sample must reach the reader");
+        assert_eq!(change.data_value(), payload.as_slice());
     }
 
     // --- Fragment reassembly: a bail between completion and delivery must not leave the ---

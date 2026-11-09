@@ -23,7 +23,7 @@ use crate::{
             guid::{Guid, GuidPrefix, GUIDPREFIX_UNKNOWN},
             locator::{
                 udp_locator_kind, Locator, LOCATOR_ADDRESS_INVALID, LOCATOR_INVALID,
-                LOCATOR_PORT_INVALID,
+                LOCATOR_KIND_SHM, LOCATOR_PORT_INVALID,
             },
             parameters::{ParameterId, ParameterId as CommonParameterId, ParameterList},
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
@@ -84,6 +84,8 @@ pub(crate) struct MessageReceiver {
     timestamp: RtpsTime,
     rtps_message: Option<Arc<RtpsMessage<'static>>>,
     sender_addr: SocketAddr, // for extended discovery message
+    // The transport the message arrived on; unlike the reply locators, INFO_REPLY cannot change it.
+    received_locator_kind: i32,
     // Identity of the certificate the message's connection authenticated with.
     peer_identity: Option<[u8; IDENTITY_LEN]>,
     identity_required: bool,
@@ -128,6 +130,7 @@ impl MessageReceiver {
             timestamp: RtpsTime::INVALID,
             rtps_message: None,
             sender_addr: *from_addr,
+            received_locator_kind: locator_kind,
             peer_identity: None,
             identity_required: false,
             tls_policy: None,
@@ -192,6 +195,11 @@ impl MessageReceiver {
 
     pub(crate) fn sender_addr(&self) -> SocketAddr {
         self.sender_addr
+    }
+
+    /// True when the message came off this participant's own zero-copy ring.
+    pub(crate) fn received_over_shm(&self) -> bool {
+        self.received_locator_kind == LOCATOR_KIND_SHM
     }
 
     // 8.3.6.4 Change in state of Receiver
