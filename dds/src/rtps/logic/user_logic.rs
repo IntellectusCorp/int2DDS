@@ -3445,8 +3445,8 @@ impl UserLogic {
     }
 
     /// The remote writer's peer segment, resolved once per DATA message ahead of the
-    /// fan-out. `None`, warning once, when this participant has no `ShmRuntime` (a
-    /// descriptor can arrive over UDP) or the peer cannot be mapped.
+    /// fan-out. `None`, warning once, when this participant has no `ShmRuntime` or the
+    /// peer cannot be mapped.
     fn resolve_shm_peer(&self, remote_writer_guid: Guid) -> Option<Arc<PeerSegment>> {
         let Some(rt) = self.transport.shm_runtime() else {
             if descriptor_rejects().note(DescriptorRejectReason::NoLocalRuntime) {

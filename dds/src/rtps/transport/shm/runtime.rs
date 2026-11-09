@@ -100,7 +100,7 @@ impl FallbackCounters {
 /// `FallbackReason`: a rejected descriptor has no copy path to retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DescriptorRejectReason {
-    /// No local `ShmRuntime`; a descriptor can still arrive over UDP or TCP.
+    /// No local `ShmRuntime`.
     NoLocalRuntime,
     /// `PeerMap::resolve` could not map the remote writer's segment.
     PeerUnresolved,
