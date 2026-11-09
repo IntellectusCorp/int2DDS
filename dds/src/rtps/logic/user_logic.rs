@@ -3206,8 +3206,8 @@ impl UserLogic {
 
     /// Hand an assembled descriptor to the destination's zero-copy ring. Every SHM
     /// locator in `selected` names the same participant, so the first ring that takes
-    /// it is the only one written to. `false` when none did (`RingFull`, `PeerGone`);
-    /// the fallback is counted here, once, not per locator tried.
+    /// it is the only one written to. `false` when none did (`RingFull`, `PeerGone`,
+    /// `DescriptorTooLarge`); the fallback is counted here, once, not per locator tried.
     fn try_send_to_peers(
         &self,
         selected: &[&Locator],
@@ -3225,11 +3225,8 @@ impl UserLogic {
         let Some(rt) = self.transport.shm_runtime() else {
             return false;
         };
-        let reason = match last_error.map(|e| e.kind()) {
-            Some(std::io::ErrorKind::NotFound) => FallbackReason::PeerGone,
-            Some(std::io::ErrorKind::WouldBlock) => FallbackReason::RingFull,
-            // `Unsupported`, or nothing tried: not a send-time fallback.
-            _ => return false,
+        let Some(reason) = last_error.and_then(|e| send_time_fallback(e.kind())) else {
+            return false;
         };
         if rt.fallbacks().note(reason) {
             info!("[shm] send-time fallback for {dst_prefix:?}: {reason:?}");
@@ -3509,6 +3506,17 @@ impl UserLogic {
             self.add_change_to_reader_cache_and_notify(reader, pending_delivery)?;
         }
         Ok(())
+    }
+}
+
+/// The fallback a `send_to_peer` refusal counts as; `None` for `Unsupported`, which is not a
+/// send-time fallback.
+fn send_time_fallback(kind: std::io::ErrorKind) -> Option<FallbackReason> {
+    match kind {
+        std::io::ErrorKind::NotFound => Some(FallbackReason::PeerGone),
+        std::io::ErrorKind::WouldBlock => Some(FallbackReason::RingFull),
+        std::io::ErrorKind::InvalidInput => Some(FallbackReason::DescriptorTooLarge),
+        _ => None,
     }
 }
 
@@ -7097,6 +7105,20 @@ mod tests {
         let cache = reader.reader_cache();
         let guard = cache.lock().expect("reader cache lock");
         assert_eq!(guard.get_seq_num_max(), Some(SequenceNumber::from_i64(sn.to_i64() + 4)));
+    }
+
+    /// A descriptor too big for a ring cell is refused by every ring, so counting it as a full
+    /// ring would point at the reader when the writer built a message no ring can take.
+    #[test]
+    fn each_send_to_peer_refusal_maps_to_its_own_fallback_reason() {
+        use std::io::ErrorKind;
+        assert_eq!(send_time_fallback(ErrorKind::NotFound), Some(FallbackReason::PeerGone));
+        assert_eq!(send_time_fallback(ErrorKind::WouldBlock), Some(FallbackReason::RingFull));
+        assert_eq!(
+            send_time_fallback(ErrorKind::InvalidInput),
+            Some(FallbackReason::DescriptorTooLarge)
+        );
+        assert_eq!(send_time_fallback(ErrorKind::Unsupported), None);
     }
 
     /// A slot claim that fails drops that one sample. The samples before it that are still on

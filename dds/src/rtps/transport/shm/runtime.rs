@@ -47,8 +47,8 @@ fn parse_size(raw: &str) -> Option<u64> {
 }
 
 /// Why a sample took the copy path. `NoLocalReader` through
-/// `DurabilityTooStrong` are decided at `write()`, `RingFull` and `PeerGone` at
-/// send time. Two cases have no variant because no counter can hold them: a
+/// `DurabilityTooStrong` are decided at `write()`, `RingFull` through
+/// `DescriptorTooLarge` at send time. Two cases have no variant because no counter can hold them: a
 /// participant whose runtime never started is reported by `ShmRuntime::start`
 /// instead, and a platform without a kernel wakeup polls and keeps using slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +60,8 @@ pub(crate) enum FallbackReason {
     DurabilityTooStrong,
     RingFull,
     PeerGone,
+    /// The assembled descriptor message does not fit a ring cell.
+    DescriptorTooLarge,
 }
 
 impl FallbackReason {
@@ -72,11 +74,12 @@ impl FallbackReason {
             FallbackReason::DurabilityTooStrong => 4,
             FallbackReason::RingFull => 5,
             FallbackReason::PeerGone => 6,
+            FallbackReason::DescriptorTooLarge => 7,
         }
     }
 }
 
-pub(crate) const FALLBACK_REASONS: usize = 7;
+pub(crate) const FALLBACK_REASONS: usize = 8;
 
 #[derive(Default)]
 pub(crate) struct FallbackCounters {

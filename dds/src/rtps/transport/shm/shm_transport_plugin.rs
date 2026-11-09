@@ -171,7 +171,8 @@ impl TransportPlugin for ShmTransportPlugin {
 
     /// Reports why it failed through `ErrorKind` and counts nothing: only the
     /// caller knows when every locator has refused. `NotFound` is `PeerGone`,
-    /// `WouldBlock` is `RingFull`, `Unsupported` means no zero-copy path.
+    /// `WouldBlock` is `RingFull`, `InvalidInput` is `DescriptorTooLarge`,
+    /// `Unsupported` means no zero-copy path.
     fn send_to_peer(
         &self,
         data: &[u8],
@@ -193,7 +194,13 @@ impl TransportPlugin for ShmTransportPlugin {
         if pushed == Err(RingError::Preempted) {
             pushed = peer.push_and_signal(data, SPILL_NONE);
         }
-        pushed.map_err(|e| io::Error::new(io::ErrorKind::WouldBlock, format!("{e:?}")))
+        pushed.map_err(|e| {
+            let kind = match e {
+                RingError::TooLarge => io::ErrorKind::InvalidInput,
+                RingError::Full | RingError::Preempted => io::ErrorKind::WouldBlock,
+            };
+            io::Error::new(kind, format!("{e:?}"))
+        })
     }
 
     fn can_handle(&self, locator: &Locator) -> bool {
@@ -380,6 +387,10 @@ mod tests {
         let (len, _) =
             peer.ring_mut().pop(&mut out, |_| true).expect("the peer's ring must carry it");
         assert_eq!(&out[..len as usize], b"descriptor");
+
+        let oversize = [0u8; RING_INLINE + 1];
+        let err = plugin.send_to_peer(&oversize, &locator, PEER_PREFIX).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
         // Another host's SHM locator, and a UDP one, are not zero-copy targets.
         let theirs = Locator::from_shm(&Ipv4Addr::new(192, 168, 1, 50), 7410);

@@ -43,6 +43,8 @@ pub(crate) struct RingHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RingError {
     Full,
+    /// Longer than a cell's inline buffer; no ring can carry it.
+    TooLarge,
     /// The cell was reclaimed by `recover_if_wedged` because the registry
     /// declared this producer dead; the payload was not published.
     Preempted,
@@ -160,7 +162,7 @@ impl Ring {
     /// `tag` is the calling participant's `producer_tag`.
     pub(crate) fn push(&self, payload: &[u8], spill: u32, tag: u32) -> Result<(), RingError> {
         if payload.len() > RING_INLINE {
-            return Err(RingError::Full);
+            return Err(RingError::TooLarge);
         }
         let header = self.header();
         let pos = loop {
@@ -463,13 +465,20 @@ mod tests {
         assert!(r.pop(&mut out, live).is_none());
     }
 
+    /// No ring could ever take it, so a caller must not count it as a full ring.
+    #[test]
+    fn a_payload_past_the_inline_cell_is_too_large_even_in_an_empty_ring() {
+        let (_g, r) = ring(2);
+        assert_eq!(r.push(&[0u8; RING_INLINE + 1], SPILL_NONE, T), Err(RingError::TooLarge));
+        assert_eq!(r.push(&[0u8; RING_INLINE], SPILL_NONE, T), Ok(()));
+    }
+
     #[test]
     fn a_full_ring_reports_full_and_never_overwrites() {
         let (_g, mut r) = ring(2);
         r.push(b"a", SPILL_NONE, T).unwrap();
         r.push(b"b", SPILL_NONE, T).unwrap();
         assert_eq!(r.push(b"c", SPILL_NONE, T), Err(RingError::Full));
-        assert_eq!(r.push(&[0u8; RING_INLINE + 1], SPILL_NONE, T), Err(RingError::Full));
         let mut out = [0u8; RING_INLINE];
         let (len, _) = r.pop(&mut out, live).unwrap();
         assert_eq!(&out[..len as usize], b"a");
