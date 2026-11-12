@@ -139,6 +139,10 @@ fn parse_args() -> Args {
                 println!("int2dds-idl {}", env!("CARGO_PKG_VERSION"));
                 process::exit(0);
             }
+            "--product" => {
+                println!("int2dds-idl (int2DDS v{})", env!("CARGO_PKG_VERSION"));
+                process::exit(0);
+            }
             arg if arg.starts_with('-') => {
                 eprintln!("unknown option: {}", arg);
                 process::exit(1);
@@ -209,7 +213,8 @@ OPTIONS:
     --ros2-package <NAME>     Override the package for flat (module-less) IDL under --ros2
     --ros2-kind <KIND>        Interface kind (msg|srv|action) for --ros2-package (default: msg)
     -h, --help                Print help
-    -V, --version             Print version"
+    -V, --version             Print version
+    --product                 Print the product name and version"
     );
 }
 
