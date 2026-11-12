@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define INT2DDS_PRODUCT_VERSION "int2DDS v1.0.1"
+
 #if defined(__GNUC__) || defined(__clang__)
 #define INT2DDS_DEPRECATED(msg) __attribute__((deprecated(msg)))
 #elif defined(_MSC_VER)
