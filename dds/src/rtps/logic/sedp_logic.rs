@@ -3403,6 +3403,12 @@ impl UnicastMessageProcessor for SedpLogic {
             let cache_guard = writer_cache.lock().unwrap();
             for seq_num in missing_sequence_numbers {
                 match cache_guard.get_change(seq_num) {
+                    // Directed at another reader (TypeLookup): irrelevant to this one.
+                    Some(change)
+                        if change.directed_to().is_some_and(|t| t != remote_reader_guid) =>
+                    {
+                        gap_sns.push(seq_num)
+                    }
                     Some(change) => missing_changes.push(change),
                     None => gap_sns.push(seq_num),
                 }
@@ -3884,6 +3890,201 @@ mod tests {
             data_submessage_count, 3,
             "each announcement already in the history has to be sent to the new peer"
         );
+    }
+
+    /// A TypeLookup reply is its requester's alone; another reader that NACKs it (it saw the
+    /// sequence number in a heartbeat) is told GAP, not sent the reply.
+    #[test]
+    fn a_nack_for_a_type_lookup_reply_meant_for_another_reader_is_answered_with_gap() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let buffers = transport.buffers.clone();
+        let mut sedp_logic = SedpLogic::new(participant.clone(), transport);
+
+        let remote_prefix = [9u8; 12];
+        let mut remote = SPDPDiscoveredParticipantData::new(
+            0,
+            remote_prefix,
+            Participant::init_builtin_endpoints(),
+        );
+        remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
+            &Ipv4Addr::new(127, 0, 0, 1),
+            7410,
+        ));
+        participant.add_remote_participant_proxy_data(remote);
+        let writer = participant.type_lookup_reply_writer();
+        writer.matched_reader_add(ReaderProxy::new(
+            Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REPLY_READER),
+            EntityId::UNKNOWN,
+            vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 1), 7410)],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        // The reader the reply is for, matched like the one that NACKs it.
+        let requester = Guid::new([8u8; 12], EntityId::TYPE_LOOKUP_REPLY_READER);
+        writer.matched_reader_add(ReaderProxy::new(
+            requester,
+            EntityId::UNKNOWN,
+            vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 2), 7410)],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        let mut change =
+            writer.new_change(ChangeKind::Alive, vec![0u8; 8], InstanceHandle::NIL, None);
+        change.set_directed_to(Some(requester));
+        let sn = change.sequence_number();
+        writer
+            .writer_cache()
+            .lock()
+            .unwrap()
+            .add_change_builtin(Arc::new(change), writer.as_ref())
+            .unwrap();
+        buffers.lock().unwrap().clear();
+
+        let mut flag = SubmessageHeaderFlag::new();
+        flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
+        let acknack = AckNack::new(
+            EntityId::TYPE_LOOKUP_REPLY_READER,
+            EntityId::TYPE_LOOKUP_REPLY_WRITER,
+            SequenceNumberSet::from_vec(sn, vec![sn]),
+            1,
+        );
+        sedp_logic
+            .handle_acknack_message(
+                &Header::new(remote_prefix),
+                &SubmessageHeader::new(SubmessageId::ACKNACK, flag.flag, 0),
+                &acknack,
+            )
+            .expect("the acknack is accepted");
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let (mut data, mut gap) = (0, 0);
+        for buffer in buffers.lock().unwrap().iter() {
+            let mut receiver = MessageReceiver::new(remote_prefix, &addr);
+            receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
+            for submessage in receiver.parse_submessages() {
+                match submessage {
+                    TypedSubmessage::Data(_, d)
+                        if d.writer_id == EntityId::TYPE_LOOKUP_REPLY_WRITER =>
+                    {
+                        data += 1
+                    }
+                    TypedSubmessage::Gap(..) => gap += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!((data, gap), (0, 1), "another requester's reply was resent instead of GAPped");
+    }
+
+    /// A replier with `requesters` matched TypeLookup request writers, each its own participant.
+    fn type_lookup_replier(requesters: &[GuidPrefix]) -> (SedpLogic, Arc<Participant>) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let sedp_logic =
+            SedpLogic::new(participant.clone(), Arc::new(CountingTransport::default()));
+        let reader = participant.type_lookup_request_reader();
+        for (i, prefix) in requesters.iter().enumerate() {
+            let mut remote = SPDPDiscoveredParticipantData::new(
+                0,
+                *prefix,
+                Participant::init_builtin_endpoints(),
+            );
+            remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
+                &Ipv4Addr::new(127, 0, 0, 1),
+                7410 + 2 * i as u32,
+            ));
+            participant.add_remote_participant_proxy_data(remote);
+            let request_writer = Guid::new(*prefix, EntityId::TYPE_LOOKUP_REQUEST_WRITER);
+            reader.matched_writer_add(WriterProxy::new(
+                request_writer,
+                request_writer.entity_id(),
+                Vec::new(),
+                Vec::new(),
+                0,
+                PublicationBuiltinTopicData::default(),
+                reader.get_update_status_callback(),
+            ));
+        }
+        (sedp_logic, participant)
+    }
+
+    fn get_types_request(from: GuidPrefix, sn: SequenceNumber) -> (Header, Data<'static>) {
+        use crate::xtypes::{
+            GetTypesIn, RequestHeader, SampleIdentity, TypeLookupCall, TypeLookupRequest,
+        };
+        let request = TypeLookupRequest {
+            header: RequestHeader {
+                request_id: SampleIdentity::new(
+                    Guid::new(from, EntityId::TYPE_LOOKUP_REQUEST_WRITER),
+                    sn,
+                ),
+                instance_name: String::new(),
+            },
+            data: TypeLookupCall::GetTypes(GetTypesIn { type_ids: Vec::new() }),
+        };
+        let mut data = Data::new(
+            EntityId::TYPE_LOOKUP_REQUEST_READER,
+            EntityId::TYPE_LOOKUP_REQUEST_WRITER,
+            sn,
+        );
+        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(request.serialize())));
+        (Header::new(from), data)
+    }
+
+    /// A request that arrives twice (a repair, or the direct send plus the pump) must be answered
+    /// once: answering each copy is how one getTypes turns into a burst of replies.
+    #[test]
+    fn a_repeated_type_lookup_request_is_answered_once() {
+        let remote_prefix = [7u8; 12];
+        let (sedp_logic, participant) = type_lookup_replier(&[remote_prefix]);
+        let (header, data) = get_types_request(remote_prefix, SequenceNumber::new(0, 1));
+        for _ in 0..2 {
+            let _ = sedp_logic.handle_type_lookup_data(&header, &data);
+        }
+
+        let cache = participant.type_lookup_reply_writer().writer_cache();
+        let cache = cache.lock().unwrap();
+        assert_eq!(cache.len(), 1, "the second copy of one request was answered again");
+        assert_eq!(
+            cache.get_change(SequenceNumber::new(0, 1)).and_then(|c| c.directed_to()),
+            Some(Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REPLY_READER)),
+            "the reply must be for the requester's reply reader alone"
+        );
+    }
+
+    /// Guards the repeat check's key: every requester numbers its requests from 1, so the same
+    /// number from another requester is a new request.
+    #[test]
+    fn requests_from_different_requesters_are_each_answered() {
+        let requesters = [[7u8; 12], [8u8; 12], [9u8; 12]];
+        let (sedp_logic, participant) = type_lookup_replier(&requesters);
+        for prefix in requesters {
+            let (header, data) = get_types_request(prefix, SequenceNumber::new(0, 1));
+            let _ = sedp_logic.handle_type_lookup_data(&header, &data);
+        }
+
+        let cache = participant.type_lookup_reply_writer().writer_cache();
+        let cache = cache.lock().unwrap();
+        let mut targets: Vec<Option<Guid>> = (1..=3)
+            .map(|sn| cache.get_change(SequenceNumber::new(0, sn)).and_then(|c| c.directed_to()))
+            .collect();
+        targets.sort();
+        let mut expected: Vec<Option<Guid>> = requesters
+            .iter()
+            .map(|p| Some(Guid::new(*p, EntityId::TYPE_LOOKUP_REPLY_READER)))
+            .collect();
+        expected.sort();
+        assert_eq!(targets, expected, "not every requester got its own reply");
     }
 
     /// The peer may hold our acks from before we dropped it, so on discovery each SEDP reader

@@ -38,6 +38,8 @@ pub(crate) struct ReaderProxy {
     subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
     last_irrelevant_sn: SequenceNumber, // Sequence numbers <= this value are irrelevant for this reader and should be responded with GAP.
     is_first_hb_sent: bool,             // has stateful writer sent first heartbeat to this reader
+    // Changes directed at other readers have been GAPped to this reader up to here.
+    last_gapped_elsewhere_sn: SequenceNumber,
 }
 
 use std::hash::{Hash, Hasher};
@@ -89,6 +91,7 @@ impl ReaderProxy {
             subscription_builtin_topic_data,
             last_irrelevant_sn,
             is_first_hb_sent: false,
+            last_gapped_elsewhere_sn: SequenceNumber::new(0, 0),
         }
     }
 
@@ -277,6 +280,14 @@ impl ReaderProxy {
         signatures: Option<Vec<FilterSignature>>,
     ) {
         self.content_filter_signatures = signatures;
+    }
+
+    pub(crate) fn last_gapped_elsewhere_sn(&self) -> SequenceNumber {
+        self.last_gapped_elsewhere_sn
+    }
+
+    pub(crate) fn set_last_gapped_elsewhere_sn(&mut self, sn: SequenceNumber) {
+        self.last_gapped_elsewhere_sn = sn;
     }
 
     pub(crate) fn last_irrelevant_sn(&self) -> SequenceNumber {

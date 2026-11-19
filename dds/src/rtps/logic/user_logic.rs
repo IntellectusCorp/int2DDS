@@ -1162,6 +1162,18 @@ impl UserLogic {
                     }
 
                     if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
+                        // Directed at another reader: send nothing. Count it acknowledged when
+                        // nothing older is outstanding, so it draws no heartbeat; the GAP for it
+                        // rides this reader's next directed DATA.
+                        if a_change.directed_to().is_some_and(|target| target != reader_guid) {
+                            if reader_proxy.max_acked_sn().to_i64() >= a_change_seq_num.to_i64() - 1
+                            {
+                                reader_proxy.acked_changes_set(a_change_seq_num);
+                            }
+                            reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
+                            continue;
+                        }
+
                         // A change in a coherent set whose first sequence number was GAPped can never
                         // complete on this reader; answer with GAP so no DATA references a gapped set start.
                         if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
@@ -1176,6 +1188,21 @@ impl UserLogic {
                             continue;
                         }
 
+                        // The heartbeat riding this DATA covers the whole history, including
+                        // changes never sent here because they were for other readers.
+                        if a_change.directed_to() == Some(reader_guid) {
+                            if reliable {
+                                for (start, end) in directed_elsewhere_runs(
+                                    history_cache,
+                                    reader_guid,
+                                    reader_proxy.last_gapped_elsewhere_sn(),
+                                    a_change_seq_num,
+                                ) {
+                                    unsent_change_types.push(UnsentChangeType::Gap(start, end));
+                                }
+                            }
+                            reader_proxy.set_last_gapped_elsewhere_sn(a_change_seq_num);
+                        }
                         unsent_change_types.push(UnsentChangeType::Data(a_change_seq_num));
                     } else {
                         warn!(
@@ -4095,6 +4122,33 @@ impl UnicastMessageProcessor for UserLogic {
     }
 }
 
+/// Contiguous runs of sequence numbers in `(after, before)` whose change is directed at a reader
+/// other than `reader`.
+fn directed_elsewhere_runs(
+    history_cache: &WriterHistoryCache,
+    reader: Guid,
+    after: SequenceNumber,
+    before: SequenceNumber,
+) -> Vec<(SequenceNumber, SequenceNumber)> {
+    let mut runs: Vec<(SequenceNumber, SequenceNumber)> = Vec::new();
+    let mut cursor = after;
+    while let Some(change) = history_cache.next_change_after(cursor) {
+        let sn = change.sequence_number();
+        if sn >= before {
+            break;
+        }
+        cursor = sn;
+        if change.directed_to().is_none_or(|target| target == reader) {
+            continue;
+        }
+        match runs.last_mut() {
+            Some((_, end)) if end.to_i64() + 1 == sn.to_i64() => *end = sn,
+            _ => runs.push((sn, sn)),
+        }
+    }
+    runs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4501,6 +4555,9 @@ mod tests {
         /// The riding HEARTBEAT's firstSN and lastSN, if any.
         heartbeat_first_sn: Option<i64>,
         heartbeat_last_sn: Option<i64>,
+        /// readerId of every DATA submessage.
+        data_reader_ids: Vec<[u8; 4]>,
+        carries_gap: bool,
     }
 
     /// A transport that sends nowhere and records what it was asked to send.
@@ -4526,6 +4583,8 @@ mod tests {
                 carries_heartbeat: false,
                 heartbeat_first_sn: None,
                 heartbeat_last_sn: None,
+                data_reader_ids: Vec::new(),
+                carries_gap: false,
             };
             while offset + 4 <= data.len() {
                 let id = data[offset];
@@ -4542,6 +4601,10 @@ mod tests {
                         datagram.heartbeat_first_sn = Some(sn_at(body + 8));
                         datagram.heartbeat_last_sn = Some(sn_at(body + 16));
                     }
+                } else if id == SubmessageId::DATA.as_u8() && body + 8 <= data.len() {
+                    datagram.data_reader_ids.push(data[body + 4..body + 8].try_into().unwrap());
+                } else if id == SubmessageId::GAP.as_u8() {
+                    datagram.carries_gap = true;
                 } else if id == SubmessageId::DATA_FRAG.as_u8() && body + 26 <= data.len() {
                     datagram.first_fragment =
                         u32::from_le_bytes(data[body + 20..body + 24].try_into().unwrap());
@@ -4737,6 +4800,150 @@ mod tests {
                 datagram.first_fragment
             );
             *expected += datagram.fragment_count as u32;
+        }
+    }
+
+    /// Puts a change directed at `target` into the cache as sequence number `n`.
+    fn stage_directed_change(writer: &Arc<StatefulWriter>, target: Guid, n: u32) -> SequenceNumber {
+        let sn = SequenceNumber::new(0, n);
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            writer.guid(),
+            InstanceHandle::NIL,
+            sn,
+            vec![0x5A; 64],
+            None,
+        );
+        change.set_directed_to(Some(target));
+        writer
+            .writer_cache()
+            .lock()
+            .unwrap()
+            .add_change(Arc::new(change), writer.as_ref())
+            .unwrap();
+        sn
+    }
+
+    fn reader_guid_at(prefix: GuidPrefix, r: u8) -> Guid {
+        Guid::new(
+            prefix,
+            EntityId::new([0x20 + r, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY),
+        )
+    }
+
+    /// Matches a reader behind its own participant and locator, so what reaches it is told
+    /// apart by locator.
+    fn add_remote_reader(writer: &Arc<StatefulWriter>, i: u8) -> (Guid, Locator) {
+        let guid = Guid::new([0xD0 + i; 12], EntityId::TYPE_LOOKUP_REPLY_READER);
+        let locator = Locator::from_ip(Ipv4Addr::new(127, 0, 1, i), 7411);
+        writer.matched_reader_add(ReaderProxy::new(
+            guid,
+            EntityId::UNKNOWN,
+            vec![locator.clone()],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        (guid, locator)
+    }
+
+    #[test]
+    fn a_directed_change_reaches_only_its_target_reader() {
+        let (_participant, user_logic, recorder, writer, _) = windowed_writer(1, 1, None);
+        let (target, target_locator) = add_remote_reader(&writer, 1);
+        add_remote_reader(&writer, 2);
+        stage_directed_change(&writer, target, 1);
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        let reached: Vec<Locator> = round
+            .iter()
+            .filter(|d| !d.data_reader_ids.is_empty())
+            .map(|d| d.locator.clone())
+            .collect();
+        assert_eq!(reached, vec![target_locator], "the DATA did not go to its target alone");
+    }
+
+    /// The target's ledger must account for the sequence numbers skipped for other readers, or
+    /// it NACKs them on every heartbeat until a round of GAPs settles it.
+    #[test]
+    fn a_target_is_told_which_changes_went_to_other_readers() {
+        let (_participant, user_logic, recorder, writer, _) = windowed_writer(1, 1, None);
+        let (first, _) = add_remote_reader(&writer, 1);
+        let (second, second_locator) = add_remote_reader(&writer, 2);
+        stage_directed_change(&writer, first, 1);
+        first_transmission(&user_logic, &writer, &recorder);
+        stage_directed_change(&writer, second, 2);
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        let to_second: Vec<&SentDatagram> =
+            round.iter().filter(|d| d.locator == second_locator).collect();
+        assert!(
+            to_second.iter().any(|d| !d.data_reader_ids.is_empty()),
+            "the second change did not reach its target"
+        );
+        assert!(
+            to_second.iter().any(|d| d.carries_gap),
+            "the target was not told that sequence number 1 is not for it"
+        );
+    }
+
+    /// A reader matched after changes for other readers were written is never sent them, yet
+    /// its first heartbeat still covers them; it must be told they are not for it.
+    #[test]
+    fn a_target_matched_late_is_told_about_earlier_changes_for_other_readers() {
+        let (_participant, user_logic, recorder, writer, _) = windowed_writer(1, 1, None);
+        let (first, _) = add_remote_reader(&writer, 1);
+        stage_directed_change(&writer, first, 1);
+        first_transmission(&user_logic, &writer, &recorder);
+
+        // Matched as discovery matches a builtin reader: counted as sent up to the last change.
+        let late = Guid::new([0xE0; 12], EntityId::TYPE_LOOKUP_REPLY_READER);
+        let late_locator = Locator::from_ip(Ipv4Addr::new(127, 0, 2, 1), 7411);
+        writer.matched_reader_add(ReaderProxy::new(
+            late,
+            EntityId::UNKNOWN,
+            vec![late_locator.clone()],
+            Vec::new(),
+            SequenceNumber::new(0, 1),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        stage_directed_change(&writer, late, 2);
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        let to_late: Vec<&SentDatagram> =
+            round.iter().filter(|d| d.locator == late_locator).collect();
+        assert!(to_late.iter().any(|d| !d.data_reader_ids.is_empty()), "its change did not arrive");
+        assert!(
+            to_late.iter().any(|d| d.carries_gap),
+            "the late reader was not told that sequence number 1 is not for it"
+        );
+    }
+
+    #[test]
+    fn skipped_readers_count_a_directed_change_as_acknowledged() {
+        let (_participant, user_logic, recorder, writer, prefix) = windowed_writer(2, 1, None);
+        let target = reader_guid_at(prefix, 0);
+        let sn = stage_directed_change(&writer, target, 1);
+        first_transmission(&user_logic, &writer, &recorder);
+
+        let proxies = writer.reader_proxies();
+        let proxies = proxies.lock().unwrap();
+        for proxy in proxies.iter() {
+            let acked = proxy.max_acked_sn() >= sn;
+            assert_eq!(
+                acked,
+                proxy.remote_reader_guid() != target,
+                "{}: a skipped reader must not be heartbeated for it, the target must ack it",
+                proxy.remote_reader_guid()
+            );
         }
     }
 
