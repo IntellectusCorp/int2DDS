@@ -4558,6 +4558,8 @@ mod tests {
         /// readerId of every DATA submessage.
         data_reader_ids: Vec<[u8; 4]>,
         carries_gap: bool,
+        /// `(gapStart, gapList.base - 1)` of every GAP; the bitmap is not read.
+        gap_ranges: Vec<(i64, i64)>,
     }
 
     /// A transport that sends nowhere and records what it was asked to send.
@@ -4585,6 +4587,7 @@ mod tests {
                 heartbeat_last_sn: None,
                 data_reader_ids: Vec::new(),
                 carries_gap: false,
+                gap_ranges: Vec::new(),
             };
             while offset + 4 <= data.len() {
                 let id = data[offset];
@@ -4605,6 +4608,14 @@ mod tests {
                     datagram.data_reader_ids.push(data[body + 4..body + 8].try_into().unwrap());
                 } else if id == SubmessageId::GAP.as_u8() {
                     datagram.carries_gap = true;
+                    if body + 24 <= data.len() {
+                        let sn_at = |at: usize| {
+                            let high = i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+                            let low = u32::from_le_bytes(data[at + 4..at + 8].try_into().unwrap());
+                            SequenceNumber::new(high, low).to_i64()
+                        };
+                        datagram.gap_ranges.push((sn_at(body + 8), sn_at(body + 16) - 1));
+                    }
                 } else if id == SubmessageId::DATA_FRAG.as_u8() && body + 26 <= data.len() {
                     datagram.first_fragment =
                         u32::from_le_bytes(data[body + 20..body + 24].try_into().unwrap());
@@ -4885,9 +4896,11 @@ mod tests {
             to_second.iter().any(|d| !d.data_reader_ids.is_empty()),
             "the second change did not reach its target"
         );
-        assert!(
-            to_second.iter().any(|d| d.carries_gap),
-            "the target was not told that sequence number 1 is not for it"
+        let gaps: Vec<(i64, i64)> = to_second.iter().flat_map(|d| d.gap_ranges.clone()).collect();
+        assert_eq!(
+            gaps,
+            vec![(1, 1)],
+            "the target was not told that only sequence number 1 is not for it"
         );
     }
 
@@ -4921,9 +4934,11 @@ mod tests {
         let to_late: Vec<&SentDatagram> =
             round.iter().filter(|d| d.locator == late_locator).collect();
         assert!(to_late.iter().any(|d| !d.data_reader_ids.is_empty()), "its change did not arrive");
-        assert!(
-            to_late.iter().any(|d| d.carries_gap),
-            "the late reader was not told that sequence number 1 is not for it"
+        let gaps: Vec<(i64, i64)> = to_late.iter().flat_map(|d| d.gap_ranges.clone()).collect();
+        assert_eq!(
+            gaps,
+            vec![(1, 1)],
+            "the late reader was not told that only sequence number 1 is not for it"
         );
     }
 
