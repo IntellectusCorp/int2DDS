@@ -32,6 +32,7 @@ pub(crate) struct ShmTransportPlugin {
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
+    multicast_enabled: bool,
 
     // UDP listeners — discovery is always UDP
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
@@ -59,11 +60,22 @@ impl ShmTransportPlugin {
         let port_manager = udp_config.port_manager;
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).
-        let discovery_mc_port =
-            port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
-        let user_mc_port = port_manager.calculate_user_traffic_multicast_port(domain_id)?;
-        let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
-        let user_mc = Some(UdpListener::new_multicast(user_mc_port, &working_ips)?);
+        let multicast_enabled = udp_config.multicast_enabled;
+        let (discovery_mc, user_mc) = if multicast_enabled {
+            let discovery_mc_port =
+                port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
+            let user_mc_port = port_manager.calculate_user_traffic_multicast_port(domain_id)?;
+            (
+                Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?),
+                Some(UdpListener::new_multicast(user_mc_port, &working_ips)?),
+            )
+        } else {
+            log::info!(
+                "SPDP multicast off (domain={}): announcing to initial peers only, multicast group not joined",
+                domain_id
+            );
+            (None, None)
+        };
 
         // Unicast listeners — both must bind at the same participant_id
         // (matches develop's Socket contract).
@@ -97,6 +109,7 @@ impl ShmTransportPlugin {
             domain_id,
             participant_id,
             working_ips,
+            multicast_enabled,
             discovery_multicast_listener: Mutex::new(discovery_mc),
             discovery_unicast_listener: Mutex::new(Some(discovery_uc)),
             user_multicast_listener: Mutex::new(user_mc),
@@ -140,8 +153,10 @@ impl TransportPlugin for ShmTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
-                // Discovery always uses UDP multicast, plus fan-out to initial_peers.
-                let _ = self.udp_sender.send_multicast(self.domain_id, data);
+                // UDP multicast unless turned off, plus fan-out to initial_peers.
+                if self.multicast_enabled {
+                    let _ = self.udp_sender.send_multicast(self.domain_id, data);
+                }
                 for peer_addr in *initial_peers {
                     let _ = self.udp_sender.send(peer_addr, data);
                 }
