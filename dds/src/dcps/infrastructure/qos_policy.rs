@@ -916,6 +916,13 @@ pub const PROP_PARTICIPANT_ID: &str = "int2dds.participant_id";
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
+/// Whether SPDP uses multicast alongside `initial_peers` (`true` | `false`).
+/// `false` stops sending SPDP to the multicast group and joining it, so only
+/// the initial peers are announced to. Default `true`. Ignored when no unicast
+/// IPv4 initial peer is configured, and on the hybrid transport. UDP and SHM only. Falls
+/// back to the `INT2DDS_INITIAL_PEERS_MULTICAST` env var when absent.
+pub const PROP_INITIAL_PEERS_MULTICAST: &str = "int2dds.initial_peers.multicast";
+
 /// Whether to dial peers discovered at runtime that are NOT in `initial_peers`.
 /// `false` (default): only dial `initial_peers` (or every advertised locator when
 /// `initial_peers` is empty).

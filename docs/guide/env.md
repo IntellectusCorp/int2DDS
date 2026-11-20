@@ -34,6 +34,7 @@ This document describes the environment variables available in int2DDS.
 | `INT2DDS_SEDP_HEARTBEAT_MS`          | SEDP heartbeat period (ms)                 | heartbeat_period (2000) |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
+| `INT2DDS_INITIAL_PEERS_MULTICAST`    | Use SPDP multicast alongside initial peers | true                    |
 | `INT2DDS_THREAD_MONITORING`          | Enable thread monitoring                   | false                   |
 | `INT2DDS_THREAD_MONITORING_LOG_PATH` | Thread monitoring log path                 | ./thread_monitoring.log |
 | `INT2DDS_FUNCTION_TIMING`            | Enable function timing                     | false                   |
@@ -601,7 +602,7 @@ cargo run --example hello_world_pub
 
 ### INT2DDS_INITIAL_PEERS
 
-Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages are sent via unicast to these peers in addition to the default multicast. Works with all transport modes. Format is comma-separated socket addresses.
+Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages are sent via unicast to these peers in addition to the default multicast (see [INT2DDS_INITIAL_PEERS_MULTICAST](#int2dds_initial_peers_multicast) to turn the multicast off). Works with all transport modes. Format is comma-separated socket addresses.
 
 - Format: `ip:port,ip:port,...`
 - The port must be the remote participant's **metatraffic unicast port** (discovery unicast port)
@@ -623,6 +624,31 @@ cargo run --example hello_world_pub
 export INT2DDS_INITIAL_PEERS="192.168.1.100:17410,192.168.1.100:17412"
 
 cargo run --example hello_world_pub
+```
+
+### INT2DDS_INITIAL_PEERS_MULTICAST
+
+Whether SPDP keeps using multicast while initial peers are set. `false` sends SPDP to the initial peers only and does not join the discovery or user multicast group, so a participant is discovered only by peers it names or that name it.
+
+- Values: `true` (default), `false`
+- Precedence: participant property `int2dds.initial_peers.multicast` → this env var
+- Applies on the UDP and SHM transports; the property is set per participant, the env var covers every participant in the process
+- Ignored (multicast stays on, with a warning) when no unicast IPv4 initial peer is set, and on the hybrid transport
+- Naming a peer on one side is enough: the named participant answers by unicast
+- Participants on the same host are discovered only when they are in the peer list (e.g. `127.0.0.1:7412`)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_INITIAL_PEERS = "192.168.1.100:7410"
+$env:INT2DDS_INITIAL_PEERS_MULTICAST = "false"
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_INITIAL_PEERS="192.168.1.100:7410"
+export INT2DDS_INITIAL_PEERS_MULTICAST=false
 ```
 
 ---
