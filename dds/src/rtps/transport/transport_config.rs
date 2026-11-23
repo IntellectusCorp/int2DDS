@@ -14,11 +14,12 @@ use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_DISCOVERY_MULTICAST_OFFSET,
-    PROP_DISCOVERY_UNICAST_OFFSET, PROP_DOMAIN_ID_GAIN, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_PARTICIPANT_ID, PROP_PARTICIPANT_ID_GAIN, PROP_PORT_BASE, PROP_TCP_BIND_PORT,
-    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
-    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_PEER_SEARCH_SLOTS, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PROP_DISCOVERY_UNICAST_OFFSET, PROP_DOMAIN_ID_GAIN, PROP_INITIAL_PEERS,
+    PROP_INITIAL_PEERS_MULTICAST, PROP_MULTICAST_TTL, PROP_PARTICIPANT_ID,
+    PROP_PARTICIPANT_ID_GAIN, PROP_PORT_BASE, PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS,
+    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
+    PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PEER_SEARCH_SLOTS,
+    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
     PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
     PROP_USER_MULTICAST_OFFSET, PROP_USER_UNICAST_OFFSET,
 };
@@ -44,6 +45,7 @@ pub(crate) struct UdpConfig {
     pub multicast_ttl: u8,
     pub port_manager: PortManager,
     pub participant_id: Option<u32>,
+    pub multicast_enabled: bool,
 }
 
 impl TransportConfig for UdpConfig {
@@ -69,8 +71,41 @@ impl TransportConfig for UdpConfig {
             })
             .or_else(crate::common::env::get_multicast_ttl_override)
             .unwrap_or(DEFAULT_MULTICAST_TTL);
-        Self { multicast_ttl, port_manager, participant_id }
+        let multicast_enabled = resolve_multicast_enabled(
+            property,
+            crate::common::env::get_initial_peers_multicast(),
+            crate::common::env::get_initial_peers(),
+        );
+        Self { multicast_ttl, port_manager, participant_id, multicast_enabled }
     }
+}
+
+/// SPDP multicast on/off: property → env → `true`. Turning it off needs at
+/// least one unicast IPv4 initial peer (property list, else the env list),
+/// otherwise nothing could be discovered.
+fn resolve_multicast_enabled(
+    property: &PropertyQosPolicy,
+    env_flag: Option<bool>,
+    env_peers: Vec<SocketAddr>,
+) -> bool {
+    let property_flag = prop_parse::<bool>(property, PROP_INITIAL_PEERS_MULTICAST);
+    if property_flag.or(env_flag).unwrap_or(true) {
+        return true;
+    }
+    let peers = match property.find_property(PROP_INITIAL_PEERS) {
+        Some(list) => crate::common::env::parse_initial_peers(list),
+        None => env_peers,
+    };
+    // The UDP sender is IPv4-only, and a group address is no peer once the group is left.
+    let has_peers =
+        peers.iter().any(|peer| matches!(peer, SocketAddr::V4(v4) if !v4.ip().is_multicast()));
+    if !has_peers {
+        log::warn!(
+            "{} is false but no unicast IPv4 initial peer is configured. Keeping SPDP multicast on.",
+            PROP_INITIAL_PEERS_MULTICAST
+        );
+    }
+    !has_peers
 }
 
 /// TCP transport parameters — all resolved per participant.
@@ -164,10 +199,14 @@ pub(crate) struct HybridConfig {
 
 impl TransportConfig for HybridConfig {
     fn from_property(property: &PropertyQosPolicy, domain_id: u32) -> Self {
-        Self {
-            udp: UdpConfig::from_property(property, domain_id),
-            tcp: TcpConfig::from_property(property, domain_id),
+        let udp = UdpConfig::from_property(property, domain_id);
+        if !udp.multicast_enabled {
+            log::warn!(
+                "{} is ignored on the hybrid transport: it discovers peers only over UDP multicast.",
+                PROP_INITIAL_PEERS_MULTICAST
+            );
         }
+        Self { udp, tcp: TcpConfig::from_property(property, domain_id) }
     }
 }
 
@@ -291,6 +330,94 @@ mod tests {
     fn clear_env() {
         unsafe { std::env::remove_var("INT2DDS_MULTICAST_TTL") };
         unsafe { std::env::remove_var("INT2DDS_TCP_PEER_SEARCH_SLOTS") };
+    }
+
+    fn props(pairs: &[(&str, &str)]) -> PropertyQosPolicy {
+        let mut p = PropertyQosPolicy::default();
+        for (name, value) in pairs {
+            p.add_property(*name, *value, false);
+        }
+        p
+    }
+
+    fn peer() -> Vec<SocketAddr> {
+        vec!["127.0.0.1:7410".parse().unwrap()]
+    }
+
+    const PEERS: (&str, &str) = (PROP_INITIAL_PEERS, "127.0.0.1:7410");
+
+    #[test]
+    fn multicast_enabled_by_default() {
+        assert!(resolve_multicast_enabled(&PropertyQosPolicy::default(), None, Vec::new()));
+        assert!(resolve_multicast_enabled(&props(&[PEERS]), None, Vec::new()));
+    }
+
+    #[test]
+    fn false_without_peers_keeps_multicast() {
+        let p = props(&[(PROP_INITIAL_PEERS_MULTICAST, "false")]);
+        assert!(resolve_multicast_enabled(&p, None, Vec::new()));
+        assert!(resolve_multicast_enabled(&PropertyQosPolicy::default(), Some(false), Vec::new()));
+    }
+
+    #[test]
+    fn env_false_with_env_peers_disables_multicast() {
+        assert!(!resolve_multicast_enabled(&PropertyQosPolicy::default(), Some(false), peer()));
+    }
+
+    #[test]
+    fn env_peers_count_as_peers() {
+        let p = props(&[(PROP_INITIAL_PEERS_MULTICAST, "false")]);
+        assert!(!resolve_multicast_enabled(&p, None, peer()));
+    }
+
+    #[test]
+    fn property_peers_replace_env_peers() {
+        // An empty property list overrides the env list, as participant init does.
+        let p = props(&[(PROP_INITIAL_PEERS, ""), (PROP_INITIAL_PEERS_MULTICAST, "false")]);
+        assert!(resolve_multicast_enabled(&p, None, peer()));
+    }
+
+    #[test]
+    fn property_overrides_env() {
+        let p = props(&[PEERS, (PROP_INITIAL_PEERS_MULTICAST, "true")]);
+        assert!(resolve_multicast_enabled(&p, Some(false), Vec::new()));
+    }
+
+    #[test]
+    fn property_value_parses_like_other_bool_properties() {
+        let p = props(&[PEERS, (PROP_INITIAL_PEERS_MULTICAST, " false ")]);
+        assert!(!resolve_multicast_enabled(&p, None, Vec::new()));
+        for value in ["FALSE", "0"] {
+            let p = props(&[PEERS, (PROP_INITIAL_PEERS_MULTICAST, value)]);
+            assert!(resolve_multicast_enabled(&p, None, Vec::new()), "{value}");
+        }
+    }
+
+    #[test]
+    fn invalid_value_falls_back_to_env_then_default() {
+        let p = props(&[PEERS, (PROP_INITIAL_PEERS_MULTICAST, "nope")]);
+        assert!(resolve_multicast_enabled(&p, None, Vec::new()));
+        assert!(!resolve_multicast_enabled(&p, Some(false), Vec::new()));
+    }
+
+    #[test]
+    fn only_unicast_ipv4_peers_count() {
+        for peers in ["239.255.0.1:7400", "[fe80::1]:7410", "239.255.0.1:7400,[::1]:7410"] {
+            let p = props(&[(PROP_INITIAL_PEERS, peers), (PROP_INITIAL_PEERS_MULTICAST, "false")]);
+            assert!(resolve_multicast_enabled(&p, None, Vec::new()), "{peers}");
+        }
+
+        let p = props(&[
+            (PROP_INITIAL_PEERS, "239.255.0.1:7400,127.0.0.1:7410"),
+            (PROP_INITIAL_PEERS_MULTICAST, "false"),
+        ]);
+        assert!(!resolve_multicast_enabled(&p, None, Vec::new()));
+    }
+
+    #[test]
+    fn udp_config_resolves_multicast_from_property() {
+        let p = props(&[PEERS, (PROP_INITIAL_PEERS_MULTICAST, "false")]);
+        assert!(!UdpConfig::from_property(&p, 0).multicast_enabled);
     }
 
     #[test]

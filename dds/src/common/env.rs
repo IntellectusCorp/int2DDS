@@ -56,6 +56,7 @@ pub fn init_from_env() {
     // - INT2DDS_XTYPES_RTI_KEY_COMPAT: Skip the XTypes 1.3 Table 19 key member rules in type matching, as RTI Connext does (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
+    // - INT2DDS_INITIAL_PEERS_MULTICAST: Use SPDP multicast alongside the initial peers; false sends SPDP to the initial peers only and skips joining the multicast group (true, false) - Default: true
     // - INT2DDS_TCP_PEER_SEARCH_SLOTS: Set how many participant slots a TCP peer named with the wildcard port stands for (1-125, one domain's port block) - Default: 16
 
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
@@ -327,6 +328,11 @@ pub fn set_initial_peers(peers: &[std::net::SocketAddr]) {
 
     log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", peers_str);
     unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", peers_str) };
+}
+
+/// Read `INT2DDS_INITIAL_PEERS_MULTICAST`. `None` when unset or invalid.
+pub fn get_initial_peers_multicast() -> Option<bool> {
+    get_bool_env("INT2DDS_INITIAL_PEERS_MULTICAST")
 }
 
 /// Read the IPv4 multicast TTL override from `INT2DDS_MULTICAST_TTL`.

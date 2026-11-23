@@ -22,6 +22,7 @@ pub(crate) struct UdpTransportPlugin {
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
+    multicast_enabled: bool,
 
     // Listeners created during construction, taken once during init.
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
@@ -52,11 +53,22 @@ impl UdpTransportPlugin {
         let port_manager = udp_config.port_manager;
 
         // Create multicast listeners (shared ports, no conflict)
-        let discovery_mc_port =
-            port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
-        let user_mc_port = port_manager.calculate_user_traffic_multicast_port(domain_id)?;
-        let discovery_mc = Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?);
-        let user_mc = Some(UdpListener::new_multicast(user_mc_port, &working_ips)?);
+        let multicast_enabled = udp_config.multicast_enabled;
+        let (discovery_mc, user_mc) = if multicast_enabled {
+            let discovery_mc_port =
+                port_manager.calculate_discovery_traffic_multicast_port(domain_id)?;
+            let user_mc_port = port_manager.calculate_user_traffic_multicast_port(domain_id)?;
+            (
+                Some(UdpListener::new_multicast(discovery_mc_port, &working_ips)?),
+                Some(UdpListener::new_multicast(user_mc_port, &working_ips)?),
+            )
+        } else {
+            log::info!(
+                "SPDP multicast off (domain={}): announcing to initial peers only, multicast group not joined",
+                domain_id
+            );
+            (None, None)
+        };
 
         // Create unicast listeners — both discovery_uc and user_uc must bind at
         // the same participant_id (matches develop's Socket contract).
@@ -96,6 +108,7 @@ impl UdpTransportPlugin {
             domain_id,
             participant_id,
             working_ips,
+            multicast_enabled,
             discovery_multicast_listener: Mutex::new(discovery_mc),
             discovery_unicast_listener: Mutex::new(Some(discovery_uc)),
             user_multicast_listener: Mutex::new(user_mc),
@@ -148,8 +161,10 @@ impl TransportPlugin for UdpTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
-                // Discovery always uses UDP multicast, plus fan-out to initial_peers.
-                let _ = self.sender.send_multicast(self.domain_id, data);
+                // UDP multicast unless turned off, plus fan-out to initial_peers.
+                if self.multicast_enabled {
+                    let _ = self.sender.send_multicast(self.domain_id, data);
+                }
                 for peer_addr in *initial_peers {
                     let _ = self.sender.send(peer_addr, data);
                 }
@@ -233,5 +248,64 @@ impl TransportPlugin for UdpTransportPlugin {
                 listener.close();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
+    use crate::rtps::transport::transport_config::TransportConfig;
+
+    const DOMAIN: u32 = 229;
+
+    fn config(multicast_enabled: bool) -> UdpConfig {
+        let mut config = UdpConfig::from_property(&PropertyQosPolicy::default(), DOMAIN);
+        config.multicast_enabled = multicast_enabled;
+        config
+    }
+
+    fn create(config: UdpConfig) -> io::Result<UdpTransportPlugin> {
+        UdpTransportPlugin::new(
+            DOMAIN,
+            0,
+            "0.0.0.0".into(),
+            "0.0.0.0".into(),
+            vec!["127.0.0.1".into()],
+            config,
+        )
+    }
+
+    fn plugin(multicast_enabled: bool) -> UdpTransportPlugin {
+        create(config(multicast_enabled)).expect("udp plugin")
+    }
+
+    #[test]
+    fn multicast_listeners_exist_by_default() {
+        let plugin = plugin(true);
+        assert!(plugin.take_discovery_multicast_source().is_some());
+        assert!(plugin.take_user_multicast_listener().is_some());
+        plugin.close();
+    }
+
+    #[test]
+    fn disabling_multicast_skips_both_multicast_listeners() {
+        let plugin = plugin(false);
+        assert!(plugin.take_discovery_multicast_source().is_none());
+        assert!(plugin.take_user_multicast_listener().is_none());
+        assert!(plugin.take_discovery_unicast_source().is_some());
+        plugin.close();
+    }
+
+    #[test]
+    fn multicast_ports_are_not_computed_when_multicast_is_off() {
+        let mut off = config(false);
+        off.port_manager.discovery_multicast_offset = 70_000;
+        off.port_manager.user_multicast_offset = 70_000;
+        create(off).expect("multicast ports are unused when multicast is off").close();
+
+        let mut on = off;
+        on.multicast_enabled = true;
+        assert!(create(on).is_err());
     }
 }
