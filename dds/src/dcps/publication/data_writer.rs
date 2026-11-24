@@ -2403,16 +2403,8 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         */
         let _operation = self.lifecycle.begin_operation()?;
 
-        let mut status_guard =
-            self.publication_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let result = *status_guard;
-
-        // 1. Reset total_count_change
-        status_guard.total_count_change = 0;
-
         self.set_communication_status_propagation(&StatusKind::PUBLICATION_MATCHED, false)?;
-
-        Ok(result)
+        self.take_publication_matched_status()
     }
 
     fn get_topic(&self) -> DdsResult<Topic> {
@@ -3579,6 +3571,45 @@ mod tests {
             listener.publication_matched_called.load(Ordering::SeqCst),
             "on_publication_matched should be called when mask contains PUBLICATION_MATCHED"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_get_publication_matched_status_resets_change_counts() {
+        let (participant, publisher, topic) = setup_mask_test();
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let delta = |d: i32| {
+            Arc::new(PublicationMatchedStatus {
+                total_count: 0,
+                total_count_change: 0,
+                current_count: 0,
+                current_count_change: d,
+                last_subscription_handle: InstanceHandle::default(),
+            })
+        };
+
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(delta(1))).unwrap();
+        let s = writer.get_publication_matched_status().unwrap();
+        assert_eq!((s.current_count, s.current_count_change), (1, 1));
+        assert_eq!((s.total_count, s.total_count_change), (1, 1));
+
+        let s = writer.get_publication_matched_status().unwrap();
+        assert_eq!((s.current_count, s.current_count_change), (1, 0));
+        assert_eq!((s.total_count, s.total_count_change), (1, 0));
+
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(delta(-1))).unwrap();
+        let s = writer.get_publication_matched_status().unwrap();
+        assert_eq!((s.current_count, s.current_count_change), (0, -1));
+        assert_eq!((s.total_count, s.total_count_change), (1, 0));
 
         participant.delete_contained_entities().unwrap();
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
