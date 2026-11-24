@@ -1671,14 +1671,18 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener_called = true;
             }
             let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_offered_deadline_missed(self, &status);
-                listener_called = true;
+            if publisher.get_listener_mask()?.contains(StatusKind::OFFERED_DEADLINE_MISSED) {
+                if let Some(listener) = publisher.get_listener()? {
+                    listener.on_offered_deadline_missed(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_offered_deadline_missed(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::OFFERED_DEADLINE_MISSED) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_offered_deadline_missed(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1719,14 +1723,18 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener_called = true;
             }
             let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_offered_incompatible_qos(self, &status);
-                listener_called = true;
+            if publisher.get_listener_mask()?.contains(StatusKind::OFFERED_INCOMPATIBLE_QOS) {
+                if let Some(listener) = publisher.get_listener()? {
+                    listener.on_offered_incompatible_qos(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_offered_incompatible_qos(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::OFFERED_INCOMPATIBLE_QOS) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_offered_incompatible_qos(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1780,14 +1788,18 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener_called = true;
             }
             let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_liveliness_lost(self, &status);
-                listener_called = true;
+            if publisher.get_listener_mask()?.contains(StatusKind::LIVELINESS_LOST) {
+                if let Some(listener) = publisher.get_listener()? {
+                    listener.on_liveliness_lost(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_liveliness_lost(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::LIVELINESS_LOST) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_liveliness_lost(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1832,14 +1844,18 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener_called = true;
             }
             let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_publication_matched(self, &status);
-                listener_called = true;
+            if publisher.get_listener_mask()?.contains(StatusKind::PUBLICATION_MATCHED) {
+                if let Some(listener) = publisher.get_listener()? {
+                    listener.on_publication_matched(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_publication_matched(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::PUBLICATION_MATCHED) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_publication_matched(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -2407,8 +2423,16 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         */
         let _operation = self.lifecycle.begin_operation()?;
 
+        let mut status_guard =
+            self.publication_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = *status_guard;
+
+        status_guard.total_count_change = 0;
+        status_guard.current_count_change = 0;
+
         self.set_communication_status_propagation(&StatusKind::PUBLICATION_MATCHED, false)?;
-        self.take_publication_matched_status()
+
+        Ok(result)
     }
 
     fn get_topic(&self) -> DdsResult<Topic> {

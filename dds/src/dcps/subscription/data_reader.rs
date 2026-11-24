@@ -1218,14 +1218,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 listener_called = true;
             }
             let subscriber = self.get_subscriber()?;
-            if let Some(listener) = subscriber.get_listener()? {
-                listener.on_requested_deadline_missed(self, &status);
-                listener_called = true;
+            if subscriber.get_listener_mask()?.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
+                if let Some(listener) = subscriber.get_listener()? {
+                    listener.on_requested_deadline_missed(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = subscriber.get_participant()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_requested_deadline_missed(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_requested_deadline_missed(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1277,14 +1281,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 listener_called = true;
             }
             let subscriber = self.get_subscriber()?;
-            if let Some(listener) = subscriber.get_listener()? {
-                listener.on_requested_incompatible_qos(self, &status);
-                listener_called = true;
+            if subscriber.get_listener_mask()?.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
+                if let Some(listener) = subscriber.get_listener()? {
+                    listener.on_requested_incompatible_qos(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = subscriber.get_participant()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_requested_incompatible_qos(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_requested_incompatible_qos(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1343,14 +1351,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 listener_called = true;
             }
             let subscriber = self.get_subscriber()?;
-            if let Some(listener) = subscriber.get_listener()? {
-                listener.on_sample_lost(self, &status);
-                listener_called = true;
+            if subscriber.get_listener_mask()?.contains(StatusKind::SAMPLE_LOST) {
+                if let Some(listener) = subscriber.get_listener()? {
+                    listener.on_sample_lost(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = subscriber.get_participant()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_sample_lost(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::SAMPLE_LOST) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_sample_lost(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1392,14 +1404,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 listener_called = true;
             }
             let subscriber = self.get_subscriber()?;
-            if let Some(listener) = subscriber.get_listener()? {
-                listener.on_sample_rejected(self, &status);
-                listener_called = true;
+            if subscriber.get_listener_mask()?.contains(StatusKind::SAMPLE_REJECTED) {
+                if let Some(listener) = subscriber.get_listener()? {
+                    listener.on_sample_rejected(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = subscriber.get_participant()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_sample_rejected(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::SAMPLE_REJECTED) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_sample_rejected(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1494,14 +1510,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 listener_called = true;
             }
             let subscriber = self.get_subscriber()?;
-            if let Some(listener) = subscriber.get_listener()? {
-                listener.on_liveliness_changed(self, &status);
-                listener_called = true;
+            if subscriber.get_listener_mask()?.contains(StatusKind::LIVELINESS_CHANGED) {
+                if let Some(listener) = subscriber.get_listener()? {
+                    listener.on_liveliness_changed(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = subscriber.get_participant()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_liveliness_changed(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::LIVELINESS_CHANGED) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_liveliness_changed(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -1552,14 +1572,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 listener_called = true;
             }
             let subscriber = self.get_subscriber()?;
-            if let Some(listener) = subscriber.get_listener()? {
-                listener.on_subscription_matched(self, &status);
-                listener_called = true;
+            if subscriber.get_listener_mask()?.contains(StatusKind::SUBSCRIPTION_MATCHED) {
+                if let Some(listener) = subscriber.get_listener()? {
+                    listener.on_subscription_matched(self, &status);
+                    listener_called = true;
+                }
             }
             let participant = subscriber.get_participant()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_subscription_matched(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::SUBSCRIPTION_MATCHED) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_subscription_matched(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
@@ -7975,6 +7999,73 @@ pub(crate) mod tests {
 
         assert!(on_publication_matched > 0, "the participant listener was never called");
         assert_eq!(on_data_available, 1, "the reader listener must receive the sample");
+    }
+
+    // DDS 1.4 2.2.4.3.1: a parent listener whose mask leaves the status out is not enabled for it,
+    // so it neither runs nor consumes the status, and the writer's StatusCondition still triggers.
+    #[test]
+    fn test_parent_listener_outside_its_mask_leaves_publication_matched_to_the_condition() {
+        let factory = DomainParticipantFactory::get_instance();
+        let on_publication_matched_count = Arc::new(AtomicUsize::new(0));
+
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                Some(Arc::new(MatchOnlyParticipantListener {
+                    on_publication_matched_count: Arc::clone(&on_publication_matched_count),
+                })),
+                StatusMask::DATA_AVAILABLE,
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "ParentListenerOutsideItsMask",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let woken = wait_set.wait(Duration::from_seconds(10)).is_ok();
+        wait_set.detach_condition(condition).unwrap();
+        let on_publication_matched = on_publication_matched_count.load(Ordering::Acquire);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        assert!(woken, "the writer's StatusCondition never triggered on the match");
+        assert_eq!(on_publication_matched, 0, "a listener outside its mask must not be called");
     }
 
     #[test]
