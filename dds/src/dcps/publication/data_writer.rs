@@ -1660,7 +1660,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             *status_guard
         };
 
-        // Listener
+        // DDS 1.4 2.2.4.1: the flag turns TRUE before any listener runs.
+        self.set_communication_status_propagation(&StatusKind::OFFERED_DEADLINE_MISSED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::OFFERED_DEADLINE_MISSED) {
             let mut listener_called = false;
@@ -1681,11 +1683,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
             if listener_called {
                 let _ = self.take_offered_deadline_missed_status()?;
+                // Reset only this entity's flag; parents may hold events from siblings.
+                self.set_communication_status(&StatusKind::OFFERED_DEADLINE_MISSED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::OFFERED_DEADLINE_MISSED, true)?;
 
         Ok(())
     }
@@ -1707,7 +1708,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             status_guard.clone()
         };
 
-        // Listener
+        // DDS 1.4 2.2.4.1: the flag turns TRUE before any listener runs.
+        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::OFFERED_INCOMPATIBLE_QOS) {
             let mut listener_called = false;
@@ -1728,11 +1731,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
             if listener_called {
                 let _ = self.take_offered_incompatible_qos_status()?;
+                // Reset only this entity's flag; parents may hold events from siblings.
+                self.set_communication_status(&StatusKind::OFFERED_INCOMPATIBLE_QOS, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, true)?;
 
         Ok(())
     }
@@ -1767,7 +1769,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             *status_guard
         };
 
-        // Listener
+        // DDS 1.4 2.2.4.1: the flag turns TRUE before any listener runs.
+        self.set_communication_status_propagation(&StatusKind::LIVELINESS_LOST, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::LIVELINESS_LOST) {
             let mut listener_called = false;
@@ -1788,11 +1792,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
             if listener_called {
                 let _ = self.take_liveliness_lost_status()?;
+                // Reset only this entity's flag; parents may hold events from siblings.
+                self.set_communication_status(&StatusKind::LIVELINESS_LOST, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::LIVELINESS_LOST, true)?;
 
         Ok(())
     }
@@ -1818,7 +1821,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             *status_guard
         };
 
-        // Listener
+        // DDS 1.4 2.2.4.1: the flag turns TRUE before any listener runs.
+        self.set_communication_status_propagation(&StatusKind::PUBLICATION_MATCHED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::PUBLICATION_MATCHED) {
             let mut listener_called = false;
@@ -1839,11 +1844,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
             if listener_called {
                 let _ = self.take_publication_matched_status()?;
+                // Reset only this entity's flag; parents may hold events from siblings.
+                self.set_communication_status(&StatusKind::PUBLICATION_MATCHED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::PUBLICATION_MATCHED, true)?;
 
         Ok(())
     }
@@ -3610,6 +3614,42 @@ mod tests {
         let s = writer.get_publication_matched_status().unwrap();
         assert_eq!((s.current_count, s.current_count_change), (0, -1));
         assert_eq!((s.total_count, s.total_count_change), (1, 0));
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_listener_consumed_status_leaves_condition_untriggered() {
+        let (participant, publisher, topic) = setup_mask_test();
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::PUBLICATION_MATCHED,
+            )
+            .unwrap();
+        let condition = writer.get_statuscondition().unwrap();
+        condition.set_enabled_statuses(StatusKind::PUBLICATION_MATCHED).unwrap();
+        let wait_set = crate::dcps::infrastructure::wait_set::WaitSet::new();
+        wait_set.attach_condition(condition).unwrap();
+
+        let status = Arc::new(PublicationMatchedStatus {
+            total_count: 0,
+            total_count_change: 0,
+            current_count: 0,
+            current_count_change: 1,
+            last_subscription_handle: InstanceHandle::default(),
+        });
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(status)).unwrap();
+
+        assert!(listener.publication_matched_called.load(Ordering::SeqCst));
+        assert_eq!(
+            wait_set.wait(crate::core::time::Duration::from_millis(300)).unwrap_err(),
+            DdsError::Timeout,
+        );
 
         participant.delete_contained_entities().unwrap();
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
