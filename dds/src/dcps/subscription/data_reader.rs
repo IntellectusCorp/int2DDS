@@ -7947,12 +7947,13 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_seconds(10)).expect("timed out waiting for the reader");
-        wait_set.detach_condition(condition).unwrap();
+        // The participant listener consumes PUBLICATION_MATCHED, so the writer's StatusCondition
+        // never triggers; wait for the match through the listener instead.
+        let match_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while on_publication_matched_count.load(Ordering::Acquire) == 0 {
+            assert!(std::time::Instant::now() < match_deadline, "timed out waiting for the reader");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
 
         writer
             .write(&HelloWorld { index: 0, message: "sample".to_string() }, InstanceHandle::NIL)
