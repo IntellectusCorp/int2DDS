@@ -3413,6 +3413,23 @@ impl UnicastMessageProcessor for SedpLogic {
                     None => gap_sns.push(seq_num),
                 }
             }
+
+            // A full window may be all other readers' TypeLookup samples, with this reader's
+            // past it; answer the directed run beyond the window too, or each further 256
+            // sequence numbers costs a heartbeat round.
+            let state = &acknack.reader_sn_state;
+            if state.num_bits() == 256 {
+                let mut cursor = SequenceNumber::from_i64(state.bitmap_base().to_i64() + 255);
+                while let Some(change) = cache_guard.next_change_after(cursor) {
+                    let Some(target) = change.directed_to() else { break };
+                    cursor = change.sequence_number();
+                    if target == remote_reader_guid {
+                        missing_changes.push(change);
+                    } else {
+                        gap_sns.push(cursor);
+                    }
+                }
+            }
         }
 
         if !gap_sns.is_empty() {
@@ -3896,6 +3913,19 @@ mod tests {
     /// (`directed_at_nacker`) or at another matched reader. Returns the reply DATA and GAP
     /// submessages the NACK drew.
     fn nack_a_type_lookup_reply(directed_at_nacker: bool) -> (usize, usize) {
+        let outcome = nack_type_lookup_replies(&[directed_at_nacker], 1);
+        (outcome.data_sns.len(), outcome.gap_submessages)
+    }
+
+    struct NackOutcome {
+        data_sns: Vec<i64>,
+        gap_submessages: usize,
+        gapped: std::collections::BTreeSet<i64>,
+    }
+
+    /// Replies 1..=n, the i-th directed at the NACKing reader `[9; 12]` when `for_nacker[i]`,
+    /// otherwise at another matched reader; the NACK names the first `nacked` of them.
+    fn nack_type_lookup_replies(for_nacker: &[bool], nacked: usize) -> NackOutcome {
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let transport = Arc::new(CountingTransport::default());
         let buffers = transport.buffers.clone();
@@ -3939,20 +3969,23 @@ mod tests {
             SubscriptionBuiltinTopicData::builtin_reliable(),
             SequenceNumber::new(0, 0),
         ));
-        let mut change =
-            writer.new_change(ChangeKind::Alive, vec![0u8; 8], InstanceHandle::NIL, None);
-        change.set_directed_to(Some(if directed_at_nacker {
-            Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REPLY_READER)
-        } else {
-            requester
-        }));
-        let sn = change.sequence_number();
-        writer
-            .writer_cache()
-            .lock()
-            .unwrap()
-            .add_change_builtin(Arc::new(change), writer.as_ref())
-            .unwrap();
+        let mut sns = Vec::with_capacity(for_nacker.len());
+        for &at_nacker in for_nacker {
+            let mut change =
+                writer.new_change(ChangeKind::Alive, vec![0u8; 8], InstanceHandle::NIL, None);
+            change.set_directed_to(Some(if at_nacker {
+                Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REPLY_READER)
+            } else {
+                requester
+            }));
+            sns.push(change.sequence_number());
+            writer
+                .writer_cache()
+                .lock()
+                .unwrap()
+                .add_change_builtin(Arc::new(change), writer.as_ref())
+                .unwrap();
+        }
         buffers.lock().unwrap().clear();
 
         let mut flag = SubmessageHeaderFlag::new();
@@ -3960,7 +3993,7 @@ mod tests {
         let acknack = AckNack::new(
             EntityId::TYPE_LOOKUP_REPLY_READER,
             EntityId::TYPE_LOOKUP_REPLY_WRITER,
-            SequenceNumberSet::from_vec(sn, vec![sn]),
+            SequenceNumberSet::from_vec(sns[0], sns[..nacked].to_vec()),
             1,
         );
         sedp_logic
@@ -3972,7 +4005,11 @@ mod tests {
             .expect("the acknack is accepted");
 
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
-        let (mut data, mut gap) = (0, 0);
+        let mut outcome = NackOutcome {
+            data_sns: Vec::new(),
+            gap_submessages: 0,
+            gapped: std::collections::BTreeSet::new(),
+        };
         for buffer in buffers.lock().unwrap().iter() {
             let mut receiver = MessageReceiver::new(remote_prefix, &addr);
             receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
@@ -3981,14 +4018,38 @@ mod tests {
                     TypedSubmessage::Data(_, d)
                         if d.writer_id == EntityId::TYPE_LOOKUP_REPLY_WRITER =>
                     {
-                        data += 1
+                        outcome.data_sns.push(d.writer_sn.to_i64())
                     }
-                    TypedSubmessage::Gap(..) => gap += 1,
+                    TypedSubmessage::Gap(_, g) => {
+                        outcome.gap_submessages += 1;
+                        outcome
+                            .gapped
+                            .extend(g.gap_start.to_i64()..g.gap_list.bitmap_base().to_i64());
+                        outcome
+                            .gapped
+                            .extend(g.gap_list.extract_numbers().iter().map(|s| s.to_i64()));
+                    }
                     _ => {}
                 }
             }
         }
-        (data, gap)
+        outcome
+    }
+
+    /// A NACK fills its 256-bit window with other readers' replies, so the nacker's own reply
+    /// lies past it; answering the window alone would take a heartbeat round per 256 sequence
+    /// numbers. The run past the window is GAPped and the nacker's reply sent in the same answer.
+    #[test]
+    fn a_full_nack_window_of_other_readers_replies_also_answers_past_the_window() {
+        let mut for_nacker = vec![false; 300];
+        for_nacker[299] = true;
+        let outcome = nack_type_lookup_replies(&for_nacker, 256);
+        assert_eq!(outcome.data_sns, vec![300], "the nacker's reply past the window was not sent");
+        assert_eq!(
+            outcome.gapped,
+            (1..=299).collect(),
+            "other readers' replies were not all GAPped in one answer"
+        );
     }
 
     /// A TypeLookup reply is its requester's alone; another reader that NACKs it (it saw the
