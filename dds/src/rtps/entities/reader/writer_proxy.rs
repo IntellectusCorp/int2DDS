@@ -121,6 +121,14 @@ impl WriterProxy {
         })
     }
 
+    /// Whether the DATA for `seq_num` has arrived. A GAP marks it received too, but irrelevant;
+    /// that is not an arrival.
+    pub(crate) fn has_received(&self, seq_num: SequenceNumber) -> bool {
+        self.changes_from_writer.get(&seq_num).is_some_and(|change| {
+            change.status == ChangeFromWriterStatusKind::Received && change.is_relevant
+        })
+    }
+
     pub(crate) fn last_heartbeat_count(&self) -> Option<u32> {
         self.last_heartbeat_count
     }
@@ -767,6 +775,25 @@ mod tests {
     /// `missing_changes_for_heartbeat` reads an absent entry as missing too, so this sequence
     /// number was being nacked before the base ever looked at it. Under-claiming costs a
     /// redundant retransmit; over-claiming would let the writer drop a sample for good.
+    #[test]
+    fn has_received_tells_a_repeat_from_a_first_arrival() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+        assert!(!proxy.has_received(sn));
+        proxy.mark_change_received(sn, None);
+        assert!(proxy.has_received(sn));
+        assert!(!proxy.has_received(SequenceNumber::new(0, 2)));
+    }
+
+    /// A GAP settles a sequence number without delivering it; the DATA may still follow.
+    #[test]
+    fn a_gapped_sequence_number_is_not_received() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+        proxy.irrelevant_change_set(sn);
+        assert!(!proxy.has_received(sn));
+    }
+
     #[test]
     fn a_ledger_entry_removed_after_delivery_is_requested_again_rather_than_acknowledged() {
         let mut proxy = empty_writer_proxy();

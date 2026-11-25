@@ -147,6 +147,16 @@ impl SendingTask {
                 Ok(())
             }
 
+            MessageType::PeriodicBuiltinHeartbeat(start_time, duration, guid_prefix, writer_id) => {
+                sedp_logic.send_sedp_periodic_heartbeat_message(
+                    start_time,
+                    duration,
+                    guid_prefix,
+                    writer_id,
+                )?;
+                Ok(())
+            }
+
             MessageType::PeriodicSubscriptionHeartbeat(start_time, duration, guid_prefix) => {
                 sedp_logic.send_sedp_periodic_heartbeat_message(
                     start_time,

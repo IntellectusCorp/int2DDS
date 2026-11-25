@@ -140,6 +140,9 @@ pub(crate) struct CacheChange {
     writer_ownership_strength: Option<i32>, // Set only when it's writer cache && Ownership QoS is EXCLUSIVE, CacheChange should be split to reader & writer cache in the future
     lifespan_duration: Option<Duration>,
     decoded: DecodedCell,
+    // Writer side: the one reader this change is for (TypeLookup request/reply);
+    // None = every matched reader.
+    directed_to: Option<Guid>,
 }
 impl std::fmt::Display for CacheChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -205,6 +208,7 @@ impl CacheChange {
             fragment_size: 0,
             lifespan_duration: None,
             decoded: DecodedCell::default(),
+            directed_to: None,
         }
     }
 
@@ -226,6 +230,7 @@ impl CacheChange {
             fragment_size: 0,
             lifespan_duration: None,
             decoded: DecodedCell::default(),
+            directed_to: None,
         }
     }
 
@@ -258,6 +263,7 @@ impl CacheChange {
         self.fragment_size = 0;
         self.lifespan_duration = None;
         self.decoded.clear();
+        self.directed_to = None;
     }
 
     pub(crate) fn kind(&self) -> ChangeKind {
@@ -294,6 +300,14 @@ impl CacheChange {
 
     pub(crate) fn set_presentation_info(&mut self, presentation_info: PresentationInfo) {
         self.presentation_info = presentation_info;
+    }
+
+    pub(crate) fn directed_to(&self) -> Option<Guid> {
+        self.directed_to
+    }
+
+    pub(crate) fn set_directed_to(&mut self, reader: Option<Guid>) {
+        self.directed_to = reader;
     }
 
     // An End Coherent Set carries no payload and names its group coherent set, while a member of

@@ -35,6 +35,8 @@ pub(crate) enum MessageType {
     ),
     PeriodicPublicationHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     PeriodicSubscriptionHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    // Heartbeat of a builtin writer that has no variant of its own (TypeLookup) towards one remote.
+    PeriodicBuiltinHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>, EntityId),
     SedpHistoryPush(GuidPrefix),
     SedpPreemptiveAcknack(GuidPrefix),
     // PeriodicSedpTopicHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
