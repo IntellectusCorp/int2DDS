@@ -279,30 +279,35 @@ impl Topic {
             *status_guard
         };
 
-        // DDS 1.4 2.2.4.1: the flag turns TRUE before any listener runs.
         let participant = self.get_participant()?;
-        self.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, true)?;
+        let (own, participant_listener) =
+            if self.get_listener_mask()?.contains(StatusKind::INCONSISTENT_TOPIC) {
+                let participant_listener =
+                    if participant.get_listener_mask()?.contains(StatusKind::INCONSISTENT_TOPIC) {
+                        participant.get_listener()?
+                    } else {
+                        None
+                    };
+                (self.get_listener()?, participant_listener)
+            } else {
+                (None, None)
+            };
+
+        // DDS 1.4 2.2.4.2.1: a status passed to a listener is reset before the call, so this
+        // topic's flag ends FALSE, even if an earlier event had raised it. The participant's
+        // flag is raised either way.
+        let consumed = own.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_inconsistent_topic_status()?;
+        }
+        self.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, !consumed)?;
         participant.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, true)?;
 
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::INCONSISTENT_TOPIC) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_inconsistent_topic(self, &status);
-                listener_called = true;
-            }
-            if participant.get_listener_mask()?.contains(StatusKind::INCONSISTENT_TOPIC) {
-                if let Some(listener) = participant.get_listener()? {
-                    listener.on_inconsistent_topic(self, &status);
-                    listener_called = true;
-                }
-            }
-
-            if listener_called {
-                let _ = self.take_inconsistent_topic_status()?;
-                // Reset only this entity's flag; the participant may hold events from siblings.
-                self.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, false)?;
-            }
+        if let Some(listener) = own {
+            listener.on_inconsistent_topic(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_inconsistent_topic(self, &status);
         }
 
         Ok(())
@@ -582,6 +587,101 @@ pub(crate) mod tests {
 
         assert_eq!(called.load(Ordering::SeqCst), 1);
         assert_eq!(woken.unwrap_err(), DdsError::Timeout);
+    }
+
+    /// Records what the topic reports from inside the listener, then keeps it busy.
+    struct InspectingTopicListener {
+        seen: std::sync::Mutex<Option<(bool, i32)>>,
+    }
+
+    impl TopicListener for InspectingTopicListener {
+        fn on_inconsistent_topic(
+            &self,
+            topic: &super::Topic,
+            _status: &crate::infrastructure::status::InconsistentTopicStatus,
+        ) {
+            use crate::infrastructure::status::StatusKind;
+            let flag = topic.get_status_changes().unwrap().contains(StatusKind::INCONSISTENT_TOPIC);
+            let change = topic.get_inconsistent_topic_status().unwrap().total_count_change();
+            *self.seen.lock().unwrap() = Some((flag, change));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    /// (flag after, total_count_change after, flag/change seen inside the listener,
+    /// waiter blocked before the event woke, waiter started after the event woke)
+    type StatusRow = (bool, i32, Option<(bool, i32)>, Option<bool>, bool);
+
+    /// Delivers one INCONSISTENT_TOPIC event, optionally after an earlier event that no
+    /// listener consumed, and with or without a listener installed for the second one.
+    fn inconsistent_topic_row(flag_before: bool, with_listener: bool) -> StatusRow {
+        use crate::dcps::infrastructure::entity::UpdateStatus;
+        use crate::infrastructure::status::StatusKind;
+        use crate::infrastructure::wait_set::WaitSet;
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let mut topic = participant
+            .create_topic::<HelloWorld>(
+                "InconsistentTopicRow",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let condition = topic.get_statuscondition().unwrap();
+        condition.set_enabled_statuses(StatusMask::INCONSISTENT_TOPIC).unwrap();
+        let wait_set = Arc::new(WaitSet::new());
+        wait_set.attach_condition(condition).unwrap();
+
+        if flag_before {
+            topic.update_status(StatusKind::INCONSISTENT_TOPIC, None).unwrap();
+        }
+        let listener = Arc::new(InspectingTopicListener { seen: std::sync::Mutex::new(None) });
+        if with_listener {
+            topic
+                .set_listener(
+                    Some(listener.clone() as Arc<dyn TopicListener>),
+                    StatusMask::INCONSISTENT_TOPIC,
+                )
+                .unwrap();
+        }
+        // A waiter can only block while the flag is FALSE.
+        let early_waiter = (!flag_before).then(|| {
+            let wait_set = wait_set.clone();
+            std::thread::spawn(move || wait_set.wait(Duration::from_millis(1000)).is_ok())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        topic.update_status(StatusKind::INCONSISTENT_TOPIC, None).unwrap();
+
+        let early_woke = early_waiter.map(|waiter| waiter.join().unwrap());
+        let flag_after =
+            topic.get_status_changes().unwrap().contains(StatusKind::INCONSISTENT_TOPIC);
+        let late_woke = wait_set.wait(Duration::from_millis(200)).is_ok();
+        let change_after = topic.get_inconsistent_topic_status().unwrap().total_count_change();
+        let seen = *listener.seen.lock().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+        (flag_after, change_after, seen, early_woke, late_woke)
+    }
+
+    #[test]
+    fn test_inconsistent_topic_flag_for_each_starting_state() {
+        // No listener: the flag rises and the change accumulates.
+        assert_eq!(inconsistent_topic_row(false, false), (true, 1, None, Some(true), true));
+        assert_eq!(inconsistent_topic_row(true, false), (true, 2, None, None, true));
+        // DDS 1.4 2.2.4.2.1: the listener sees the status already reset, and the flag ends
+        // FALSE even when an earlier unconsumed event had raised it.
+        assert_eq!(
+            inconsistent_topic_row(false, true),
+            (false, 0, Some((false, 0)), Some(false), false)
+        );
+        assert_eq!(inconsistent_topic_row(true, true), (false, 0, Some((false, 0)), None, false));
     }
 
     /// Writer(WITH_KEY) on dp1 vs Reader(NO_KEY) on dp2

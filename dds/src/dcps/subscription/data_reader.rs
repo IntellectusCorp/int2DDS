@@ -47,7 +47,9 @@ use super::{
     read_condition::ReadCondition,
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     subscriber::{OnDataOnReadersGuard, Subscriber},
+    subscriber_listener::SubscriberListener,
 };
+use crate::domain::domain_participant_listener::DomainParticipantListener;
 use crate::{
     common::{
         builtin::topic::{
@@ -1203,43 +1205,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             *status_guard
         };
 
-        // Listener
-        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
-        // changes, which is before any listener runs, so a thread already blocked in
-        // WaitSet::wait observes the change instead of it being published only after
-        // the listener has already consumed and cleared the status.
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, true)?;
-
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_requested_deadline_missed(self, &status);
-                listener_called = true;
-            }
-            let subscriber = self.get_subscriber()?;
-            if subscriber.get_listener_mask()?.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
-                if let Some(listener) = subscriber.get_listener()? {
-                    listener.on_requested_deadline_missed(self, &status);
-                    listener_called = true;
-                }
-            }
-            let participant = subscriber.get_participant()?;
-            if participant.get_listener_mask()?.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
-                if let Some(listener) = participant.get_listener()? {
-                    listener.on_requested_deadline_missed(self, &status);
-                    listener_called = true;
-                }
-            }
-
-            if listener_called {
-                let _ = self.take_requested_deadline_missed_status()?;
-                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
-                // listener returns. Only this entity's flag -- the Subscriber and
-                // DomainParticipant own theirs and may still hold unconsumed events
-                // from sibling readers.
-                self.set_communication_status(&StatusKind::REQUESTED_DEADLINE_MISSED, false)?;
-            }
+        let (own, subscriber_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::REQUESTED_DEADLINE_MISSED)?;
+        let consumed =
+            own.is_some() || subscriber_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_requested_deadline_missed_status()?;
+        }
+        self.raise_communication_status(&StatusKind::REQUESTED_DEADLINE_MISSED, consumed)?;
+        if let Some(listener) = own {
+            listener.on_requested_deadline_missed(self, &status);
+        }
+        if let Some(listener) = subscriber_listener {
+            listener.on_requested_deadline_missed(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_requested_deadline_missed(self, &status);
         }
 
         // Ownership is lost when deadline is missed
@@ -1266,43 +1247,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             status_guard.clone()
         };
 
-        // Listener
-        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
-        // changes, which is before any listener runs, so a thread already blocked in
-        // WaitSet::wait observes the change instead of it being published only after
-        // the listener has already consumed and cleared the status.
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
-
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_requested_incompatible_qos(self, &status);
-                listener_called = true;
-            }
-            let subscriber = self.get_subscriber()?;
-            if subscriber.get_listener_mask()?.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
-                if let Some(listener) = subscriber.get_listener()? {
-                    listener.on_requested_incompatible_qos(self, &status);
-                    listener_called = true;
-                }
-            }
-            let participant = subscriber.get_participant()?;
-            if participant.get_listener_mask()?.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
-                if let Some(listener) = participant.get_listener()? {
-                    listener.on_requested_incompatible_qos(self, &status);
-                    listener_called = true;
-                }
-            }
-
-            if listener_called {
-                let _ = self.take_requested_incompatible_qos_status()?;
-                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
-                // listener returns. Only this entity's flag -- the Subscriber and
-                // DomainParticipant own theirs and may still hold unconsumed events
-                // from sibling readers.
-                self.set_communication_status(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
-            }
+        let (own, subscriber_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::REQUESTED_INCOMPATIBLE_QOS)?;
+        let consumed =
+            own.is_some() || subscriber_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_requested_incompatible_qos_status()?;
+        }
+        self.raise_communication_status(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, consumed)?;
+        if let Some(listener) = own {
+            listener.on_requested_incompatible_qos(self, &status);
+        }
+        if let Some(listener) = subscriber_listener {
+            listener.on_requested_incompatible_qos(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_requested_incompatible_qos(self, &status);
         }
 
         Ok(())
@@ -1336,43 +1296,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             *status_guard
         };
 
-        // Listener
-        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
-        // changes, which is before any listener runs, so a thread already blocked in
-        // WaitSet::wait observes the change instead of it being published only after
-        // the listener has already consumed and cleared the status.
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, true)?;
-
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_LOST) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_sample_lost(self, &status);
-                listener_called = true;
-            }
-            let subscriber = self.get_subscriber()?;
-            if subscriber.get_listener_mask()?.contains(StatusKind::SAMPLE_LOST) {
-                if let Some(listener) = subscriber.get_listener()? {
-                    listener.on_sample_lost(self, &status);
-                    listener_called = true;
-                }
-            }
-            let participant = subscriber.get_participant()?;
-            if participant.get_listener_mask()?.contains(StatusKind::SAMPLE_LOST) {
-                if let Some(listener) = participant.get_listener()? {
-                    listener.on_sample_lost(self, &status);
-                    listener_called = true;
-                }
-            }
-
-            if listener_called {
-                let _ = self.take_sample_lost_status()?;
-                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
-                // listener returns. Only this entity's flag -- the Subscriber and
-                // DomainParticipant own theirs and may still hold unconsumed events
-                // from sibling readers.
-                self.set_communication_status(&StatusKind::SAMPLE_LOST, false)?;
-            }
+        let (own, subscriber_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::SAMPLE_LOST)?;
+        let consumed =
+            own.is_some() || subscriber_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_sample_lost_status()?;
+        }
+        self.raise_communication_status(&StatusKind::SAMPLE_LOST, consumed)?;
+        if let Some(listener) = own {
+            listener.on_sample_lost(self, &status);
+        }
+        if let Some(listener) = subscriber_listener {
+            listener.on_sample_lost(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_sample_lost(self, &status);
         }
 
         Ok(())
@@ -1389,43 +1328,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             *status_guard
         };
 
-        // Listener
-        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
-        // changes, which is before any listener runs, so a thread already blocked in
-        // WaitSet::wait observes the change instead of it being published only after
-        // the listener has already consumed and cleared the status.
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, true)?;
-
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_REJECTED) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_sample_rejected(self, &status);
-                listener_called = true;
-            }
-            let subscriber = self.get_subscriber()?;
-            if subscriber.get_listener_mask()?.contains(StatusKind::SAMPLE_REJECTED) {
-                if let Some(listener) = subscriber.get_listener()? {
-                    listener.on_sample_rejected(self, &status);
-                    listener_called = true;
-                }
-            }
-            let participant = subscriber.get_participant()?;
-            if participant.get_listener_mask()?.contains(StatusKind::SAMPLE_REJECTED) {
-                if let Some(listener) = participant.get_listener()? {
-                    listener.on_sample_rejected(self, &status);
-                    listener_called = true;
-                }
-            }
-
-            if listener_called {
-                let _ = self.take_sample_rejected_status()?;
-                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
-                // listener returns. Only this entity's flag -- the Subscriber and
-                // DomainParticipant own theirs and may still hold unconsumed events
-                // from sibling readers.
-                self.set_communication_status(&StatusKind::SAMPLE_REJECTED, false)?;
-            }
+        let (own, subscriber_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::SAMPLE_REJECTED)?;
+        let consumed =
+            own.is_some() || subscriber_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_sample_rejected_status()?;
+        }
+        self.raise_communication_status(&StatusKind::SAMPLE_REJECTED, consumed)?;
+        if let Some(listener) = own {
+            listener.on_sample_rejected(self, &status);
+        }
+        if let Some(listener) = subscriber_listener {
+            listener.on_sample_rejected(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_sample_rejected(self, &status);
         }
 
         Ok(())
@@ -1436,7 +1354,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // WaitSet::wait observes the change. Publishing it after the listeners also made the
         // flag hostage to them completing -- a listener that panics is contained at the
         // callback boundary, and the waiter would then block forever on a reader whose samples
-        // are sitting in the cache. `handle_liveliness_changed_status` uses this same order.
+        // are sitting in the cache.
         self.set_read_communication_status(true)?;
 
         let subscriber = self.subscriber_arc()?;
@@ -1495,43 +1413,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             *status_guard
         };
 
-        // Listener
-        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
-        // changes, which is before any listener runs, so a thread already blocked in
-        // WaitSet::wait observes the change instead of it being published only after
-        // the listener has already consumed and cleared the status.
-        self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
-
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::LIVELINESS_CHANGED) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_liveliness_changed(self, &status);
-                listener_called = true;
-            }
-            let subscriber = self.get_subscriber()?;
-            if subscriber.get_listener_mask()?.contains(StatusKind::LIVELINESS_CHANGED) {
-                if let Some(listener) = subscriber.get_listener()? {
-                    listener.on_liveliness_changed(self, &status);
-                    listener_called = true;
-                }
-            }
-            let participant = subscriber.get_participant()?;
-            if participant.get_listener_mask()?.contains(StatusKind::LIVELINESS_CHANGED) {
-                if let Some(listener) = participant.get_listener()? {
-                    listener.on_liveliness_changed(self, &status);
-                    listener_called = true;
-                }
-            }
-
-            if listener_called {
-                let _ = self.take_liveliness_changed_status()?;
-                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
-                // listener returns. Only this entity's flag -- the Subscriber and
-                // DomainParticipant own theirs and may still hold unconsumed events
-                // from sibling readers.
-                self.set_communication_status(&StatusKind::LIVELINESS_CHANGED, false)?;
-            }
+        let (own, subscriber_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::LIVELINESS_CHANGED)?;
+        let consumed =
+            own.is_some() || subscriber_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_liveliness_changed_status()?;
+        }
+        self.raise_communication_status(&StatusKind::LIVELINESS_CHANGED, consumed)?;
+        if let Some(listener) = own {
+            listener.on_liveliness_changed(self, &status);
+        }
+        if let Some(listener) = subscriber_listener {
+            listener.on_liveliness_changed(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_liveliness_changed(self, &status);
         }
 
         Ok(())
@@ -1557,43 +1454,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             *status_guard
         };
 
-        // Listener
-        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
-        // changes, which is before any listener runs, so a thread already blocked in
-        // WaitSet::wait observes the change instead of it being published only after
-        // the listener has already consumed and cleared the status.
-        self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, true)?;
-
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SUBSCRIPTION_MATCHED) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_subscription_matched(self, &status);
-                listener_called = true;
-            }
-            let subscriber = self.get_subscriber()?;
-            if subscriber.get_listener_mask()?.contains(StatusKind::SUBSCRIPTION_MATCHED) {
-                if let Some(listener) = subscriber.get_listener()? {
-                    listener.on_subscription_matched(self, &status);
-                    listener_called = true;
-                }
-            }
-            let participant = subscriber.get_participant()?;
-            if participant.get_listener_mask()?.contains(StatusKind::SUBSCRIPTION_MATCHED) {
-                if let Some(listener) = participant.get_listener()? {
-                    listener.on_subscription_matched(self, &status);
-                    listener_called = true;
-                }
-            }
-
-            if listener_called {
-                let _ = self.take_subscription_matched_status()?;
-                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
-                // listener returns. Only this entity's flag -- the Subscriber and
-                // DomainParticipant own theirs and may still hold unconsumed events
-                // from sibling readers.
-                self.set_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, false)?;
-            }
+        let (own, subscriber_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::SUBSCRIPTION_MATCHED)?;
+        let consumed =
+            own.is_some() || subscriber_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_subscription_matched_status()?;
+        }
+        self.raise_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, consumed)?;
+        if let Some(listener) = own {
+            listener.on_subscription_matched(self, &status);
+        }
+        if let Some(listener) = subscriber_listener {
+            listener.on_subscription_matched(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_subscription_matched(self, &status);
         }
 
         Ok(())
@@ -1611,6 +1487,51 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         subscriber.set_communication_status(status_kind, trigger_value)?;
         // 3. DomainParticipant StatusCondition
         subscriber.participant_arc()?.set_communication_status(status_kind, trigger_value)?;
+
+        Ok(())
+    }
+
+    /// The listeners to call for `status_kind`: this reader's, then the Subscriber's and the
+    /// DomainParticipant's, each only when its own mask enables the status.
+    #[allow(clippy::type_complexity)]
+    fn enabled_listeners(
+        &self,
+        status_kind: StatusKind,
+    ) -> DdsResult<(
+        Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        Option<Arc<dyn SubscriberListener>>,
+        Option<Arc<dyn DomainParticipantListener>>,
+    )> {
+        if !self.get_listener_mask()?.contains(status_kind) {
+            return Ok((None, None, None));
+        }
+        let subscriber = self.get_subscriber()?;
+        let subscriber_listener = if subscriber.get_listener_mask()?.contains(status_kind) {
+            subscriber.get_listener()?
+        } else {
+            None
+        };
+        let participant = subscriber.get_participant()?;
+        let participant_listener = if participant.get_listener_mask()?.contains(status_kind) {
+            participant.get_listener()?
+        } else {
+            None
+        };
+        Ok((self.get_listener()?, subscriber_listener, participant_listener))
+    }
+
+    /// DDS 1.4 2.2.4.2.1: a status passed to a listener is reset before the call, so this
+    /// reader's flag ends FALSE, even if an earlier event had raised it. The parents' flags
+    /// are raised either way.
+    fn raise_communication_status(
+        &self,
+        status_kind: &StatusKind,
+        consumed: bool,
+    ) -> DdsResult<()> {
+        self.set_communication_status(status_kind, !consumed)?;
+        let subscriber = self.subscriber_arc()?;
+        subscriber.set_communication_status(status_kind, true)?;
+        subscriber.participant_arc()?.set_communication_status(status_kind, true)?;
 
         Ok(())
     }
@@ -8066,6 +7987,125 @@ pub(crate) mod tests {
 
         assert!(woken, "the writer's StatusCondition never triggered on the match");
         assert_eq!(on_publication_matched, 0, "a listener outside its mask must not be called");
+    }
+
+    /// Records what the reader reports from inside the listener, then keeps it busy.
+    struct InspectingReaderListener {
+        seen: std::sync::Mutex<Option<(bool, i32)>>,
+    }
+
+    impl DataReaderListener for InspectingReaderListener {
+        type Foo = HelloWorld;
+
+        fn on_subscription_matched(
+            &self,
+            reader: &DataReader<HelloWorld>,
+            _status: &SubscriptionMatchedStatus,
+        ) {
+            let flag =
+                reader.get_status_changes().unwrap().contains(StatusKind::SUBSCRIPTION_MATCHED);
+            let change = reader.get_subscription_matched_status().unwrap().current_count_change();
+            *self.seen.lock().unwrap() = Some((flag, change));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    /// (flag after, current_count_change after, flag/change seen inside the listener,
+    /// waiter blocked before the event woke, waiter started after the event woke)
+    type StatusRow = (bool, i32, Option<(bool, i32)>, Option<bool>, bool);
+
+    /// Delivers one SUBSCRIPTION_MATCHED event, optionally after an earlier event that no
+    /// listener consumed, and with or without a listener installed for the second one.
+    fn subscription_matched_row(flag_before: bool, with_listener: bool) -> StatusRow {
+        use crate::dcps::infrastructure::entity::UpdateStatus;
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "SubscriptionMatchedRow",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let condition = reader.get_statuscondition().unwrap();
+        condition.set_enabled_statuses(StatusKind::SUBSCRIPTION_MATCHED).unwrap();
+        let wait_set = Arc::new(WaitSet::new());
+        wait_set.attach_condition(condition).unwrap();
+        let event = || {
+            Arc::new(SubscriptionMatchedStatus {
+                total_count: 0,
+                total_count_change: 0,
+                current_count: 0,
+                current_count_change: 1,
+                last_publication_handle: InstanceHandle::default(),
+            })
+        };
+
+        if flag_before {
+            reader.update_status(StatusKind::SUBSCRIPTION_MATCHED, Some(event())).unwrap();
+        }
+        let listener = Arc::new(InspectingReaderListener { seen: std::sync::Mutex::new(None) });
+        if with_listener {
+            reader
+                .set_listener(
+                    Some(listener.clone() as Arc<dyn DataReaderListener<Foo = HelloWorld>>),
+                    StatusKind::SUBSCRIPTION_MATCHED,
+                )
+                .unwrap();
+        }
+        // A waiter can only block while the flag is FALSE.
+        let early_waiter = (!flag_before).then(|| {
+            let wait_set = wait_set.clone();
+            std::thread::spawn(move || wait_set.wait(Duration::from_millis(1000)).is_ok())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        reader.update_status(StatusKind::SUBSCRIPTION_MATCHED, Some(event())).unwrap();
+
+        let early_woke = early_waiter.map(|waiter| waiter.join().unwrap());
+        let flag_after =
+            reader.get_status_changes().unwrap().contains(StatusKind::SUBSCRIPTION_MATCHED);
+        let late_woke = wait_set.wait(Duration::from_millis(200)).is_ok();
+        let change_after = reader.get_subscription_matched_status().unwrap().current_count_change();
+        let seen = *listener.seen.lock().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+        (flag_after, change_after, seen, early_woke, late_woke)
+    }
+
+    #[test]
+    fn test_subscription_matched_flag_for_each_starting_state() {
+        // No listener: the flag rises and the change accumulates.
+        assert_eq!(subscription_matched_row(false, false), (true, 1, None, Some(true), true));
+        assert_eq!(subscription_matched_row(true, false), (true, 2, None, None, true));
+        // DDS 1.4 2.2.4.2.1: the listener sees the status already reset, and the flag ends
+        // FALSE even when an earlier unconsumed event had raised it.
+        assert_eq!(
+            subscription_matched_row(false, true),
+            (false, 0, Some((false, 0)), Some(false), false)
+        );
+        assert_eq!(subscription_matched_row(true, true), (false, 0, Some((false, 0)), None, false));
     }
 
     #[test]
