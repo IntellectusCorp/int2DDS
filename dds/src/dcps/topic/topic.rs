@@ -279,7 +279,11 @@ impl Topic {
             *status_guard
         };
 
-        // Listener
+        // DDS 1.4 2.2.4.1: the flag turns TRUE before any listener runs.
+        let participant = self.get_participant()?;
+        self.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, true)?;
+        participant.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::INCONSISTENT_TOPIC) {
             let mut listener_called = false;
@@ -287,20 +291,19 @@ impl Topic {
                 listener.on_inconsistent_topic(self, &status);
                 listener_called = true;
             }
-            let participant = self.get_participant()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_inconsistent_topic(self, &status);
-                listener_called = true;
+            if participant.get_listener_mask()?.contains(StatusKind::INCONSISTENT_TOPIC) {
+                if let Some(listener) = participant.get_listener()? {
+                    listener.on_inconsistent_topic(self, &status);
+                    listener_called = true;
+                }
             }
 
             if listener_called {
                 let _ = self.take_inconsistent_topic_status()?;
+                // Reset only this entity's flag; the participant may hold events from siblings.
+                self.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, true)?;
-        self.get_participant()?.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, true)?;
 
         Ok(())
     }
@@ -531,6 +534,54 @@ pub(crate) mod tests {
 
         domain_participant.delete_contained_entities().unwrap();
         domain_participant_factory.delete_participant(domain_participant).unwrap();
+    }
+
+    // DDS 1.4 2.2.4.2.1: a status the listener consumed leaves the StatusCondition untriggered.
+    #[test]
+    fn test_listener_consumed_inconsistent_topic_leaves_condition_untriggered() {
+        use crate::dcps::infrastructure::entity::UpdateStatus;
+        use crate::infrastructure::status::{InconsistentTopicStatus, StatusKind};
+        use crate::infrastructure::wait_set::WaitSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingTopicListener(Arc<AtomicUsize>);
+        impl TopicListener for CountingTopicListener {
+            fn on_inconsistent_topic(
+                &self,
+                _topic: &super::Topic,
+                _status: &InconsistentTopicStatus,
+            ) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let called = Arc::new(AtomicUsize::new(0));
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "ListenerConsumedInconsistentTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                Some(Arc::new(CountingTopicListener(called.clone()))),
+                StatusMask::INCONSISTENT_TOPIC,
+            )
+            .unwrap();
+        let condition = topic.get_statuscondition().unwrap();
+        condition.set_enabled_statuses(StatusMask::INCONSISTENT_TOPIC).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition).unwrap();
+
+        topic.update_status(StatusKind::INCONSISTENT_TOPIC, None).unwrap();
+        let woken = wait_set.wait(Duration::from_millis(300));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+        assert_eq!(woken.unwrap_err(), DdsError::Timeout);
     }
 
     /// Writer(WITH_KEY) on dp1 vs Reader(NO_KEY) on dp2
