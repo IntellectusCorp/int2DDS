@@ -3403,8 +3403,31 @@ impl UnicastMessageProcessor for SedpLogic {
             let cache_guard = writer_cache.lock().unwrap();
             for seq_num in missing_sequence_numbers {
                 match cache_guard.get_change(seq_num) {
+                    // Directed at another reader (TypeLookup): irrelevant to this one.
+                    Some(change)
+                        if change.directed_to().is_some_and(|t| t != remote_reader_guid) =>
+                    {
+                        gap_sns.push(seq_num)
+                    }
                     Some(change) => missing_changes.push(change),
                     None => gap_sns.push(seq_num),
+                }
+            }
+
+            // A full window may be all other readers' TypeLookup samples, with this reader's
+            // past it; answer the directed run beyond the window too, or each further 256
+            // sequence numbers costs a heartbeat round.
+            let state = &acknack.reader_sn_state;
+            if state.num_bits() == 256 {
+                let mut cursor = SequenceNumber::from_i64(state.bitmap_base().to_i64() + 255);
+                while let Some(change) = cache_guard.next_change_after(cursor) {
+                    let Some(target) = change.directed_to() else { break };
+                    cursor = change.sequence_number();
+                    if target == remote_reader_guid {
+                        missing_changes.push(change);
+                    } else {
+                        gap_sns.push(cursor);
+                    }
                 }
             }
         }
@@ -3884,6 +3907,371 @@ mod tests {
             data_submessage_count, 3,
             "each announcement already in the history has to be sent to the new peer"
         );
+    }
+
+    /// The reply writer NACKed by the reader behind `[9; 12]` for a reply directed at that reader
+    /// (`directed_at_nacker`) or at another matched reader. Returns the reply DATA and GAP
+    /// submessages the NACK drew.
+    fn nack_a_type_lookup_reply(directed_at_nacker: bool) -> (usize, usize) {
+        let outcome = nack_type_lookup_replies(&[directed_at_nacker], 1);
+        (outcome.data_sns.len(), outcome.gap_submessages)
+    }
+
+    struct NackOutcome {
+        data_sns: Vec<i64>,
+        gap_submessages: usize,
+        gapped: std::collections::BTreeSet<i64>,
+    }
+
+    /// Replies 1..=n, the i-th directed at the NACKing reader `[9; 12]` when `for_nacker[i]`,
+    /// otherwise at another matched reader; the NACK names the first `nacked` of them.
+    fn nack_type_lookup_replies(for_nacker: &[bool], nacked: usize) -> NackOutcome {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let buffers = transport.buffers.clone();
+        let mut sedp_logic = SedpLogic::new(participant.clone(), transport);
+
+        let remote_prefix = [9u8; 12];
+        let mut remote = SPDPDiscoveredParticipantData::new(
+            0,
+            remote_prefix,
+            Participant::init_builtin_endpoints(),
+        );
+        remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
+            &Ipv4Addr::new(127, 0, 0, 1),
+            7410,
+        ));
+        participant.add_remote_participant_proxy_data(remote);
+        let writer = participant.type_lookup_reply_writer();
+        writer.matched_reader_add(ReaderProxy::new(
+            Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REPLY_READER),
+            EntityId::UNKNOWN,
+            vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 1), 7410)],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        // The reader the reply is for, matched like the one that NACKs it.
+        let requester = Guid::new([8u8; 12], EntityId::TYPE_LOOKUP_REPLY_READER);
+        writer.matched_reader_add(ReaderProxy::new(
+            requester,
+            EntityId::UNKNOWN,
+            vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 2), 7410)],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        let mut sns = Vec::with_capacity(for_nacker.len());
+        for &at_nacker in for_nacker {
+            let mut change =
+                writer.new_change(ChangeKind::Alive, vec![0u8; 8], InstanceHandle::NIL, None);
+            change.set_directed_to(Some(if at_nacker {
+                Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REPLY_READER)
+            } else {
+                requester
+            }));
+            sns.push(change.sequence_number());
+            writer
+                .writer_cache()
+                .lock()
+                .unwrap()
+                .add_change_builtin(Arc::new(change), writer.as_ref())
+                .unwrap();
+        }
+        buffers.lock().unwrap().clear();
+
+        let mut flag = SubmessageHeaderFlag::new();
+        flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
+        let acknack = AckNack::new(
+            EntityId::TYPE_LOOKUP_REPLY_READER,
+            EntityId::TYPE_LOOKUP_REPLY_WRITER,
+            SequenceNumberSet::from_vec(sns[0], sns[..nacked].to_vec()),
+            1,
+        );
+        sedp_logic
+            .handle_acknack_message(
+                &Header::new(remote_prefix),
+                &SubmessageHeader::new(SubmessageId::ACKNACK, flag.flag, 0),
+                &acknack,
+            )
+            .expect("the acknack is accepted");
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let mut outcome = NackOutcome {
+            data_sns: Vec::new(),
+            gap_submessages: 0,
+            gapped: std::collections::BTreeSet::new(),
+        };
+        for buffer in buffers.lock().unwrap().iter() {
+            let mut receiver = MessageReceiver::new(remote_prefix, &addr);
+            receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
+            for submessage in receiver.parse_submessages() {
+                match submessage {
+                    TypedSubmessage::Data(_, d)
+                        if d.writer_id == EntityId::TYPE_LOOKUP_REPLY_WRITER =>
+                    {
+                        outcome.data_sns.push(d.writer_sn.to_i64())
+                    }
+                    TypedSubmessage::Gap(_, g) => {
+                        outcome.gap_submessages += 1;
+                        outcome
+                            .gapped
+                            .extend(g.gap_start.to_i64()..g.gap_list.bitmap_base().to_i64());
+                        outcome
+                            .gapped
+                            .extend(g.gap_list.extract_numbers().iter().map(|s| s.to_i64()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        outcome
+    }
+
+    /// A NACK fills its 256-bit window with other readers' replies, so the nacker's own reply
+    /// lies past it; answering the window alone would take a heartbeat round per 256 sequence
+    /// numbers. The run past the window is GAPped and the nacker's reply sent in the same answer.
+    #[test]
+    fn a_full_nack_window_of_other_readers_replies_also_answers_past_the_window() {
+        let mut for_nacker = vec![false; 300];
+        for_nacker[299] = true;
+        let outcome = nack_type_lookup_replies(&for_nacker, 256);
+        assert_eq!(outcome.data_sns, vec![300], "the nacker's reply past the window was not sent");
+        assert_eq!(
+            outcome.gapped,
+            (1..=299).collect(),
+            "other readers' replies were not all GAPped in one answer"
+        );
+    }
+
+    /// A TypeLookup reply is its requester's alone; another reader that NACKs it (it saw the
+    /// sequence number in a heartbeat) is told GAP, not sent the reply.
+    #[test]
+    fn a_nack_for_a_type_lookup_reply_meant_for_another_reader_is_answered_with_gap() {
+        assert_eq!(
+            nack_a_type_lookup_reply(false),
+            (0, 1),
+            "another requester's reply was resent instead of GAPped"
+        );
+    }
+
+    /// The requester itself NACKing its reply must get the reply again, not a GAP.
+    #[test]
+    fn a_nack_from_its_requester_resends_a_type_lookup_reply() {
+        assert_eq!(nack_a_type_lookup_reply(true), (1, 0), "the requester was not sent its reply");
+    }
+
+    /// TypeLookup writers have no heartbeat of their own; the per-remote SEDP pass is what
+    /// repairs a lost request, so it must reach a remote that has not acked and stop once it has.
+    #[test]
+    fn the_periodic_pass_heartbeats_a_type_lookup_writer_until_its_target_acks() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let buffers = transport.buffers.clone();
+        let sedp_logic = SedpLogic::new(participant.clone(), transport);
+
+        let remote_prefix = [9u8; 12];
+        let locator = Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 1), 7410);
+        let mut remote = SPDPDiscoveredParticipantData::new(
+            0,
+            remote_prefix,
+            Participant::init_builtin_endpoints(),
+        );
+        remote.add_metatraffic_unicast_locator(locator.clone());
+        participant.add_remote_participant_proxy_data(remote);
+        let target = Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_READER);
+        let writer = participant.type_lookup_request_writer();
+        writer.matched_reader_add(ReaderProxy::new(
+            target,
+            EntityId::UNKNOWN,
+            vec![locator],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        let mut change =
+            writer.new_change(ChangeKind::Alive, vec![0u8; 8], InstanceHandle::NIL, None);
+        change.set_directed_to(Some(target));
+        let sn = change.sequence_number();
+        writer
+            .writer_cache()
+            .lock()
+            .unwrap()
+            .add_change_builtin(Arc::new(change), writer.as_ref())
+            .unwrap();
+
+        let heartbeats = |sedp_logic: &SedpLogic| {
+            buffers.lock().unwrap().clear();
+            sedp_logic
+                .send_sedp_periodic_heartbeat_message(
+                    None,
+                    BUILTIN_SEDP_HB_PERIOD,
+                    Arc::new(remote_prefix),
+                    EntityId::TYPE_LOOKUP_REQUEST_WRITER,
+                )
+                .expect("the periodic pass runs");
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+            buffers
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|buffer| {
+                    let mut receiver = MessageReceiver::new(remote_prefix, &addr);
+                    receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
+                    receiver
+                        .parse_submessages()
+                        .iter()
+                        .filter(|submessage| {
+                            matches!(submessage, TypedSubmessage::Heartbeat(_, hb)
+                                if hb.writer_id == EntityId::TYPE_LOOKUP_REQUEST_WRITER)
+                        })
+                        .count()
+                })
+                .sum::<usize>()
+        };
+
+        assert_eq!(heartbeats(&sedp_logic), 1, "a target that has not acked heard no heartbeat");
+
+        {
+            let proxies = writer.reader_proxies();
+            let mut proxies = proxies.lock().unwrap();
+            proxies
+                .iter_mut()
+                .find(|p| p.remote_reader_guid() == target)
+                .unwrap()
+                .acked_changes_set(sn);
+        }
+        assert_eq!(heartbeats(&sedp_logic), 0, "a target that has acked is still heartbeated");
+    }
+
+    /// A replier with `requesters` matched TypeLookup request writers, each its own participant.
+    fn type_lookup_replier(requesters: &[GuidPrefix]) -> (SedpLogic, Arc<Participant>) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let sedp_logic =
+            SedpLogic::new(participant.clone(), Arc::new(CountingTransport::default()));
+        let reader = participant.type_lookup_request_reader();
+        for (i, prefix) in requesters.iter().enumerate() {
+            let mut remote = SPDPDiscoveredParticipantData::new(
+                0,
+                *prefix,
+                Participant::init_builtin_endpoints(),
+            );
+            remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
+                &Ipv4Addr::new(127, 0, 0, 1),
+                7410 + 2 * i as u32,
+            ));
+            participant.add_remote_participant_proxy_data(remote);
+            let request_writer = Guid::new(*prefix, EntityId::TYPE_LOOKUP_REQUEST_WRITER);
+            reader.matched_writer_add(WriterProxy::new(
+                request_writer,
+                request_writer.entity_id(),
+                Vec::new(),
+                Vec::new(),
+                0,
+                PublicationBuiltinTopicData::default(),
+                reader.get_update_status_callback(),
+            ));
+        }
+        (sedp_logic, participant)
+    }
+
+    fn get_types_request(from: GuidPrefix, sn: SequenceNumber) -> (Header, Data<'static>) {
+        use crate::xtypes::{
+            GetTypesIn, RequestHeader, SampleIdentity, TypeLookupCall, TypeLookupRequest,
+        };
+        let request = TypeLookupRequest {
+            header: RequestHeader {
+                request_id: SampleIdentity::new(
+                    Guid::new(from, EntityId::TYPE_LOOKUP_REQUEST_WRITER),
+                    sn,
+                ),
+                instance_name: String::new(),
+            },
+            data: TypeLookupCall::GetTypes(GetTypesIn { type_ids: Vec::new() }),
+        };
+        let mut data = Data::new(
+            EntityId::TYPE_LOOKUP_REQUEST_READER,
+            EntityId::TYPE_LOOKUP_REQUEST_WRITER,
+            sn,
+        );
+        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(request.serialize())));
+        (Header::new(from), data)
+    }
+
+    /// A request that arrives twice (a repair, or the direct send plus the pump) must be answered
+    /// once: answering each copy is how one getTypes turns into a burst of replies.
+    #[test]
+    fn a_repeated_type_lookup_request_is_answered_once() {
+        let remote_prefix = [7u8; 12];
+        let (sedp_logic, participant) = type_lookup_replier(&[remote_prefix]);
+        let (header, data) = get_types_request(remote_prefix, SequenceNumber::new(0, 1));
+        for _ in 0..2 {
+            let _ = sedp_logic.handle_type_lookup_data(&header, &data);
+        }
+
+        let cache = participant.type_lookup_reply_writer().writer_cache();
+        let cache = cache.lock().unwrap();
+        assert_eq!(cache.len(), 1, "the second copy of one request was answered again");
+        assert_eq!(
+            cache.get_change(SequenceNumber::new(0, 1)).and_then(|c| c.directed_to()),
+            Some(Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REPLY_READER)),
+            "the reply must be for the requester's reply reader alone"
+        );
+    }
+
+    /// Before the requester's SPDP there is no writer proxy to record the request in, so copies
+    /// would each be answered; it is dropped instead and arrives again by heartbeat after matching.
+    #[test]
+    fn a_type_lookup_request_from_an_unmatched_requester_is_not_answered() {
+        let (sedp_logic, participant) = type_lookup_replier(&[]);
+        let (header, data) = get_types_request([7u8; 12], SequenceNumber::new(0, 1));
+        for _ in 0..2 {
+            let _ = sedp_logic.handle_type_lookup_data(&header, &data);
+        }
+
+        let cache = participant.type_lookup_reply_writer().writer_cache();
+        assert_eq!(
+            cache.lock().unwrap().len(),
+            0,
+            "a request from an unmatched writer was answered"
+        );
+    }
+
+    /// Guards the repeat check's key: every requester numbers its requests from 1, so the same
+    /// number from another requester is a new request.
+    #[test]
+    fn requests_from_different_requesters_are_each_answered() {
+        let requesters = [[7u8; 12], [8u8; 12], [9u8; 12]];
+        let (sedp_logic, participant) = type_lookup_replier(&requesters);
+        for prefix in requesters {
+            let (header, data) = get_types_request(prefix, SequenceNumber::new(0, 1));
+            let _ = sedp_logic.handle_type_lookup_data(&header, &data);
+        }
+
+        let cache = participant.type_lookup_reply_writer().writer_cache();
+        let cache = cache.lock().unwrap();
+        let mut targets: Vec<Option<Guid>> = (1..=3)
+            .map(|sn| cache.get_change(SequenceNumber::new(0, sn)).and_then(|c| c.directed_to()))
+            .collect();
+        targets.sort();
+        let mut expected: Vec<Option<Guid>> = requesters
+            .iter()
+            .map(|p| Some(Guid::new(*p, EntityId::TYPE_LOOKUP_REPLY_READER)))
+            .collect();
+        expected.sort();
+        assert_eq!(targets, expected, "not every requester got its own reply");
     }
 
     /// The peer may hold our acks from before we dropped it, so on discovery each SEDP reader

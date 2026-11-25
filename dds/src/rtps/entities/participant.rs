@@ -1430,6 +1430,8 @@ impl Participant {
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
                 EntityId::SEDP_BUILTIN_TOPICS_WRITER,
+                EntityId::TYPE_LOOKUP_REQUEST_WRITER,
+                EntityId::TYPE_LOOKUP_REPLY_WRITER,
             ] {
                 handler.remove_timer(TimerId::SedpScheduledMessage {
                     remote_prefix,

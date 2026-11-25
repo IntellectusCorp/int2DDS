@@ -26,8 +26,12 @@ use crate::{
             types::ChangeKind,
         },
         entities::writer::Writer as _,
-        logic::{common::ParticipantAccessor as _, sedp_logic::SedpLogic},
+        logic::{
+            common::ParticipantAccessor as _,
+            sedp_logic::{SedpLogic, BUILTIN_SEDP_HB_PERIOD},
+        },
         messages::{header::Header, submessages::data::Data},
+        task::sending_handler::MessageType,
     },
     xtypes::{
         GetTypeDependenciesOut, GetTypesOut, ReplyHeader, RequestHeader, SampleIdentity,
@@ -64,6 +68,23 @@ impl SedpLogic {
         } else {
             participant.type_lookup_reply_reader()
         };
+        // A repeat (repair, or direct send plus pump) was already handled; answering it again
+        // multiplies replies. An unmatched writer (its SPDP not yet processed) has nowhere to
+        // record the sample, so it is dropped; the writer's heartbeat recovers it after matching.
+        let received = reader.writer_proxies().lock().ok().and_then(|proxies| {
+            proxies
+                .iter()
+                .find(|p| p.remote_writer_guid() == writer_guid)
+                .map(|p| p.has_received(data.writer_sn))
+        });
+        match received {
+            Some(false) => {}
+            Some(true) => return Ok(()),
+            None => {
+                debug!("[TypeLookup] DATA from unmatched writer {}; dropping", writer_guid);
+                return Ok(());
+            }
+        }
         let _ = self.mark_as_received_in_writer_proxy(&reader, writer_guid, data.writer_sn);
 
         let payload = data.serialized_data();
@@ -423,17 +444,19 @@ impl SedpLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
         let writer = participant.type_lookup_request_writer();
-        let change = writer.new_change_with_rpc_callback(
+        let remote_reader_guid = Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_READER);
+        let mut change = writer.new_change_with_rpc_callback(
             ChangeKind::Alive,
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
             data_fn,
         );
+        change.set_directed_to(Some(remote_reader_guid));
         let cache_change = Arc::new(change);
         if let Ok(mut cache) = writer.writer_cache().lock() {
             let _ = cache.add_change_builtin(cache_change.clone(), writer.as_ref());
         }
-        let remote_reader_guid = Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_READER);
+        self.arm_type_lookup_heartbeat(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_WRITER);
         self.send_sedp_data_message(
             cache_change,
             remote_reader_guid,
@@ -484,22 +507,40 @@ impl SedpLogic {
         writer_entity_id: EntityId,
         payload: Vec<u8>,
     ) -> RtpsResult<()> {
-        let change = writer.new_change(
+        let mut change = writer.new_change(
             ChangeKind::Alive,
             payload,
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
+        change.set_directed_to(Some(remote_reader_guid));
         let cache_change = Arc::new(change);
         if let Ok(mut cache) = writer.writer_cache().lock() {
             let _ = cache.add_change_builtin(cache_change.clone(), writer.as_ref());
         }
+        self.arm_type_lookup_heartbeat(remote_reader_guid.prefix(), writer_entity_id);
         self.send_sedp_data_message(
             cache_change,
             remote_reader_guid,
             reader_entity_id,
             writer_entity_id,
         )
+    }
+
+    /// A sample sent to one remote alone is repaired only if that remote hears a heartbeat;
+    /// arms the per-remote heartbeat SEDP uses, which backs off and settles once the remote acks.
+    fn arm_type_lookup_heartbeat(&self, remote_prefix: GuidPrefix, writer_entity_id: EntityId) {
+        let _ = self.register_periodic_send_timer(
+            remote_prefix,
+            writer_entity_id,
+            BUILTIN_SEDP_HB_PERIOD,
+            MessageType::PeriodicBuiltinHeartbeat(
+                None,
+                BUILTIN_SEDP_HB_PERIOD,
+                Arc::new(remote_prefix),
+                writer_entity_id,
+            ),
+        );
     }
 }
 
