@@ -69,15 +69,21 @@ impl SedpLogic {
             participant.type_lookup_reply_reader()
         };
         // A repeat (repair, or direct send plus pump) was already handled; answering it again
-        // multiplies replies.
-        let repeat = reader.writer_proxies().lock().ok().is_some_and(|proxies| {
+        // multiplies replies. An unmatched writer (its SPDP not yet processed) has nowhere to
+        // record the sample, so it is dropped; the writer's heartbeat recovers it after matching.
+        let received = reader.writer_proxies().lock().ok().and_then(|proxies| {
             proxies
                 .iter()
                 .find(|p| p.remote_writer_guid() == writer_guid)
-                .is_some_and(|p| p.has_received(data.writer_sn))
+                .map(|p| p.has_received(data.writer_sn))
         });
-        if repeat {
-            return Ok(());
+        match received {
+            Some(false) => {}
+            Some(true) => return Ok(()),
+            None => {
+                debug!("[TypeLookup] DATA from unmatched writer {}; dropping", writer_guid);
+                return Ok(());
+            }
         }
         let _ = self.mark_as_received_in_writer_proxy(&reader, writer_guid, data.writer_sn);
 

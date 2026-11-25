@@ -4170,6 +4170,24 @@ mod tests {
         );
     }
 
+    /// Before the requester's SPDP there is no writer proxy to record the request in, so copies
+    /// would each be answered; it is dropped instead and arrives again by heartbeat after matching.
+    #[test]
+    fn a_type_lookup_request_from_an_unmatched_requester_is_not_answered() {
+        let (sedp_logic, participant) = type_lookup_replier(&[]);
+        let (header, data) = get_types_request([7u8; 12], SequenceNumber::new(0, 1));
+        for _ in 0..2 {
+            let _ = sedp_logic.handle_type_lookup_data(&header, &data);
+        }
+
+        let cache = participant.type_lookup_reply_writer().writer_cache();
+        assert_eq!(
+            cache.lock().unwrap().len(),
+            0,
+            "a request from an unmatched writer was answered"
+        );
+    }
+
     /// Guards the repeat check's key: every requester numbers its requests from 1, so the same
     /// number from another requester is a new request.
     #[test]
