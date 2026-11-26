@@ -337,36 +337,49 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> ServiceProxy for Requester<TReq, TRep> 
     }
 
     fn wait_for_service(&self) -> DdsRpcResult<()> {
-        let condition = self.writer()?.get_statuscondition()?;
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition)?;
-        wait_set.wait(int2dds::dcps::core::time::Duration::infinite())?;
-
-        let condition = self.reader()?.get_statuscondition()?;
-        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED)?;
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition)?;
-        wait_set.wait(int2dds::dcps::core::time::Duration::infinite())?;
-
-        Ok(())
+        self.wait_for_service_until(None)
     }
 
     fn wait_for_service_timeout(&self, timeout: Duration) -> DdsRpcResult<()> {
-        let dds_timeout = int2dds::dcps::core::time::Duration::try_from(timeout)?;
+        self.wait_for_service_until(Some(timeout))
+    }
+}
 
-        let condition = self.writer()?.get_statuscondition()?;
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition)?;
-        wait_set.wait(dds_timeout)?;
+impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
+    fn wait_for_service_until(&self, timeout: Option<Duration>) -> DdsRpcResult<()> {
+        let writer = self.writer()?;
+        wait_for_match(timeout, || Ok(!writer.get_matched_subscriptions()?.is_empty()))?;
 
-        let condition = self.reader()?.get_statuscondition()?;
-        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED)?;
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition)?;
-        wait_set.wait(dds_timeout)?;
-        Ok(())
+        let reader = self.reader()?;
+        wait_for_match(timeout, || Ok(!reader.get_matched_publications()?.is_empty()))
+    }
+}
+
+/// Polls the matched list rather than waiting on the StatusCondition: a parent listener may
+/// consume the matched status, and an earlier unmatch leaves the condition triggered.
+fn wait_for_match(
+    timeout: Option<Duration>,
+    is_matched: impl Fn() -> Result<bool, DdsError>,
+) -> DdsRpcResult<()> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    // A timeout too large to represent as an Instant waits without a deadline.
+    let deadline = timeout.and_then(|t| std::time::Instant::now().checked_add(t));
+    loop {
+        if is_matched()? {
+            return Ok(());
+        }
+        let slice = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(DdsError::Timeout.into());
+                }
+                remaining.min(POLL_INTERVAL)
+            }
+            None => POLL_INTERVAL,
+        };
+        std::thread::sleep(slice);
     }
 }
 
@@ -455,4 +468,100 @@ fn rpc_datareader_qos() -> DataReaderQos {
     qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
     qos.durability = DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile };
     qos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::params::ReplierParams;
+    use crate::replier::Replier;
+    use int2dds::dcps::domain::domain_participant_factory::DomainParticipantFactory;
+    use int2dds::dcps::domain::domain_participant_listener::DomainParticipantListener;
+    use int2dds::dcps::domain::qos::DomainParticipantQos;
+    use int2dds::dcps::publication::publisher_listener::PublisherListener;
+    use int2dds::dcps::subscription::subscriber_listener::SubscriberListener;
+    use int2dds::dcps::topic::topic_listener::TopicListener;
+
+    #[derive(DdsType, Debug, Clone, Default)]
+    #[dds_type(crate_path = "int2dds", no_additional_derives)]
+    struct Ping {
+        value: i32,
+    }
+
+    struct NoopParticipantListener;
+    impl TopicListener for NoopParticipantListener {}
+    impl SubscriberListener for NoopParticipantListener {}
+    impl PublisherListener for NoopParticipantListener {}
+    impl DomainParticipantListener for NoopParticipantListener {}
+
+    // A participant listener with the default mask consumes the matched statuses, so the
+    // requester's StatusConditions never trigger; the wait must still end once matched.
+    #[test]
+    fn wait_for_service_returns_when_a_participant_listener_consumes_the_match() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                97,
+                DomainParticipantQos::default(),
+                Some(Arc::new(NoopParticipantListener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let requester = Requester::<Ping, Ping>::new(
+            RequesterParams::new(participant.clone()).service_name("WaitForServiceListener"),
+        )
+        .unwrap();
+        let replier = Replier::<Ping, Ping>::new(
+            ReplierParams::new(participant.clone()).service_name("WaitForServiceListener"),
+        )
+        .unwrap();
+
+        let result = requester.wait_for_service_timeout(Duration::from_secs(5));
+
+        drop(requester);
+        drop(replier);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        assert!(result.is_ok(), "wait_for_service_timeout failed: {result:?}");
+    }
+
+    // After the service leaves, the unmatch keeps the writer's condition triggered; the wait must
+    // still report a timeout rather than return early or spin.
+    #[test]
+    fn wait_for_service_times_out_after_the_service_left() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(96, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let requester = Requester::<Ping, Ping>::new(
+            RequesterParams::new(participant.clone()).service_name("WaitForServiceLeft"),
+        )
+        .unwrap();
+        let mut replier = Replier::<Ping, Ping>::new(
+            ReplierParams::new(participant.clone()).service_name("WaitForServiceLeft"),
+        )
+        .unwrap();
+        requester.wait_for_service_timeout(Duration::from_secs(5)).unwrap();
+
+        replier.close().unwrap();
+        let unmatch_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !requester.writer().unwrap().get_matched_subscriptions().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < unmatch_deadline, "the replier never unmatched");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let result = requester.wait_for_service_timeout(Duration::from_millis(300));
+
+        drop(requester);
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+
+        assert!(
+            matches!(result, Err(DdsRpcError::Dds(DdsError::Timeout))),
+            "expected a timeout, got {result:?}"
+        );
+    }
 }

@@ -101,7 +101,11 @@ impl SerializedWriteLoan {
     }
 }
 
-use super::{data_writer_listener::DataWriterListener, publisher::Publisher, qos::DataWriterQos};
+use super::{
+    data_writer_listener::DataWriterListener, publisher::Publisher,
+    publisher_listener::PublisherListener, qos::DataWriterQos,
+};
+use crate::domain::domain_participant_listener::DomainParticipantListener;
 
 // Since Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
 // trait objects are used for runtime polymorphism instead of generics
@@ -1644,6 +1648,51 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(())
     }
 
+    /// The listeners to call for `status_kind`: this writer's, then the Publisher's and the
+    /// DomainParticipant's, each only when its own mask enables the status.
+    #[allow(clippy::type_complexity)]
+    fn enabled_listeners(
+        &self,
+        status_kind: StatusKind,
+    ) -> DdsResult<(
+        Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
+        Option<Arc<dyn PublisherListener>>,
+        Option<Arc<dyn DomainParticipantListener>>,
+    )> {
+        if !self.get_listener_mask()?.contains(status_kind) {
+            return Ok((None, None, None));
+        }
+        let publisher = self.publisher_arc()?;
+        let publisher_listener = if publisher.get_listener_mask()?.contains(status_kind) {
+            publisher.get_listener()?
+        } else {
+            None
+        };
+        let participant = publisher.participant_arc()?;
+        let participant_listener = if participant.get_listener_mask()?.contains(status_kind) {
+            participant.get_listener()?
+        } else {
+            None
+        };
+        Ok((self.get_listener()?, publisher_listener, participant_listener))
+    }
+
+    /// DDS 1.4 2.2.4.2.1: a status passed to a listener is reset before the call, so this
+    /// writer's flag ends FALSE, even if an earlier event had raised it. The parents' flags
+    /// are raised either way.
+    fn raise_communication_status(
+        &self,
+        status_kind: &StatusKind,
+        consumed: bool,
+    ) -> DdsResult<()> {
+        self.get_statuscondition()?.set_communication_status(status_kind, !consumed)?;
+        let publisher = self.publisher_arc()?;
+        publisher.set_communication_status(status_kind, true)?;
+        publisher.participant_arc()?.set_communication_status(status_kind, true)?;
+
+        Ok(())
+    }
+
     fn handle_offered_deadline_missed_status(
         &self,
         info: Arc<OfferedDeadlineMissedStatus>,
@@ -1660,32 +1709,23 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             *status_guard
         };
 
-        // Listener
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::OFFERED_DEADLINE_MISSED) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_offered_deadline_missed(self, &status);
-                listener_called = true;
-            }
-            let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_offered_deadline_missed(self, &status);
-                listener_called = true;
-            }
-            let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_offered_deadline_missed(self, &status);
-                listener_called = true;
-            }
-
-            if listener_called {
-                let _ = self.take_offered_deadline_missed_status()?;
-            }
+        let (own, publisher_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::OFFERED_DEADLINE_MISSED)?;
+        let consumed =
+            own.is_some() || publisher_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_offered_deadline_missed_status()?;
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::OFFERED_DEADLINE_MISSED, true)?;
+        self.raise_communication_status(&StatusKind::OFFERED_DEADLINE_MISSED, consumed)?;
+        if let Some(listener) = own {
+            listener.on_offered_deadline_missed(self, &status);
+        }
+        if let Some(listener) = publisher_listener {
+            listener.on_offered_deadline_missed(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_offered_deadline_missed(self, &status);
+        }
 
         Ok(())
     }
@@ -1707,32 +1747,23 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             status_guard.clone()
         };
 
-        // Listener
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::OFFERED_INCOMPATIBLE_QOS) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_offered_incompatible_qos(self, &status);
-                listener_called = true;
-            }
-            let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_offered_incompatible_qos(self, &status);
-                listener_called = true;
-            }
-            let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_offered_incompatible_qos(self, &status);
-                listener_called = true;
-            }
-
-            if listener_called {
-                let _ = self.take_offered_incompatible_qos_status()?;
-            }
+        let (own, publisher_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::OFFERED_INCOMPATIBLE_QOS)?;
+        let consumed =
+            own.is_some() || publisher_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_offered_incompatible_qos_status()?;
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, true)?;
+        self.raise_communication_status(&StatusKind::OFFERED_INCOMPATIBLE_QOS, consumed)?;
+        if let Some(listener) = own {
+            listener.on_offered_incompatible_qos(self, &status);
+        }
+        if let Some(listener) = publisher_listener {
+            listener.on_offered_incompatible_qos(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_offered_incompatible_qos(self, &status);
+        }
 
         Ok(())
     }
@@ -1767,32 +1798,23 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             *status_guard
         };
 
-        // Listener
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::LIVELINESS_LOST) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_liveliness_lost(self, &status);
-                listener_called = true;
-            }
-            let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_liveliness_lost(self, &status);
-                listener_called = true;
-            }
-            let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_liveliness_lost(self, &status);
-                listener_called = true;
-            }
-
-            if listener_called {
-                let _ = self.take_liveliness_lost_status()?;
-            }
+        let (own, publisher_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::LIVELINESS_LOST)?;
+        let consumed =
+            own.is_some() || publisher_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_liveliness_lost_status()?;
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::LIVELINESS_LOST, true)?;
+        self.raise_communication_status(&StatusKind::LIVELINESS_LOST, consumed)?;
+        if let Some(listener) = own {
+            listener.on_liveliness_lost(self, &status);
+        }
+        if let Some(listener) = publisher_listener {
+            listener.on_liveliness_lost(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_liveliness_lost(self, &status);
+        }
 
         Ok(())
     }
@@ -1818,32 +1840,23 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             *status_guard
         };
 
-        // Listener
-        let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::PUBLICATION_MATCHED) {
-            let mut listener_called = false;
-            if let Some(listener) = self.get_listener()? {
-                listener.on_publication_matched(self, &status);
-                listener_called = true;
-            }
-            let publisher = self.publisher_arc()?;
-            if let Some(listener) = publisher.get_listener()? {
-                listener.on_publication_matched(self, &status);
-                listener_called = true;
-            }
-            let participant = publisher.participant_arc()?;
-            if let Some(listener) = participant.get_listener()? {
-                listener.on_publication_matched(self, &status);
-                listener_called = true;
-            }
-
-            if listener_called {
-                let _ = self.take_publication_matched_status()?;
-            }
+        let (own, publisher_listener, participant_listener) =
+            self.enabled_listeners(StatusKind::PUBLICATION_MATCHED)?;
+        let consumed =
+            own.is_some() || publisher_listener.is_some() || participant_listener.is_some();
+        if consumed {
+            let _ = self.take_publication_matched_status()?;
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::PUBLICATION_MATCHED, true)?;
+        self.raise_communication_status(&StatusKind::PUBLICATION_MATCHED, consumed)?;
+        if let Some(listener) = own {
+            listener.on_publication_matched(self, &status);
+        }
+        if let Some(listener) = publisher_listener {
+            listener.on_publication_matched(self, &status);
+        }
+        if let Some(listener) = participant_listener {
+            listener.on_publication_matched(self, &status);
+        }
 
         Ok(())
     }
@@ -2407,8 +2420,8 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             self.publication_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let result = *status_guard;
 
-        // 1. Reset total_count_change
         status_guard.total_count_change = 0;
+        status_guard.current_count_change = 0;
 
         self.set_communication_status_propagation(&StatusKind::PUBLICATION_MATCHED, false)?;
 
@@ -3582,6 +3595,180 @@ mod tests {
 
         participant.delete_contained_entities().unwrap();
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_get_publication_matched_status_resets_change_counts() {
+        let (participant, publisher, topic) = setup_mask_test();
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let delta = |d: i32| {
+            Arc::new(PublicationMatchedStatus {
+                total_count: 0,
+                total_count_change: 0,
+                current_count: 0,
+                current_count_change: d,
+                last_subscription_handle: InstanceHandle::default(),
+            })
+        };
+
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(delta(1))).unwrap();
+        let s = writer.get_publication_matched_status().unwrap();
+        assert_eq!((s.current_count, s.current_count_change), (1, 1));
+        assert_eq!((s.total_count, s.total_count_change), (1, 1));
+
+        let s = writer.get_publication_matched_status().unwrap();
+        assert_eq!((s.current_count, s.current_count_change), (1, 0));
+        assert_eq!((s.total_count, s.total_count_change), (1, 0));
+
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(delta(-1))).unwrap();
+        let s = writer.get_publication_matched_status().unwrap();
+        assert_eq!((s.current_count, s.current_count_change), (0, -1));
+        assert_eq!((s.total_count, s.total_count_change), (1, 0));
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_listener_consumed_status_leaves_condition_untriggered() {
+        let (participant, publisher, topic) = setup_mask_test();
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::PUBLICATION_MATCHED,
+            )
+            .unwrap();
+        let condition = writer.get_statuscondition().unwrap();
+        condition.set_enabled_statuses(StatusKind::PUBLICATION_MATCHED).unwrap();
+        let wait_set = crate::dcps::infrastructure::wait_set::WaitSet::new();
+        wait_set.attach_condition(condition).unwrap();
+
+        let status = Arc::new(PublicationMatchedStatus {
+            total_count: 0,
+            total_count_change: 0,
+            current_count: 0,
+            current_count_change: 1,
+            last_subscription_handle: InstanceHandle::default(),
+        });
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(status)).unwrap();
+
+        assert!(listener.publication_matched_called.load(Ordering::SeqCst));
+        assert_eq!(
+            wait_set.wait(crate::core::time::Duration::from_millis(300)).unwrap_err(),
+            DdsError::Timeout,
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    /// Records what the writer reports from inside the listener, then keeps it busy.
+    struct InspectingListener {
+        seen: std::sync::Mutex<Option<(bool, i32)>>,
+    }
+
+    impl DataWriterListener for InspectingListener {
+        type Foo = TestData;
+
+        fn on_publication_matched(
+            &self,
+            writer: &DataWriter<TestData>,
+            _status: &PublicationMatchedStatus,
+        ) {
+            let flag =
+                writer.get_status_changes().unwrap().contains(StatusKind::PUBLICATION_MATCHED);
+            let change = writer.get_publication_matched_status().unwrap().current_count_change();
+            *self.seen.lock().unwrap() = Some((flag, change));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    /// (flag after, current_count_change after, flag/change seen inside the listener,
+    /// waiter blocked before the event woke, waiter started after the event woke)
+    type StatusRow = (bool, i32, Option<(bool, i32)>, Option<bool>, bool);
+
+    /// Delivers one PUBLICATION_MATCHED event, optionally after an earlier event that no
+    /// listener consumed, and with or without a listener installed for the second one.
+    fn publication_matched_row(flag_before: bool, with_listener: bool) -> StatusRow {
+        use crate::core::time::Duration;
+        let (participant, publisher, topic) = setup_mask_test();
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let condition = writer.get_statuscondition().unwrap();
+        condition.set_enabled_statuses(StatusKind::PUBLICATION_MATCHED).unwrap();
+        let wait_set = Arc::new(crate::dcps::infrastructure::wait_set::WaitSet::new());
+        wait_set.attach_condition(condition).unwrap();
+        let event = || {
+            Arc::new(PublicationMatchedStatus {
+                total_count: 0,
+                total_count_change: 0,
+                current_count: 0,
+                current_count_change: 1,
+                last_subscription_handle: InstanceHandle::default(),
+            })
+        };
+
+        if flag_before {
+            writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(event())).unwrap();
+        }
+        let listener = Arc::new(InspectingListener { seen: std::sync::Mutex::new(None) });
+        if with_listener {
+            writer
+                .set_listener(
+                    Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                    StatusKind::PUBLICATION_MATCHED,
+                )
+                .unwrap();
+        }
+        // A waiter can only block while the flag is FALSE.
+        let early_waiter = (!flag_before).then(|| {
+            let wait_set = wait_set.clone();
+            std::thread::spawn(move || wait_set.wait(Duration::from_millis(1000)).is_ok())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(event())).unwrap();
+
+        let early_woke = early_waiter.map(|waiter| waiter.join().unwrap());
+        let flag_after =
+            writer.get_status_changes().unwrap().contains(StatusKind::PUBLICATION_MATCHED);
+        let late_woke = wait_set.wait(Duration::from_millis(200)).is_ok();
+        let change_after = writer.get_publication_matched_status().unwrap().current_count_change();
+        let seen = *listener.seen.lock().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+        (flag_after, change_after, seen, early_woke, late_woke)
+    }
+
+    #[test]
+    fn test_publication_matched_flag_for_each_starting_state() {
+        // No listener: the flag rises and the change accumulates.
+        assert_eq!(publication_matched_row(false, false), (true, 1, None, Some(true), true));
+        assert_eq!(publication_matched_row(true, false), (true, 2, None, None, true));
+        // DDS 1.4 2.2.4.2.1: the listener sees the status already reset, and the flag ends
+        // FALSE even when an earlier unconsumed event had raised it.
+        assert_eq!(
+            publication_matched_row(false, true),
+            (false, 0, Some((false, 0)), Some(false), false)
+        );
+        assert_eq!(publication_matched_row(true, true), (false, 0, Some((false, 0)), None, false));
     }
 
     #[test]
